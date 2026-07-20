@@ -33,7 +33,12 @@ adapters and pass them through Opportunity-0 before admitting them to this corpu
 Prefer public ATS endpoints that publish their own timestamps:
 
 - Greenhouse Job Board API: `https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}`;
-  job records contain `updated_at`.
+  job records contain `updated_at`. The admitted Anthropic role `5030244008` was verified through
+  the configured Scrapling sidecar on 20 July 2026: both its official hosted vacancy and API
+  endpoint returned HTTP 200, and the captured API bytes contained
+  `updated_at: 2026-07-14T18:35:00-04:00`. Use the individual job endpoint for role evidence and
+  the distinct board jobs endpoint for hiring evidence; parse JSON fields and escaped job content
+  rather than forcing these responses through the HTML-paragraph extractor.
 - Ashby public job board API: `https://api.ashbyhq.com/posting-api/job-board/{board}`;
   records contain `publishedAt`.
 - Lever public postings may supply official role and hiring bodies, but do not use them for a
