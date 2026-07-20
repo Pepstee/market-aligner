@@ -85,7 +85,16 @@ def _canonical_bytes(value: Any) -> bytes:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
+    """Open a live database read-only, including any committed WAL contents."""
     uri = "file:" + quote(str(path.resolve()), safe="/") + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    connection.execute("PRAGMA query_only=ON")
+    return connection
+
+
+def _immutable_connection(path: Path) -> sqlite3.Connection:
+    """Open a closed snapshot without permitting SQLite filesystem mutations."""
+    uri = "file:" + quote(str(path.resolve()), safe="/") + "?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True, timeout=30)
     connection.execute("PRAGMA query_only=ON")
     return connection
@@ -129,7 +138,7 @@ def _inspect_database(path: Path) -> dict[str, Any]:
     if not path.is_file() or path.is_symlink():
         raise AdoptionError("snapshot must be a regular, non-symlink file")
     try:
-        with closing(_readonly_connection(path)) as connection:
+        with closing(_immutable_connection(path)) as connection:
             integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check").fetchall()]
             if integrity != ["ok"]:
                 raise AdoptionError(f"snapshot integrity_check failed: {integrity}")
@@ -170,7 +179,7 @@ def _verify_database(path: Path, spec: BaselineSpec) -> dict[str, Any]:
     if digest != spec.sha256:
         raise AdoptionError(f"{spec.name}: SHA-256 mismatch: expected {spec.sha256}, got {digest}")
     try:
-        with closing(_readonly_connection(path)) as connection:
+        with closing(_immutable_connection(path)) as connection:
             integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check").fetchall()]
             if integrity != ["ok"]:
                 raise AdoptionError(f"{spec.name}: integrity_check failed: {integrity}")
@@ -319,6 +328,7 @@ def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -
     fd, temporary_name = tempfile.mkstemp(prefix=".snapshotting-", dir=destination.parent)
     os.close(fd)
     temporary = Path(temporary_name)
+    temporary_sidecars = [Path(str(temporary) + suffix) for suffix in ("-journal", "-wal", "-shm")]
     started_at = datetime.now(timezone.utc).isoformat()
     published = False
     try:
@@ -326,6 +336,17 @@ def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -
             with closing(_readonly_connection(source)) as source_connection, \
                     closing(sqlite3.connect(temporary)) as destination_connection:
                 source_connection.backup(destination_connection)
+                # sqlite3_backup copies a consistent logical database but may leave
+                # the destination header in WAL mode.  Convert the private temporary
+                # copy to a closed rollback-journal database before it is measured or
+                # published, so immutable reconciliation never needs WAL/SHM state.
+                journal_mode = destination_connection.execute(
+                    "PRAGMA journal_mode=DELETE"
+                ).fetchone()[0]
+                if str(journal_mode).lower() != "delete":
+                    raise AdoptionError(
+                        f"{spec.name}: could not finalise online backup in DELETE journal mode"
+                    )
         except sqlite3.Error as exc:
             raise AdoptionError(f"{spec.name}: SQLite online backup failed: {exc}") from exc
         ended_at = datetime.now(timezone.utc).isoformat()
@@ -374,6 +395,8 @@ def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -
         raise
     finally:
         temporary.unlink(missing_ok=True)
+        for sidecar in temporary_sidecars:
+            sidecar.unlink(missing_ok=True)
 
 
 def adopt(source_root: str | Path, data_root: str | Path, *, repository: str | Path,
