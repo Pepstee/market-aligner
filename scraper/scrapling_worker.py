@@ -153,14 +153,14 @@ def _response_to_dict(response: Any, *, include_related: bool = True) -> dict[st
 
 
 def _fetch(request: Mapping[str, Any]) -> dict[str, Any]:
-    engine = str(request.get("engine", "http")).casefold()
+    engine = str(request.get("engine", "static")).casefold()
     url = str(request["url"])
     kwargs = _prepare_kwargs(url, dict(request.get("kwargs") or {}))
-    if engine == "http":
+    if engine in {"static", "http"}:
         from scrapling.fetchers import Fetcher
         method = str(request.get("method", "get")).casefold()
         if method not in {"get", "post", "put", "delete"}:
-            raise ValueError("HTTP method must be get, post, put or delete")
+            raise ValueError("static method must be get, post, put or delete")
         response = getattr(Fetcher, method)(url, **kwargs)
     elif engine == "dynamic":
         from scrapling.fetchers import DynamicFetcher
@@ -169,24 +169,24 @@ def _fetch(request: Mapping[str, Any]) -> dict[str, Any]:
         from scrapling.fetchers import StealthyFetcher
         response = StealthyFetcher.fetch(url, **kwargs)
     else:
-        raise ValueError("engine must be http, dynamic or stealth")
+        raise ValueError("engine must be static, http, dynamic or stealth")
     return _response_to_dict(response)
 
 
 def _session_batch(request: Mapping[str, Any]) -> list[dict[str, Any]]:
     from scrapling.fetchers import DynamicSession, FetcherSession, StealthySession
 
-    engine = str(request.get("engine", "http")).casefold()
+    engine = str(request.get("engine", "static")).casefold()
     session_kwargs = _hydrate(dict(request.get("session_kwargs") or {}))
     jobs = list(request.get("requests") or ())
-    if engine == "http":
+    if engine in {"static", "http"}:
         manager = FetcherSession(**session_kwargs)
     elif engine == "dynamic":
         manager = DynamicSession(**session_kwargs)
     elif engine in {"stealth", "stealthy"}:
         manager = StealthySession(**session_kwargs)
     else:
-        raise ValueError("engine must be http, dynamic or stealth")
+        raise ValueError("engine must be static, http, dynamic or stealth")
 
     rows: list[dict[str, Any]] = []
     with manager as session:
@@ -197,7 +197,7 @@ def _session_batch(request: Mapping[str, Any]) -> list[dict[str, Any]]:
                 kwargs["selector_config"] = _prepare_kwargs(
                     url, {"selector_config": session_kwargs["selector_config"]}
                 )["selector_config"]
-            if engine == "http":
+            if engine in {"static", "http"}:
                 method = str(job.get("method", "get")).casefold()
                 response = getattr(session, method)(url, **kwargs)
             else:
@@ -290,8 +290,9 @@ def capabilities() -> dict[str, Any]:
         "python": sys.version,
         "operations": ["fetch", "session_batch", "parse", "spider", "call", "capabilities"],
         "exports": [f"{value.__module__}:{value.__qualname__}" for value in exports],
-        "engines": ["http", "dynamic", "stealth"],
-        "http_methods": ["get", "post", "put", "delete"],
+        "engines": ["static", "dynamic", "stealth"],
+        "static_methods": ["get", "post", "put", "delete"],
+        "engine_aliases": {"http": "static"},
         "typed_json": ["$ref", "$set", "$tuple", "$bytes_base64", "$path", "$proxy_rotator"],
         "upstream_cli": ["install", "extract", "shell", "mcp"],
     }

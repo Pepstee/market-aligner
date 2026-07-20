@@ -225,46 +225,58 @@ class RawResponseCache:
 
 
 class ScraplingPublicRetriever:
-    """Small adapter over Scrapling's public HTTP fetcher; no requests fallback."""
+    """Adapter over the production Scrapling sidecar; no requests fallback."""
 
-    def __init__(self, cache: RawResponseCache, *, timeout_seconds: int = 45) -> None:
+    def __init__(self, cache: RawResponseCache, *, timeout_seconds: int = 45,
+                 root: str | Path | None = None) -> None:
+        from scraper.scrapling_client import ScraplingClient
+
         self.cache, self.timeout_seconds = cache, timeout_seconds
+        project_root = Path(root).resolve() if root else Path(__file__).resolve().parents[1]
+        self.client = ScraplingClient(project_root, {
+            "command_timeout_seconds": timeout_seconds,
+            "fallback_chain": [
+                {"engine": "static", "method": "get",
+                 "kwargs": {"timeout": timeout_seconds}},
+                {"engine": "dynamic", "kwargs": {"network_idle": True},
+                 "timeout_seconds": max(timeout_seconds, 60)},
+                {"engine": "stealth", "kwargs": {},
+                 "timeout_seconds": max(timeout_seconds, 60)},
+            ],
+        })
 
     def retrieve(self, source_id: str, url: str, *, source_kind: str | None = None,
-                 canonical_publisher: str | None = None,
+        canonical_publisher: str | None = None,
                  canonical_article: str | None = None) -> Citation:
         _public_url(url)
-        try:
-            from scrapling.fetchers import Fetcher  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError("Scrapling is required for employer reconnaissance") from exc
-        response = Fetcher.get(url, timeout=self.timeout_seconds)
-        final_url = str(getattr(response, "url", url))
+        import base64
+
+        result = self.client.fetch_with_chain(url)
+        response = result.response
+        final_url = str(response.get("url", url))
         _public_url(final_url)
-        status = int(getattr(response, "status", getattr(response, "status_code", 0)))
+        status = int(response.get("status", 0))
         if not 200 <= status < 300:
             raise RuntimeError(f"public retrieval failed with HTTP {status}")
-        raw = getattr(response, "body", None)
-        if raw is None:
-            raw = str(getattr(response, "text", response)).encode("utf-8")
-        if isinstance(raw, str):
-            raw = raw.encode("utf-8")
-        digest, reference = self.cache.store(bytes(raw))
+        raw = base64.b64decode(str(response["body_base64"]), validate=True)
+        if len(raw) != int(response.get("body_bytes", -1)):
+            raise RuntimeError("Scrapling response byte count mismatch")
+        digest, reference = self.cache.store(raw)
         now = datetime.now(timezone.utc).isoformat()
         history = []
-        for item in getattr(response, "history", ()) or ():
+        for item in response.get("history", ()) or ():
             history.append({
-                "url": _canonical_public_url(str(getattr(item, "url"))),
-                "status_code": int(getattr(item, "status", getattr(item, "status_code", 0))),
+                "url": _canonical_public_url(str(item["url"])),
+                "status_code": int(item.get("status", 0)),
             })
-        published_at, updated_at, date_evidence = extract_publisher_timestamps(bytes(raw))
+        published_at, updated_at, date_evidence = extract_publisher_timestamps(raw)
         # Retrieval is observation metadata only.  Publisher time is extracted
         # from the captured representation and retains the byte-resolvable
         # metadata fragment which established it.
         return Citation(source_id, final_url, now, now, digest, reference,
                         status, url, history, published_at, updated_at,
                         source_kind, canonical_publisher, canonical_article,
-                        date_evidence, "scrapling-fetcher")
+                        date_evidence, f"scrapling-{result.engine}")
 
 
 class PortableAuthorityRetriever:
@@ -401,7 +413,7 @@ class SidecarAuthorityRetriever:
         self.cache = cache
         self.records = {str(record["job_key"]): dict(record) for record in records}
         self.client = ScraplingClient(Path(root), {"fallback_chain": [
-            {"engine": "http", "method": "get", "kwargs": {"timeout": 45}},
+            {"engine": "static", "method": "get", "kwargs": {"timeout": 45}},
             {"engine": "dynamic", "kwargs": {"network_idle": True}},
             {"engine": "stealth", "kwargs": {}},
         ]})
