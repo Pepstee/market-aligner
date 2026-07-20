@@ -22,8 +22,8 @@ from baseline_adoption import core
 
 
 ROOT = Path(__file__).resolve().parent
-DOMAIN = b"jaa01-source-content-revision-v1\0"
-EXCLUDED = (b"runtime_evidence/jaa01/", b"runtime_evidence/pytest/")
+DOMAIN = b"jaa-source-content-revision-v2\0"
+EXCLUDED = (b"runtime_evidence/",)
 
 
 def _sha256(path: Path) -> str:

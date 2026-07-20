@@ -51,6 +51,14 @@ versions only to a temporary copy, checks lifecycle replay and retry invariants,
 the result to the exact tracked source revision. Consequently its command has no
 `--live-source` option and newly produced JAA-01 evidence has no `live_sources` field.
 
+The tracked product revision uses the `jaa-source-content-revision-v2` domain. Every
+tracked path beneath `runtime_evidence/` is generated evidence and is excluded as one
+universal class; all other tracked paths remain inputs, including their Git mode, type,
+symlink target and checked-out bytes. Dirty, unmerged, missing, type-drifted, mode-drifted
+or escaping tracked source is refused. JAA-02 certification runs its executable demo and
+independent negative-control tests, records their exact commands, totals and output hashes,
+and publishes an atomic content-addressed receipt under `runtime_evidence/jaa02/`.
+
 ## Online snapshot contract
 
 For a collector that is still writing, `adopt-online` opens each source with SQLite

@@ -23,8 +23,8 @@ from career_automation.database import SCHEMA
 
 
 ROOT = Path(__file__).resolve().parent
-DOMAIN = b"jaa01-source-content-revision-v1\0"
-EXCLUDED_PREFIXES = (b"runtime_evidence/jaa01/", b"runtime_evidence/pytest/")
+DOMAIN = b"jaa-source-content-revision-v2\0"
+EXCLUDED_PREFIXES = (b"runtime_evidence/",)
 
 
 def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
@@ -134,10 +134,10 @@ def _assert_source_binding(root: Path, receipt: Path, document: dict[str, object
     assert receipt.name == f"sha256-{hashlib.sha256(receipt.read_bytes()).hexdigest()}.json"
     assert document["source_content_revision"] == _independent_source_revision(root)
     assert document["source_content_revision_contract"] == {
-        "algorithm": "sha256", "domain": "jaa01-source-content-revision-v1",
+        "algorithm": "sha256", "domain": "jaa-source-content-revision-v2",
         "entry_encoding": "uint64be-length-prefixed-path-mode-content",
         "scope": "current-tracked-source-tree", "ordering": "repository-relative-path-byte-order",
-        "exclusions": ["runtime_evidence/jaa01/", "runtime_evidence/pytest/"],
+        "exclusions": ["runtime_evidence/"],
     }
     assert str(root) not in rendered
     assert not any(value.startswith("/") for value in _strings(document))
@@ -188,6 +188,7 @@ def test_every_remaining_tracked_source_class_changes_the_independent_revision(
 
 @pytest.mark.parametrize("relative", [
     "runtime_evidence/jaa01/manual-receipt.json", "runtime_evidence/pytest/manual-receipt.json",
+    "runtime_evidence/jaa02/manual-receipt.json", "runtime_evidence/future/nested/output.bin",
 ])
 def test_generated_receipt_bytes_do_not_change_source_revision(
     isolated_repository: Path, relative: str,
