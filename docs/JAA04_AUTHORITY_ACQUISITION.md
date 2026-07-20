@@ -46,6 +46,11 @@ Prefer public ATS endpoints that publish their own timestamps:
   response exposes `publishedAt`. Treat these structured fields as publisher-time evidence.
 - Lever public postings may supply official role and hiring bodies, but do not use them for a
   current claim unless the publisher supplies a verifiable publication/update time.
+- Workable hosted vacancies advertise a canonical Markdown representation at
+  `https://apply.workable.com/{account}/jobs/view/{job_id}.md`. The admitted Cogna role
+  `847CFBC5F4` was verified through the sidecar: the Markdown endpoint returned HTTP 200 and a
+  publisher line `Posted 2026-06-17`, followed by the substantive role body. Prefer this exact,
+  dated representation over scraping the JavaScript shell.
 - SEC EDGAR submissions/filings are suitable dated operational evidence for US public
   employers. Observe SEC fair-access requirements and send a declared User-Agent.
 
