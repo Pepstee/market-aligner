@@ -146,25 +146,27 @@ def _response_to_dict(response: Any, *, include_related: bool = True) -> dict[st
             _response_to_dict(item, include_related=False) for item in response.history
         ]
         result["captured_xhr"] = [
-            _response_to_dict(item, include_related=False) for item in response.captured_xhr
+            _response_to_dict(item, include_related=False)
+            for item in (getattr(response, "captured_xhr", ()) or ())
         ]
     return result
 
 
 def _fetch(request: Mapping[str, Any]) -> dict[str, Any]:
-    from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
-
     engine = str(request.get("engine", "static")).casefold()
     url = str(request["url"])
     kwargs = _prepare_kwargs(url, dict(request.get("kwargs") or {}))
     if engine == "static":
+        from scrapling.fetchers import Fetcher
         method = str(request.get("method", "get")).casefold()
         if method not in {"get", "post", "put", "delete"}:
             raise ValueError("static method must be get, post, put or delete")
         response = getattr(Fetcher, method)(url, **kwargs)
     elif engine == "dynamic":
+        from scrapling.fetchers import DynamicFetcher
         response = DynamicFetcher.fetch(url, **kwargs)
     elif engine in {"stealth", "stealthy"}:
+        from scrapling.fetchers import StealthyFetcher
         response = StealthyFetcher.fetch(url, **kwargs)
     else:
         raise ValueError("engine must be static, dynamic or stealth")

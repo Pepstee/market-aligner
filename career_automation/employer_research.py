@@ -11,7 +11,7 @@ import hashlib
 import ipaddress
 import json
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -84,6 +84,8 @@ class Citation:
     content_sha256: str
     raw_response_ref: str
     status_code: int
+    requested_url: str | None = None
+    redirect_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 class RawResponseCache:
@@ -135,7 +137,14 @@ class ScraplingPublicRetriever:
             raw = raw.encode("utf-8")
         digest, reference = self.cache.store(bytes(raw))
         now = datetime.now(timezone.utc).isoformat()
-        return Citation(source_id, final_url, captured_at or now, now, digest, reference, status)
+        history = []
+        for item in getattr(response, "history", ()) or ():
+            history.append({
+                "url": _canonical_public_url(str(getattr(item, "url"))),
+                "status_code": int(getattr(item, "status", getattr(item, "status_code", 0))),
+            })
+        return Citation(source_id, final_url, captured_at or now, now, digest, reference,
+                        status, url, history)
 
 
 def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_of: date | None = None) -> None:
@@ -154,6 +163,14 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         if citation.id in by_id or citation.status_code < 200 or citation.status_code >= 300:
             raise ValueError("invalid or duplicate citation")
         _canonical_public_url(citation.url)
+        if citation.requested_url is not None:
+            _canonical_public_url(citation.requested_url)
+        if not isinstance(citation.redirect_history, list):
+            raise ValueError("redirect history must be a list")
+        for redirect in citation.redirect_history:
+            _canonical_public_url(str(redirect["url"]))
+            if not 300 <= int(redirect["status_code"]) < 400:
+                raise ValueError("redirect history contains a non-redirect response")
         cache.resolve(citation.raw_response_ref, citation.content_sha256)
         datetime.fromisoformat(citation.retrieved_at.replace("Z", "+00:00"))
         datetime.fromisoformat(citation.captured_at.replace("Z", "+00:00"))
