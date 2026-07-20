@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.database import CareerDatabase  # noqa: E402
 from career_automation.employer_research import (  # noqa: E402
-    RawResponseCache, content_hash, load_frozen_dossiers, validate_dossier,
+    Citation, EmployerResearchWorker, RawResponseCache, content_hash,
+    load_frozen_dossiers, validate_dossier,
 )
 from career_automation.engine import OpportunityGate, scored_job_from_payload  # noqa: E402
 from career_automation.models import PipelineState  # noqa: E402
@@ -114,6 +115,16 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
                 "manifest is not bound to frozen dossier provenance")
     source_hashes = {source["content_sha256"] for dossier in frozen for source in dossier["sources"]}
     require(len(source_hashes) == 30, "identical synthetic responses cannot certify JAA-04")
+    expected_kinds = {"company", "role", "product", "hiring", "operational_health"}
+    for dossier in frozen:
+        require({claim["kind"] for claim in dossier["claims"]} == expected_kinds,
+                "dossier lacks substantive kind coverage")
+        require({claim["classification"] for claim in dossier["claims"]}
+                == {"fact", "inference", "hypothesis"},
+                "dossier does not distinguish fact, inference, and hypothesis")
+        require(any(edge["relation"] in {"qualifies", "contradicts"}
+                    for edge in dossier["edges"]),
+                "dossier lacks a typed qualification or contradiction")
 
     # Dossier claim failures must be rejected before durable completion.
     negative_controls = []
@@ -144,14 +155,48 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
     else:
         raise AcceptanceError("rejected Opportunity-0 entered research queue")
 
-    first = database.claim_research("interrupted", lease_seconds=1)
-    require(first is not None and first.job_key == strong.key, "passed vacancy was not leased")
-    with database.connection() as connection:
-        connection.execute("UPDATE employer_research_queue SET lease_until='2000-01-01T00:00:00+00:00' WHERE job_key=?", (strong.key,))
-    resumed = database.claim_research("resumer", lease_seconds=60)
-    require(resumed is not None and resumed.attempts == 2, "expired lease was not resumed")
     cache = RawResponseCache(work / "worker-cache")
-    dossier = _runtime_dossier(cache, strong.key)
+
+    class FailingRetriever:
+        def retrieve(self, source_id: str, url: str) -> Citation:
+            raise RuntimeError("simulated interruption after atomic claim")
+
+    interrupted = EmployerResearchWorker(database, "interrupted", cache,
+                                         retriever=FailingRetriever(), lease_seconds=1)
+    try:
+        interrupted.run_once()
+    except RuntimeError:
+        pass
+    else:
+        raise AcceptanceError("interrupted retrieval did not fail closed")
+    with database.connection() as connection:
+        leased = connection.execute(
+            "SELECT status,lease_owner FROM employer_research_queue WHERE job_key=?", (strong.key,)
+        ).fetchone()
+        require(tuple(leased) == ("leased", "interrupted"),
+                "interruption did not preserve a resumable lease")
+        connection.execute("UPDATE employer_research_queue SET lease_until='2000-01-01T00:00:00+00:00' WHERE job_key=?", (strong.key,))
+
+    class CapturedRetriever:
+        def retrieve(self, source_id: str, url: str) -> Citation:
+            body = (b"<html><p>Example operates a public technology service with "
+                    b"documented products, customers, delivery scope, and operating constraints.</p></html>")
+            digest, reference = cache.store(body)
+            timestamp = "2026-07-20T00:00:00+00:00"
+            return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,
+                            digest, reference, 200)
+
+    resumed_worker = EmployerResearchWorker(database, "resumer", cache,
+                                            retriever=CapturedRetriever(), lease_seconds=60)
+    require(resumed_worker.run_once() == strong.key, "expired lease was not processed")
+    with database.connection() as connection:
+        queue = connection.execute(
+            "SELECT status,attempts FROM employer_research_queue WHERE job_key=?", (strong.key,)
+        ).fetchone()
+        dossier = json.loads(connection.execute(
+            "SELECT dossier_json FROM employer_dossiers WHERE job_key=?", (strong.key,)
+        ).fetchone()[0])
+    require(tuple(queue) == ("completed", 2), "resumed worker did not complete exactly once")
     digest = content_hash(dossier)
     with ThreadPoolExecutor(max_workers=2) as pool:
         for future in [pool.submit(database.complete_research, job_key=strong.key,
@@ -170,7 +215,9 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
             "capture_provenance": "external-jaa04.capture-receipt.v1",
             "dossier_count": 30, "distinct_source_bytes": 30,
             "negative_controls": negative_controls,
-            "lease_resume_attempts": resumed.attempts,
+            "lease_resume_attempts": 2,
+            "queue_worker": "retrieval-validation-completion",
+            "intelligence_kinds": sorted(expected_kinds),
             "opportunity1": result}
 
 

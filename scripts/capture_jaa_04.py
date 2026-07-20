@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import (  # noqa: E402
-    RawResponseCache, content_hash, load_frozen_dossiers,
+    Citation, RawResponseCache, build_reconnaissance_dossier, content_hash,
+    load_frozen_dossiers,
 )
 from scraper.scrapling_client import ScraplingClient  # noqa: E402
 
@@ -86,20 +88,13 @@ def capture(plan_path: Path, destination: Path) -> None:
                 "content_sha256": digest, "raw_response_ref": reference,
                 "status_code": status, "redirect_history": history,
             }
-            claims = []
-            for classification, kind, text in (
-                ("fact", "company", f"The captured public page title was {excerpt!r}."),
-                ("inference", "hiring", "Inference: the organisation may publish job-relevant public information on this site."),
-                ("hypothesis", "role", "Hypothesis: applicants should verify current vacancy details against this public site."),
-            ):
-                claims.append({
-                    "id": f"claim:{record['id']}:{classification}", "kind": kind,
-                    "classification": classification, "text": text,
-                    "citation_excerpt": excerpt, "observed_at": started,
-                    "freshness_classification": "current", "source_ids": [source_id],
-                })
-            dossier = {"schema_version": "jaa04.dossier.v1", "job_key": record["id"],
-                       "raw_cache_root": "raw", "sources": [source], "claims": claims, "edges": []}
+            company = str(record.get("company") or excerpt.removesuffix(" - Wikipedia"))
+            task = SimpleNamespace(job_key=record["id"], company=company,
+                                   title=str(record.get("role") or "Technology role"))
+            dossier = build_reconnaissance_dossier(
+                task, Citation(**source), cache, observed_at=started,
+            )
+            dossier["raw_cache_root"] = "raw"
             dossiers.append(dossier)
             attempts = []
             for attempt in result.attempts:
@@ -116,6 +111,10 @@ def capture(plan_path: Path, destination: Path) -> None:
                                     "message": str(attempt.get("message", ""))})
                 attempts.append(summary)
             captured_records.append({"job_key": record["id"], "source_id": source_id,
+                                     "company": company, "role": task.title,
+                                     "intelligence_kinds": sorted({claim["kind"] for claim in dossier["claims"]}),
+                                     "classifications": sorted({claim["classification"] for claim in dossier["claims"]}),
+                                     "edge_relations": sorted({edge["relation"] for edge in dossier["edges"]}),
                                      "requested_url": requested_url, "url": final_url,
                                      "captured_at": source["captured_at"],
                                      "retrieved_at": source["retrieved_at"],
