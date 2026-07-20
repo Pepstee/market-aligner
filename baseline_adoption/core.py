@@ -389,56 +389,64 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
 
 def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -> Path:
     """Fail-closed recertification of both original live brownfield databases."""
-    source_root = Path(source_root).resolve()
-    evidence_directory = Path(evidence_directory).resolve()
-    if source_root == evidence_directory or source_root in evidence_directory.parents:
-        raise AdoptionError("recertification evidence must be outside the preserved source root")
-    for component in (evidence_directory, *evidence_directory.parents):
-        if component.is_symlink():
-            raise AdoptionError("recertification evidence path must not contain a symlink")
-
-    # Complete every source check before creating or changing the evidence directory.
-    databases = {
-        spec.name: _recertify_source(source_root / spec.source_relative, spec)
-        for spec in BASELINES
-    }
-    content = {
-        "format": "jaa-00-source-recertification/v2",
-        "baseline": {"label": "SOURCE_BASELINE.md", "contract": "live-source-recertification"},
-        "source_root": {"label": "operator-configured-source-root"},
-        "databases": databases,
-        "isolation": {
-            "source_connections": "read-only-query-only",
-            "source_write_operations": "none-successful; transactional schema probes rejected",
-            "adopted_product_databases": "not-opened-by-recertification",
-        },
-    }
-    content_hash = hashlib.sha256(_canonical_bytes(content)).hexdigest()
-    receipt = {"content": content, "content_sha256": content_hash}
-    payload = _canonical_bytes(receipt) + b"\n"
-    evidence_directory.mkdir(parents=True, exist_ok=True)
-    for component in (evidence_directory, *evidence_directory.parents):
-        if component.is_symlink():
-            raise AdoptionError("recertification evidence path must not contain a symlink")
-    destination = evidence_directory / f"source-recertification-{content_hash}.json"
-    if destination.exists():
-        if destination.is_symlink() or destination.read_bytes() != payload:
-            raise AdoptionError("certified recertification receipt content mismatch")
-        return destination
-    temporary_fd, temporary_name = tempfile.mkstemp(prefix=".recertifying-", dir=evidence_directory)
-    temporary = Path(temporary_name)
     try:
-        with os.fdopen(temporary_fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+        source_root = Path(source_root).resolve()
+        requested_evidence = Path(evidence_directory).absolute()
+        for component in (requested_evidence, *requested_evidence.parents):
+            if component.is_symlink():
+                raise AdoptionError("recertification evidence path must not contain a symlink")
+        evidence_directory = requested_evidence.resolve()
+        if source_root == evidence_directory or source_root in evidence_directory.parents:
+            raise AdoptionError("recertification evidence must be outside the preserved source root")
+
+        # Complete every source check before creating or changing the evidence directory.
+        databases = {
+            spec.name: _recertify_source(source_root / spec.source_relative, spec)
+            for spec in BASELINES
+        }
+        content = {
+            "format": "jaa-00-source-recertification/v2",
+            "baseline": {"label": "SOURCE_BASELINE.md", "contract": "live-source-recertification"},
+            "source_root": {"label": "operator-configured-source-root"},
+            "databases": databases,
+            "isolation": {
+                "source_connections": "read-only-query-only",
+                "source_write_operations": "none-successful; transactional schema probes rejected",
+                "adopted_product_databases": "not-opened-by-recertification",
+            },
+        }
+        content_hash = hashlib.sha256(_canonical_bytes(content)).hexdigest()
+        receipt = {"content": content, "content_sha256": content_hash}
+        payload = _canonical_bytes(receipt) + b"\n"
+        evidence_directory.mkdir(parents=True, exist_ok=True)
+        for component in (evidence_directory, *evidence_directory.parents):
+            if component.is_symlink():
+                raise AdoptionError("recertification evidence path must not contain a symlink")
+        destination = evidence_directory / f"source-recertification-{content_hash}.json"
+        if destination.exists():
+            if destination.is_symlink() or destination.read_bytes() != payload:
+                raise AdoptionError("certified recertification receipt content mismatch")
+            return destination
+        temporary_fd, temporary_name = tempfile.mkstemp(prefix=".recertifying-", dir=evidence_directory)
+        temporary = Path(temporary_name)
         try:
-            os.link(temporary, destination)
-        except FileExistsError as exc:
-            raise AdoptionError("recertification receipt appeared during publication") from exc
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+            with os.fdopen(temporary_fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, destination)
+            except FileExistsError as exc:
+                raise AdoptionError("recertification receipt appeared during publication") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination
+    except AdoptionError:
+        raise
+    except OSError as exc:
+        # Filesystem exception text commonly embeds the operator's private absolute
+        # path, so expose a stable logical error and retain details only in the cause.
+        raise AdoptionError("recertification filesystem operation failed") from exc
 
 
 def _runtime_versions() -> dict[str, Any]:
