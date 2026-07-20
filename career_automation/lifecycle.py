@@ -162,35 +162,71 @@ class LifecycleReducer:
             raise ValueError("transition proposals must come from a probabilistic or external actor")
         self._required(job_key, "job_key")
         self._required(idempotency_key, "idempotency_key")
-        payload = {"proposed_state": proposed_state.value, "observation": observation,
-                   "observation_hash": canonical_hash(observation),
-                   "model": None if model is None else {
-                       "provider": model.provider, "model_id": model.model_id, "version": model.version}}
-        payload_json = canonical_json(payload)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute("SELECT * FROM pipeline_events WHERE idempotency_key=?", (idempotency_key,)).fetchone()
-            if existing is not None:
-                if existing["event_type"] != "lifecycle_transition_proposed" or existing["job_key"] != job_key or existing["payload_json"] != payload_json or existing["actor_kind"] != actor.value:
-                    raise IdempotencyConflict("idempotency key was reused with different proposal content")
-                conn.commit()
-                return int(existing["id"])
-            current = conn.execute("SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,)).fetchone()
-            if current is None:
-                raise KeyError(job_key)
-            cursor = conn.execute(
-                """INSERT INTO pipeline_events(job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (job_key, "lifecycle_transition_proposed", current["state"], None, actor.value, payload_json, idempotency_key),
+            event_id = self.record_proposal_in_transaction(
+                conn, job_key=job_key, proposed_state=proposed_state, actor=actor,
+                observation=observation, idempotency_key=idempotency_key, model=model,
             )
             conn.commit()
-            return int(cursor.lastrowid)
+            return event_id
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+
+    def record_proposal_in_transaction(
+        self, conn: sqlite3.Connection, *, job_key: str,
+        proposed_state: PipelineState, actor: ActorKind, observation: Any,
+        idempotency_key: str, model: ModelIdentity | None = None,
+    ) -> int:
+        """Record a proposal using the caller's active transaction."""
+        if not isinstance(proposed_state, PipelineState):
+            raise ValueError("proposed_state must be a PipelineState")
+        if actor not in {ActorKind.PROBABILISTIC, ActorKind.EXTERNAL}:
+            raise ValueError("transition proposals must come from a probabilistic or external actor")
+        self._required(job_key, "job_key")
+        self._required(idempotency_key, "idempotency_key")
+        if model is not None and not isinstance(model, ModelIdentity):
+            raise ValueError("model must be a ModelIdentity or None")
+        payload = {
+            "proposed_state": proposed_state.value,
+            "observation": observation,
+            "observation_hash": canonical_hash(observation),
+            "model": None if model is None else {
+                "provider": model.provider, "model_id": model.model_id,
+                "version": model.version,
+            },
+        }
+        payload_json = canonical_json(payload)
+        existing = conn.execute(
+            "SELECT * FROM pipeline_events WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            if (existing["event_type"] != "lifecycle_transition_proposed"
+                    or existing["job_key"] != job_key
+                    or existing["payload_json"] != payload_json
+                    or existing["actor_kind"] != actor.value):
+                raise IdempotencyConflict(
+                    "idempotency key was reused with different proposal content"
+                )
+            return int(existing["id"])
+        current = conn.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+        ).fetchone()
+        if current is None:
+            raise KeyError(job_key)
+        cursor = conn.execute(
+            """INSERT INTO pipeline_events(
+                   job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
+                 ) VALUES(?,?,?,?,?,?,?)""",
+            (job_key, "lifecycle_transition_proposed", current["state"], None,
+             actor.value, payload_json, idempotency_key),
+        )
+        return int(cursor.lastrowid)
 
     def commit(
         self, *, job_key: str, to_state: PipelineState, policy: PolicyIdentity,
@@ -198,6 +234,29 @@ class LifecycleReducer:
         model: ModelIdentity | None = None,
     ) -> TransitionReceipt:
         """Atomically append an event and receipt and advance materialised state."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            receipt = self.commit_in_transaction(
+                conn, job_key=job_key, to_state=to_state, policy=policy,
+                inputs=inputs, outputs=outputs, idempotency_key=idempotency_key,
+                model=model,
+            )
+            conn.commit()
+            return receipt
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def commit_in_transaction(
+        self, conn: sqlite3.Connection, *, job_key: str,
+        to_state: PipelineState, policy: PolicyIdentity, inputs: Any,
+        outputs: Any, idempotency_key: str,
+        model: ModelIdentity | None = None,
+    ) -> TransitionReceipt:
+        """Commit through the reducer on the caller's active SQLite transaction."""
         if not isinstance(to_state, PipelineState):
             raise ValueError("to_state must be a PipelineState")
         if not isinstance(policy, PolicyIdentity):
@@ -214,68 +273,88 @@ class LifecycleReducer:
             self._required(model.model_id, "model_id")
             self._required(model.version, "model_version")
         input_hash, output_hash = canonical_hash(inputs), canonical_hash(outputs)
-        binding = {"policy": {"id": policy.policy_id, "version": policy.version, "sha256": policy.sha256},
-                   "model": None if model is None else {"provider": model.provider, "id": model.model_id, "version": model.version},
-                   "input_hash": input_hash, "output_hash": output_hash}
+        binding = {
+            "policy": {"id": policy.policy_id, "version": policy.version,
+                       "sha256": policy.sha256},
+            "model": None if model is None else {
+                "provider": model.provider, "id": model.model_id,
+                "version": model.version,
+            },
+            "input_hash": input_hash, "output_hash": output_hash,
+        }
         payload_json = canonical_json(binding)
-        conn = self._connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
+        existing = conn.execute(
                 """SELECT r.*,e.event_type,e.actor_kind,e.payload_json AS event_payload
                    FROM lifecycle_transition_receipts r JOIN pipeline_events e ON e.id=r.event_id
                    WHERE r.idempotency_key=?""", (idempotency_key,),
-            ).fetchone()
-            if existing is not None:
-                expected = (job_key, to_state.value, policy.policy_id, policy.version, policy.sha256,
-                            input_hash, output_hash, model.provider if model else None,
-                            model.model_id if model else None, model.version if model else None, payload_json)
-                actual = (existing["job_key"], existing["to_state"], existing["policy_id"], existing["policy_version"], existing["policy_hash"],
-                          existing["input_hash"], existing["output_hash"], existing["model_provider"], existing["model_id"], existing["model_version"], existing["event_payload"])
-                if actual != expected:
-                    raise IdempotencyConflict("idempotency key was reused with different transition content")
-                conn.commit()
-                return self._receipt(existing)
-            if conn.execute("SELECT 1 FROM pipeline_events WHERE idempotency_key=?", (idempotency_key,)).fetchone():
-                raise IdempotencyConflict("idempotency key is already used by a non-transition event")
-            current = conn.execute("SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,)).fetchone()
-            if current is None:
-                raise KeyError(job_key)
-            try:
-                from_state = PipelineState(current["state"])
-            except ValueError as exc:
-                raise InvalidTransition(f"unknown current state {current['state']!r}") from exc
-            if to_state not in LEGAL_TRANSITIONS[from_state]:
-                raise InvalidTransition(f"illegal or out-of-order transition: {from_state.value} -> {to_state.value}")
-            event = conn.execute(
-                """INSERT INTO pipeline_events(job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (job_key, "lifecycle_transition_committed", from_state.value, to_state.value,
-                 ActorKind.DETERMINISTIC.value, payload_json, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            expected = (job_key, to_state.value, policy.policy_id, policy.version,
+                        policy.sha256, input_hash, output_hash,
+                        model.provider if model else None,
+                        model.model_id if model else None,
+                        model.version if model else None, payload_json)
+            actual = (existing["job_key"], existing["to_state"],
+                      existing["policy_id"], existing["policy_version"],
+                      existing["policy_hash"], existing["input_hash"],
+                      existing["output_hash"], existing["model_provider"],
+                      existing["model_id"], existing["model_version"],
+                      existing["event_payload"])
+            if actual != expected:
+                raise IdempotencyConflict(
+                    "idempotency key was reused with different transition content"
+                )
+            return self._receipt(existing)
+        if conn.execute(
+            "SELECT 1 FROM pipeline_events WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone():
+            raise IdempotencyConflict(
+                "idempotency key is already used by a non-transition event"
             )
-            receipt = conn.execute(
-                """INSERT INTO lifecycle_transition_receipts(
-                     event_id,job_key,from_state,to_state,policy_id,policy_version,policy_hash,
-                     model_provider,model_id,model_version,input_hash,output_hash,idempotency_key)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
-                (event.lastrowid, job_key, from_state.value, to_state.value, policy.policy_id,
-                 policy.version, policy.sha256, model.provider if model else None,
-                 model.model_id if model else None, model.version if model else None,
-                 input_hash, output_hash, idempotency_key),
-            ).fetchone()
-            changed = conn.execute(
-                "UPDATE pipeline_jobs SET state=?,policy_hash=?,updated_at=CURRENT_TIMESTAMP WHERE job_key=? AND state=?",
-                (to_state.value, policy.sha256, job_key, from_state.value),
-            ).rowcount
-            if changed != 1:
-                raise InvalidTransition("job state changed concurrently")
-            conn.commit()
-            return self._receipt(receipt)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        current = conn.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+        ).fetchone()
+        if current is None:
+            raise KeyError(job_key)
+        try:
+            from_state = PipelineState(current["state"])
+        except ValueError as exc:
+            raise InvalidTransition(
+                f"unknown current state {current['state']!r}"
+            ) from exc
+        if to_state not in LEGAL_TRANSITIONS[from_state]:
+            raise InvalidTransition(
+                f"illegal or out-of-order transition: {from_state.value} -> {to_state.value}"
+            )
+        event = conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (job_key, "lifecycle_transition_committed", from_state.value,
+             to_state.value, ActorKind.DETERMINISTIC.value, payload_json,
+             idempotency_key),
+        )
+        receipt = conn.execute(
+            """INSERT INTO lifecycle_transition_receipts(
+                 event_id,job_key,from_state,to_state,policy_id,policy_version,policy_hash,
+                 model_provider,model_id,model_version,input_hash,output_hash,idempotency_key)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
+            (event.lastrowid, job_key, from_state.value, to_state.value,
+             policy.policy_id, policy.version, policy.sha256,
+             model.provider if model else None, model.model_id if model else None,
+             model.version if model else None, input_hash, output_hash,
+             idempotency_key),
+        ).fetchone()
+        changed = conn.execute(
+            """UPDATE pipeline_jobs
+               SET state=?,policy_hash=?,updated_at=CURRENT_TIMESTAMP
+               WHERE job_key=? AND state=?""",
+            (to_state.value, policy.sha256, job_key, from_state.value),
+        ).rowcount
+        if changed != 1:
+            raise InvalidTransition("job state changed concurrently")
+        return self._receipt(receipt)
 
     @staticmethod
     def _receipt(row: sqlite3.Row) -> TransitionReceipt:
