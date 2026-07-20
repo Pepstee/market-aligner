@@ -37,6 +37,7 @@ MANIFEST = CAPTURE / "research_manifest.json"
 FROZEN = CAPTURE / "frozen_dossiers.json"
 FROZEN_RAW = CAPTURE / "raw"
 CAPTURE_RECEIPT = CAPTURE / "capture_receipt.json"
+CAPTURE_PLAN = ROOT / "career_automation/fixtures/jaa04_capture_plan.json"
 EVIDENCE = ROOT / "runtime_evidence/jaa04"
 COMMANDS = [
     "python3 scripts/accept_jaa_04.py",
@@ -104,19 +105,12 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
     by_key = {dossier["job_key"]: dossier for dossier in frozen}
     for record in manifest["records"]:
         dossier = by_key[record["job_key"]]
-        source = dossier["sources"][0]
-        require(record["content_sha256"] == source["content_sha256"]
-                and record["url"] == source["url"]
-                and record["status_code"] == source["status_code"]
-                and record["retrieved_at"] == source["retrieved_at"]
-                and record["redirect_history"] == source["redirect_history"],
-                "manifest is not bound to frozen dossier provenance")
         require(record.get("sources") == dossier["sources"]
                 and record.get("source_plan") == dossier["source_plan"]
                 and record.get("source_ids") == [item["id"] for item in dossier["sources"]],
                 "manifest does not exactly cover dossier sources and source plan")
     source_hashes = {source["content_sha256"] for dossier in frozen for source in dossier["sources"]}
-    require(len(source_hashes) == 30, "identical synthetic responses cannot certify JAA-04")
+    require(len(source_hashes) == 150, "all five purposes require independent authentic responses")
     expected_kinds = {"company", "role", "product", "hiring", "operational_health"}
     for dossier in frozen:
         require({claim["kind"] for claim in dossier["claims"]} == expected_kinds,
@@ -214,8 +208,8 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
     require(database.lifecycle.replay()[strong.key] is PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH,
             "durable lifecycle replay mismatch")
     return {"status": "PASS", "validation_mode": "offline-corpus-validation",
-            "capture_provenance": "external-jaa04.capture-receipt.v1",
-            "dossier_count": 30, "distinct_source_bytes": 30,
+            "capture_provenance": "external-jaa04.capture-receipt.v2",
+            "dossier_count": 30, "distinct_source_bytes": 150,
             "negative_controls": negative_controls,
             "lease_resume_attempts": 2,
             "queue_worker": "retrieval-validation-completion",
@@ -229,7 +223,7 @@ def canonical(document: dict[str, Any]) -> bytes:
 
 def raw_corpus_hash() -> str:
     files = sorted(path for path in FROZEN_RAW.rglob("*") if path.is_file())
-    require(len(files) == 30, "raw response corpus cardinality mismatch")
+    require(len(files) == 150, "raw response corpus cardinality mismatch")
     digest = hashlib.sha256()
     for path in files:
         digest.update(path.relative_to(CAPTURE).as_posix().encode())
@@ -261,17 +255,20 @@ def main() -> int:
     try:
         revision_before, content_before = clean_revision()
         capture_receipt = json.loads(CAPTURE_RECEIPT.read_text(encoding="utf-8"))
-        require(capture_receipt.get("schema_version") == "jaa04.capture-receipt.v1"
+        require(capture_receipt.get("schema_version") == "jaa04.capture-receipt.v2"
                 and capture_receipt.get("status") == "SUCCESS"
-                and capture_receipt.get("captured_count") == 30,
+                and capture_receipt.get("captured_count") == 30
+                and capture_receipt.get("source_count") == 150,
                 "authentic capture receipt is missing")
         hashes = {
+            "capture_plan_sha256": hashlib.sha256(CAPTURE_PLAN.read_bytes()).hexdigest(),
             "research_manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
             "frozen_dossiers_sha256": hashlib.sha256(FROZEN.read_bytes()).hexdigest(),
             "capture_receipt_sha256": hashlib.sha256(CAPTURE_RECEIPT.read_bytes()).hexdigest(),
             "raw_corpus_sha256": capture_receipt["raw_corpus_sha256"],
         }
-        require(hashes["research_manifest_sha256"] == capture_receipt["manifest_sha256"]
+        require(hashes["capture_plan_sha256"] == capture_receipt["capture_plan_sha256"]
+                and hashes["research_manifest_sha256"] == capture_receipt["manifest_sha256"]
                 and hashes["frozen_dossiers_sha256"] == capture_receipt["dossiers_sha256"]
                 and hashes["raw_corpus_sha256"] == raw_corpus_hash(),
                 "capture components are not hash-bound")
