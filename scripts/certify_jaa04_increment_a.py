@@ -33,6 +33,13 @@ from tracked_source_revision import (  # noqa: E402
 
 FORMAT = "jaa04-increment-a-temporal-provenance-certification/v1"
 CANARY_DIRECTORY = ROOT / "career_automation/fixtures/jaa04_authority_canaries"
+INVENTORY_PATH = ROOT / "scripts/jaa04_increment_a_test_inventory.json"
+INVENTORY_SHA256 = "4685a0b53ec15b89adce13fa2a30da54a5cc443aa49a7ba1d3bfb855e7f43a5d"
+PYTEST_PLUGIN = ROOT / "scripts/jaa04_pytest_inventory_plugin.py"
+PYTEST_PLUGIN_SHA256 = "4b167aa1ad974e772ad309f6d69c055a4912025ba9c4a0b0c78ba6f59d6487b3"
+# Compatibility integrity sentinels. Discovery and expected outcomes come only
+# from the content-pinned inventory; these make legacy count-reduction attacks
+# explicit failures instead of harmless-looking certifier edits.
 SUITES = (
     "test_jaa04_increment_a_authority_canaries.py",
     "test_jaa04_increment_a_temporal_authority_regression.py",
@@ -172,33 +179,98 @@ def validate_canaries() -> dict[str, str]:
     return dict(sorted(hashes.items()))
 
 
+def canonical_inventory() -> tuple[list[str], int]:
+    """Load the content-pinned inventory and verify every canonical suite byte."""
+    require(INVENTORY_PATH.is_file() and not INVENTORY_PATH.is_symlink(),
+            "canonical Increment A test inventory is missing or unsafe")
+    payload = INVENTORY_PATH.read_bytes()
+    require(sha256(payload) == INVENTORY_SHA256,
+            "canonical Increment A test inventory was tampered")
+    try:
+        inventory = json.loads(payload)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise CertificationError(f"invalid canonical test inventory: {exc}") from exc
+    require(inventory.get("format") == "jaa04-increment-a-test-inventory/v1",
+            "unsupported canonical Increment A test inventory")
+    suites = inventory.get("suites")
+    require(isinstance(suites, dict) and suites,
+            "canonical Increment A suite inventory is incomplete")
+    names = inventory.get("suite_order")
+    require(isinstance(names, list) and all(isinstance(name, str) for name in names)
+            and len(names) == len(set(names)) and set(names) == set(suites),
+            "canonical Increment A suite ordering is incomplete")
+    require(tuple(names) == SUITES and EXPECTED_TESTS == 47,
+            "legacy Increment A inventory sentinels were changed")
+    require("test_jaa04_sidecar_temporal_semantics.py" in names,
+            "sidecar temporal-semantics suite is absent from canonical inventory")
+    for name in names:
+        require(Path(name).name == name and name.startswith("test_jaa04_")
+                and name.endswith(".py"), f"unsafe canonical suite name: {name}")
+        path = ROOT / name
+        require(path.is_file() and not path.is_symlink(),
+                f"canonical Increment A suite is missing or unsafe: {name}")
+        require(sha256(path.read_bytes()) == suites[name],
+                f"canonical Increment A suite bytes changed: {name}")
+    collected = inventory.get("collected")
+    require(type(collected) is int and collected == 47,
+            "canonical Increment A inventory must contain exactly 47 tests")
+    return names, collected
+
+
 def run_suites() -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for suite in SUITES:
-        argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", suite]
+    suites, expected = canonical_inventory()
+    require(PYTEST_PLUGIN.is_file() and not PYTEST_PLUGIN.is_symlink()
+            and sha256(PYTEST_PLUGIN.read_bytes()) == PYTEST_PLUGIN_SHA256,
+            "JAA-04 pytest outcome reporter is missing or tampered")
+    with tempfile.TemporaryDirectory(prefix=".jaa04-pytest-", dir=ROOT) as temporary:
+        report_path = Path(temporary) / "report.json"
+        argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                "-p", "scripts.jaa04_pytest_inventory_plugin", *suites]
+        environment = os.environ.copy()
+        environment["JAA04_PYTEST_REPORT"] = str(report_path)
         completed = subprocess.run(
-            argv, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            check=False,
+            argv, cwd=ROOT, env=environment, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
         )
         output = completed.stdout.decode("utf-8", errors="replace")
-        matches = re.findall(r"(\d+) passed", output)
-        passed = int(matches[-1]) if matches else 0
-        require(completed.returncode == 0,
-                f"preserved suite failed: {suite}: "
-                f"{completed.stderr.decode(errors='replace').strip() or output.strip()}")
-        require(passed > 0, f"preserved suite reported no passing tests: {suite}")
-        results.append({
-            "suite": suite,
-            "argv": ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", suite],
-            "exit_code": 0,
-            "passed": passed,
-            "failed": 0,
-            "errors": 0,
-            "skipped": 0,
-        })
-    require(sum(item["passed"] for item in results) == EXPECTED_TESTS,
-            "preserved Increment A suite total changed")
-    return results
+        error = completed.stderr.decode("utf-8", errors="replace")
+        require(report_path.is_file() and not report_path.is_symlink(),
+                f"pytest produced no trustworthy outcome report: {error or output}")
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CertificationError(f"invalid pytest outcome report: {exc}") from exc
+
+    outcomes = report.get("outcomes")
+    require(isinstance(outcomes, dict), "pytest outcome report is incomplete")
+    require(completed.returncode == report.get("exit_code") == 0,
+            f"canonical Increment A pytest run failed: {error.strip() or output.strip()}")
+    require(report.get("collected") == expected == 47,
+            "pytest must collect exactly the 47 canonical Increment A tests")
+    require(outcomes.get("passed") == expected,
+            "pytest must report exactly 47 passed Increment A tests")
+    for outcome in ("skipped", "xfailed", "xpassed", "failed", "error"):
+        require(outcomes.get(outcome) == 0,
+                f"pytest reported forbidden {outcome} outcomes")
+    require(report.get("deselected") == 0,
+            "pytest reported forbidden deselected outcomes")
+    passed_by_suite = report.get("passed_by_suite")
+    require(isinstance(passed_by_suite, dict)
+            and set(passed_by_suite) == set(suites)
+            and sum(passed_by_suite.values()) == expected,
+            "pytest per-suite pass inventory does not match the canonical inventory")
+    return [{
+        "suite": suite,
+        "argv": ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", suite],
+        "exit_code": 0,
+        "passed": passed_by_suite[suite],
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xfailed": 0,
+        "xpassed": 0,
+        "deselected": 0,
+    } for suite in suites]
 
 
 def publish(directory: Path, payload: bytes) -> Path:
