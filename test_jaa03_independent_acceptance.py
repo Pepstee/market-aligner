@@ -90,7 +90,10 @@ def _verify_receipt(root: Path, receipt: Path) -> None:
     assert payload == _canonical(document)
     assert document["format"] == FORMAT
     assert document["status"] == "PASS"
-    assert document["source_revision"] == _git(root, "rev-parse", "HEAD").stdout.strip()
+    origin = document["source_revision"]
+    assert isinstance(origin, str) and len(origin) == 40
+    assert _git(root, "rev-parse", "--verify", f"{origin}^{{commit}}").returncode == 0
+    assert _git(root, "merge-base", "--is-ancestor", origin, "HEAD").returncode == 0
     # This command is intentionally outside the certifier and binds every
     # tracked product byte except generated runtime evidence.
     source_revision = _run(root, "-c", "from tracked_source_revision import source_content_revision; print(source_content_revision('.'))")
@@ -212,6 +215,18 @@ def test_real_certifier_receipt_and_negative_receipt_controls(repository: Path) 
     forged.write_bytes(payload)
     with pytest.raises(AssertionError):
         _verify_receipt(repository, forged)
+    forged.unlink()
+
+    # Tracking a receipt changes Git HEAD but not the certified source-content
+    # tree.  Re-running certification must reuse the one receipt, not create an
+    # endless chain of self-invalidating evidence files.
+    assert _git(repository, "add", str(receipt.relative_to(repository))).returncode == 0
+    assert _git(repository, "commit", "-m", "track JAA-03 receipt").returncode == 0
+    _verify_receipt(repository, receipt)
+    replay = _run(repository, str(CERTIFIER))
+    assert replay.returncode == 0, replay.stderr
+    assert json.loads(replay.stdout)["receipt"] == receipt.relative_to(repository).as_posix()
+    assert list((repository / "runtime_evidence" / "jaa03").glob("sha256-*.json")) == [receipt]
 
     (repository / "README.md").write_bytes((repository / "README.md").read_bytes() + b"\nrevision replay\n")
     assert _git(repository, "add", "README.md").returncode == 0

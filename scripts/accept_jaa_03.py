@@ -131,23 +131,74 @@ def canonical_receipt(document: dict[str, Any]) -> bytes:
     return (json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def validate_existing_receipts() -> None:
+def validate_existing_receipts() -> list[tuple[Path, dict[str, Any]]]:
     if not EVIDENCE_DIRECTORY.exists():
-        return
+        return []
     require(EVIDENCE_DIRECTORY.is_dir() and not EVIDENCE_DIRECTORY.is_symlink(),
             "unsafe JAA-03 evidence directory")
+    receipts: list[tuple[Path, dict[str, Any]]] = []
     for path in EVIDENCE_DIRECTORY.iterdir():
         require(path.is_file() and not path.is_symlink() and path.name.startswith("sha256-")
                 and path.name.endswith(".json"), "unexpected or unsafe JAA-03 receipt")
-        require(path.name == f"sha256-{sha256_bytes(path.read_bytes())}.json",
+        payload = path.read_bytes()
+        require(path.name == f"sha256-{sha256_bytes(payload)}.json",
                 "JAA-03 receipt tampering detected")
+        try:
+            document = json.loads(payload)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise AcceptanceError(f"invalid JAA-03 receipt: {exc}") from exc
+        require(payload == canonical_receipt(document), "non-canonical JAA-03 receipt")
+        require(document.get("format") == FORMAT and document.get("status") == "PASS",
+                "unsupported JAA-03 receipt")
+        receipts.append((path, document))
+    return sorted(receipts, key=lambda item: item[0].name)
+
+
+def reusable_receipt(
+    source_revision: str,
+    runtime_inputs: dict[str, str],
+    configuration: dict[str, Any],
+    acceptance_result: dict[str, Any],
+) -> Path | None:
+    """Reuse a certificate across commits which alter runtime evidence only.
+
+    A checked-in content-addressed receipt necessarily changes Git HEAD.  The
+    certified source-content revision excludes runtime_evidence/, so exact
+    product bytes—not an impossible self-referential commit hash—are the
+    authority for replay.
+    """
+    receipts = validate_existing_receipts()
+    require(len(receipts) <= 1, "multiple JAA-03 receipts")
+    matches: list[Path] = []
+    for path, document in receipts:
+        if (
+            document.get("source_content_revision") == source_revision
+            and document.get("source_content_revision_contract")
+            == source_content_revision_contract()
+            and document.get("runtime_inputs") == runtime_inputs
+            and document.get("configuration") == configuration
+            and document.get("acceptance_result") == acceptance_result
+        ):
+            origin = document.get("source_revision")
+            require(isinstance(origin, str) and len(origin) == 40
+                    and all(character in "0123456789abcdef" for character in origin),
+                    "invalid JAA-03 origin revision")
+            git("rev-parse", "--verify", f"{origin}^{{commit}}")
+            matches.append(path)
+    require(len(matches) <= 1, "multiple reusable JAA-03 receipts")
+    if matches:
+        return matches[0]
+    require(not receipts,
+            "stale JAA-03 receipt must be replaced before certification")
+    return None
 
 
 def write_receipt(document: dict[str, Any]) -> Path:
     payload = canonical_receipt(document)
     destination = EVIDENCE_DIRECTORY / f"sha256-{sha256_bytes(payload)}.json"
     EVIDENCE_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    validate_existing_receipts()
+    require(not validate_existing_receipts(),
+            "refusing to retain multiple JAA-03 receipts")
     if destination.exists():
         require(destination.read_bytes() == payload, "conflicting JAA-03 PASS receipt")
         return destination
@@ -189,6 +240,17 @@ def main() -> int:
                 (revision_after, source_after, inputs_after),
                 "source or runtime inputs changed during acceptance")
         policy = CalibrationPolicy()
+        configuration = {
+            "locked_set_id": LOCKED_SET_ID,
+            "decision_rule_version": DECISION_RULE_VERSION,
+            "policy": vars(policy),
+            "policy_hash": policy.policy_hash,
+        }
+        existing = reusable_receipt(source_before, inputs_before, configuration, result)
+        if existing is not None:
+            print(json.dumps({"receipt": existing.relative_to(ROOT).as_posix(), "status": "PASS"},
+                             sort_keys=True))
+            return 0
         receipt = {
             "format": FORMAT,
             "status": "PASS",
@@ -200,12 +262,7 @@ def main() -> int:
                 "python_version": platform.python_version(),
             },
             "runtime_inputs": inputs_before,
-            "configuration": {
-                "locked_set_id": LOCKED_SET_ID,
-                "decision_rule_version": DECISION_RULE_VERSION,
-                "policy": vars(policy),
-                "policy_hash": policy.policy_hash,
-            },
+            "configuration": configuration,
             "acceptance_result": result,
         }
         destination = write_receipt(receipt)
