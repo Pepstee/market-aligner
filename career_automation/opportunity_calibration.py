@@ -15,6 +15,12 @@ from typing import Any, Mapping, Sequence
 
 LOCKED_SET = Path(__file__).with_name("fixtures") / "jaa03_vacancies.json"
 LOCKED_METRICS = Path(__file__).with_name("fixtures") / "jaa03_locked_metrics.json"
+LOCKED_SET_ID = "JAA-03-reviewed-historical-calibration-2026-07-20"
+DECISION_RULE_VERSION = "jaa03.gold-decision-rules.v1"
+# Independent trust anchor for the reviewed set.  This is deliberately outside
+# the attacker-rehashable JSON envelope.  It commits to the identity, policy,
+# canonical vacancy inputs, and all expected labels.
+LOCKED_SET_AUTHORITY_HASH = "sha256:b1f4b1386903b1f9de437fcccde21872f449f70ea63d374aed4229b87b588d4e"
 ALLOWED_REASONS = {
     "viable", "expired", "inaccessible", "ineligible", "implausibly_senior",
     "low_confidence_extraction", "below_opportunity_threshold",
@@ -118,13 +124,83 @@ def decide_opportunity0(
     return Opportunity0Decision("pass", "viable", score, policy.policy_hash)
 
 
+_REASON_MARKERS = {
+    "viable": "Applications are open and the vacancy is accessible.",
+    "expired": "The application deadline expired on 2026-06-01.",
+    "inaccessible": "The employer vacancy page is inaccessible.",
+    "ineligible": "Applicants must be resident outside the United Kingdom.",
+    "implausibly_senior": "This principal role requires ten years of experience.",
+    "low_confidence_extraction": "The copied requirements are incomplete and uncertain.",
+    "below_opportunity_threshold": "This is a short unpaid role with limited market demand.",
+}
+
+
+def derive_gold_labels(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive reviewed gold labels solely from canonical inputs and v1 rules."""
+    text = row["vacancy"]["text"]
+    matches = [reason for reason, marker in _REASON_MARKERS.items() if marker in text]
+    if len(matches) != 1:
+        raise ValueError(f"canonical reason is not unambiguous: {row.get('id', '<unknown>')}")
+    reason = matches[0]
+    role_location = f"{str(row['role_family']).title()} role in {row['geography']}."
+    requirement = "Essential requirement: Python."
+    opportunity = text[text.index("Market evidence:"):]
+    spans = []
+    for task, needle in (
+        ("viability", _REASON_MARKERS[reason]),
+        ("eligibility", role_location),
+        ("requirements", requirement),
+        ("opportunity0", opportunity),
+    ):
+        start = text.index(needle)
+        spans.append({"task": task, "start": start, "end": start + len(needle), "text": needle})
+    derived = decide_opportunity0(
+        Opportunity0Input.from_mapping(row["opportunity0"]),
+        Confidence(**row["confidence"]),
+        viability_reason=reason if reason in {
+            "expired", "inaccessible", "ineligible", "implausibly_senior"
+        } else "viable",
+    )
+    return {
+        "viability": reason not in {"expired", "inaccessible", "implausibly_senior"},
+        "eligibility": reason != "ineligible",
+        "requirements": [{"text": "Python", "essential": True}],
+        "viability_reason": (
+            reason if reason in {"expired", "inaccessible", "ineligible", "implausibly_senior"}
+            else "viable"
+        ),
+        "opportunity0_decision": {"decision": derived.decision, "reason": derived.reason},
+        "source_spans": spans,
+    }
+
+
+def locked_set_authority_document(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable commitment domain; never includes envelope hashes."""
+    return {
+        "domain": "jaa03-locked-set-authority-v1",
+        "locked_set_id": envelope.get("locked_set_id"),
+        "decision_rule_version": envelope.get("decision_rule_version"),
+        "policy": vars(CalibrationPolicy()),
+        "schema_version": envelope.get("schema_version"),
+        "frozen_at": envelope.get("frozen_at"),
+        "stratification": envelope.get("stratification"),
+        "records": envelope.get("records"),
+    }
+
+
 def load_locked_set(path: Path = LOCKED_SET) -> tuple[list[dict[str, Any]], str]:
     envelope = json.loads(path.read_text(encoding="utf-8"))
     records = envelope["records"]
     if envelope.get("schema_version") != "jaa03.locked-set.v1" or len(records) != 100:
         raise ValueError("JAA-03 set must contain exactly 100 v1 records")
+    if envelope.get("locked_set_id") != LOCKED_SET_ID:
+        raise ValueError("JAA-03 locked-set identity mismatch")
+    if envelope.get("decision_rule_version") != DECISION_RULE_VERSION:
+        raise ValueError("JAA-03 decision-rule version mismatch")
     if content_hash(records) != envelope.get("records_hash"):
         raise ValueError("JAA-03 locked-set hash mismatch")
+    if content_hash(locked_set_authority_document(envelope)) != LOCKED_SET_AUTHORITY_HASH:
+        raise ValueError("JAA-03 locked-set authority mismatch")
     for row in records:
         text = row["vacancy"]["text"]
         if content_hash(row["vacancy"]) != row["content_hash"]:
@@ -136,6 +212,8 @@ def load_locked_set(path: Path = LOCKED_SET) -> tuple[list[dict[str, Any]], str]
         for span in spans:
             if text[span["start"]:span["end"]] != span["text"]:
                 raise ValueError(f"invalid source span: {row['id']}")
+        if row["labels"] != derive_gold_labels(row):
+            raise ValueError(f"gold decision derivation mismatch: {row['id']}")
     return records, envelope["records_hash"]
 
 

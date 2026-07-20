@@ -1,5 +1,7 @@
 {
+  "decision_rule_version": "jaa03.gold-decision-rules.v1",
   "frozen_at": "2026-07-20",
+  "locked_set_id": "JAA-03-reviewed-historical-calibration-2026-07-20",
   "records": [
     {
       "confidence": {
