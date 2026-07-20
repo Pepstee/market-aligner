@@ -39,6 +39,12 @@ similarly named historical copies are not import sources unless an operator supp
 their paths explicitly. The `jaa-baseline adopt` and `adopt-online` contracts require
 `--source-root`, `--data-root`, and `--repository`. They have no personal-path or
 first-operator defaults, and receipts retain logical labels rather than host paths.
+Online adoption opens live SQLite sources with `mode=ro` and `query_only`, performs no
+source checkpoint or journal-mode operation, and never deletes, renames, or truncates
+source main/WAL/SHM files. Receipts compare stable main/WAL content at capture boundaries;
+SHM is observed as identity metadata only because SQLite may lawfully update its volatile
+reader-lock metadata during a read-only WAL connection. Destination finalisation and
+immutable, sidecar-refusing reconciliation remain separate from that source behaviour.
 
 ## Run
 

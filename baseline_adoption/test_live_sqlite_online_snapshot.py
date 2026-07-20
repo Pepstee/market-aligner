@@ -159,6 +159,12 @@ def test_online_cli_freezes_consistent_wal_snapshot_records_drift_and_reconciles
         assert record["capture"]["method"] == "sqlite-online-backup"
         assert record["capture"]["drift_observed"] is True
         assert "wal" in record["capture"]["changed_components"]
+        assert record["capture"]["shm_observation"]["content_compared"] is False
+        for boundary in ("start", "end"):
+            assert record["capture"][f"source_observations_{boundary}"]["shm"][
+                "observation_scope"
+            ] == "identity-metadata-only"
+            assert "sha256" not in record["capture"][f"source_observations_{boundary}"]["shm"]
         copy = data / "databases" / f"{name}.sqlite3"
         with _readonly(copy) as snapshot:
             assert snapshot.execute("PRAGMA integrity_check").fetchall() == [("ok",)]

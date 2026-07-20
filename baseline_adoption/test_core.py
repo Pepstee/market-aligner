@@ -130,6 +130,7 @@ class BaselineAdoptionTests(unittest.TestCase):
 
     def test_online_backup_freezes_live_wal_and_preserves_historical_observation(self) -> None:
         writers = []
+        source_content = {}
         try:
             for spec in self.specs:
                 path = self.source / spec.source_relative
@@ -138,6 +139,13 @@ class BaselineAdoptionTests(unittest.TestCase):
                 writer.execute("INSERT INTO records(value) VALUES ('newly-observed')")
                 writer.commit()
                 writers.append(writer)
+                source_content[spec.name] = {
+                    component: core._hash_file(component_path)
+                    for component, component_path in {
+                        "main": path,
+                        "wal": Path(str(path) + "-wal"),
+                    }.items()
+                }
 
             data = self.root / "online-data"
             repository = self.root / "repository"
@@ -158,6 +166,22 @@ class BaselineAdoptionTests(unittest.TestCase):
                     self.assertEqual(record["capture"]["method"], "sqlite-online-backup")
                     self.assertEqual(record["capture"]["source_identities_start"]["wal"]["label"],
                                      f"source:{spec.name}:wal")
+                    self.assertEqual(record["capture"]["main_content_unchanged"], True)
+                    self.assertEqual(record["capture"]["wal_content_unchanged"], True)
+                    self.assertTrue(record["capture"]["main_wal_content_comparison_complete"])
+                    self.assertEqual(record["capture"]["source_open_semantics"], {
+                        "sqlite_uri_mode": "ro",
+                        "query_only": True,
+                        "source_write_operations": "none",
+                    })
+                    for boundary in ("start", "end"):
+                        observations = record["capture"][f"source_observations_{boundary}"]
+                        self.assertEqual(observations["main"]["sha256"],
+                                         source_content[spec.name]["main"])
+                        self.assertEqual(observations["wal"]["sha256"],
+                                         source_content[spec.name]["wal"])
+                        self.assertFalse(observations["shm"]["content_compared"])
+                        self.assertNotIn("sha256", observations["shm"])
                     self.assertNotIn(str(self.root), json.dumps(record))
                     with closing(core._immutable_connection(destination)) as frozen:
                         self.assertEqual(frozen.execute("PRAGMA journal_mode").fetchone()[0],
@@ -193,6 +217,9 @@ class BaselineAdoptionTests(unittest.TestCase):
                 path: (path.stat().st_dev, path.stat().st_ino)
                 for path in (source_wal, source_shm)
             }
+            source_bytes = {
+                path: path.read_bytes() for path in (source, source_wal)
+            }
             destination = self.root / "failed-data" / spec.destination_relative
             with patch.object(core, "_inspect_database",
                               side_effect=core.AdoptionError("forced inspection failure")):
@@ -205,6 +232,7 @@ class BaselineAdoptionTests(unittest.TestCase):
                 path: (path.stat().st_dev, path.stat().st_ino)
                 for path in source_sidecars
             }, source_sidecars)
+            self.assertEqual({path: path.read_bytes() for path in source_bytes}, source_bytes)
             self.assertEqual(writer.execute("SELECT COUNT(*) FROM records").fetchone()[0], 2)
         finally:
             writer.close()

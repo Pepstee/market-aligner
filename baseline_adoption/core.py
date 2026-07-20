@@ -85,7 +85,13 @@ def _canonical_bytes(value: Any) -> bytes:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
-    """Open a live database read-only, including any committed WAL contents."""
+    """Open a live WAL view without granting SQLite permission to write it.
+
+    ``mode=ro`` is required rather than ``immutable=1`` because immutable
+    connections deliberately ignore a live WAL.  SQLite may still update the
+    existing SHM reader-lock region while servicing this lawful read-only
+    connection; it cannot write the main database or WAL through this handle.
+    """
     uri = "file:" + quote(str(path.resolve()), safe="/") + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=30)
     connection.execute("PRAGMA query_only=ON")
@@ -126,11 +132,59 @@ def _file_identity(path: Path, label: str) -> dict[str, Any]:
 
 
 def _source_identities(path: Path, source_label: str) -> dict[str, dict[str, Any]]:
+    """Observe source files, hashing content only where byte comparison is sound.
+
+    Main and WAL hashes are labelled stable only when their identity metadata is
+    unchanged across the hash read.  SHM is intentionally metadata-only: SQLite
+    owns a volatile reader-lock region there and a read-only WAL connection may
+    lawfully update it.
+    """
+    def content_observation(component: str) -> dict[str, Any]:
+        component_path = path if component == "main" else Path(str(path) + "-wal")
+        label = f"{source_label}:{component}"
+        before = _file_identity(component_path, label)
+        if not before["exists"]:
+            return before
+        try:
+            digest = _hash_file(component_path)
+            after = _file_identity(component_path, label)
+        except FileNotFoundError:
+            return {**before, "content_observation_stable": False,
+                    "content_observation_note": "file disappeared while content was read"}
+        stable = before == after
+        observation = {
+            **after,
+            "content_observation_stable": stable,
+            "content_read_sha256": digest,
+        }
+        if stable:
+            observation["sha256"] = digest
+        else:
+            observation["content_observation_note"] = (
+                "identity drifted while content was read; digest is not a stable-file claim"
+            )
+        return observation
+
     return {
-        "main": _file_identity(path, source_label + ":main"),
-        "wal": _file_identity(Path(str(path) + "-wal"), source_label + ":wal"),
-        "shm": _file_identity(Path(str(path) + "-shm"), source_label + ":shm"),
+        "main": content_observation("main"),
+        "wal": content_observation("wal"),
+        "shm": {
+            **_file_identity(Path(str(path) + "-shm"), source_label + ":shm"),
+            "observation_scope": "identity-metadata-only",
+            "content_compared": False,
+        },
     }
+
+
+def _stable_content_equal(start: Mapping[str, Any], end: Mapping[str, Any]) -> bool | None:
+    """Compare two stable file-content observations, or report indeterminate."""
+    if start.get("exists") != end.get("exists"):
+        return False
+    if not start.get("exists"):
+        return True
+    if not (start.get("content_observation_stable") and end.get("content_observation_stable")):
+        return None
+    return start.get("sha256") == end.get("sha256")
 
 
 def _inspect_database(path: Path) -> dict[str, Any]:
@@ -374,15 +428,37 @@ def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -
             os.close(directory_fd)
 
         changed = [name for name in ("main", "wal", "shm") if start[name] != end[name]]
+        main_content_equal = _stable_content_equal(start["main"], end["main"])
+        wal_content_equal = _stable_content_equal(start["wal"], end["wal"])
         return {
             "capture": {
                 "method": "sqlite-online-backup",
+                "source_open_semantics": {
+                    "sqlite_uri_mode": "ro",
+                    "query_only": True,
+                    "source_write_operations": "none",
+                },
                 "started_at": started_at,
                 "ended_at": ended_at,
+                "source_observations_start": start,
+                "source_observations_end": end,
+                # Retained for v2 receipt consumers; these values now include the
+                # stronger, component-appropriate observations above.
                 "source_identities_start": start,
                 "source_identities_end": end,
                 "drift_observed": bool(changed),
                 "changed_components": changed,
+                "main_content_unchanged": main_content_equal,
+                "wal_content_unchanged": wal_content_equal,
+                "main_wal_content_comparison_complete": (
+                    main_content_equal is not None and wal_content_equal is not None
+                ),
+                "shm_observation": {
+                    "scope": "identity-metadata-only",
+                    "metadata_drift_observed": start["shm"] != end["shm"],
+                    "content_compared": False,
+                    "reason": "SQLite may update SHM reader-lock metadata during read-only WAL access",
+                },
             },
             "snapshot": measured,
             "destination_identity": _file_identity(
