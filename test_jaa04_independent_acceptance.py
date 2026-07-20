@@ -20,6 +20,8 @@ import pytest
 
 from career_automation.database import CareerDatabase
 from career_automation.employer_research import (
+    Citation,
+    EmployerResearchWorker,
     RawResponseCache,
     content_hash,
     load_frozen_dossiers,
@@ -89,12 +91,36 @@ def test_all_thirty_frozen_records_validate_against_receipt_backed_raw_corpus() 
     assert {item["job_key"] for item in dossiers} == {
         f"jaa04-{number:03d}" for number in range(1, 31)
     }
+    generic_texts: dict[str, set[str]] = {}
+    required_kinds = {"company", "role", "product", "hiring", "operational_health"}
     for dossier in dossiers:
         validate_dossier(dossier, cache)
-        claim = dossier["claims"][0]
-        source = dossier["sources"][0]
-        assert claim["source_ids"] == [source["id"]]
-        assert cache.resolve(source["raw_response_ref"], source["content_sha256"])
+        company = dossier["claims"][0]["text"].split(":", 1)[0].strip()
+        assert company
+        sources = {source["id"]: source for source in dossier["sources"]}
+        assert {claim["kind"] for claim in dossier["claims"]} == required_kinds
+        for claim in dossier["claims"]:
+            # Every intelligence item, not merely the first company claim,
+            # must be traceable to actual captured response bytes.
+            assert claim["source_ids"]
+            cited_bytes = [
+                cache.resolve(sources[source_id]["raw_response_ref"], sources[source_id]["content_sha256"])
+                for source_id in claim["source_ids"]
+            ]
+            excerpt = claim.get("citation_excerpt")
+            assert isinstance(excerpt, str) and excerpt.strip()
+            assert any(excerpt.encode("utf-8") in body for body in cited_bytes)
+            assert claim["text"].strip() != company
+            assert len(claim["text"].split()) >= 8
+            # Prefixing a common template with a company name does not turn it
+            # into employer-specific intelligence.  Normalise that name out
+            # and require a distinct substantive statement for every dossier.
+            normalised = claim["text"].casefold().replace(company.casefold(), "<employer>")
+            generic_texts.setdefault(claim["kind"], set()).add(normalised)
+
+    assert {kind: len(texts) for kind, texts in generic_texts.items()} == {
+        kind: 30 for kind in required_kinds
+    }
 
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     receipt = json.loads((CAPTURE / "capture_receipt.json").read_text(encoding="utf-8"))
@@ -201,6 +227,55 @@ def test_expired_lease_concurrent_replay_completes_exactly_one_dossier(tmp_path:
         assert tuple(conn.execute("SELECT status,attempts FROM employer_research_queue WHERE job_key=?", (job_key,)).fetchone()) == ("completed", 2)
         assert conn.execute("SELECT COUNT(*) FROM pipeline_events WHERE job_key=? AND event_type='lifecycle_transition_committed'", (job_key,)).fetchone()[0] == 3
     assert database.lifecycle.replay()[job_key] is PipelineState.EMPLOYER_RESEARCHED
+
+
+def test_production_worker_consumes_real_database_queue_and_fails_closed_for_retrieval_and_invalid_dossier(
+    tmp_path: Path,
+) -> None:
+    """Exercise the public worker with on-disk SQLite, never a mock queue."""
+    database, job_key, cache = _ready_database(tmp_path / "success", "worker-success")
+
+    class PublicRetriever:
+        def retrieve(self, source_id: str, url: str) -> Citation:
+            body = (b"<html><p>Example operates a documented public service with "
+                    b"products, delivery responsibilities, and current hiring context.</p></html>")
+            digest, reference = cache.store(body)
+            timestamp = date.today().isoformat() + "T00:00:00+00:00"
+            return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,
+                            digest, reference, 200)
+
+    worker = EmployerResearchWorker(database, "successful-worker", cache,
+                                    retriever=PublicRetriever(), lease_seconds=60)
+    assert worker.run_once() == job_key
+    assert worker.run_once() is None
+    with database.connection() as conn:
+        assert tuple(conn.execute(
+            "SELECT status, attempts FROM employer_research_queue WHERE job_key=?", (job_key,)
+        ).fetchone()) == ("completed", 1)
+        assert conn.execute("SELECT COUNT(*) FROM employer_dossiers WHERE job_key=?", (job_key,)).fetchone()[0] == 1
+
+    for failure in ("retrieval", "invalid-dossier"):
+        failed_database, failed_key, failed_cache = _ready_database(tmp_path / failure, failure)
+
+        class FailingRetriever:
+            def retrieve(self, source_id: str, url: str) -> Citation:
+                if failure == "retrieval":
+                    raise RuntimeError("retrieval unavailable")
+                # No substantive paragraph makes the production dossier builder
+                # reject the result before completion.
+                digest, reference = failed_cache.store(b"<html>unusable</html>")
+                timestamp = date.today().isoformat() + "T00:00:00+00:00"
+                return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,
+                                digest, reference, 200)
+
+        with pytest.raises((RuntimeError, ValueError)):
+            EmployerResearchWorker(failed_database, f"{failure}-worker", failed_cache,
+                                   retriever=FailingRetriever(), lease_seconds=60).run_once()
+        with failed_database.connection() as conn:
+            assert tuple(conn.execute(
+                "SELECT status, lease_owner, attempts FROM employer_research_queue WHERE job_key=?", (failed_key,)
+            ).fetchone()) == ("leased", f"{failure}-worker", 1)
+            assert conn.execute("SELECT COUNT(*) FROM employer_dossiers WHERE job_key=?", (failed_key,)).fetchone()[0] == 0
 
 
 def test_jaa04_command_is_declared_and_successful_runs_create_revision_bound_receipt(tmp_path: Path) -> None:
