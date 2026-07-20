@@ -1,4 +1,4 @@
-# UK Job Matcher
+# Market Aligner
 
 An evidence-led, configurable candidate job-search pipeline for the United
 Kingdom AI/IT market. It discovers live vacancies, extracts structured role
@@ -30,6 +30,15 @@ Guardian Jobs currently returns full search/RSS metadata but responds to public
 detail requests with an empty HTTP 202. Those records are retained in the raw
 database and marked `listing_excerpt_only`; the deterministic viability gate
 does not send them to the LLM until a complete description is available.
+
+## Canonical repository and brownfield imports
+
+This checkout identifies itself with the machine-readable
+`canonical-repository.json` marker. It is the active **Market Aligner** repository;
+similarly named historical copies are not import sources unless an operator supplies
+their paths explicitly. The `jaa-baseline adopt` and `adopt-online` contracts require
+`--source-root`, `--data-root`, and `--repository`. They have no personal-path or
+first-operator defaults, and receipts retain logical labels rather than host paths.
 
 ## Run
 
@@ -130,16 +139,24 @@ observability, workflow, retrieval, migration, deployment and document-policy
 contracts. See `docs/SCRAPLING_FULL_INTEGRATION.md` for the full installed
 Scrapling surface and commands.
 
-## Verify
+## Clean bootstrap and complete verification
+
+No virtual environment is assumed to exist. From a clean checkout, create one from the
+locked CPython 3.12 dependency input and run the complete collected suite:
 
 ```bash
-./.venv/bin/python profiler/test_candidate_profile.py
-./.venv/bin/python scraper/test_uk_scraper.py
-./.venv/bin/python llm/test_llm.py
-./.venv/bin/python skeleton/contracts.py
-./.venv/bin/python skeleton/scoring.py
-./.venv/bin/python -m unittest career_automation.test_engine -v
+PYTHON_BOOTSTRAP=python3.12 ./scripts/bootstrap-test-env.sh
+./.venv/bin/python -m pytest -q
 ```
+
+The pre-adoption observation was **65 passing career-control tests**. That is a labelled
+historical baseline, not the current suite total. Record each new run's
+passed/skipped/failed totals separately instead of rewriting it. Five full Scrapling
+sidecar tests are collected and skip unless the separately documented
+`.venv-scrapling` runtime has actually been installed.
+
+Clean-bootstrap verification on 20 July 2026: **94 passed, 5 skipped, 0 failed**
+(99 tests collected; 25 unittest subtests also passed). This is the post-adoption total.
 
 The original guided-pass files remain as generic reproducibility fixtures;
 the active config, profile, contracts, prompts and reports no longer load them.

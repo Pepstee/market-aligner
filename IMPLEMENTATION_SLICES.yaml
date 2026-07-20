@@ -3,7 +3,8 @@ programme: autonomous-job-application-system
 plan_date: "2026-07-20"
 status: authorised_active
 canonical_plan: BUILD_PLAN.md
-current_project_candidate: /Users/admin/Claude/Projects/Korea Job Scraper
+canonical_repository_marker: canonical-repository.json
+brownfield_source_root: operator_supplied
 rules:
   single_executable_slice_source: true
   implement_in_order: true
@@ -30,10 +31,10 @@ slices:
       - Record dependency locks, Python runtimes, host prerequisites and secret references without copying secrets.
       - Re-run the collector/profile/control-plane test baselines and measure database state.
     acceptance:
-      - A clean checkout on the actual Mac reproduces all 65 existing career-control tests.
+      - A clean checkout reproduces the complete current suite; the 65 passing career-control tests remain a labelled pre-adoption observation.
       - The canonical raw and control databases match the pre-migration schema, counts and content hashes or carry an explained migration receipt.
       - The old project remains recoverable and is marked non-canonical rather than silently deleted.
-      - Neither giga-user market-aligner copy can be mistaken for the active source of truth.
+      - No similarly named historical Market Aligner copy can be mistaken for the canonical repository.
       - No credential appears in version control, logs or the migration manifest.
     negative_controls:
       - An altered database copy fails the hash reconciliation.
@@ -115,7 +116,7 @@ slices:
   - id: JAA-05
     name: Evidence matching and gap optimiser
     depends_on: [JAA-04]
-    objective: Determine what Artiom can truthfully demonstrate and automatically create high-value improvement work where useful.
+    objective: Determine what the candidate can truthfully demonstrate and automatically create high-value improvement work where useful.
     work:
       - Match atomic requirements to evidence IDs with confidence and abstention.
       - Classify presentation, retrieval, knowledge, execution, evidence, experience, credential and structural gaps.
@@ -311,7 +312,7 @@ slices:
       - Alerts distinguish weather, blocked work and product defects accurately.
       - Version 0.1 release criteria in BUILD_PLAN.md are all evidenced by a certification receipt.
       - A clean supported Mac can install, onboard, run the local walking skeleton, back up, restore and upgrade using the shipped artefacts and instructions.
-      - The product contains no Artiom- or Hyun-specific defaults, test data, claims, credentials or paths in its distributable package.
+      - The product contains no person-specific defaults, test data, claims, credentials or paths in its distributable package.
       - Commercial claims, privacy behaviour, support boundary, licensing state and external activation dependencies are documented truthfully.
     negative_controls:
       - Exhausted providers, broken portals and unavailable receipts pause affected work without fabricated progress.

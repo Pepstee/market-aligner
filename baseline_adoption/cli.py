@@ -16,14 +16,14 @@ def _parser() -> argparse.ArgumentParser:
     adoption = sub.add_parser("adopt", help="verify and atomically adopt both locked databases")
     adoption.add_argument("--source-root", required=True)
     adoption.add_argument("--data-root", required=True)
-    adoption.add_argument("--repository", default=str(Path(__file__).resolve().parents[1]))
+    adoption.add_argument("--repository", required=True)
     adoption.add_argument("--secret-reference", action="append", default=[], metavar="NAME")
     online = sub.add_parser(
         "adopt-online", help="atomically freeze live databases with SQLite online backup"
     )
     online.add_argument("--source-root", required=True)
     online.add_argument("--data-root", required=True)
-    online.add_argument("--repository", default=str(Path(__file__).resolve().parents[1]))
+    online.add_argument("--repository", required=True)
     online.add_argument("--secret-reference", action="append", default=[], metavar="NAME")
     for name in ("reconcile", "rollback-manifest"):
         command = sub.add_parser(name)

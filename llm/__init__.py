@@ -1,5 +1,5 @@
 """
-llm/ — the shared "brain" of the Korea Job Scraper.
+llm/ — the shared semantic service of Market Aligner.
 
 A horizontal SERVICE (see Architecture.md), not a pipeline stage: both the
 scraper (extract_job, rate_axes) and the profiler (assess_portfolio) call in.

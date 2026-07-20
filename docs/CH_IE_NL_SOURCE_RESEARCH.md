@@ -1,7 +1,7 @@
 # Switzerland, Ireland and Netherlands source audit
 
 Audit date: 19 July 2026. Scope: current, public vacancy sources relevant to
-Artiom's AI/automation/software/platform/cloud/security/technical-solutions
+The configured candidate's AI/automation/software/platform/cloud/security/technical-solutions
 tracks, including suitable roles in ordinary non-software employers.
 
 ## Method

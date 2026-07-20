@@ -68,6 +68,8 @@ BASELINES: tuple[BaselineSpec, ...] = (
 )
 
 REQUIRED_DISTRIBUTIONS = ("PyYAML", "requests", "openpyxl", "pypdf")
+CANONICAL_MARKER = "canonical-repository.json"
+CANONICAL_REPOSITORY_ID = "market-aligner"
 
 
 def _hash_file(path: Path) -> str:
@@ -217,6 +219,7 @@ def _runtime_versions() -> dict[str, Any]:
 
 
 def _repository_revision(repository: Path) -> str:
+    _validate_canonical_marker(repository)
     try:
         top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=repository,
                              check=True, capture_output=True, text=True).stdout.strip()
@@ -227,6 +230,25 @@ def _repository_revision(repository: Path) -> str:
     if Path(top).resolve() != repository.resolve() or len(revision) != 40:
         raise AdoptionError("repository is not the canonical worktree root")
     return revision
+
+
+def _validate_canonical_marker(repository: Path) -> None:
+    """Refuse imports through a similarly named checkout without the canonical contract."""
+    try:
+        marker = json.loads((repository / CANONICAL_MARKER).read_text(encoding="utf-8"))
+        identity = marker["canonical_repository"]
+        contract = marker["brownfield_import_contract"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise AdoptionError("canonical repository marker is missing or invalid") from exc
+    if (marker.get("schema_version") != 1 or
+            identity.get("id") != CANONICAL_REPOSITORY_ID or
+            identity.get("product_name") != "Market Aligner" or
+            identity.get("status") != "active" or
+            contract.get("implicit_host_paths") is not False or
+            contract.get("required_operator_paths") != [
+                "source_root", "runtime_data_root", "repository_root"
+            ]):
+        raise AdoptionError("repository does not carry the active Market Aligner import contract")
 
 
 def _validate_roots(source_root: Path, data_root: Path, repository: Path) -> None:

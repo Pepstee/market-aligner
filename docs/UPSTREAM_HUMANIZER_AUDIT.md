@@ -17,11 +17,8 @@ audit date: 2026-07-19
 implementation: portable Markdown prompt/skill; no runtime model or test suite
 ```
 
-A graph-based audit was generated outside the live project at:
-
-```text
-/Users/admin/.graphify/repos/blader/humanizer/graphify-out/
-```
+A graph-based audit was generated in an operator-supplied external analysis directory.
+That host-specific directory is not a repository default or part of the import contract.
 
 No upstream prompt or plugin file has been copied into this repository.
 
@@ -124,7 +121,7 @@ rewrite is never accepted as a single opaque edit.
 | A universal em/en-dash ban | Treat punctuation frequency as a configurable voice/style signal, not evidence of AI authorship. |
 | “Human” equals adding opinions or messiness | Add neither unless supported by the candidate's real voice and appropriate to the document. |
 | One prompt can preserve meaning reliably | Re-run evidence entailment and requirement coverage after every accepted edit. |
-| Generic AI-writing patterns are sufficient | Calibrate against Artiom's corpus, successful applications and employer outcomes. |
+| Generic AI-writing patterns are sufficient | Calibrate against the candidate's supplied corpus, successful applications and employer outcomes. |
 | Whole-document rewrite output | Require atomic, attributable edits with claim and requirement impact. |
 | Humanizer as the final step | Deterministic truth, ATS, rendering and release gates must come afterwards. |
 
@@ -132,7 +129,7 @@ rewrite is never accepted as a single opaque edit.
 
 Create a blinded benchmark containing:
 
-- Artiom's genuine writing in several registers;
+- the candidate's supplied genuine writing in several registers;
 - current model-generated CV bullets, letters and application answers;
 - deliberately factual but polished text;
 - deliberately formulaic AI text;
@@ -150,4 +147,3 @@ Measure:
 
 The module ships only if it improves judged authenticity without increasing
 unsupported claims or reducing requirement coverage.
-

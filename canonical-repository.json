@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "canonical_repository": {
+    "id": "market-aligner",
+    "product_name": "Market Aligner",
+    "status": "active",
+    "marker": "canonical-repository.json"
+  },
+  "historical_copies": {
+    "canonical": false,
+    "discovery": "operator_supplied_only"
+  },
+  "brownfield_import_contract": {
+    "implicit_host_paths": false,
+    "required_operator_paths": [
+      "source_root",
+      "runtime_data_root",
+      "repository_root"
+    ],
+    "path_persistence": "logical_labels_only",
+    "overwrite_existing_destinations": false
+  }
+}

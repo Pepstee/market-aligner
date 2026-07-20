@@ -395,7 +395,7 @@ with a much larger generic one.
 
 - The reviewed Compose surface contained dozens of service/profile entries.
 - Its modified licence restricts multi-tenant operation and branding. Separate
-  Artiom and Hyun workspaces could intersect with the tenant restriction.
+  operator and candidate workspaces could intersect with the tenant restriction.
 - Recent cross-tenant disclosure and SSRF advisories show why its many trust
   boundaries require continuous operational attention; they do not establish
   that the pinned release is presently vulnerable.
