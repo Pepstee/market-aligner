@@ -37,8 +37,9 @@ SUITES = (
     "test_jaa04_increment_a_authority_canaries.py",
     "test_jaa04_increment_a_temporal_authority_regression.py",
     "test_jaa04_sidecar_temporal_semantics.py",
+    "test_jaa04_portable_authority_contract.py",
 )
-EXPECTED_TESTS = 34
+EXPECTED_TESTS = 47
 
 
 class CertificationError(RuntimeError):
