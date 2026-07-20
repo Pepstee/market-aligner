@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from .models import ClaimClassification, IntelligenceKind
 
@@ -43,12 +43,30 @@ def content_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
-def _public_url(url: str, resolver: Callable[..., Any] = socket.getaddrinfo) -> None:
+def _canonical_public_url(url: str) -> str:
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
+            or parsed.password or parsed.fragment):
         raise ValueError("source URL must be anonymous public HTTP(S)")
     if parsed.hostname.casefold() == "localhost":
         raise ValueError("private source URL is forbidden")
+    try:
+        literal = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        literal = None
+    if literal is not None and not literal.is_global:
+        raise ValueError("private source URL is forbidden")
+    canonical = urlunparse((parsed.scheme.casefold(), parsed.netloc.casefold(),
+                            parsed.path or "/", "", parsed.query, ""))
+    if canonical != url:
+        raise ValueError("source URL must be canonical")
+    return canonical
+
+
+def _public_url(url: str, resolver: Callable[..., Any] | None = None) -> None:
+    _canonical_public_url(url)
+    parsed = urlparse(url)
+    resolver = resolver or socket.getaddrinfo
     try:
         addresses = {row[4][0] for row in resolver(parsed.hostname, parsed.port or 443)}
     except OSError as exc:
@@ -135,7 +153,7 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         citation = Citation(**source)
         if citation.id in by_id or citation.status_code < 200 or citation.status_code >= 300:
             raise ValueError("invalid or duplicate citation")
-        _public_url(citation.url)
+        _canonical_public_url(citation.url)
         cache.resolve(citation.raw_response_ref, citation.content_sha256)
         datetime.fromisoformat(citation.retrieved_at.replace("Z", "+00:00"))
         datetime.fromisoformat(citation.captured_at.replace("Z", "+00:00"))
@@ -158,6 +176,11 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         observed = datetime.fromisoformat(str(claim.get("observed_at", "")).replace("Z", "+00:00")).date()
         if as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]) or observed > as_of:
             raise ValueError(f"stale or future {kind.value} claim")
+        freshness = claim.get("freshness_classification")
+        if freshness is not None and freshness not in {"current", "historical"}:
+            raise ValueError("unknown freshness classification")
+        if freshness == "current" and as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]):
+            raise ValueError("stale claim represented as current")
     for edge in edges:
         if edge.get("from_claim_id") not in claim_ids or edge.get("to_claim_id") not in claim_ids:
             raise ValueError("edge endpoints must resolve to typed claims")
@@ -165,19 +188,60 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             raise ValueError("unknown intelligence edge relation")
 
 
-def load_frozen_dossiers(path: str | Path, cache: RawResponseCache) -> list[dict[str, Any]]:
+def load_frozen_dossiers(
+    path: str | Path, cache: RawResponseCache, *, strict_corpus: bool = False,
+) -> list[dict[str, Any]]:
     envelope = json.loads(Path(path).read_text(encoding="utf-8"))
     dossiers = envelope.get("dossiers")
-    if envelope.get("schema_version") != "jaa04.frozen-dossiers.v1" or not isinstance(dossiers, list) or len(dossiers) < 30:
-        raise ValueError("JAA-04 frozen set requires at least 30 dossiers")
+    if envelope.get("schema_version") != "jaa04.frozen-dossiers.v1" or not isinstance(dossiers, list) or len(dossiers) != 30:
+        raise ValueError("JAA-04 frozen set requires exactly 30 dossiers")
     if content_hash(dossiers) != envelope.get("dossiers_hash"):
         raise ValueError("frozen dossier-set hash mismatch")
+    urls: set[str] = set()
+    source_hashes: set[str] = set()
+    classifications: set[str] = set()
+    job_keys: set[str] = set()
     for dossier in dossiers:
-        validate_dossier(dossier, cache)
+        captured_dates = [datetime.fromisoformat(
+            str(source["captured_at"]).replace("Z", "+00:00")
+        ).date() for source in dossier.get("sources", [])]
+        if not captured_dates or len(set(captured_dates)) != 1:
+            raise ValueError("frozen dossier requires one unambiguous capture date")
+        validate_dossier(dossier, cache, as_of=captured_dates[0])
+        job_key = str(dossier.get("job_key", ""))
+        if not job_key or job_key in job_keys:
+            raise ValueError("frozen dossier job keys must be distinct")
+        job_keys.add(job_key)
+        for source in dossier["sources"]:
+            url = _canonical_public_url(source["url"])
+            body = cache.resolve(source["raw_response_ref"], source["content_sha256"])
+            if strict_corpus and (url in urls or source["content_sha256"] in source_hashes):
+                raise ValueError("frozen sources must have distinct URLs and captured bytes")
+            urls.add(url)
+            source_hashes.add(source["content_sha256"])
+            if not body:
+                raise ValueError("frozen source bytes must be non-empty")
+        source_by_id = {source["id"]: source for source in dossier["sources"]}
+        for claim in dossier["claims"]:
+            classifications.add(str(claim["classification"]))
+            excerpt = claim.get("citation_excerpt")
+            if strict_corpus and (not isinstance(excerpt, str) or not excerpt.strip()):
+                raise ValueError("frozen claims require a citation excerpt")
+            if strict_corpus and not any(excerpt.encode("utf-8") in cache.resolve(
+                source_by_id[source_id]["raw_response_ref"],
+                source_by_id[source_id]["content_sha256"],
+            ) for source_id in claim["source_ids"]):
+                raise ValueError("frozen claim excerpt does not resolve to cited bytes")
+            if strict_corpus and claim.get("freshness_classification") not in {"current", "historical"}:
+                raise ValueError("frozen claims require freshness classification")
+    if strict_corpus and classifications != {"fact", "inference", "hypothesis"}:
+        raise ValueError("frozen corpus must distinguish facts, inferences, and hypotheses")
     return dossiers
 
 
-def ingest_frozen_manifest(path: str | Path, cache: RawResponseCache) -> list[dict[str, Any]]:
+def ingest_frozen_manifest(
+    path: str | Path, cache: RawResponseCache, *, enforce_reviewed_bytes: bool = False,
+) -> list[dict[str, Any]]:
     """Ingest the reviewed JAA-04 set through the production Scrapling path."""
     envelope = json.loads(Path(path).read_text(encoding="utf-8"))
     records = envelope.get("records")
@@ -189,17 +253,21 @@ def ingest_frozen_manifest(path: str | Path, cache: RawResponseCache) -> list[di
     dossiers = []
     observed_at = str(envelope["frozen_at"])
     for record in records:
-        citation = retriever.retrieve(f"source:{record['id']}", record["url"], captured_at=observed_at)
+        citation = retriever.retrieve(f"source:{record['id']}", record["url"], captured_at=record.get("captured_at", observed_at))
+        expected_digest = record.get("content_sha256")
+        if enforce_reviewed_bytes and expected_digest is not None and citation.content_sha256 != expected_digest:
+            raise ValueError("retrieved source differs from reviewed frozen bytes")
+        claims = record.get("claims") or [{
+            "id": f"claim:{record['id']}", "kind": "company", "classification": "fact",
+            "text": "The employer maintained the cited public corporate page at capture time.",
+            "observed_at": observed_at, "source_ids": [citation.id],
+        }]
         dossier = {
             "schema_version": "jaa04.dossier.v1",
             "job_key": record["id"],
             "raw_cache_root": str(cache.root),
             "sources": [vars(citation)],
-            "claims": [{
-                "id": f"claim:{record['id']}", "kind": "company", "classification": "fact",
-                "text": "The employer maintained the cited public corporate page at capture time.",
-                "observed_at": observed_at, "source_ids": [citation.id],
-            }],
+            "claims": claims,
             "edges": [],
         }
         validate_dossier(dossier, cache)
