@@ -3,7 +3,7 @@
 <!-- skill-router:start -->
 ## Mandatory skill routing for the career automation project
 
-- Use `/Users/admin/.codex/skills/skill-router/SKILL.md` at the start of every substantive task and invoke every genuine description match from the complete installed catalog.
+- Use the installed `skill-router` skill at the start of every substantive task and invoke every genuine description match from the complete installed catalog.
 - `skill-creator` is mandatory for skill changes, `skill-installer` for installs, and `find-skills` for capability discovery.
 - Use `scrapling-official` for vacancy and employer crawling with its complete capability set: HTTP sessions, dynamic and stealth browsers, adaptive selectors, concurrent spiders, streaming, proxy/session support, pause/resume, checkpoints, and raw-response preservation.
 - Use `playwright` for deterministic ATS form automation and `browser-use` only as an isolated fallback for unsupported interactive flows. Do not bypass login, MFA, consent, CAPTCHA, site terms, rate limits, or explicit submission gates.

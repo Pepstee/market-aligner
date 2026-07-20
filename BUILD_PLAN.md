@@ -2,14 +2,13 @@
 
 **Status:** authorised for implementation through orchestrator-v3 on 20 July 2026  
 **Plan date:** 20 July 2026  
-**Operator:** Artiom Gutu  
 **Executable slice source:** `IMPLEMENTATION_SLICES.yaml`
 
 ## 1. Verdict
 
-Build this as a **brownfield extension and certification** of the working project at
-`/Users/admin/Claude/Projects/Korea Job Scraper`, not as a new scraper and not from either
-stale `market-aligner` copy in `giga-user`.
+Build this as a **brownfield extension and certification** of the operator-supplied source,
+not as a new scraper and not from any similarly named historical copy. The active repository
+is identified by `canonical-repository.json`; brownfield roots are explicit import inputs.
 
 The first product milestone is one truthful, evidence-linked application carried from a
 real vacancy through research, document generation, deterministic release checks, a
@@ -37,7 +36,10 @@ Read-only inspection on 20 July 2026 found:
 | Jobs queued for employer research | 58 |
 | Completed employer dossiers | 0 |
 | Registered browser workflows/runs | 0 / 0 |
-| Existing career-control tests | 65 passing |
+| Pre-adoption career-control test observation | 65 passing |
+
+The 65-test figure is historical. Current test totals are reported separately for each
+post-adoption run and do not revise this observation.
 
 Already real:
 
@@ -83,7 +85,7 @@ discover -> verify -> assess opportunity -> research employer
 
 ### 3.2 Operator involvement
 
-The intended mature system is zero-routine-touch. Artiom does not manually write CVs,
+The intended mature system is zero-routine-touch. The operator does not manually write CVs,
 cover letters, routine answers, predictions, or application records.
 
 Permitted operator involvement:

@@ -1,12 +1,12 @@
 # Architecture — Modular Design
 
-Your four-part split is the right shape. One refinement changes how they connect: **the LLM module is a horizontal *service*, not a vertical stage.** Both the scraper (to extract and rate jobs) and the profiler (to assess Hyun's portfolio and answers) call into it. So the dependency graph isn't a line — it's a spine with a shared brain hanging off it.
+The four-part split is the right shape. One refinement changes how they connect: **the LLM module is a horizontal *service*, not a vertical stage.** Both the scraper (to extract and rate jobs) and the profiler (to assess the supplied candidate portfolio and answers) call into it. So the dependency graph isn't a line — it's a spine with a shared brain hanging off it.
 
 ## The modules
 
 - **Skeleton** — orchestrator. Owns the pipeline runner, the config, resume/caching/logging, and the **deterministic scoring maths** (power/geometric mean, two axes, field aggregation). It's the only place scraper data and profiler data meet.
 - **Scraper** — code + its data. Per-board adapters (Wanted, Saramin, JobKorea, Notefolio), crawl/fetch, rate-limiting, and the raw cache. This is the earlier *Scraper* sub-build; its LLM-driven extraction/scoring (the *Judge*) is now just "scraper calls the LLM module".
-- **Profiler** — code + Hyun's data. The v1 guided pass, later v2 (portfolio + micro-tasks + Elo), and the scoring that produces `hyun_profile`. Its data is **personal and private** — kept local, never committed, never sent to the LLM beyond what a given assessment needs.
+- **Profiler** — code plus operator-supplied candidate data. The v1 guided pass, later v2 (portfolio + micro-tasks + Elo), and the scoring that produces a candidate profile. Its data is **personal and private** — kept local, never committed, never sent to the LLM beyond what a given assessment needs.
 - **LLM** — the shared brain. Model-agnostic client with retries, rate-limit, cost logging, and a response **cache**; versioned prompts and rubrics; structured-output schemas. Exposes capabilities, not a pipeline: `extract_job()`, `rate_axes()`, `assess_portfolio()`, `normalise_skill()`.
 - **Outputs** (small, worth naming) — the two workbooks + the Fit/Opportunity plot. A thin reporter the skeleton drives.
 
@@ -20,7 +20,7 @@ Your four-part split is the right shape. One refinement changes how they connect
               ┌──────┘      └──────┐
         ┌─────▼─────┐        ┌─────▼─────┐
         │  SCRAPER  │        │  PROFILER │
-        │ +raw data │        │ +Hyun data│
+        │ +raw data │        │ +candidate data│
         └─────┬─────┘        └─────┬─────┘
               │  calls             │  calls
               └────────┬───────────┘
@@ -29,7 +29,7 @@ Your four-part split is the right shape. One refinement changes how they connect
                  └───────────┘
 ```
 
-Scoring lives in the **skeleton**, not the LLM: the LLM produces the fuzzy 0–10 ratings, the skeleton does the deterministic arithmetic that joins them with Hyun's priors. That keeps the final scores reproducible and re-runnable without new LLM calls.
+Scoring lives in the **skeleton**, not the LLM: the LLM produces the fuzzy 0–10 ratings, the skeleton does the deterministic arithmetic that joins them with candidate priors. That keeps the final scores reproducible and re-runnable without new LLM calls.
 
 ## Two design rules that make this hold up
 
@@ -77,4 +77,4 @@ llm       everything in/out via a JSON schema; every call cached by (prompt-hash
 
 ## What this buys you
 
-Swap the model without touching the scraper. Re-score after a weight change without re-calling the LLM. Recalibrate Hyun's profile without re-crawling. Rebuild the scrape cache without losing her data. Test any module alone. And because every LLM call is cached and every prompt versioned, calibration — which you'll iterate a lot — stays cheap and traceable.
+Swap the model without touching the scraper. Re-score after a weight change without re-calling the LLM. Recalibrate the candidate profile without re-crawling. Rebuild the scrape cache without losing candidate data. Test any module alone. And because every LLM call is cached and every prompt versioned, calibration — which you'll iterate a lot — stays cheap and traceable.

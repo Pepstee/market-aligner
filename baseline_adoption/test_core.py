@@ -103,6 +103,25 @@ class BaselineAdoptionTests(unittest.TestCase):
             with self.assertRaisesRegex(core.AdoptionError, "missing runtime dependencies"):
                 core._runtime_versions()
 
+    def test_canonical_marker_rejects_historical_or_implicit_import_contracts(self) -> None:
+        repository = self.root / "repository"
+        repository.mkdir()
+        with self.assertRaisesRegex(core.AdoptionError, "marker"):
+            core._validate_canonical_marker(repository)
+        marker = {
+            "schema_version": 1,
+            "canonical_repository": {
+                "id": "market-aligner", "product_name": "Market Aligner", "status": "active"
+            },
+            "brownfield_import_contract": {
+                "implicit_host_paths": True,
+                "required_operator_paths": ["source_root", "runtime_data_root", "repository_root"],
+            },
+        }
+        (repository / core.CANONICAL_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+        with self.assertRaisesRegex(core.AdoptionError, "active Market Aligner"):
+            core._validate_canonical_marker(repository)
+
     def test_dirty_sqlite_sidecar_is_rejected(self) -> None:
         sidecar = Path(str(self.source / self.specs[0].source_relative) + "-wal")
         sidecar.touch()
