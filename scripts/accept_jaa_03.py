@@ -243,7 +243,11 @@ def main() -> int:
         configuration = {
             "locked_set_id": LOCKED_SET_ID,
             "decision_rule_version": DECISION_RULE_VERSION,
-            "policy": vars(policy),
+            "policy": {
+                "minimum_confidence_bp": policy.minimum_confidence_bp,
+                "minimum_opportunity_bp": policy.minimum_opportunity_bp,
+                "weights": list(policy.weights),
+            },
             "policy_hash": policy.policy_hash,
         }
         existing = reusable_receipt(source_before, inputs_before, configuration, result)
