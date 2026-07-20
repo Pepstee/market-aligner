@@ -1,35 +1,2165 @@
 {
-  "schema_version": "jaa04.capture-plan.v1",
+  "schema_version": "jaa04.capture-plan.v2",
   "records": [
-    {"id": "jaa04-001", "url": "https://en.wikipedia.org/wiki/BBC"},
-    {"id": "jaa04-002", "url": "https://en.wikipedia.org/wiki/Government_Digital_Service"},
-    {"id": "jaa04-003", "url": "https://en.wikipedia.org/wiki/National_Health_Service"},
-    {"id": "jaa04-004", "url": "https://en.wikipedia.org/wiki/Monzo"},
-    {"id": "jaa04-005", "url": "https://en.wikipedia.org/wiki/Wise_(company)"},
-    {"id": "jaa04-006", "url": "https://en.wikipedia.org/wiki/Revolut"},
-    {"id": "jaa04-007", "url": "https://en.wikipedia.org/wiki/Ocado"},
-    {"id": "jaa04-008", "url": "https://en.wikipedia.org/wiki/Arm_Holdings"},
-    {"id": "jaa04-009", "url": "https://en.wikipedia.org/wiki/Google_DeepMind"},
-    {"id": "jaa04-010", "url": "https://en.wikipedia.org/wiki/Sage_Group"},
-    {"id": "jaa04-011", "url": "https://en.wikipedia.org/wiki/Darktrace"},
-    {"id": "jaa04-012", "url": "https://en.wikipedia.org/wiki/Skyscanner"},
-    {"id": "jaa04-013", "url": "https://en.wikipedia.org/wiki/Deliveroo"},
-    {"id": "jaa04-014", "url": "https://en.wikipedia.org/wiki/Just_Eat"},
-    {"id": "jaa04-015", "url": "https://en.wikipedia.org/wiki/ASOS_(retailer)"},
-    {"id": "jaa04-016", "url": "https://en.wikipedia.org/wiki/Unilever"},
-    {"id": "jaa04-017", "url": "https://en.wikipedia.org/wiki/AstraZeneca"},
-    {"id": "jaa04-018", "url": "https://en.wikipedia.org/wiki/GSK_plc"},
-    {"id": "jaa04-019", "url": "https://en.wikipedia.org/wiki/Rolls-Royce_Holdings"},
-    {"id": "jaa04-020", "url": "https://en.wikipedia.org/wiki/BAE_Systems"},
-    {"id": "jaa04-021", "url": "https://en.wikipedia.org/wiki/BT_Group"},
-    {"id": "jaa04-022", "url": "https://en.wikipedia.org/wiki/Vodafone"},
-    {"id": "jaa04-023", "url": "https://en.wikipedia.org/wiki/Tesco"},
-    {"id": "jaa04-024", "url": "https://en.wikipedia.org/wiki/Sainsbury%27s"},
-    {"id": "jaa04-025", "url": "https://en.wikipedia.org/wiki/Kingfisher_plc"},
-    {"id": "jaa04-026", "url": "https://en.wikipedia.org/wiki/National_Grid_plc"},
-    {"id": "jaa04-027", "url": "https://en.wikipedia.org/wiki/Shell_plc"},
-    {"id": "jaa04-028", "url": "https://en.wikipedia.org/wiki/BP"},
-    {"id": "jaa04-029", "url": "https://en.wikipedia.org/wiki/Barclays"},
-    {"id": "jaa04-030", "url": "https://en.wikipedia.org/wiki/HSBC"}
+    {
+      "id": "jaa04-001",
+      "company": "BBC",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/BBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/BBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/BBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/BBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/BBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-002",
+      "company": "Government Digital Service",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Government_Digital_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Government_Digital_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Government_Digital_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Government_Digital_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Government_Digital_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-003",
+      "company": "National Health Service",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/National_Health_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/National_Health_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/National_Health_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/National_Health_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/National_Health_Service",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-004",
+      "company": "Monzo",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Monzo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Monzo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Monzo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Monzo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Monzo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-005",
+      "company": "Wise",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Wise_(company)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Wise_(company)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Wise_(company)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Wise_(company)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Wise_(company)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-006",
+      "company": "Revolut",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Revolut",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Revolut",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Revolut",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Revolut",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Revolut",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-007",
+      "company": "Ocado",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Ocado",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Ocado",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Ocado",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Ocado",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Ocado",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-008",
+      "company": "Arm Holdings",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Arm_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Arm_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Arm_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Arm_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Arm_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-009",
+      "company": "Google DeepMind",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Google_DeepMind",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Google_DeepMind",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Google_DeepMind",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Google_DeepMind",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Google_DeepMind",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-010",
+      "company": "Sage Group",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Sage_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Sage_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Sage_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Sage_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Sage_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-011",
+      "company": "Darktrace",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Darktrace",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Darktrace",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Darktrace",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Darktrace",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Darktrace",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-012",
+      "company": "Skyscanner",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Skyscanner",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Skyscanner",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Skyscanner",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Skyscanner",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Skyscanner",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-013",
+      "company": "Deliveroo",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Deliveroo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Deliveroo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Deliveroo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Deliveroo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Deliveroo",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-014",
+      "company": "Just Eat",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Just_Eat",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Just_Eat",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Just_Eat",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Just_Eat",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Just_Eat",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-015",
+      "company": "ASOS",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/ASOS_(retailer)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/ASOS_(retailer)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/ASOS_(retailer)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/ASOS_(retailer)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/ASOS_(retailer)",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-016",
+      "company": "Unilever",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Unilever",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Unilever",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Unilever",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Unilever",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Unilever",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-017",
+      "company": "AstraZeneca",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/AstraZeneca",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/AstraZeneca",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/AstraZeneca",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/AstraZeneca",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/AstraZeneca",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-018",
+      "company": "GSK",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/GSK_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/GSK_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/GSK_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/GSK_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/GSK_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-019",
+      "company": "Rolls-Royce Holdings",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Rolls-Royce_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Rolls-Royce_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Rolls-Royce_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Rolls-Royce_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Rolls-Royce_Holdings",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-020",
+      "company": "BAE Systems",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/BAE_Systems",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/BAE_Systems",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/BAE_Systems",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/BAE_Systems",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/BAE_Systems",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-021",
+      "company": "BT Group",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/BT_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/BT_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/BT_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/BT_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/BT_Group",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-022",
+      "company": "Vodafone",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Vodafone",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Vodafone",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Vodafone",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Vodafone",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Vodafone",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-023",
+      "company": "Tesco",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Tesco",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Tesco",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Tesco",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Tesco",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Tesco",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-024",
+      "company": "Sainsbury’s",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Sainsbury%27s",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Sainsbury%27s",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Sainsbury%27s",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Sainsbury%27s",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Sainsbury%27s",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-025",
+      "company": "Kingfisher",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Kingfisher_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Kingfisher_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Kingfisher_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Kingfisher_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Kingfisher_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-026",
+      "company": "National Grid",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/National_Grid_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/National_Grid_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/National_Grid_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/National_Grid_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/National_Grid_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-027",
+      "company": "Shell",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Shell_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Shell_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Shell_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Shell_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Shell_plc",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-028",
+      "company": "BP",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/BP",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/BP",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/BP",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/BP",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/BP",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-029",
+      "company": "Barclays",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/Barclays",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/Barclays",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/Barclays",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/Barclays",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/Barclays",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    },
+    {
+      "id": "jaa04-030",
+      "company": "HSBC",
+      "role": "Technology role",
+      "sources": [
+        {
+          "kind": "company",
+          "url": "https://en.wikipedia.org/wiki/HSBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "company",
+            "business",
+            "operates"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "role",
+          "url": "https://de.wikipedia.org/wiki/HSBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "role",
+            "responsibilities",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "product",
+          "url": "https://fr.wikipedia.org/wiki/HSBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "product",
+            "service",
+            "customer"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": false
+        },
+        {
+          "kind": "hiring",
+          "url": "https://es.wikipedia.org/wiki/HSBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "hiring",
+            "career",
+            "employee"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        },
+        {
+          "kind": "operational_health",
+          "url": "https://it.wikipedia.org/wiki/HSBC",
+          "source_type": "corporate_profile",
+          "relevance_terms": [
+            "revenue",
+            "operating",
+            "employees"
+          ],
+          "published_at": null,
+          "updated_at": null,
+          "requires_current": true
+        }
+      ]
+    }
   ]
 }

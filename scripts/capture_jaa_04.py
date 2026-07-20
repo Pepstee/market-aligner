@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,19 @@ def title_excerpt(body: bytes) -> str:
     return excerpt
 
 
+def publisher_timestamp(value: object) -> str | None:
+    """Normalise only publisher/server supplied HTTP dates; never use fetch time."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def capture(plan_path: Path, destination: Path) -> None:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     records = plan.get("records")
@@ -75,6 +89,13 @@ def capture(plan_path: Path, destination: Path) -> None:
             source_plan = []
             source_attempts = []
             for specification in specifications:
+                required = {"kind", "url", "source_type", "relevance_terms",
+                            "published_at", "updated_at", "requires_current"}
+                missing = required.difference(specification)
+                if missing:
+                    raise RuntimeError(f"capture source is missing required fields: {sorted(missing)}")
+                if not isinstance(specification["relevance_terms"], list) or not specification["relevance_terms"]:
+                    raise RuntimeError("capture source requires relevance terms")
                 requested_url = str(specification["url"])
                 if "?" in requested_url or requested_url in seen_urls:
                     raise RuntimeError("source URL is non-canonical or duplicated")
@@ -105,7 +126,9 @@ def capture(plan_path: Path, destination: Path) -> None:
                     "content_sha256": digest, "raw_response_ref": reference,
                     "status_code": status, "redirect_history": history,
                     "published_at": specification.get("published_at"),
-                    "updated_at": specification.get("updated_at"),
+                    "updated_at": (specification.get("updated_at") or publisher_timestamp(
+                        dict(response.get("headers") or {}).get("last-modified")
+                    )),
                 }
                 citations.append(Citation(**source))
                 source_plan.append({
@@ -115,6 +138,7 @@ def capture(plan_path: Path, destination: Path) -> None:
                     "freshness_days": __import__("career_automation.employer_research", fromlist=["FRESHNESS_DAYS"]).FRESHNESS_DAYS[
                         __import__("career_automation.models", fromlist=["IntelligenceKind"]).IntelligenceKind(kind)],
                     "relevance_terms": specification["relevance_terms"],
+                    "requires_current": specification["requires_current"],
                     **({"excerpt_sha256": specification["excerpt_sha256"]}
                        if specification.get("excerpt_sha256") else {}),
                 })
@@ -163,8 +187,10 @@ def capture(plan_path: Path, destination: Path) -> None:
         corpus_hash = hashlib.sha256(b"".join(
             path.relative_to(stage).as_posix().encode() + b"\0" + path.read_bytes()
             for path in corpus if path.is_file())).hexdigest()
-        receipt = {"schema_version": "jaa04.capture-receipt.v1", "status": "SUCCESS",
-                   "captured_count": 30, "manifest_sha256": hashlib.sha256((stage / "research_manifest.json").read_bytes()).hexdigest(),
+        receipt = {"schema_version": "jaa04.capture-receipt.v2", "status": "SUCCESS",
+                   "captured_count": 30, "source_count": 150,
+                   "capture_plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                   "manifest_sha256": hashlib.sha256((stage / "research_manifest.json").read_bytes()).hexdigest(),
                    "dossiers_sha256": hashlib.sha256((stage / "frozen_dossiers.json").read_bytes()).hexdigest(),
                    "raw_corpus_sha256": corpus_hash}
         receipt["source_plan_contract"] = {
@@ -173,6 +199,8 @@ def capture(plan_path: Path, destination: Path) -> None:
             ).IntelligenceKind),
             "coverage": "one-plan-one-source-one-claim-per-kind",
             "byte_binding": "sha256-and-exact-byte-range",
+            "semantic_validation": "source-type-purpose-and-byte-resolvable-excerpt",
+            "temporal_policy": "historical-never-satisfies-requires-current",
         }
         (stage / "capture_receipt.json").write_bytes(canonical(receipt))
         os.rename(stage, destination)

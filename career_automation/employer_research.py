@@ -379,14 +379,19 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             observed_value = temporal
             if claim.get("observed_at") != temporal:
                 raise ValueError("claim observation time must be publisher-provided time")
-        observed = datetime.fromisoformat(str(observed_value or "").replace("Z", "+00:00")).date()
-        if as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]) or observed > as_of:
-            raise ValueError(f"stale or future {kind.value} claim")
         freshness = claim.get("freshness_classification")
-        if freshness is not None and freshness not in {"current", "historical"}:
+        if freshness not in {"current", "historical"}:
             raise ValueError("unknown freshness classification")
-        if freshness == "current" and as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]):
+        observed = datetime.fromisoformat(str(observed_value or "").replace("Z", "+00:00")).date()
+        age = as_of - observed
+        if observed > as_of:
+            raise ValueError(f"future {kind.value} claim")
+        if freshness == "current" and age > timedelta(days=FRESHNESS_DAYS[kind]):
             raise ValueError("stale claim represented as current")
+        if freshness == "historical" and age <= timedelta(days=FRESHNESS_DAYS[kind]):
+            raise ValueError("temporally current evidence represented as historical")
+        if entry.get("requires_current") is True and freshness != "current":
+            raise ValueError(f"current {kind.value} claim has no temporally valid evidence")
     for edge in edges:
         if edge.get("from_claim_id") not in claim_ids or edge.get("to_claim_id") not in claim_ids:
             raise ValueError("edge endpoints must resolve to typed claims")
@@ -517,8 +522,14 @@ def build_reconnaissance_dossier(
         claim_observed = claim_observed or observed_at
         if claim_observed is None:
             raise ValueError("publication time is unknown; retrieval time cannot substitute")
+        evidence_date = datetime.fromisoformat(claim_observed.replace("Z", "+00:00")).date()
+        capture_date = datetime.fromisoformat(cited_source.captured_at.replace("Z", "+00:00")).date()
+        freshness = ("current" if capture_date - evidence_date <= timedelta(days=FRESHNESS_DAYS[kind])
+                     else "historical")
+        if entry.get("requires_current") is True and freshness != "current":
+            raise ValueError(f"current {kind.value} claim has no temporally valid authoritative evidence")
         claim.update({"observed_at": claim_observed, "source_captured_at": cited_source.captured_at,
-                      "freshness_classification": "current",
+                      "freshness_classification": freshness,
                       "source_ids": [entry["source_id"]], "citation_excerpt": excerpt})
         claims.append(claim)
     dossier = {
