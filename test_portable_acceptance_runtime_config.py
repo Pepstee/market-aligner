@@ -216,9 +216,5 @@ def test_acceptance_declaration_commands_are_independent_and_direct_execution_fa
     lines = [line.strip() for line in (ROOT / "acceptance").read_text(encoding="utf-8").splitlines()]
     commands = [line for line in lines if line and not line.startswith("#")]
     assert commands == [
-        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.py" || exit $?',
-        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa_02.py" || exit $?',
-        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa02_receipt.py" || exit $?',
-        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa_03.py" || exit $?',
-        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa_04.py" || exit $?',
+        'python3 "${BASH_SOURCE[0]:+${BASH_SOURCE[0]%/*}/}scripts/run_acceptance_declaration.py"',
     ]
