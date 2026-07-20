@@ -161,17 +161,22 @@ passed/skipped/failed totals separately instead of rewriting it. Five full Scrap
 sidecar tests are collected and skip unless the separately documented
 `.venv-scrapling` runtime has actually been installed.
 
-Clean-bootstrap verification on 20 July 2026: **94 passed, 5 skipped, 0 failed**
-(99 tests collected; 25 unittest subtests also passed). This is the post-adoption total.
+JAA-00 clean-bootstrap verification on 20 July 2026 recorded the complete suite as
+**111 passed, 5 skipped, 0 failed** (116 collected) and the separately run
+`career_automation` subset as **68 passed, 0 skipped, 0 failed** (68 collected).
+Both suites tested the pre-receipt source revision
+`fa157d2fe2477bf59b03390426f662ac31808385`; the receipt itself is generated
+content committed after that revision.
 
 The original guided-pass files remain as generic reproducibility fixtures;
 the active config, profile, contracts, prompts and reports no longer load them.
 
 Generate a content-addressed JSON receipt for both the current complete suite and
-the separately labelled 65-test historical `career_automation` scope with:
+the separately labelled current `career_automation` scope, which retains the
+65-passing-test historical baseline as metadata, with:
 
 ```bash
-python3 scripts/generate-test-evidence.py
+./.venv/bin/python scripts/generate-test-evidence.py
 ```
 
 The generator publishes under `runtime_evidence/pytest/` only after both runs
