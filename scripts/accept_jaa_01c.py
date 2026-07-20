@@ -21,6 +21,7 @@ from career_automation.lifecycle import (
     canonical_hash,
 )
 from career_automation.models import PipelineState
+from career_automation.migrations import JAA_01_MIGRATIONS
 
 
 def require(condition: bool, message: str) -> None:
@@ -59,8 +60,20 @@ def main() -> int:
                     "migration did not preserve the legacy job")
             require(conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == 1,
                     "migration did not preserve the legacy event")
-            require(conn.execute("SELECT COUNT(*) FROM career_schema_migrations").fetchone()[0] == 1,
-                    "canonical migration was not recorded")
+            jaa01_ledger = conn.execute(
+                "SELECT version,name,checksum FROM career_schema_migrations "
+                "WHERE version IN ({}) ORDER BY version".format(
+                    ",".join("?" for _ in JAA_01_MIGRATIONS)
+                ),
+                tuple(migration.version for migration in JAA_01_MIGRATIONS),
+            ).fetchall()
+            require(
+                jaa01_ledger == [
+                    (migration.version, migration.name, migration.checksum)
+                    for migration in JAA_01_MIGRATIONS
+                ],
+                "canonical JAA-01 migration identity was not recorded",
+            )
         finally:
             conn.close()
 
