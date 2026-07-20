@@ -159,6 +159,10 @@ def locked_environment() -> dict[str, object]:
             + "); run ./scripts/bootstrap-test-env.sh and activate .venv"
         )
 
+    repository_root = os.fspath(ROOT.resolve())
+    if not sys.path or sys.path[0] != repository_root:
+        sys.path.insert(0, repository_root)
+    importlib.invalidate_caches()
     try:
         local_module = importlib.import_module(LOCAL_IMPORT)
         local_file = Path(local_module.__file__).resolve()
@@ -182,10 +186,13 @@ def locked_environment() -> dict[str, object]:
 
 def run_suite(name: str, argv: tuple[str, ...]) -> dict[str, object]:
     execution_command = (sys.executable, *argv[1:])
+    execution_environment = os.environ.copy()
+    execution_environment["PYTHONPATH"] = os.fspath(ROOT.resolve())
     try:
         completed = subprocess.run(
             execution_command,
             cwd=ROOT,
+            env=execution_environment,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
