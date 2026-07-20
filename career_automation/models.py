@@ -63,6 +63,20 @@ class OpportunityDecision(str, Enum):
     REJECT = "reject"
 
 
+class IntelligenceKind(str, Enum):
+    COMPANY = "company"
+    ROLE = "role"
+    PRODUCT = "product"
+    HIRING = "hiring"
+    OPERATIONAL_HEALTH = "operational_health"
+
+
+class ClaimClassification(str, Enum):
+    FACT = "fact"
+    INFERENCE = "inference"
+    HYPOTHESIS = "hypothesis"
+
+
 @dataclass(frozen=True)
 class ScoredJob:
     key: str
