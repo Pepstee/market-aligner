@@ -6,6 +6,7 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -143,6 +144,34 @@ def test_suite_executes_current_interpreter_but_records_portable_argv(
     assert sys.executable not in result["argv"]
 
 
+def test_receipt_argv_has_no_environment_path_and_reexecutes_from_path(
+    tmp_path: Path,
+) -> None:
+    """A consumer can run the recorded command after activating the locked environment."""
+    completed = _public_generator(
+        tmp_path,
+        "================ 4 passed in 0.01s ================",
+        "================ 2 passed in 0.01s ================",
+    )
+    root = tmp_path / "isolated-repository"
+    receipt = json.loads((root / completed.stdout.strip()).read_text(encoding="utf-8"))
+
+    locked_bin = tmp_path / "locked-cpython-312" / "bin"
+    locked_bin.mkdir(parents=True)
+    (locked_bin / "python").symlink_to(sys.executable)
+    environment = {**os.environ, "PATH": str(locked_bin) + os.pathsep + os.environ["PATH"]}
+
+    for suite in receipt["suites"]:
+        argv = suite["argv"]
+        assert all(".venv" not in argument for argument in argv)
+        assert all(not Path(argument).is_absolute() for argument in argv)
+        reexecuted = subprocess.run(
+            argv, cwd=root, env=environment, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+        assert reexecuted.returncode == 0, reexecuted.stderr
+
+
 def test_environment_validation_reports_missing_locked_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -151,6 +180,32 @@ def test_environment_validation_reports_missing_locked_dependencies(
     monkeypatch.setattr(GENERATOR_MODULE, "LOCK_FILE", lock)
     with pytest.raises(GENERATOR_MODULE.EvidenceError, match="missing:.*bootstrap-test-env"):
         GENERATOR_MODULE.locked_environment()
+
+
+def test_missing_openpyxl_rejects_environment_before_a_stale_suite_can_pass(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    original_version = importlib.metadata.version
+    suite_was_run = False
+
+    def missing_openpyxl(distribution: str) -> str:
+        if distribution == "openpyxl":
+            raise importlib.metadata.PackageNotFoundError(distribution)
+        return original_version(distribution)
+
+    def stale_success(*_args, **_kwargs):
+        nonlocal suite_was_run
+        suite_was_run = True
+        return {"name": "stale", "argv": [], "counts": {}}
+
+    monkeypatch.setattr(GENERATOR_MODULE.importlib.metadata, "version", missing_openpyxl)
+    monkeypatch.setattr(GENERATOR_MODULE, "product_content_revision", lambda: "sha256:stable")
+    monkeypatch.setattr(GENERATOR_MODULE, "tested_git_parent", lambda: "a" * 40)
+    monkeypatch.setattr(GENERATOR_MODULE, "run_suite", stale_success)
+
+    assert GENERATOR_MODULE.main() == 1
+    assert suite_was_run is False
+    assert "locked test dependencies are unavailable (missing: openpyxl" in capsys.readouterr().err
 
 
 def test_product_revision_is_stable_across_excluded_receipts(
