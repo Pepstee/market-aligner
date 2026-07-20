@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from datetime import date
 from pathlib import Path
@@ -25,6 +26,24 @@ from career_automation.models import IntelligenceKind
 ROOT = Path(__file__).resolve().parent
 CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
 CAPTURE_PLAN = ROOT / "career_automation/fixtures/jaa04_capture_plan.json"
+ADMITTED_QUEUE = ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"
+
+
+def test_capture_plan_is_bound_to_the_admitted_opportunity_queue() -> None:
+    queue = json.loads(ADMITTED_QUEUE.read_text(encoding="utf-8"))
+    records = queue.get("records", [])
+    canonical = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode()).hexdigest() == queue.get("records_hash")
+    assert len(records) == len({row["job_key"] for row in records}) == 30
+    admitted = {row["job_key"]: row for row in records}
+
+    plan = json.loads(CAPTURE_PLAN.read_text(encoding="utf-8"))["records"]
+    assert {row.get("job_key") for row in plan} == set(admitted)
+    for row in plan:
+        source = admitted[row["job_key"]]
+        assert row.get("company") == source["company"]
+        assert row.get("role") == source["title"]
+        assert row.get("official_vacancy_url") == source["url"]
 
 
 def test_capture_plan_uses_purpose_specific_authorities() -> None:
