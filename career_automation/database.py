@@ -370,7 +370,7 @@ class CareerDatabase:
     ) -> None:
         """Persist a provenance-validated probabilistic research result."""
         from .employer_research import RawResponseCache, content_hash, validate_dossier
-        strict = dossier.get("schema_version") == "jaa04.dossier.v1"
+        strict = dossier.get("schema_version") in {"jaa04.dossier.v1", "jaa04.dossier.v2"}
         if strict:
             cache_root = dossier.get("raw_cache_root")
             if not isinstance(cache_root, str) or not cache_root:

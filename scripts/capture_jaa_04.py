@@ -17,7 +17,6 @@ import re
 import shutil
 import sys
 import tempfile
-from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,8 +26,10 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import (  # noqa: E402
     Citation, RawResponseCache, build_reconnaissance_dossier, content_hash,
-    load_frozen_dossiers,
+    SOURCE_KIND_POLICY, extract_publisher_timestamps, load_frozen_dossiers,
 )
+from career_automation.models import IntelligenceKind  # noqa: E402
+from tracked_source_revision import source_content_revision  # noqa: E402
 from scraper.scrapling_client import ScraplingClient  # noqa: E402
 
 
@@ -46,19 +47,6 @@ def title_excerpt(body: bytes) -> str:
     if not excerpt.strip():
         raise RuntimeError("captured response has an empty HTML title")
     return excerpt
-
-
-def publisher_timestamp(value: object) -> str | None:
-    """Normalise only publisher/server supplied HTTP dates; never use fetch time."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def capture(plan_path: Path, destination: Path) -> None:
@@ -81,6 +69,7 @@ def capture(plan_path: Path, destination: Path) -> None:
     try:
         seen_urls: set[str] = set()
         seen_bodies: set[str] = set()
+        seen_articles: set[str] = set()
         for record in records:
             specifications = record.get("sources")
             if not isinstance(specifications, list) or len(specifications) != 5:
@@ -90,7 +79,7 @@ def capture(plan_path: Path, destination: Path) -> None:
             source_attempts = []
             for specification in specifications:
                 required = {"kind", "url", "source_type", "relevance_terms",
-                            "published_at", "updated_at", "requires_current"}
+                            "canonical_publisher", "canonical_article", "requires_current"}
                 missing = required.difference(specification)
                 if missing:
                     raise RuntimeError(f"capture source is missing required fields: {sorted(missing)}")
@@ -99,6 +88,19 @@ def capture(plan_path: Path, destination: Path) -> None:
                 requested_url = str(specification["url"])
                 if "?" in requested_url or requested_url in seen_urls:
                     raise RuntimeError("source URL is non-canonical or duplicated")
+                kind_enum = IntelligenceKind(str(specification["kind"]))
+                if specification["source_type"] not in SOURCE_KIND_POLICY[kind_enum]["source_types"]:
+                    raise RuntimeError("source kind is ineligible for its evidence purpose")
+                parsed = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(requested_url)
+                host = (parsed.hostname or "").casefold()
+                publisher = str(specification["canonical_publisher"]).casefold().strip()
+                article = str(specification["canonical_article"]).casefold().strip()
+                if (not publisher or (publisher != host and not host.endswith("." + publisher))
+                        or host.endswith("wikipedia.org")):
+                    raise RuntimeError("source is not owned by its canonical publisher")
+                if not article or article in seen_articles:
+                    raise RuntimeError("canonical article alias cannot satisfy another purpose")
+                seen_articles.add(article)
                 started = datetime.now(timezone.utc).isoformat()
                 result = client.fetch_with_chain(requested_url)
                 response = result.response
@@ -119,16 +121,20 @@ def capture(plan_path: Path, destination: Path) -> None:
                 history = [{"url": str(item["url"]), "status_code": int(item["status"])}
                            for item in response.get("history", [])]
                 kind = str(specification["kind"])
+                published_at, updated_at, date_evidence = extract_publisher_timestamps(body)
+                if not (published_at or updated_at) or not date_evidence:
+                    raise RuntimeError(f"source has no byte-resolvable publisher date: {requested_url}")
                 source_id = f"source:{record['id']}:{kind}"
                 source = {
                     "id": source_id, "url": final_url, "requested_url": requested_url,
                     "captured_at": started, "retrieved_at": datetime.now(timezone.utc).isoformat(),
                     "content_sha256": digest, "raw_response_ref": reference,
                     "status_code": status, "redirect_history": history,
-                    "published_at": specification.get("published_at"),
-                    "updated_at": (specification.get("updated_at") or publisher_timestamp(
-                        dict(response.get("headers") or {}).get("last-modified")
-                    )),
+                    "published_at": published_at, "updated_at": updated_at,
+                    "publisher_date_evidence": date_evidence,
+                    "source_kind": specification["source_type"],
+                    "canonical_publisher": specification["canonical_publisher"],
+                    "canonical_article": specification["canonical_article"],
                 }
                 citations.append(Citation(**source))
                 source_plan.append({
@@ -176,7 +182,7 @@ def capture(plan_path: Path, destination: Path) -> None:
                                      "classifications": sorted({claim["classification"] for claim in dossier["claims"]}),
                                      "edge_relations": sorted({edge["relation"] for edge in dossier["edges"]}),
                                      "retrievals": source_attempts})
-        envelope = {"schema_version": "jaa04.frozen-dossiers.v1", "dossiers": dossiers,
+        envelope = {"schema_version": "jaa04.frozen-dossiers.v2", "dossiers": dossiers,
                     "dossiers_hash": content_hash(dossiers)}
         (stage / "frozen_dossiers.json").write_bytes(canonical(envelope))
         manifest = {"schema_version": "jaa04.research-manifest.v2", "records": captured_records,
@@ -187,12 +193,17 @@ def capture(plan_path: Path, destination: Path) -> None:
         corpus_hash = hashlib.sha256(b"".join(
             path.relative_to(stage).as_posix().encode() + b"\0" + path.read_bytes()
             for path in corpus if path.is_file())).hexdigest()
-        receipt = {"schema_version": "jaa04.capture-receipt.v2", "status": "SUCCESS",
+        receipt = {"schema_version": "jaa04.capture-receipt.v3", "status": "SUCCESS",
                    "captured_count": 30, "source_count": 150,
                    "capture_plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
                    "manifest_sha256": hashlib.sha256((stage / "research_manifest.json").read_bytes()).hexdigest(),
                    "dossiers_sha256": hashlib.sha256((stage / "frozen_dossiers.json").read_bytes()).hexdigest(),
                    "raw_corpus_sha256": corpus_hash}
+        receipt["source_revision"] = __import__("subprocess").run(
+            ("git", "rev-parse", "HEAD^{commit}"), cwd=ROOT, text=True,
+            capture_output=True, check=True,
+        ).stdout.strip()
+        receipt["source_content_revision"] = source_content_revision(ROOT)
         receipt["source_plan_contract"] = {
             "intelligence_kinds": sorted(kind.value for kind in __import__(
                 "career_automation.models", fromlist=["IntelligenceKind"]
@@ -201,6 +212,8 @@ def capture(plan_path: Path, destination: Path) -> None:
             "byte_binding": "sha256-and-exact-byte-range",
             "semantic_validation": "source-type-purpose-and-byte-resolvable-excerpt",
             "temporal_policy": "historical-never-satisfies-requires-current",
+            "publisher_date": "captured-body-metadata-only",
+            "independence": "canonical-publisher-article-and-normalized-content",
         }
         (stage / "capture_receipt.json").write_bytes(canonical(receipt))
         os.rename(stage, destination)

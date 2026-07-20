@@ -255,11 +255,14 @@ def main() -> int:
     try:
         revision_before, content_before = clean_revision()
         capture_receipt = json.loads(CAPTURE_RECEIPT.read_text(encoding="utf-8"))
-        require(capture_receipt.get("schema_version") == "jaa04.capture-receipt.v2"
+        require(capture_receipt.get("schema_version") == "jaa04.capture-receipt.v3"
                 and capture_receipt.get("status") == "SUCCESS"
                 and capture_receipt.get("captured_count") == 30
                 and capture_receipt.get("source_count") == 150,
                 "authentic capture receipt is missing")
+        require(capture_receipt.get("source_revision") == revision_before
+                and capture_receipt.get("source_content_revision") == content_before,
+                "capture receipt is not bound to this source revision")
         hashes = {
             "capture_plan_sha256": hashlib.sha256(CAPTURE_PLAN.read_bytes()).hexdigest(),
             "research_manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),

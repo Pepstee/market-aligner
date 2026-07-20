@@ -14,6 +14,7 @@ import re
 import socket
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from html import unescape
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse, urlunparse
@@ -34,24 +35,24 @@ FRESHNESS_DAYS = {
 # an eligibility gate, not a model prompt or a relevance score.
 SOURCE_KIND_POLICY: dict[IntelligenceKind, dict[str, Any]] = {
     IntelligenceKind.COMPANY: {
-        "source_types": {"official_company", "corporate_profile"},
+        "source_types": {"authoritative_company_record", "official_company"},
         "terms": ("company", "organisation", "organization", "operates", "employer", "business"),
     },
     IntelligenceKind.PRODUCT: {
-        "source_types": {"official_company", "official_product", "corporate_profile"},
+        "source_types": {"official_product_documentation"},
         "terms": ("product", "service", "platform", "customer", "clients", "technology"),
     },
     IntelligenceKind.OPERATIONAL_HEALTH: {
-        "source_types": {"dated_operational", "official_financial", "regulatory_filing"},
+        "source_types": {"regulatory_filing", "regulatory_status_record", "independent_reporting"},
         "terms": ("revenue", "profit", "loss", "funding", "financial", "operating", "operational", "current"),
         "dated": True,
     },
     IntelligenceKind.ROLE: {
-        "source_types": {"official_vacancy", "official_role", "corporate_profile"},
+        "source_types": {"official_vacancy"},
         "terms": ("role", "position", "job", "responsibilities", "responsible", "duties"),
     },
     IntelligenceKind.HIRING: {
-        "source_types": {"official_vacancy", "official_careers", "corporate_profile"},
+        "source_types": {"official_careers"},
         "terms": ("hiring", "apply", "application", "career", "vacancy", "candidate", "employee"),
     },
 }
@@ -178,6 +179,10 @@ class Citation:
     redirect_history: list[dict[str, Any]] = field(default_factory=list)
     published_at: str | None = None
     updated_at: str | None = None
+    source_kind: str | None = None
+    canonical_publisher: str | None = None
+    canonical_article: str | None = None
+    publisher_date_evidence: str | None = None
 
     @property
     def capture_identity(self) -> tuple[str, str]:
@@ -215,8 +220,9 @@ class ScraplingPublicRetriever:
     def __init__(self, cache: RawResponseCache, *, timeout_seconds: int = 45) -> None:
         self.cache, self.timeout_seconds = cache, timeout_seconds
 
-    def retrieve(self, source_id: str, url: str, *, published_at: str | None = None,
-                 updated_at: str | None = None) -> Citation:
+    def retrieve(self, source_id: str, url: str, *, source_kind: str | None = None,
+                 canonical_publisher: str | None = None,
+                 canonical_article: str | None = None) -> Citation:
         _public_url(url)
         try:
             from scrapling.fetchers import Fetcher  # type: ignore
@@ -241,16 +247,78 @@ class ScraplingPublicRetriever:
                 "url": _canonical_public_url(str(getattr(item, "url"))),
                 "status_code": int(getattr(item, "status", getattr(item, "status_code", 0))),
             })
-        # Retrieval is an observation about this fetch, never evidence of when
-        # the publisher created or changed the document.
+        published_at, updated_at, date_evidence = extract_publisher_timestamps(bytes(raw))
+        # Retrieval is observation metadata only.  Publisher time is extracted
+        # from the captured representation and retains the byte-resolvable
+        # metadata fragment which established it.
         return Citation(source_id, final_url, now, now, digest, reference,
-                        status, url, history, published_at, updated_at)
+                        status, url, history, published_at, updated_at,
+                        source_kind, canonical_publisher, canonical_article,
+                        date_evidence)
+
+
+_DATE_FIELDS = {
+    "datepublished": "published", "datecreated": "published",
+    "article:published_time": "published", "publication_date": "published",
+    "datemodified": "updated", "article:modified_time": "updated",
+    "last-modified": "updated", "dateupdated": "updated",
+}
+
+
+def _iso_publisher_time(value: str) -> str | None:
+    value = unescape(value).strip()
+    if not re.search(r"\b(?:19|20)\d{2}\b", value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            from email.utils import parsedate_to_datetime
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def extract_publisher_timestamps(body: bytes) -> tuple[str | None, str | None, str | None]:
+    """Extract dated publisher metadata from captured HTML/JSON bytes.
+
+    The returned evidence is an exact substring of the response body.  Server
+    receipt time and caller-supplied dates are intentionally not inputs.
+    """
+    text = body.decode("utf-8", "strict")
+    candidates: list[tuple[str, str, str]] = []
+    tag_pattern = re.compile(r"<(?:meta|time)\b[^>]*>", re.I)
+    attr_pattern = re.compile(r"([:\w-]+)\s*=\s*([\"'])(.*?)\2", re.I | re.S)
+    for match in tag_pattern.finditer(text):
+        attrs = {key.casefold(): value for key, _, value in attr_pattern.findall(match.group(0))}
+        key = (attrs.get("property") or attrs.get("name") or attrs.get("itemprop") or "").casefold()
+        value = attrs.get("content") or attrs.get("datetime")
+        field = _DATE_FIELDS.get(key)
+        if field and value and (stamp := _iso_publisher_time(value)):
+            candidates.append((field, stamp, match.group(0)))
+    json_pattern = re.compile(
+        r'([\"\'])(datePublished|dateCreated|dateModified|dateUpdated)\1\s*:\s*([\"\'])(.*?)\3',
+        re.I | re.S,
+    )
+    for match in json_pattern.finditer(text):
+        field = "updated" if "modified" in match.group(2).casefold() or "updated" in match.group(2).casefold() else "published"
+        if stamp := _iso_publisher_time(match.group(4)):
+            candidates.append((field, stamp, match.group(0)))
+    published = next((value for field, value, _ in candidates if field == "published"), None)
+    updated = next((value for field, value, _ in candidates if field == "updated"), None)
+    evidence = next((raw for field, _, raw in candidates if field == ("updated" if updated else "published")), None)
+    return published, updated, evidence
 
 
 def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_of: date | None = None) -> None:
     """Validate all provenance, typing, freshness and privacy rules or fail closed."""
-    if dossier.get("schema_version") != "jaa04.dossier.v1":
+    schema_version = dossier.get("schema_version")
+    if schema_version not in {"jaa04.dossier.v1", "jaa04.dossier.v2"}:
         raise ValueError("unsupported dossier schema")
+    authority_contract = schema_version == "jaa04.dossier.v2"
     as_of = as_of or datetime.now(timezone.utc).date()
     sources = dossier.get("sources")
     claims = dossier.get("claims")
@@ -261,6 +329,8 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
     identities: set[tuple[str, str]] = set()
     urls: set[str] = set()
     bodies: set[str] = set()
+    articles: set[str] = set()
+    equivalent_content: set[str] = set()
     for source in sources:
         citation = Citation(**source)
         if citation.id in by_id or citation.status_code < 200 or citation.status_code >= 300:
@@ -274,7 +344,7 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             _canonical_public_url(str(redirect["url"]))
             if not 300 <= int(redirect["status_code"]) < 400:
                 raise ValueError("redirect history contains a non-redirect response")
-        cache.resolve(citation.raw_response_ref, citation.content_sha256)
+        body = cache.resolve(citation.raw_response_ref, citation.content_sha256)
         datetime.fromisoformat(citation.retrieved_at.replace("Z", "+00:00"))
         datetime.fromisoformat(citation.captured_at.replace("Z", "+00:00"))
         identity = citation.capture_identity
@@ -283,6 +353,33 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         identities.add(identity)
         urls.add(identity[0])
         bodies.add(identity[1])
+        if authority_contract:
+            host = (urlparse(citation.url).hostname or "").casefold()
+            publisher = str(citation.canonical_publisher or "").casefold().strip()
+            article = str(citation.canonical_article or "").casefold().strip()
+            if not citation.source_kind or not publisher or not article:
+                raise ValueError("source lacks classified kind or canonical publisher/article identity")
+            if publisher != host and not host.endswith("." + publisher):
+                raise ValueError("canonical publisher does not own the captured URL")
+            _canonical_public_url(article)
+            if article.encode("utf-8") not in body.lower():
+                raise ValueError("canonical article identity does not resolve to publisher bytes")
+            if article in articles:
+                raise ValueError("translations, mirrors, or aliases resolve to one canonical article")
+            articles.add(article)
+            plain = re.sub(br"<[^>]+>", b" ", body)
+            normalized = re.sub(br"\s+", b" ", plain).strip().casefold()
+            equivalence_hash = hashlib.sha256(normalized).hexdigest()
+            if equivalence_hash in equivalent_content:
+                raise ValueError("mirrored, syndicated, or repeated content is not independent evidence")
+            equivalent_content.add(equivalence_hash)
+            if citation.publisher_date_evidence is not None:
+                evidence = citation.publisher_date_evidence.encode("utf-8")
+                if evidence not in body:
+                    raise ValueError("publisher date evidence does not resolve to captured bytes")
+                extracted = extract_publisher_timestamps(body)
+                if (citation.published_at, citation.updated_at) != extracted[:2]:
+                    raise ValueError("publisher timestamp differs from captured metadata")
         for field_name in ("published_at", "updated_at"):
             value = getattr(citation, field_name)
             if value is not None:
@@ -307,6 +404,8 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             raise ValueError("source plan purpose must exactly match its intelligence kind")
         if entry.get("source_type") not in SOURCE_KIND_POLICY[kind]["source_types"]:
             raise ValueError("source plan source type is not permitted for its intelligence kind")
+        if authority_contract and by_id[source_id].get("source_kind") != entry.get("source_type"):
+            raise ValueError("source-kind classification differs from source plan")
         if type(entry.get("freshness_days")) is not int or entry["freshness_days"] != FRESHNESS_DAYS[kind]:
             raise ValueError("source plan freshness policy does not match claim kind")
         source = by_id[source_id]
@@ -328,6 +427,14 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         plan_source_ids.add(source_id)
     if plan_kinds != set(IntelligenceKind) or plan_source_ids != set(by_id):
         raise ValueError("source plan must cover every intelligence kind and source exactly once")
+    if authority_contract:
+        company_entry = next(item for item in plan if item["kind"] == IntelligenceKind.COMPANY.value)
+        health_entry = next(item for item in plan if item["kind"] == IntelligenceKind.OPERATIONAL_HEALTH.value)
+        company_publisher = by_id[str(company_entry["source_id"])]["canonical_publisher"]
+        health_source = by_id[str(health_entry["source_id"])]
+        if (health_source["canonical_publisher"] == company_publisher
+                and health_entry["source_type"] == "independent_reporting"):
+            raise ValueError("operational-health corroboration is not publisher-independent")
     claim_ids: set[str] = set()
     for claim in claims:
         if not isinstance(claim, Mapping) or not isinstance(claim.get("text"), str) or not claim["text"].strip():
@@ -370,6 +477,8 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
                 raise ValueError("claim excerpt does not match its declared captured byte range")
         source = by_id[cited[0]]
         temporal = source.get("updated_at") or source.get("published_at")
+        if authority_contract and (temporal is None or not source.get("publisher_date_evidence")):
+            raise ValueError(f"{kind.value} claim lacks byte-resolvable publisher date")
         if temporal is None:
             if kind in {IntelligenceKind.ROLE, IntelligenceKind.HIRING,
                         IntelligenceKind.OPERATIONAL_HEALTH} or claim.get("freshness_classification") == "current":
@@ -461,11 +570,11 @@ def build_reconnaissance_dossier(
     if not company or not role:
         raise ValueError("research task requires company and role")
     specifications = (
-        ("company-fact", IntelligenceKind.COMPANY, "fact", "Company evidence", "corporate_profile"),
-        ("product-inference", IntelligenceKind.PRODUCT, "inference", "Product intelligence", "corporate_profile"),
-        ("health-inference", IntelligenceKind.OPERATIONAL_HEALTH, "inference", "Operational-health intelligence", "dated_operational"),
+        ("company-fact", IntelligenceKind.COMPANY, "fact", "Company evidence", "authoritative_company_record"),
+        ("product-inference", IntelligenceKind.PRODUCT, "inference", "Product intelligence", "official_product_documentation"),
+        ("health-inference", IntelligenceKind.OPERATIONAL_HEALTH, "inference", "Operational-health intelligence", "regulatory_filing"),
         ("role-hypothesis", IntelligenceKind.ROLE, "hypothesis", f"Role intelligence for {role}", "official_vacancy"),
-        ("hiring-hypothesis", IntelligenceKind.HIRING, "hypothesis", f"Hiring intelligence for {role}", "official_vacancy"),
+        ("hiring-hypothesis", IntelligenceKind.HIRING, "hypothesis", f"Hiring intelligence for {role}", "official_careers"),
     )
     if source_plan is None:
         source_plan = [{
@@ -533,7 +642,7 @@ def build_reconnaissance_dossier(
                       "source_ids": [entry["source_id"]], "citation_excerpt": excerpt})
         claims.append(claim)
     dossier = {
-        "schema_version": "jaa04.dossier.v1", "job_key": task.job_key,
+        "schema_version": "jaa04.dossier.v2", "job_key": task.job_key,
         "raw_cache_root": str(cache.root), "sources": [vars(item) for item in citations],
         "source_plan": [plan_by_kind[kind] for _, kind, _, _, _ in specifications], "claims": claims,
         "edges": [
@@ -634,7 +743,7 @@ def load_frozen_dossiers(
 ) -> list[dict[str, Any]]:
     envelope = json.loads(Path(path).read_text(encoding="utf-8"))
     dossiers = envelope.get("dossiers")
-    if envelope.get("schema_version") != "jaa04.frozen-dossiers.v1" or not isinstance(dossiers, list) or len(dossiers) != 30:
+    if envelope.get("schema_version") not in {"jaa04.frozen-dossiers.v1", "jaa04.frozen-dossiers.v2"} or not isinstance(dossiers, list) or len(dossiers) != 30:
         raise ValueError("JAA-04 frozen set requires exactly 30 dossiers")
     if content_hash(dossiers) != envelope.get("dossiers_hash"):
         raise ValueError("frozen dossier-set hash mismatch")
