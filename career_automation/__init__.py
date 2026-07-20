@@ -12,7 +12,7 @@ from .deployment import DeploymentStore
 from .documents import DocumentSidecarPolicy
 from .engine import OpportunityGate, OpportunityPolicy
 from .fetching import FetchControlStore, default_job_fetch_policy
-from .migrations import MigrationRunner
+from .migrations import JAA_01_MIGRATIONS, MigrationRunner, apply_jaa_01_migrations
 from .models import ActorKind, PipelineState
 from .observability import ObservabilityStore
 from .retrieval import HybridEvidenceIndex
@@ -26,6 +26,7 @@ __all__ = [
     "DocumentSidecarPolicy",
     "FetchControlStore",
     "HybridEvidenceIndex",
+    "JAA_01_MIGRATIONS",
     "MigrationRunner",
     "ObservabilityStore",
     "OpportunityGate",
@@ -33,6 +34,7 @@ __all__ = [
     "OutboundURLPolicy",
     "PipelineState",
     "backend_capability_authorizer",
+    "apply_jaa_01_migrations",
     "career_pipeline_flow",
     "default_job_fetch_policy",
 ]
