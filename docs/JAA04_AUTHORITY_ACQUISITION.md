@@ -83,3 +83,30 @@ strengthen it into an impossible or commercially useless ceremony.
   positive corpus of at least 30 admitted dossiers, the negative controls, a
   passing independent-line acceptance declaration, and a content-addressed
   runtime receipt produced by that passing path.
+
+## Live canary discovery observations (20 July 2026)
+
+Three admitted records prove that portable discovery can be deterministic
+without an employer-specific URL inventory:
+
+- Greenhouse record `greenhouse:anthropic:5030244008`: the admitted hosted page
+  is live and publishes the company careers route. Its board slug and numeric
+  job ID also deterministically identify the official Greenhouse job API
+  representation, whose genuine response carries `updated_at`.
+- Ashby record `ashby:lendable:36d47627-9b4e-4864-9f05-2dbbd1052380`: the
+  admitted hosted response contains JSON-LD `datePosted`, the employer URL and
+  the employer careers route. The board slug also identifies Ashby's official
+  posting API representation and its `publishedAt` field.
+- Workable record `workable:cogna:847CFBC5F4`: the admitted short URL redirects
+  to `/cogna/j/847CFBC5F4` and the returned bytes publish both the board's
+  `llms.txt` and `/cogna/jobs/view/847CFBC5F4.md` vacancy representation. The
+  Markdown response carries the publisher's `Posted` date.
+
+Discovery must prefer typed metadata, canonical/redirect identity and
+board-defined route transforms. It must not classify the first arbitrary
+external anchors on a vacancy page as employer-owned authority. Same-ATS job
+representations may substantiate role/hiring claims; employer-domain routes
+must be derived from explicit hiring-organisation or company metadata before
+they may substantiate company/product claims. Operational-health evidence
+remains unknown unless an appropriately dated authoritative source is actually
+discovered.
