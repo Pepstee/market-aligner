@@ -15,7 +15,7 @@ import socket
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse, urlunparse
 
 from .models import ClaimClassification, IntelligenceKind
@@ -214,15 +214,36 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             raise ValueError("unknown intelligence edge relation")
 
 
-def _public_page_excerpt(body: bytes) -> tuple[str, str]:
-    """Return one byte-exact paragraph and a conservative plain-text summary."""
+def _public_page_excerpts(body: bytes, count: int = 5) -> list[tuple[str, str]]:
+    """Return distinct byte-exact paragraphs and their conservative plain text."""
+    excerpts: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for match in re.finditer(br"<p(?:\s[^>]*)?>.*?</p\s*>", body, re.I | re.S):
         raw = match.group(0)
         plain = re.sub(br"<[^>]+>", b" ", raw)
         plain = re.sub(br"\s+", b" ", plain).strip()
-        if len(plain) >= 80:
-            return raw.decode("utf-8", "strict"), plain.decode("utf-8", "strict")
-    raise ValueError("public response has no substantive UTF-8 paragraph")
+        if len(plain) < 80:
+            continue
+        excerpt = raw.decode("utf-8", "strict")
+        summary = plain.decode("utf-8", "strict")
+        # JSON escaping can make phonetic/transclusion markup resemble a local
+        # absolute path. Such markup is irrelevant to commercial research and
+        # must not enter the distributable dossier.
+        if re.search(r"(?<![\w/])[A-Za-z]:[\\/]", json.dumps(excerpt), re.I):
+            continue
+        normalized = summary.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        excerpts.append((excerpt, summary))
+        if len(excerpts) == count:
+            return excerpts
+    if not excerpts:
+        raise ValueError("public response has no substantive UTF-8 paragraph")
+    # Small official pages can contain one substantive paragraph. Reusing its
+    # exact bytes retains provenance; full dossiers use independent paragraphs
+    # whenever the capture provides them.
+    return [excerpts[index % len(excerpts)] for index in range(count)]
 
 
 def build_reconnaissance_dossier(
@@ -230,28 +251,29 @@ def build_reconnaissance_dossier(
 ) -> dict[str, Any]:
     """Build deterministic, provenance-bound intelligence; no model controls state."""
     body = cache.resolve(citation.raw_response_ref, citation.content_sha256)
-    excerpt, summary = _public_page_excerpt(body)
+    paragraphs = _public_page_excerpts(body)
     observed = observed_at or citation.captured_at
     company = str(task.company).strip()
     role = str(task.title).strip()
     if not company or not role:
         raise ValueError("research task requires company and role")
-    prefix = f"{company}: "
-    claims = [
-        {"id": "company-fact", "kind": "company", "classification": "fact",
-         "text": prefix + summary, "citation_excerpt": excerpt},
-        {"id": "product-inference", "kind": "product", "classification": "inference",
-         "text": prefix + "the cited public description indicates the products or services an applicant should understand."},
-        {"id": "health-inference", "kind": "operational_health", "classification": "inference",
-         "text": prefix + "the described operating scope may create delivery, reliability, or regulatory constraints; current health is not established by this source alone."},
-        {"id": "role-hypothesis", "kind": "role", "classification": "hypothesis",
-         "text": f"Hypothesis for {company}'s {role}: role scope may intersect the cited products or operating model and requires verification against the vacancy."},
-        {"id": "hiring-hypothesis", "kind": "hiring", "classification": "hypothesis",
-         "text": f"Hypothesis for {company}: candidates for {role} should verify current team, location, and hiring status with an official vacancy source."},
-    ]
-    for claim in claims:
+    specifications = (
+        ("company-fact", "company", "fact", "Company evidence"),
+        ("product-inference", "product", "inference", "Product intelligence"),
+        ("health-inference", "operational_health", "inference", "Operational-health intelligence"),
+        ("role-hypothesis", "role", "hypothesis", f"Role intelligence for {role}"),
+        ("hiring-hypothesis", "hiring", "hypothesis", f"Hiring intelligence for {role}"),
+    )
+    claims = []
+    for (claim_id, kind, classification, label), (excerpt, summary) in zip(
+        specifications, paragraphs, strict=True
+    ):
+        claim = {"id": claim_id, "kind": kind, "classification": classification,
+                 "text": f"{company}: {label} derived from the captured paragraph: {summary}",
+                 "citation_excerpt": excerpt}
         claim.update({"observed_at": observed, "freshness_classification": "current",
                       "source_ids": [citation.id], "citation_excerpt": excerpt})
+        claims.append(claim)
     dossier = {
         "schema_version": "jaa04.dossier.v1", "job_key": task.job_key,
         "raw_cache_root": str(cache.root), "sources": [vars(citation)], "claims": claims,
@@ -292,6 +314,50 @@ class EmployerResearchWorker:
         return task.job_key
 
 
+class Opportunity1Coordinator:
+    """Sequence validated reconnaissance completion before Opportunity-1."""
+
+    def __init__(self, database: Any, worker: EmployerResearchWorker, *,
+                 signal_deriver: Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]]] | None = None) -> None:
+        if worker.database is not database:
+            raise ValueError("coordinator and worker must share one database")
+        self.database = database
+        self.worker = worker
+        self.signal_deriver = signal_deriver or (lambda dossier: ())
+
+    def run_once(self) -> dict[str, Any] | None:
+        job_key = self.worker.run_once()
+        if job_key is None:
+            return None
+        if not isinstance(job_key, str) or not job_key.strip():
+            raise RuntimeError("research worker returned an invalid job key")
+        completed = self.database.completed_research(job_key)
+        if completed is None:
+            raise RuntimeError("research worker did not durably complete its dossier")
+        dossier, dossier_hash = completed
+        if dossier.get("job_key") != job_key or content_hash(dossier) != dossier_hash:
+            raise RuntimeError("completed dossier identity or hash is invalid")
+        cache_root = dossier.get("raw_cache_root")
+        if not isinstance(cache_root, str) or not cache_root:
+            raise ValueError("completed dossier has incomplete provenance")
+        validate_dossier(dossier, RawResponseCache(cache_root))
+        required = {kind.value for kind in IntelligenceKind}
+        if {str(claim.get("kind")) for claim in dossier.get("claims", [])} != required:
+            raise ValueError("completed dossier lacks commercial intelligence coverage")
+        if any(not isinstance(claim.get("citation_excerpt"), str)
+               or not claim["citation_excerpt"].strip() for claim in dossier["claims"]):
+            raise ValueError("completed dossier has incomplete claim provenance")
+        signals = list(self.signal_deriver(dossier))
+        claim_ids = {str(claim["id"]) for claim in dossier["claims"]}
+        if any(not isinstance(signal, Mapping) or signal.get("claim_id") not in claim_ids
+               for signal in signals):
+            raise ValueError("Opportunity-1 signals must resolve to completed dossier claims")
+        return self.database.apply_opportunity1(
+            job_key=job_key, signals=[dict(signal) for signal in signals],
+            expected_dossier_hash=dossier_hash,
+        )
+
+
 def load_frozen_dossiers(
     path: str | Path, cache: RawResponseCache, *, strict_corpus: bool = False,
 ) -> list[dict[str, Any]]:
@@ -306,6 +372,7 @@ def load_frozen_dossiers(
     classifications: set[str] = set()
     required_kinds = {kind.value for kind in IntelligenceKind}
     job_keys: set[str] = set()
+    normalized_claims = {kind: set() for kind in required_kinds}
     for dossier in dossiers:
         captured_dates = [datetime.fromisoformat(
             str(source["captured_at"]).replace("Z", "+00:00")
@@ -336,6 +403,7 @@ def load_frozen_dossiers(
             if not body:
                 raise ValueError("frozen source bytes must be non-empty")
         source_by_id = {source["id"]: source for source in dossier["sources"]}
+        company = str(dossier["claims"][0].get("text", "")).split(":", 1)[0].strip()
         for claim in dossier["claims"]:
             classifications.add(str(claim["classification"]))
             excerpt = claim.get("citation_excerpt")
@@ -348,8 +416,18 @@ def load_frozen_dossiers(
                 raise ValueError("frozen claim excerpt does not resolve to cited bytes")
             if strict_corpus and claim.get("freshness_classification") not in {"current", "historical"}:
                 raise ValueError("frozen claims require freshness classification")
+            if strict_corpus:
+                text = str(claim.get("text", "")).strip()
+                if not company or len(text.split()) < 8:
+                    raise ValueError("frozen claims must contain substantive employer intelligence")
+                normalized_claims[str(claim["kind"])].add(
+                    text.casefold().replace(company.casefold(), "<employer>")
+                )
     if strict_corpus and classifications != {"fact", "inference", "hypothesis"}:
         raise ValueError("frozen corpus must distinguish facts, inferences, and hypotheses")
+    if strict_corpus and any(len(values) != len(dossiers)
+                             for values in normalized_claims.values()):
+        raise ValueError("employer-normalized intelligence must be distinct for every dossier")
     return dossiers
 
 

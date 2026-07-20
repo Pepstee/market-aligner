@@ -12,7 +12,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.database import CareerDatabase  # noqa: E402
 from career_automation.employer_research import (  # noqa: E402
-    Citation, EmployerResearchWorker, RawResponseCache, content_hash,
+    Citation, EmployerResearchWorker, Opportunity1Coordinator, RawResponseCache, content_hash,
     load_frozen_dossiers, validate_dossier,
 )
 from career_automation.engine import OpportunityGate, scored_job_from_payload  # noqa: E402
@@ -188,7 +187,15 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
 
     resumed_worker = EmployerResearchWorker(database, "resumer", cache,
                                             retriever=CapturedRetriever(), lease_seconds=60)
-    require(resumed_worker.run_once() == strong.key, "expired lease was not processed")
+    coordinator = Opportunity1Coordinator(
+        database, resumed_worker,
+        signal_deriver=lambda dossier: [
+            {"claim_id": "health-inference", "reason": "Funding was withdrawn.", "delta_bp": -2000},
+            {"claim_id": "role-hypothesis", "reason": "Role scope narrowed.", "delta_bp": -2000},
+        ],
+    )
+    result = coordinator.run_once()
+    require(result is not None, "expired lease was not processed")
     with database.connection() as connection:
         queue = connection.execute(
             "SELECT status,attempts FROM employer_research_queue WHERE job_key=?", (strong.key,)
@@ -197,16 +204,6 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
             "SELECT dossier_json FROM employer_dossiers WHERE job_key=?", (strong.key,)
         ).fetchone()[0])
     require(tuple(queue) == ("completed", 2), "resumed worker did not complete exactly once")
-    digest = content_hash(dossier)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        for future in [pool.submit(database.complete_research, job_key=strong.key,
-                                   worker_id="resumer", dossier=dossier,
-                                   dossier_hash=digest) for _ in range(2)]:
-            future.result()
-    result = database.apply_opportunity1(job_key=strong.key, signals=[
-        {"claim_id": "zeta", "reason": "Funding was withdrawn.", "delta_bp": -2000},
-        {"claim_id": "alpha", "reason": "Role scope narrowed.", "delta_bp": -2000},
-    ])
     require(result["decision"] == "reject" and result["opportunity0_score_bp"] == 9000
             and result["score_bp"] == 5000, "Opportunity-1 demotion failed")
     require(database.lifecycle.replay()[strong.key] is PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH,

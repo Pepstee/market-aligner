@@ -464,7 +464,26 @@ class CareerDatabase:
                 (job_key,),
             )
 
-    def apply_opportunity1(self, *, job_key: str, signals: list[dict[str, Any]]) -> dict[str, Any]:
+    def completed_research(self, job_key: str) -> tuple[dict[str, Any], str] | None:
+        """Return only a durably completed, research-state dossier."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT d.dossier_json,d.dossier_hash
+                   FROM employer_dossiers d
+                   JOIN employer_research_queue q ON q.job_key=d.job_key
+                   JOIN pipeline_jobs j ON j.job_key=d.job_key
+                   WHERE d.job_key=? AND q.status='completed' AND j.state=?""",
+                (job_key, PipelineState.EMPLOYER_RESEARCHED.value),
+            ).fetchone()
+        if row is None:
+            return None
+        dossier = json.loads(row["dossier_json"])
+        if not isinstance(dossier, dict):
+            raise ValueError("completed dossier is not an object")
+        return dossier, str(row["dossier_hash"])
+
+    def apply_opportunity1(self, *, job_key: str, signals: list[dict[str, Any]],
+                           expected_dossier_hash: str | None = None) -> dict[str, Any]:
         """Reassess after a completed dossier while retaining Opportunity-0."""
         from dataclasses import asdict
         from .opportunity1 import reassess_opportunity1
@@ -477,6 +496,9 @@ class CareerDatabase:
             ).fetchone()
             if row is None or row["state"] != PipelineState.EMPLOYER_RESEARCHED.value:
                 raise RuntimeError("Opportunity-1 requires completed employer research")
+            if (expected_dossier_hash is not None
+                    and row["dossier_hash"] != expected_dossier_hash):
+                raise RuntimeError("completed research changed before Opportunity-1")
             result = reassess_opportunity1(round(float(row["opportunity"]) * 10_000), signals)
             output = asdict(result)
             key = f"opportunity-1:{job_key}:{row['dossier_hash']}:{result.policy_hash}"

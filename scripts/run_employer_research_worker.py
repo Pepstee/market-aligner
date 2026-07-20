@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.database import CareerDatabase  # noqa: E402
-from career_automation.employer_research import EmployerResearchWorker, RawResponseCache  # noqa: E402
+from career_automation.employer_research import (  # noqa: E402
+    EmployerResearchWorker, Opportunity1Coordinator, RawResponseCache,
+)
 
 
 def main() -> int:
@@ -22,17 +24,20 @@ def main() -> int:
     parser.add_argument("--worker-id", required=True)
     parser.add_argument("--lease-seconds", type=int, default=900)
     parser.add_argument("--max-jobs", type=int, default=1)
+    parser.add_argument("--coordinate-opportunity1", action="store_true")
     args = parser.parse_args()
-    worker = EmployerResearchWorker(CareerDatabase(args.database), args.worker_id,
+    database = CareerDatabase(args.database)
+    worker = EmployerResearchWorker(database, args.worker_id,
                                     RawResponseCache(args.cache),
                                     lease_seconds=args.lease_seconds)
+    runner = Opportunity1Coordinator(database, worker) if args.coordinate_opportunity1 else worker
     completed = []
     try:
         for _ in range(max(1, args.max_jobs)):
-            job_key = worker.run_once()
-            if job_key is None:
+            result = runner.run_once()
+            if result is None:
                 break
-            completed.append(job_key)
+            completed.append(result if isinstance(result, str) else result)
     except Exception as exc:
         print(f"employer research worker failed closed: {exc}", file=sys.stderr)
         return 2
