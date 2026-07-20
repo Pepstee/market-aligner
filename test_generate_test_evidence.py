@@ -54,6 +54,8 @@ def _public_repository(
     script = root / "scripts" / GENERATOR.name
     script.parent.mkdir(parents=True)
     shutil.copy2(GENERATOR, script)
+    (root / "skeleton").mkdir()
+    (root / "skeleton" / "__init__.py").write_text("", encoding="utf-8")
     requirements = []
     for line in (REPOSITORY / "requirements-test.lock").read_text(encoding="utf-8").splitlines():
         if line and not line.startswith("#"):
@@ -71,7 +73,7 @@ def _public_repository(
     )
     subprocess.run(("git", "init", "-q"), cwd=root, check=True)
     subprocess.run(
-        ("git", "add", ".gitignore", "scripts", "pytest.py", "requirements-test.lock"),
+        ("git", "add", ".gitignore", "scripts", "skeleton", "pytest.py", "requirements-test.lock"),
         cwd=root, check=True,
     )
     subprocess.run(
@@ -86,8 +88,9 @@ def _public_repository(
 
 
 def _run_public_generator(root: Path) -> subprocess.CompletedProcess[str]:
+    environment = {**os.environ, "PYTHONPATH": str(root)}
     return subprocess.run(
-        (sys.executable, str(root / "scripts" / GENERATOR.name)), cwd=root, text=True,
+        (sys.executable, str(root / "scripts" / GENERATOR.name)), cwd=root, env=environment, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
     )
 

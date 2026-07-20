@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import os
@@ -23,6 +24,7 @@ CAREER_ARGV = COMPLETE_ARGV + ("career_automation",)
 RECEIPT_DIRECTORY = ROOT / "runtime_evidence" / "pytest"
 EVIDENCE_PREFIX = b"runtime_evidence/pytest/"
 CONTENT_REVISION_DOMAIN = b"jaa-product-content-revision-v1\0"
+LOCAL_IMPORT = "skeleton"
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SUMMARY_ITEM = re.compile(
@@ -100,15 +102,38 @@ def locked_environment() -> dict[str, object]:
     except OSError as exc:
         raise EvidenceError("requirements-test.lock is missing or unreadable") from exc
 
-    missing: list[str] = []
-    mismatched: list[str] = []
+    locked: dict[str, tuple[str, str]] = {}
     for raw_line in lock_payload.decode("utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        if "==" not in line:
+        if line.count("==") != 1:
             raise EvidenceError(f"unsupported unlocked requirement: {line}")
         distribution, expected = line.split("==", 1)
+        if not distribution or not expected:
+            raise EvidenceError(f"unsupported unlocked requirement: {line}")
+        normalized = re.sub(r"[-_.]+", "-", distribution).lower()
+        if normalized in locked:
+            previous_name, previous_version = locked[normalized]
+            detail = "duplicate" if previous_version == expected else "conflicting"
+            raise EvidenceError(
+                f"{detail} locked requirement: {previous_name}=={previous_version} and {line}"
+            )
+        locked[normalized] = (distribution, expected)
+
+    installed_versions: dict[str, set[str]] = {}
+    for installed in importlib.metadata.distributions():
+        name = installed.metadata.get("Name")
+        if not name:
+            continue
+        normalized = re.sub(r"[-_.]+", "-", name).lower()
+        if normalized in locked:
+            installed_versions.setdefault(normalized, set()).add(installed.version)
+
+    missing: list[str] = []
+    mismatched: list[str] = []
+    conflicting: list[str] = []
+    for normalized, (distribution, expected) in locked.items():
         try:
             actual = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
@@ -116,17 +141,35 @@ def locked_environment() -> dict[str, object]:
         else:
             if actual != expected:
                 mismatched.append(f"{distribution}=={actual} (expected {expected})")
-    if missing or mismatched:
+        versions = installed_versions.get(normalized, set())
+        extras = sorted(versions - {expected})
+        if extras:
+            conflicting.append(f"{distribution}: " + ", ".join(extras))
+    if missing or mismatched or conflicting:
         details = []
         if missing:
             details.append("missing: " + ", ".join(missing))
         if mismatched:
             details.append("wrong versions: " + ", ".join(mismatched))
+        if conflicting:
+            details.append("extra conflicting versions: " + "; ".join(conflicting))
         raise EvidenceError(
             "locked test dependencies are unavailable ("
             + "; ".join(details)
             + "); run ./scripts/bootstrap-test-env.sh and activate .venv"
         )
+
+    try:
+        local_module = importlib.import_module(LOCAL_IMPORT)
+        local_file = Path(local_module.__file__).resolve()
+    except (ImportError, AttributeError, OSError, TypeError) as exc:
+        raise EvidenceError(f"local project import {LOCAL_IMPORT!r} is unavailable") from exc
+    try:
+        local_file.relative_to(ROOT.resolve())
+    except ValueError as exc:
+        raise EvidenceError(
+            f"local project import {LOCAL_IMPORT!r} does not resolve to this repository"
+        ) from exc
 
     lock_hash = hashlib.sha256(lock_payload).hexdigest()
     identity_source = f"{implementation}\0{version}\0{lock_hash}".encode()
