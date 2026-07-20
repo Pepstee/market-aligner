@@ -50,7 +50,7 @@ def title_excerpt(body: bytes) -> str:
 def capture(plan_path: Path, destination: Path) -> None:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     records = plan.get("records")
-    if plan.get("schema_version") != "jaa04.capture-plan.v1" or not isinstance(records, list) or len(records) != 30:
+    if plan.get("schema_version") != "jaa04.capture-plan.v2" or not isinstance(records, list) or len(records) != 30:
         raise RuntimeError("capture plan must contain exactly 30 records")
     if destination.exists():
         raise RuntimeError("capture destination already exists")
@@ -65,34 +65,67 @@ def capture(plan_path: Path, destination: Path) -> None:
     dossiers: list[dict[str, object]] = []
     captured_records: list[dict[str, object]] = []
     try:
+        seen_urls: set[str] = set()
+        seen_bodies: set[str] = set()
         for record in records:
-            requested_url = str(record["url"])
-            started = datetime.now(timezone.utc).isoformat()
-            result = client.fetch_with_chain(requested_url)
-            response = result.response
-            status = int(response["status"])
-            if not 200 <= status < 300:
-                raise RuntimeError(f"retrieval failed with HTTP {status}: {requested_url}")
-            body = base64.b64decode(response["body_base64"], validate=True)
-            if len(body) != int(response["body_bytes"]):
-                raise RuntimeError("retriever body length mismatch")
-            digest, reference = cache.store(body)
-            final_url = str(response["url"])
-            history = [{"url": str(item["url"]), "status_code": int(item["status"])}
-                       for item in response.get("history", [])]
-            excerpt = title_excerpt(body)
-            source_id = f"source:{record['id']}"
-            source = {
-                "id": source_id, "url": final_url, "requested_url": requested_url,
-                "captured_at": started, "retrieved_at": datetime.now(timezone.utc).isoformat(),
-                "content_sha256": digest, "raw_response_ref": reference,
-                "status_code": status, "redirect_history": history,
-            }
-            company = str(record.get("company") or excerpt.removesuffix(" - Wikipedia"))
+            specifications = record.get("sources")
+            if not isinstance(specifications, list) or len(specifications) != 5:
+                raise RuntimeError("each capture record requires five authoritative sources")
+            citations = []
+            source_plan = []
+            source_attempts = []
+            for specification in specifications:
+                requested_url = str(specification["url"])
+                if "?" in requested_url or requested_url in seen_urls:
+                    raise RuntimeError("source URL is non-canonical or duplicated")
+                started = datetime.now(timezone.utc).isoformat()
+                result = client.fetch_with_chain(requested_url)
+                response = result.response
+                status = int(response["status"])
+                if not 200 <= status < 300:
+                    raise RuntimeError(f"retrieval failed with HTTP {status}: {requested_url}")
+                body = base64.b64decode(response["body_base64"], validate=True)
+                if len(body) != int(response["body_bytes"]):
+                    raise RuntimeError("retriever body length mismatch")
+                digest, reference = cache.store(body)
+                if digest in seen_bodies:
+                    raise RuntimeError("duplicate response body cannot be independent evidence")
+                final_url = str(response["url"])
+                if "?" in final_url or final_url in seen_urls:
+                    raise RuntimeError("redirect produced a URL alias or non-canonical URL")
+                seen_urls.add(final_url)
+                seen_bodies.add(digest)
+                history = [{"url": str(item["url"]), "status_code": int(item["status"])}
+                           for item in response.get("history", [])]
+                kind = str(specification["kind"])
+                source_id = f"source:{record['id']}:{kind}"
+                source = {
+                    "id": source_id, "url": final_url, "requested_url": requested_url,
+                    "captured_at": started, "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                    "content_sha256": digest, "raw_response_ref": reference,
+                    "status_code": status, "redirect_history": history,
+                    "published_at": specification.get("published_at"),
+                    "updated_at": specification.get("updated_at"),
+                }
+                citations.append(Citation(**source))
+                source_plan.append({
+                    "id": f"plan:{kind}", "kind": kind, "source_id": source_id,
+                    "source_type": specification["source_type"],
+                    "permitted_purposes": [kind],
+                    "freshness_days": __import__("career_automation.employer_research", fromlist=["FRESHNESS_DAYS"]).FRESHNESS_DAYS[
+                        __import__("career_automation.models", fromlist=["IntelligenceKind"]).IntelligenceKind(kind)],
+                    "relevance_terms": specification["relevance_terms"],
+                    **({"excerpt_sha256": specification["excerpt_sha256"]}
+                       if specification.get("excerpt_sha256") else {}),
+                })
+                source_attempts.append({"source_id": source_id, "engine": result.engine})
+            company = str(record.get("company") or "").strip()
+            if not company:
+                raise RuntimeError("capture record requires the reviewed employer name")
             task = SimpleNamespace(job_key=record["id"], company=company,
                                    title=str(record.get("role") or "Technology role"))
             dossier = build_reconnaissance_dossier(
-                task, Citation(**source), cache, observed_at=started,
+                task, citations, cache, source_plan=source_plan,
             )
             dossier["raw_cache_root"] = "raw"
             dossiers.append(dossier)
@@ -118,12 +151,7 @@ def capture(plan_path: Path, destination: Path) -> None:
                                      "intelligence_kinds": sorted({claim["kind"] for claim in dossier["claims"]}),
                                      "classifications": sorted({claim["classification"] for claim in dossier["claims"]}),
                                      "edge_relations": sorted({edge["relation"] for edge in dossier["edges"]}),
-                                     "requested_url": requested_url, "url": final_url,
-                                     "captured_at": source["captured_at"],
-                                     "retrieved_at": source["retrieved_at"],
-                                     "content_sha256": digest, "raw_response_ref": reference,
-                                     "status_code": status, "redirect_history": history,
-                                     "retriever_engine": result.engine, "attempts": attempts})
+                                     "retrievals": source_attempts})
         envelope = {"schema_version": "jaa04.frozen-dossiers.v1", "dossiers": dossiers,
                     "dossiers_hash": content_hash(dossiers)}
         (stage / "frozen_dossiers.json").write_bytes(canonical(envelope))

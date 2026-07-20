@@ -1,89 +1,43 @@
 #!/usr/bin/env python3
-"""Rebuild the reviewed JAA-04 dossiers and hash envelopes from captured bytes."""
+"""Rebuild JAA-04 only by retrieving every canonical public source again."""
 
 from __future__ import annotations
 
-import hashlib
-import json
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from career_automation.employer_research import (  # noqa: E402
-    Citation, RawResponseCache, build_reconnaissance_dossier, content_hash,
-    load_frozen_dossiers,
-)
+from scripts.capture_jaa_04 import capture  # noqa: E402
 
-CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
-
-
-def canonical(value: object) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True,
-                       separators=(",", ":")) + "\n").encode()
-
-
-def raw_corpus_hash() -> str:
-    digest = hashlib.sha256()
-    for path in sorted(item for item in (CAPTURE / "raw").rglob("*") if item.is_file()):
-        digest.update(path.relative_to(CAPTURE).as_posix().encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+PLAN = ROOT / "career_automation/fixtures/jaa04_capture_plan.json"
+DESTINATION = ROOT / "career_automation/fixtures/jaa04_capture"
 
 
 def main() -> int:
-    frozen_path = CAPTURE / "frozen_dossiers.json"
-    manifest_path = CAPTURE / "research_manifest.json"
-    old_dossiers = json.loads(frozen_path.read_text(encoding="utf-8"))["dossiers"]
-    old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    records_by_key = {record["job_key"]: record for record in old_manifest["records"]}
-    cache = RawResponseCache(CAPTURE / "raw")
-    dossiers = []
-    records = []
-    for old in old_dossiers:
-        record = records_by_key[old["job_key"]]
-        first_source = dict(old["sources"][0])
-        first_source["id"] = f"source:{old['job_key']}"
-        captured = Citation(**first_source)
-        dossier = build_reconnaissance_dossier(
-            SimpleNamespace(job_key=old["job_key"], company=record["company"],
-                            title=record["role"]),
-            captured, cache, observed_at=captured.captured_at,
-        )
-        dossier["raw_cache_root"] = "raw"
-        dossiers.append(dossier)
-        rebuilt = dict(record)
-        rebuilt.pop("source_id", None)
-        rebuilt.update({
-            "source_ids": [source["id"] for source in dossier["sources"]],
-            "sources": dossier["sources"],
-            "source_plan": dossier["source_plan"],
-        })
-        records.append(rebuilt)
-    frozen = {"schema_version": "jaa04.frozen-dossiers.v1", "dossiers": dossiers,
-              "dossiers_hash": content_hash(dossiers)}
-    manifest = {"schema_version": "jaa04.research-manifest.v2", "records": records,
-                "records_hash": content_hash(records)}
-    frozen_path.write_bytes(canonical(frozen))
-    manifest_path.write_bytes(canonical(manifest))
-    load_frozen_dossiers(frozen_path, cache, strict_corpus=True)
-    receipt = {
-        "schema_version": "jaa04.capture-receipt.v1", "status": "SUCCESS",
-        "captured_count": len(dossiers),
-        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        "dossiers_sha256": hashlib.sha256(frozen_path.read_bytes()).hexdigest(),
-        "raw_corpus_sha256": raw_corpus_hash(),
-        "source_plan_contract": {
-            "intelligence_kinds": ["company", "hiring", "operational_health", "product", "role"],
-            "coverage": "one-plan-one-source-one-claim-per-kind",
-            "byte_binding": "sha256-and-exact-byte-range",
-        },
-    }
-    (CAPTURE / "capture_receipt.json").write_bytes(canonical(receipt))
-    print("JAA-04 corpus rebuild: PASS")
+    parent = DESTINATION.parent
+    fresh = Path(tempfile.mkdtemp(prefix="jaa04-authentic-", dir=parent))
+    fresh.rmdir()  # capture deliberately requires a destination that does not exist
+    try:
+        capture(PLAN, fresh)
+        previous = DESTINATION.with_name(DESTINATION.name + ".previous")
+        if previous.exists():
+            shutil.rmtree(previous)
+        os.rename(DESTINATION, previous)
+        try:
+            os.rename(fresh, DESTINATION)
+        except BaseException:
+            os.rename(previous, DESTINATION)
+            raise
+        shutil.rmtree(previous)
+    except BaseException:
+        shutil.rmtree(fresh, ignore_errors=True)
+        raise
+    print("JAA-04 authentic corpus rebuild: PASS")
     return 0
 
 
