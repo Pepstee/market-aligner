@@ -22,7 +22,14 @@ query or fragment variants of one publication are aliases and must fail.
 
 ## Recommended executable route
 
-Use a reviewed cohort of employers for which all five authorities are publicly retrievable.
+Start from the 58 real jobs already admitted to the brownfield
+`employer_research_queue` after Opportunity-0. Select 30 qualifying job/employer pairs from
+that queue for which all five authorities are publicly retrievable; preserve their migrated
+`job_key`, company, role and official vacancy URL in the plan. Do not replace them with a
+convenient list of unrelated famous companies. If fewer than 30 queue entries can meet the
+authority contract, acquire additional live vacancies through the product's official source
+adapters and pass them through Opportunity-0 before admitting them to this corpus.
+
 Prefer public ATS endpoints that publish their own timestamps:
 
 - Greenhouse Job Board API: `https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}`;
