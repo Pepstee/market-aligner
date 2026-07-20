@@ -41,3 +41,4 @@ packages = [
 [tool.setuptools.package-data]
 skeleton = ["config.yaml"]
 llm = ["prompts/*.txt", "schemas/*.json"]
+career_automation = ["fixtures/*.json"]

@@ -100,6 +100,33 @@ CREATE TABLE IF NOT EXISTS employer_dossiers (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS employer_intelligence (
+  job_key TEXT NOT NULL REFERENCES employer_dossiers(job_key) ON DELETE CASCADE,
+  claim_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('company','role','product','hiring','operational_health')),
+  classification TEXT NOT NULL CHECK(classification IN ('fact','inference','hypothesis')),
+  claim_json TEXT NOT NULL,
+  PRIMARY KEY(job_key,claim_id)
+);
+CREATE TABLE IF NOT EXISTS employer_intelligence_edges (
+  job_key TEXT NOT NULL,
+  from_claim_id TEXT NOT NULL,
+  to_claim_id TEXT NOT NULL,
+  relation TEXT NOT NULL CHECK(relation IN ('supports','qualifies','contradicts','depends_on')),
+  PRIMARY KEY(job_key,from_claim_id,to_claim_id,relation),
+  FOREIGN KEY(job_key,from_claim_id) REFERENCES employer_intelligence(job_key,claim_id),
+  FOREIGN KEY(job_key,to_claim_id) REFERENCES employer_intelligence(job_key,claim_id)
+);
+CREATE TABLE IF NOT EXISTS opportunity_reassessments (
+  job_key TEXT PRIMARY KEY REFERENCES employer_dossiers(job_key) ON DELETE CASCADE,
+  opportunity0_score_bp INTEGER NOT NULL CHECK(opportunity0_score_bp BETWEEN 0 AND 10000),
+  opportunity1_score_bp INTEGER NOT NULL CHECK(opportunity1_score_bp BETWEEN 0 AND 10000),
+  decision TEXT NOT NULL CHECK(decision IN ('pass','reject')),
+  changes_json TEXT NOT NULL,
+  policy_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TRIGGER IF NOT EXISTS research_requires_opportunity_pass
 BEFORE INSERT ON employer_research_queue
 WHEN COALESCE((SELECT opportunity_decision FROM pipeline_jobs WHERE job_key=NEW.job_key),'') != 'pass'
@@ -301,8 +328,9 @@ class CareerDatabase:
                           q.research_depth,q.attempts,q.status,j.state
                    FROM employer_research_queue q
                    JOIN pipeline_jobs j ON j.job_key=q.job_key
-                   WHERE (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
-                      OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP)
+                   WHERE j.opportunity_decision='pass' AND (
+                         (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
+                      OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP))
                    ORDER BY q.priority DESC,j.opportunity DESC,q.queued_at LIMIT 1"""
             ).fetchone()
             if row is None:
@@ -341,14 +369,21 @@ class CareerDatabase:
         dossier_hash: str,
     ) -> None:
         """Persist a provenance-validated probabilistic research result."""
+        from .employer_research import RawResponseCache, content_hash, validate_dossier
+        strict = dossier.get("schema_version") == "jaa04.dossier.v1"
+        if strict:
+            cache_root = dossier.get("raw_cache_root")
+            if not isinstance(cache_root, str) or not cache_root:
+                raise ValueError("dossier must identify its raw response cache")
+            validate_dossier(dossier, RawResponseCache(cache_root))
+            if content_hash(dossier) != dossier_hash:
+                raise ValueError("dossier hash does not match canonical content")
         sources = dossier.get("sources")
         if not isinstance(sources, list) or not sources:
             raise ValueError("employer dossier requires at least one public source")
         source_ids = {str(source.get("id")) for source in sources if isinstance(source, dict)}
         for claim in dossier.get("claims", []):
-            if not isinstance(claim, dict):
-                raise ValueError("dossier claims must be objects")
-            cited = {str(value) for value in claim.get("source_ids", [])}
+            cited = {str(value) for value in claim.get("source_ids", [])} if isinstance(claim, dict) else set()
             if not cited or not cited.issubset(source_ids):
                 raise ValueError("every dossier claim must cite known source IDs")
         model = self._dossier_model(dossier)
@@ -393,18 +428,75 @@ class CareerDatabase:
                 idempotency_key=transition_key,
                 model=model,
             )
+            existing = conn.execute(
+                "SELECT dossier_hash FROM employer_dossiers WHERE job_key=?", (job_key,)
+            ).fetchone()
+            if existing is not None and existing["dossier_hash"] != dossier_hash:
+                raise RuntimeError("dossier completion is immutable and at-most-once")
             conn.execute(
-                """INSERT INTO employer_dossiers(job_key,dossier_json,dossier_hash,worker_id)
-                   VALUES(?,?,?,?) ON CONFLICT(job_key) DO UPDATE SET
-                   dossier_json=excluded.dossier_json,dossier_hash=excluded.dossier_hash,
-                   worker_id=excluded.worker_id,created_at=CURRENT_TIMESTAMP""",
+                """INSERT OR IGNORE INTO employer_dossiers(job_key,dossier_json,dossier_hash,worker_id)
+                   VALUES(?,?,?,?)""",
                 (job_key, json.dumps(dossier, ensure_ascii=False, sort_keys=True), dossier_hash, worker_id),
             )
+            if strict:
+                for claim in dossier["claims"]:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO employer_intelligence
+                           (job_key,claim_id,kind,classification,claim_json) VALUES(?,?,?,?,?)""",
+                        (job_key, claim["id"], claim["kind"], claim["classification"],
+                         json.dumps(claim, ensure_ascii=False, sort_keys=True)),
+                    )
+                for edge in dossier.get("edges", []):
+                    conn.execute(
+                        """INSERT OR IGNORE INTO employer_intelligence_edges
+                           (job_key,from_claim_id,to_claim_id,relation) VALUES(?,?,?,?)""",
+                        (job_key, edge["from_claim_id"], edge["to_claim_id"], edge["relation"]),
+                    )
             conn.execute(
                 """UPDATE employer_research_queue SET status='completed',lease_owner=NULL,
                      lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE job_key=?""",
                 (job_key,),
             )
+
+    def apply_opportunity1(self, *, job_key: str, signals: list[dict[str, Any]]) -> dict[str, Any]:
+        """Reassess after a completed dossier while retaining Opportunity-0."""
+        from dataclasses import asdict
+        from .opportunity1 import reassess_opportunity1
+
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """SELECT j.opportunity,j.state,d.dossier_hash
+                   FROM pipeline_jobs j JOIN employer_dossiers d ON d.job_key=j.job_key
+                   WHERE j.job_key=?""", (job_key,),
+            ).fetchone()
+            if row is None or row["state"] != PipelineState.EMPLOYER_RESEARCHED.value:
+                raise RuntimeError("Opportunity-1 requires completed employer research")
+            result = reassess_opportunity1(round(float(row["opportunity"]) * 10_000), signals)
+            output = asdict(result)
+            key = f"opportunity-1:{job_key}:{row['dossier_hash']}:{result.policy_hash}"
+            self.lifecycle.commit_in_transaction(
+                conn, job_key=job_key, to_state=PipelineState.OPPORTUNITY_1_ASSESSED,
+                policy=PolicyIdentity("career.opportunity-1", "1", result.policy_hash),
+                inputs={"opportunity0_score_bp": result.opportunity0_score_bp,
+                        "dossier_hash": row["dossier_hash"], "signals": signals},
+                outputs=output, idempotency_key=key,
+            )
+            conn.execute(
+                """INSERT INTO opportunity_reassessments
+                   (job_key,opportunity0_score_bp,opportunity1_score_bp,decision,changes_json,policy_hash)
+                   VALUES(?,?,?,?,?,?)""",
+                (job_key, result.opportunity0_score_bp, result.score_bp, result.decision,
+                 json.dumps(output["changes"], sort_keys=True), result.policy_hash),
+            )
+            target = (PipelineState.FIT_ASSESSED if result.decision == "pass"
+                      else PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH)
+            self.lifecycle.commit_in_transaction(
+                conn, job_key=job_key, to_state=target,
+                policy=PolicyIdentity("career.opportunity-1-routing", "1", result.policy_hash),
+                inputs=output, outputs={"decision": result.decision},
+                idempotency_key=key + ":route",
+            )
+            return output
 
     @staticmethod
     def _dossier_model(dossier: dict[str, Any]) -> ModelIdentity | None:
