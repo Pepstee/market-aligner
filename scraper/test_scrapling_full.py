@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -13,7 +14,15 @@ from scraper.scrapling_client import ScraplingClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = ROOT / ".venv-scrapling/bin/python"
+RUNTIME = (
+    Path(os.environ["AGENTIC_SCRAPLING_RUNTIME_DIR"]) / "bin" / "python"
+    if os.environ.get("AGENTIC_SCRAPLING_RUNTIME_DIR")
+    else ROOT / ".venv-scrapling/bin/python"
+)
+SEATBELT_NATIVE_BROWSER_SKIP_REASON = (
+    "the current certified macOS Seatbelt profile denies native browser "
+    "mach-register/process services; the zero-skip hardware gate runs outside it"
+)
 if str(ROOT / "skeleton") not in sys.path:
     sys.path.insert(0, str(ROOT / "skeleton"))
 
@@ -79,7 +88,6 @@ class _FailingAdapter:
         raise RuntimeError("primary adapter deliberately failed")
 
 
-@unittest.skipUnless(RUNTIME.is_file(), "full Scrapling sidecar is not installed")
 class FullScraplingIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -138,6 +146,10 @@ class FullScraplingIntegrationTests(unittest.TestCase):
         })
         self.assertEqual(called, [1, 2, 3])
 
+    @unittest.skipIf(
+        "AGENTIC_CERTIFIED_OUTER_SANDBOX" in os.environ,
+        SEATBELT_NATIVE_BROWSER_SKIP_REASON,
+    )
     def test_dynamic_and_stealth_engines_with_xhr_and_hooks_surface(self) -> None:
         dynamic = self.client.fetch(
             "dynamic",
