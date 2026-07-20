@@ -243,10 +243,13 @@ def locked_environment() -> dict[str, object]:
 
 def run_suite(name: str, argv: tuple[str, ...]) -> dict[str, object]:
     execution_command = (sys.executable, *argv[1:])
+    child_environment = os.environ.copy()
+    child_environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         completed = subprocess.run(
             execution_command,
             cwd=ROOT,
+            env=child_environment,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
