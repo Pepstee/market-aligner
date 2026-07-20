@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
+import importlib.machinery
 import importlib.metadata
 import json
 import os
@@ -40,6 +40,77 @@ ALLOWED_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 
 class EvidenceError(RuntimeError):
     """The run is not suitable for an accepted evidence receipt."""
+
+
+def local_source_file(module_name: str) -> Path:
+    """Locate an uncached regular Python source beneath ROOT only."""
+    root = ROOT.resolve()
+    search_path = [os.fspath(root)]
+    parts = module_name.split(".")
+    if not parts or any(not part or not part.isidentifier() for part in parts):
+        raise EvidenceError(f"local project import {module_name!r} is unavailable")
+
+    source_file: Path | None = None
+    for index, _part in enumerate(parts):
+        qualified_name = ".".join(parts[: index + 1])
+        spec = importlib.machinery.PathFinder.find_spec(qualified_name, search_path)
+        if (
+            spec is None
+            or not isinstance(spec.loader, importlib.machinery.SourceFileLoader)
+            or not spec.origin
+        ):
+            raise EvidenceError(
+                f"local project import {module_name!r} does not resolve to this repository"
+            )
+
+        apparent_source = Path(spec.origin)
+        try:
+            relative_source = apparent_source.relative_to(root)
+        except ValueError as exc:
+            raise EvidenceError(
+                f"local project import {module_name!r} does not resolve to this repository"
+            ) from exc
+
+        candidate = root
+        try:
+            for component in relative_source.parts:
+                candidate /= component
+                status = candidate.lstat()
+                if stat.S_ISLNK(status.st_mode):
+                    raise EvidenceError(
+                        f"local project import {module_name!r} does not resolve to this repository"
+                    )
+            if not stat.S_ISREG(status.st_mode):
+                raise EvidenceError(
+                    f"local project import {module_name!r} is unavailable"
+                )
+            resolved_source = apparent_source.resolve(strict=True)
+            resolved_source.relative_to(root)
+        except EvidenceError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise EvidenceError(
+                f"local project import {module_name!r} does not resolve to this repository"
+            ) from exc
+
+        source_file = resolved_source
+        if index < len(parts) - 1:
+            locations = spec.submodule_search_locations
+            if locations is None or len(locations) != 1:
+                raise EvidenceError(f"local project import {module_name!r} is unavailable")
+            package_path = Path(next(iter(locations)))
+            try:
+                package_path.relative_to(root)
+                package_path.resolve(strict=True).relative_to(root)
+            except (OSError, ValueError) as exc:
+                raise EvidenceError(
+                    f"local project import {module_name!r} does not resolve to this repository"
+                ) from exc
+            search_path = [os.fspath(package_path)]
+
+    if source_file is None:
+        raise EvidenceError(f"local project import {module_name!r} is unavailable")
+    return source_file
 
 
 def display_command(command: tuple[str, ...]) -> str:
@@ -159,21 +230,7 @@ def locked_environment() -> dict[str, object]:
             + "); run ./scripts/bootstrap-test-env.sh and activate .venv"
         )
 
-    repository_root = os.fspath(ROOT.resolve())
-    if not sys.path or sys.path[0] != repository_root:
-        sys.path.insert(0, repository_root)
-    importlib.invalidate_caches()
-    try:
-        local_module = importlib.import_module(LOCAL_IMPORT)
-        local_file = Path(local_module.__file__).resolve()
-    except (ImportError, AttributeError, OSError, TypeError) as exc:
-        raise EvidenceError(f"local project import {LOCAL_IMPORT!r} is unavailable") from exc
-    try:
-        local_file.relative_to(ROOT.resolve())
-    except ValueError as exc:
-        raise EvidenceError(
-            f"local project import {LOCAL_IMPORT!r} does not resolve to this repository"
-        ) from exc
+    local_source_file(LOCAL_IMPORT)
 
     lock_hash = hashlib.sha256(lock_payload).hexdigest()
     identity_source = f"{implementation}\0{version}\0{lock_hash}".encode()
@@ -186,13 +243,10 @@ def locked_environment() -> dict[str, object]:
 
 def run_suite(name: str, argv: tuple[str, ...]) -> dict[str, object]:
     execution_command = (sys.executable, *argv[1:])
-    execution_environment = os.environ.copy()
-    execution_environment["PYTHONPATH"] = os.fspath(ROOT.resolve())
     try:
         completed = subprocess.run(
             execution_command,
             cwd=ROOT,
-            env=execution_environment,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
