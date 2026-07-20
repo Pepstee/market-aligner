@@ -212,9 +212,11 @@ def test_configurer_rejects_symlink_overlap_and_repository_evidence_before_writi
     assert "must not overlap the product repository" in contained.stderr
 
 
-def test_acceptance_declaration_is_single_independently_executable_command() -> None:
+def test_acceptance_declaration_commands_are_independent_and_direct_execution_fails_closed() -> None:
     lines = [line.strip() for line in (ROOT / "acceptance").read_text(encoding="utf-8").splitlines()]
     commands = [line for line in lines if line and not line.startswith("#")]
     assert commands == [
-        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.py"'
+        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.py" || exit $?',
+        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa_02.py" || exit $?',
+        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa02_receipt.py" || exit $?',
     ]
