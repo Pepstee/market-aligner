@@ -24,9 +24,11 @@ full = ["playwright>=1.40", "matplotlib>=3.8", "jsonschema>=4.20"]
 [project.scripts]
 market-aligner = "skeleton.run:main"
 uk-job-matcher = "skeleton.run:main"
+jaa-baseline = "baseline_adoption.cli:main"
 
 [tool.setuptools]
 packages = [
+    "baseline_adoption",
     "career_automation",
     "skeleton",
     "scraper",
