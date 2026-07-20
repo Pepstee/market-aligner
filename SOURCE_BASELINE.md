@@ -37,6 +37,20 @@ These are historical observations, not mutable declarations of the live files' p
 contents. The legacy `adopt` path verifies these exact bytes and refuses any journal, WAL,
 or SHM sidecar; it must never directly copy a live WAL database.
 
+## Evidence ownership
+
+JAA-00 `recertify-sources`, which acceptance invokes, is the sole owner of direct
+observations of the two mutable original SQLite databases. Its disposable receipts describe
+present database state using fail-closed, read-only handles. Historical source observations
+and earlier immutable receipts remain records of what was seen at that time; their counts
+and byte hashes are not timeless assertions about files that a collector may lawfully change.
+
+JAA-01 does not accept or open either mutable original database. It certifies the frozen
+462-job/924-event baseline and its JAA-00 migration receipt, applies the declared migration
+versions only to a temporary copy, checks lifecycle replay and retry invariants, and binds
+the result to the exact tracked source revision. Consequently its command has no
+`--live-source` option and newly produced JAA-01 evidence has no `live_sources` field.
+
 ## Online snapshot contract
 
 For a collector that is still writing, `adopt-online` opens each source with SQLite

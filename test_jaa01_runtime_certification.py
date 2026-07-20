@@ -8,13 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
+import shutil
 import sqlite3
 import subprocess
 import sys
-from copy import deepcopy
 from pathlib import Path
-from urllib.parse import quote
 
 import pytest
 
@@ -25,61 +23,16 @@ ROOT = Path(__file__).resolve().parent
 CERTIFIER = ROOT / "scripts" / "certify_jaa01_runtime.py"
 REPRODUCER = ROOT / "scripts" / "reproduce_jaa01_terra_rejection.py"
 MIGRATION_CONTENT_HASH = "4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66"
-LIVE_SOURCE_ROOT = Path("/Users/admin/Claude/Projects/Korea Job Scraper")
-LIVE_SOURCES = {
-    "career-pipeline": LIVE_SOURCE_ROOT / "outputs" / "career_automation" / "career_pipeline.sqlite3",
-    "raw-jobs": LIVE_SOURCE_ROOT / "scraper" / "data_overnight" / "jobs.sqlite3",
-}
-LIVE_SOURCE_BINDING_FIELDS = {
-    "label", "sha256_before", "sha256_after", "integrity_check", "read_only_query_only",
-}
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _readonly_integrity_check(path: Path) -> tuple[list[str], int]:
-    """Observe a source independently, without importing the certifier helper."""
-    uri = "file:" + quote(str(path.resolve()), safe="/") + "?mode=ro"
-    with sqlite3.connect(uri, uri=True) as connection:
-        connection.execute("PRAGMA query_only=ON")
-        integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
-        query_only = int(connection.execute("PRAGMA query_only").fetchone()[0])
-    return integrity, query_only
-
-
 def _jaa01_receipt() -> Path:
     receipts = sorted((ROOT / "runtime_evidence" / "jaa01").glob("sha256-*.json"))
     assert len(receipts) == 1, f"expected exactly one checked-in JAA-01 receipt, found {receipts}"
     return receipts[0]
-
-
-def _assert_exact_live_source_receipt_bindings(document: dict[str, object]) -> None:
-    """Require a complete, internally stable binding made during certification."""
-    live_sources = document["live_sources"]
-    assert isinstance(live_sources, dict)
-    assert set(live_sources) == set(LIVE_SOURCES)
-    for logical_label in LIVE_SOURCES:
-        binding = live_sources[logical_label]
-        assert isinstance(binding, dict)
-        assert set(binding) == LIVE_SOURCE_BINDING_FIELDS
-        assert binding["label"] == f"live-source:{logical_label}"
-        before, after = binding["sha256_before"], binding["sha256_after"]
-        assert isinstance(before, str) and re.fullmatch(r"[0-9a-f]{64}", before)
-        assert isinstance(after, str) and re.fullmatch(r"[0-9a-f]{64}", after)
-        assert before == after
-        assert binding["integrity_check"] == ["ok"]
-        assert binding["read_only_query_only"] is True
-
-
-def _assert_current_live_sources_are_healthy() -> None:
-    """Check today's selected live databases without rewriting receipt history."""
-    for path in LIVE_SOURCES.values():
-        assert path.is_file() and not path.is_symlink(), path
-        integrity, query_only = _readonly_integrity_check(path)
-        assert integrity == ["ok"]
-        assert query_only == 1
 
 
 def _runtime() -> Path:
@@ -155,6 +108,22 @@ def clean_certifier_root(tmp_path: Path) -> Path:
         text=True, capture_output=True, check=False,
     )
     assert cloned.returncode == 0, cloned.stderr
+    cloned_certifier = clone / CERTIFIER.relative_to(ROOT)
+    shutil.copyfile(CERTIFIER, cloned_certifier)
+    changed = subprocess.run(
+        ["git", "diff", "--quiet", "--", str(CERTIFIER.relative_to(ROOT))], cwd=clone,
+        check=False,
+    )
+    if changed.returncode == 1:
+        for command in (
+            ["git", "add", str(CERTIFIER.relative_to(ROOT))],
+            ["git", "-c", "user.name=JAA-01 test", "-c", "user.email=jaa01@example.test",
+             "commit", "-m", "test current JAA-01 certifier"],
+        ):
+            completed = subprocess.run(command, cwd=clone, text=True, capture_output=True, check=False)
+            assert completed.returncode == 0, completed.stderr
+    else:
+        assert changed.returncode == 0
     return clone
 
 
@@ -202,6 +171,12 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert document["observed_counts"]["baseline_before"] == {"pipeline_jobs": 462, "pipeline_events": 924}
     assert document["migration_versions"] == [1]
     assert document["scenario"]["replay_equal"] is True
+    assert "live_sources" not in document
+    assert document["command_semantics"]["argv"] == [
+        "python3", "scripts/certify_jaa01_runtime.py",
+        "--baseline-database", "<frozen-baseline-database>",
+        "--migration-receipt", "<migration-receipt>",
+    ]
     assert str(tmp_path) not in payload
     assert not any(value.startswith("/") for value in _strings(document))
 
@@ -258,7 +233,17 @@ def test_runtime_certifier_rejects_symlinked_evidence_directory_without_writing_
     assert list(actual_output.iterdir()) == []
 
 
-def test_checked_in_jaa01_evidence_is_content_addressed_complete_and_path_free() -> None:
+def test_runtime_certifier_command_contract_rejects_mutable_live_source_input() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(CERTIFIER), "--baseline-database", "frozen.sqlite3",
+         "--migration-receipt", "migration.json", "--live-source", "raw-jobs=live.sqlite3"],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 2
+    assert "unrecognized arguments: --live-source" in completed.stderr
+
+
+def test_checked_in_jaa01_evidence_is_historical_content_addressed_and_path_free() -> None:
     runtime = _runtime()
     database = runtime / "databases" / "career_pipeline.sqlite3"
     receipt = runtime / "receipts" / f"migration-{MIGRATION_CONTENT_HASH}.json"
@@ -283,63 +268,11 @@ def test_checked_in_jaa01_evidence_is_content_addressed_complete_and_path_free()
     assert document["scenario"]["receipts"] == 3
     assert document["scenario"]["replay_equal"] is True
     assert document["scenario"]["identical_retry_unchanged"] is True
-    _assert_exact_live_source_receipt_bindings(document)
-    _assert_current_live_sources_are_healthy()
+    # A checked-in receipt records what its historical certification observed.
+    # Present mutable-source state belongs exclusively to JAA-00 recertification,
+    # so this test deliberately neither opens those databases nor compares hashes.
     assert str(runtime) not in payload.decode("utf-8")
     assert not any(value.startswith("/") for value in _strings(document))
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        pytest.param(lambda sources: sources.pop("raw-jobs"), id="missing-live-source"),
-        pytest.param(
-            lambda sources: sources.__setitem__("unexpected", deepcopy(sources["raw-jobs"])),
-            id="extra-live-source",
-        ),
-        pytest.param(
-            lambda sources: sources.__setitem__("raw_jobs", sources.pop("raw-jobs")),
-            id="renamed-live-source",
-        ),
-        pytest.param(
-            lambda sources: sources["raw-jobs"].__setitem__("sha256_after", "0" * 64),
-            id="unequal-before-after-hashes",
-        ),
-        pytest.param(
-            lambda sources: sources["raw-jobs"].__setitem__("sha256_before", "not-a-hash"),
-            id="invalid-hash",
-        ),
-        pytest.param(
-            lambda sources: sources["raw-jobs"].__setitem__("read_only_query_only", False),
-            id="false-read-only-query-only",
-        ),
-        pytest.param(
-            lambda sources: sources["raw-jobs"].__setitem__("integrity_check", ["corrupt"]),
-            id="failed-integrity-check",
-        ),
-        pytest.param(
-            lambda sources: sources["raw-jobs"].__setitem__("label", "live-source:wrong"),
-            id="wrong-logical-label",
-        ),
-        pytest.param(
-            lambda sources: sources["raw-jobs"].pop("integrity_check"),
-            id="malformed-binding-shape",
-        ),
-    ],
-)
-def test_checked_in_jaa01_receipt_rejects_non_exact_live_source_bindings(mutate: object) -> None:
-    document = json.loads(_jaa01_receipt().read_text(encoding="utf-8"))
-    # First prove the unmodified receipt is valid.  Otherwise a stale receipt
-    # could make every negative control pass for the wrong reason.
-    _assert_exact_live_source_receipt_bindings(document)
-    altered = deepcopy(document)
-    live_sources = altered["live_sources"]
-    assert isinstance(live_sources, dict)
-    assert callable(mutate)
-    mutate(live_sources)
-    with pytest.raises(AssertionError):
-        _assert_exact_live_source_receipt_bindings(altered)
-
 
 def _strings(value: object) -> list[str]:
     if isinstance(value, str):

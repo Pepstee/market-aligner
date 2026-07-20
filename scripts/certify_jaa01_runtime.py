@@ -97,13 +97,6 @@ def load_migration_receipt(path: Path) -> tuple[dict[str, Any], str]:
     return receipt, digest
 
 
-def parse_live_source(value: str) -> tuple[str, Path]:
-    label, separator, raw_path = value.partition("=")
-    if not separator or not label or not raw_path or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in label):
-        raise argparse.ArgumentTypeError("live source must be LABEL=PATH with a lowercase logical label")
-    return label, Path(raw_path)
-
-
 def require_unlinked_output_path(path: Path) -> None:
     """Reject an output path containing any existing symbolic-link component."""
     absolute = Path(os.path.abspath(path))
@@ -117,8 +110,6 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--baseline-database", required=True)
     result.add_argument("--migration-receipt", required=True)
-    result.add_argument("--live-source", action="append", type=parse_live_source, default=[],
-                        metavar="LABEL=PATH")
     result.add_argument("--evidence-directory", default="runtime_evidence/jaa01")
     return result
 
@@ -139,10 +130,6 @@ def certify(args: argparse.Namespace) -> Path:
 
     baseline_before = readonly_observation(baseline)
     require(baseline_before["counts"] == EXPECTED_COUNTS, "baseline counts are not 462/924")
-    live_before: dict[str, dict[str, Any]] = {}
-    for label, path in args.live_source:
-        require(label not in live_before, f"duplicate live-source label: {label}")
-        live_before[label] = {"sha256": hash_file(path), **readonly_observation(path)}
 
     with tempfile.TemporaryDirectory(prefix="jaa01-runtime-") as directory:
         migrated = Path(directory) / "career_pipeline.sqlite3"
@@ -174,16 +161,6 @@ def certify(args: argparse.Namespace) -> Path:
     require(readonly_observation(baseline) == baseline_before,
             "baseline read-only continuity changed during certification")
 
-    live_evidence: dict[str, Any] = {}
-    for label, path in args.live_source:
-        after = {"sha256": hash_file(path), **readonly_observation(path)}
-        require(after == live_before[label], f"live source continuity changed: {label}")
-        live_evidence[label] = {
-            "label": f"live-source:{label}", "sha256_before": live_before[label]["sha256"],
-            "sha256_after": after["sha256"], "integrity_check": after["integrity_check"],
-            "read_only_query_only": after["query_only"] == 1,
-        }
-
     require(source_content_revision() == revision,
             "tracked source content changed during certification")
 
@@ -202,7 +179,6 @@ def certify(args: argparse.Namespace) -> Path:
                 "python3", "scripts/certify_jaa01_runtime.py",
                 "--baseline-database", "<frozen-baseline-database>",
                 "--migration-receipt", "<migration-receipt>",
-                "--live-source", "<logical-label>=<optional-live-source>",
             ],
             "migration_target": "temporary-copy-only",
             "inputs_opened_read_only": True,
@@ -223,7 +199,6 @@ def certify(args: argparse.Namespace) -> Path:
         "migration_versions": versions,
         "baseline_integrity_check": baseline_before["integrity_check"],
         "read_only_continuity": True,
-        "live_sources": live_evidence,
         "scenario": scenario,
     }
     payload = (json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
