@@ -147,6 +147,24 @@ def test_suite_executes_current_interpreter_but_records_portable_argv(
     assert sys.executable not in result["argv"]
 
 
+def test_public_generator_is_bytecode_hermetic_when_parent_opt_out_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public script must enforce its child bytecode boundary itself."""
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    root = _public_repository(
+        tmp_path,
+        "================ 4 passed in 0.01s ================",
+        "================ 2 passed in 0.01s ================",
+    )
+
+    completed = _run_public_generator(root)
+
+    assert completed.returncode == 0, completed.stderr
+    assert not list(root.rglob("__pycache__"))
+    assert not list(root.rglob("*.pyc"))
+
+
 def test_receipt_argv_has_no_environment_path_and_reexecutes_from_path(
     tmp_path: Path,
 ) -> None:
