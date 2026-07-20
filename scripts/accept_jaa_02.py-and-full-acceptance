@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$project_root"
+python3 scripts/run_acceptance.py
+python3 scripts/accept_jaa_02.py
+python3 scripts/accept_jaa02_receipt.py
+python3 scripts/accept_jaa_03.py
+python3 scripts/accept_jaa_04.py

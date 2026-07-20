@@ -8,12 +8,10 @@ import json
 import os
 import platform
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
-import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -23,8 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.database import CareerDatabase  # noqa: E402
 from career_automation.employer_research import (  # noqa: E402
-    RawResponseCache, content_hash, ingest_frozen_manifest,
-    load_frozen_dossiers, validate_dossier,
+    RawResponseCache, content_hash, load_frozen_dossiers, validate_dossier,
 )
 from career_automation.engine import OpportunityGate, scored_job_from_payload  # noqa: E402
 from career_automation.models import PipelineState  # noqa: E402
@@ -34,9 +31,11 @@ from tracked_source_revision import (  # noqa: E402
 )
 
 FORMAT = "jaa04-revision-certification/v1"
-MANIFEST = ROOT / "career_automation/fixtures/jaa04_research_manifest.json"
-FROZEN = ROOT / "career_automation/fixtures/jaa04_frozen_dossiers.json"
-FROZEN_RAW = ROOT / "career_automation/fixtures/jaa04_raw"
+CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
+MANIFEST = CAPTURE / "research_manifest.json"
+FROZEN = CAPTURE / "frozen_dossiers.json"
+FROZEN_RAW = CAPTURE / "raw"
+CAPTURE_RECEIPT = CAPTURE / "capture_receipt.json"
 EVIDENCE = ROOT / "runtime_evidence/jaa04"
 COMMANDS = [
     "python3 scripts/accept_jaa_04.py",
@@ -96,52 +95,23 @@ def _runtime_dossier(cache: RawResponseCache, job_key: str) -> dict[str, Any]:
     }
 
 
-def replay_production_retrieval(records: list[dict[str, Any]], destination: Path) -> list[dict[str, Any]]:
-    bodies = {record["url"]: (FROZEN_RAW / record["raw_response_ref"]).read_bytes()
-              for record in records}
-
-    class Fetcher:
-        @staticmethod
-        def get(url: str, timeout: int):
-            require(timeout == 45 and url in bodies, "unexpected production retrieval request")
-            return types.SimpleNamespace(status=200, url=url, body=bodies[url])
-
-    scrapling = types.ModuleType("scrapling")
-    fetchers = types.ModuleType("scrapling.fetchers")
-    fetchers.Fetcher = Fetcher
-    previous_scrapling = sys.modules.get("scrapling")
-    previous_fetchers = sys.modules.get("scrapling.fetchers")
-    original_resolver = socket.getaddrinfo
-    try:
-        sys.modules["scrapling"] = scrapling
-        sys.modules["scrapling.fetchers"] = fetchers
-        socket.getaddrinfo = lambda *args, **kwargs: [(2, 1, 6, "", ("8.8.8.8", 443))]
-        return ingest_frozen_manifest(MANIFEST, RawResponseCache(destination),
-                                      enforce_reviewed_bytes=True)
-    finally:
-        socket.getaddrinfo = original_resolver
-        if previous_scrapling is None:
-            sys.modules.pop("scrapling", None)
-        else:
-            sys.modules["scrapling"] = previous_scrapling
-        if previous_fetchers is None:
-            sys.modules.pop("scrapling.fetchers", None)
-        else:
-            sys.modules["scrapling.fetchers"] = previous_fetchers
-
-
 def exercise_runtime(work: Path) -> dict[str, Any]:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     frozen = load_frozen_dossiers(FROZEN, RawResponseCache(FROZEN_RAW), strict_corpus=True)
     require(len(frozen) == 30, "frozen corpus cardinality mismatch")
-    replayed = replay_production_retrieval(manifest["records"], work / "retrieval-cache")
-    require(len(replayed) == len(frozen), "production retrieval cardinality mismatch")
-    for actual, expected in zip(replayed, frozen, strict=True):
-        require(actual["job_key"] == expected["job_key"]
-                and actual["claims"] == expected["claims"]
-                and actual["sources"][0]["url"] == expected["sources"][0]["url"]
-                and actual["sources"][0]["content_sha256"] == expected["sources"][0]["content_sha256"],
-                "production retrieval did not reproduce frozen evidence")
+    require(manifest.get("schema_version") == "jaa04.research-manifest.v2"
+            and content_hash(manifest["records"]) == manifest.get("records_hash"),
+            "captured research manifest is invalid")
+    by_key = {dossier["job_key"]: dossier for dossier in frozen}
+    for record in manifest["records"]:
+        dossier = by_key[record["job_key"]]
+        source = dossier["sources"][0]
+        require(record["content_sha256"] == source["content_sha256"]
+                and record["url"] == source["url"]
+                and record["status_code"] == source["status_code"]
+                and record["retrieved_at"] == source["retrieved_at"]
+                and record["redirect_history"] == source["redirect_history"],
+                "manifest is not bound to frozen dossier provenance")
     source_hashes = {source["content_sha256"] for dossier in frozen for source in dossier["sources"]}
     require(len(source_hashes) == 30, "identical synthetic responses cannot certify JAA-04")
 
@@ -196,7 +166,9 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
             and result["score_bp"] == 5000, "Opportunity-1 demotion failed")
     require(database.lifecycle.replay()[strong.key] is PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH,
             "durable lifecycle replay mismatch")
-    return {"status": "PASS", "dossier_count": 30, "distinct_source_bytes": 30,
+    return {"status": "PASS", "validation_mode": "offline-corpus-validation",
+            "capture_provenance": "external-jaa04.capture-receipt.v1",
+            "dossier_count": 30, "distinct_source_bytes": 30,
             "negative_controls": negative_controls,
             "lease_resume_attempts": resumed.attempts,
             "opportunity1": result}
@@ -204,6 +176,17 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
 
 def canonical(document: dict[str, Any]) -> bytes:
     return (json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def raw_corpus_hash() -> str:
+    files = sorted(path for path in FROZEN_RAW.rglob("*") if path.is_file())
+    require(len(files) == 30, "raw response corpus cardinality mismatch")
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(CAPTURE).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def publish(document: dict[str, Any]) -> Path:
@@ -228,7 +211,21 @@ def main() -> int:
     work: Path | None = None
     try:
         revision_before, content_before = clean_revision()
-        corpus_hash = hashlib.sha256(FROZEN.read_bytes()).hexdigest()
+        capture_receipt = json.loads(CAPTURE_RECEIPT.read_text(encoding="utf-8"))
+        require(capture_receipt.get("schema_version") == "jaa04.capture-receipt.v1"
+                and capture_receipt.get("status") == "SUCCESS"
+                and capture_receipt.get("captured_count") == 30,
+                "authentic capture receipt is missing")
+        hashes = {
+            "research_manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
+            "frozen_dossiers_sha256": hashlib.sha256(FROZEN.read_bytes()).hexdigest(),
+            "capture_receipt_sha256": hashlib.sha256(CAPTURE_RECEIPT.read_bytes()).hexdigest(),
+            "raw_corpus_sha256": capture_receipt["raw_corpus_sha256"],
+        }
+        require(hashes["research_manifest_sha256"] == capture_receipt["manifest_sha256"]
+                and hashes["frozen_dossiers_sha256"] == capture_receipt["dossiers_sha256"]
+                and hashes["raw_corpus_sha256"] == raw_corpus_hash(),
+                "capture components are not hash-bound")
         work = Path(tempfile.mkdtemp(prefix="jaa04-acceptance-"))
         result = exercise_runtime(work)
         revision_after, content_after = clean_revision()
@@ -239,7 +236,7 @@ def main() -> int:
             "source_content_revision": content_before,
             "source_content_revision_contract": source_content_revision_contract(),
             "acceptance_commands": COMMANDS,
-            "frozen_corpus_file_sha256": corpus_hash,
+            "capture_component_hashes": hashes,
             "frozen_corpus_hash": json.loads(FROZEN.read_text(encoding="utf-8"))["dossiers_hash"],
             "runtime": {"python_implementation": platform.python_implementation(),
                         "python_version": platform.python_version()},

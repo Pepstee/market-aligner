@@ -11,7 +11,6 @@ import json
 import sqlite3
 import subprocess
 import sys
-import types
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -23,7 +22,6 @@ from career_automation.database import CareerDatabase
 from career_automation.employer_research import (
     RawResponseCache,
     content_hash,
-    ingest_frozen_manifest,
     load_frozen_dossiers,
     validate_dossier,
 )
@@ -32,7 +30,8 @@ from career_automation.models import PipelineState
 
 
 ROOT = Path(__file__).resolve().parent
-MANIFEST = ROOT / "career_automation/fixtures/jaa04_research_manifest.json"
+CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
+MANIFEST = CAPTURE / "research_manifest.json"
 ACCEPTANCE = ROOT / "scripts/accept_jaa_04.py"
 
 
@@ -82,32 +81,10 @@ def _complete(database: CareerDatabase, job_key: str, cache: RawResponseCache, w
     return dossier
 
 
-def test_all_thirty_frozen_records_traverse_real_retrieval_cache_and_claim_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Exercise the production ingestion path without making live web content authority."""
-    class Response:
-        status = 200
-        url = "https://8.8.8.8/frozen-public-page"
-        body = b"reviewed frozen public source"
-
-    class Fetcher:
-        @staticmethod
-        def get(url: str, timeout: int):
-            assert url.startswith("https://") and timeout == 45
-            return Response()
-
-    # DNS is an external transport detail; all manifest hosts are represented
-    # by a global address while the runtime still performs its URL checks.
-    import career_automation.employer_research as research
-    monkeypatch.setattr(research.socket, "getaddrinfo", lambda *args: [(2, 1, 6, "", ("8.8.8.8", 443))])
-    monkeypatch.setitem(sys.modules, "scrapling", types.ModuleType("scrapling"))
-    fetchers = types.ModuleType("scrapling.fetchers")
-    fetchers.Fetcher = Fetcher
-    monkeypatch.setitem(sys.modules, "scrapling.fetchers", fetchers)
-
-    cache = RawResponseCache(tmp_path / "raw")
-    dossiers = ingest_frozen_manifest(MANIFEST, cache)
+def test_all_thirty_frozen_records_validate_against_receipt_backed_raw_corpus() -> None:
+    """Offline validation is deliberately not represented as a live retrieval."""
+    cache = RawResponseCache(CAPTURE / "raw")
+    dossiers = load_frozen_dossiers(CAPTURE / "frozen_dossiers.json", cache, strict_corpus=True)
     assert len(dossiers) == 30
     assert {item["job_key"] for item in dossiers} == {
         f"jaa04-{number:03d}" for number in range(1, 31)
@@ -119,11 +96,13 @@ def test_all_thirty_frozen_records_traverse_real_retrieval_cache_and_claim_valid
         assert claim["source_ids"] == [source["id"]]
         assert cache.resolve(source["raw_response_ref"], source["content_sha256"])
 
-    frozen = {"schema_version": "jaa04.frozen-dossiers.v1", "dossiers": dossiers}
-    frozen["dossiers_hash"] = content_hash(dossiers)
-    path = tmp_path / "frozen-dossiers.json"
-    path.write_text(json.dumps(frozen), encoding="utf-8")
-    assert load_frozen_dossiers(path, cache) == dossiers
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    receipt = json.loads((CAPTURE / "capture_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "SUCCESS" and receipt["captured_count"] == 30
+    assert receipt["manifest_sha256"] == hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
+    assert {row["content_sha256"] for row in manifest["records"]} == {
+        dossier["sources"][0]["content_sha256"] for dossier in dossiers
+    }
 
 
 @pytest.mark.parametrize("attack", ["uncited", "hallucinated", "stale-current", "protected", "private-person"])
