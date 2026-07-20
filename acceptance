@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-bash "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.sh"
+python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.py"
