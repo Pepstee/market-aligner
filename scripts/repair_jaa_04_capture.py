@@ -36,16 +36,16 @@ def main() -> int:
     records = []
     for old, record in zip(previous["dossiers"], manifest["records"], strict=True):
         source = old["sources"][0]
-        title = old["claims"][0]["citation_excerpt"].removesuffix(" - Wikipedia")
-        task = SimpleNamespace(job_key=old["job_key"], company=title,
-                               title="Technology role")
+        company = str(record["company"])
+        role = str(record.get("role") or "Technology role")
+        task = SimpleNamespace(job_key=old["job_key"], company=company, title=role)
         dossier = build_reconnaissance_dossier(task, Citation(**source), cache,
                                                 observed_at=source["captured_at"])
         dossier["raw_cache_root"] = "raw"
         dossiers.append(dossier)
         row = dict(record)
         row.update({
-            "company": title, "role": task.title,
+            "company": company, "role": task.title,
             "intelligence_kinds": sorted({c["kind"] for c in dossier["claims"]}),
             "classifications": sorted({c["classification"] for c in dossier["claims"]}),
             "edge_relations": sorted({e["relation"] for e in dossier["edges"]}),
