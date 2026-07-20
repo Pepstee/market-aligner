@@ -161,12 +161,9 @@ passed/skipped/failed totals separately instead of rewriting it. Five full Scrap
 sidecar tests are collected and skip unless the separately documented
 `.venv-scrapling` runtime has actually been installed.
 
-JAA-00 clean-bootstrap verification on 20 July 2026 recorded the complete suite as
-**111 passed, 5 skipped, 0 failed** (116 collected) and the separately run
-`career_automation` subset as **68 passed, 0 skipped, 0 failed** (68 collected).
-Both suites tested the pre-receipt source revision
-`fa157d2fe2477bf59b03390426f662ac31808385`; the receipt itself is generated
-content committed after that revision.
+The latest JAA-00 clean-bootstrap totals, runtime metadata and stable tested product-content
+revision are recorded in the machine-readable, content-addressed receipt under
+`runtime_evidence/pytest/`.
 
 The original guided-pass files remain as generic reproducibility fixtures;
 the active config, profile, contracts, prompts and reports no longer load them.
