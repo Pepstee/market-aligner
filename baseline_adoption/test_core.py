@@ -151,6 +151,7 @@ class BaselineAdoptionTests(unittest.TestCase):
                                  "jaa-00-online-snapshot-receipt/v2")
                 for spec in self.specs:
                     record = document["content"]["databases"][spec.name]
+                    destination = data / spec.destination_relative
                     self.assertEqual(record["historical_observation"]["observed_table_counts"],
                                      {"records": 1})
                     self.assertEqual(record["frozen_snapshot"]["table_counts"], {"records": 2})
@@ -158,7 +159,16 @@ class BaselineAdoptionTests(unittest.TestCase):
                     self.assertEqual(record["capture"]["source_identities_start"]["wal"]["label"],
                                      f"source:{spec.name}:wal")
                     self.assertNotIn(str(self.root), json.dumps(record))
+                    with closing(core._immutable_connection(destination)) as frozen:
+                        self.assertEqual(frozen.execute("PRAGMA journal_mode").fetchone()[0],
+                                         "delete")
                 self.assertEqual(core.reconcile(receipt, data)["status"], "ok")
+
+                unexplained = Path(str(data / self.specs[0].destination_relative) + "-wal")
+                unexplained.write_bytes(b"pre-existing")
+                with self.assertRaisesRegex(core.AdoptionError, "has SQLite sidecars"):
+                    core.reconcile(receipt, data)
+                self.assertEqual(unexplained.read_bytes(), b"pre-existing")
 
             with patch.object(core, "BASELINES", tuple(self.specs)):
                 with self.assertRaisesRegex(core.AdoptionError, "live or dirty"):
@@ -168,6 +178,36 @@ class BaselineAdoptionTests(unittest.TestCase):
         finally:
             for writer in writers:
                 writer.close()
+
+    def test_online_backup_failure_cleans_only_temporary_artifacts(self) -> None:
+        spec = self.specs[0]
+        source = self.source / spec.source_relative
+        source_wal = Path(str(source) + "-wal")
+        source_shm = Path(str(source) + "-shm")
+        writer = sqlite3.connect(source)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("INSERT INTO records(value) VALUES ('still-live')")
+            writer.commit()
+            source_sidecars = {
+                path: (path.stat().st_dev, path.stat().st_ino)
+                for path in (source_wal, source_shm)
+            }
+            destination = self.root / "failed-data" / spec.destination_relative
+            with patch.object(core, "_inspect_database",
+                              side_effect=core.AdoptionError("forced inspection failure")):
+                with self.assertRaisesRegex(core.AdoptionError, "forced inspection failure"):
+                    core._atomic_online_backup(source, destination, spec)
+
+            self.assertFalse(destination.exists())
+            self.assertFalse(list(destination.parent.glob(".snapshotting-*")))
+            self.assertEqual({
+                path: (path.stat().st_dev, path.stat().st_ino)
+                for path in source_sidecars
+            }, source_sidecars)
+            self.assertEqual(writer.execute("SELECT COUNT(*) FROM records").fetchone()[0], 2)
+        finally:
+            writer.close()
 
 
 if __name__ == "__main__":

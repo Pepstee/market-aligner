@@ -162,15 +162,25 @@ def test_online_cli_freezes_consistent_wal_snapshot_records_drift_and_reconciles
         copy = data / "databases" / f"{name}.sqlite3"
         with _readonly(copy) as snapshot:
             assert snapshot.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            assert snapshot.execute("PRAGMA journal_mode").fetchone() == ("delete",)
             ledger, audit = (snapshot.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                              for table in ("ledger", "audit"))
             assert ledger == audit == record["frozen_snapshot"]["table_counts"]["ledger"]
         assert not Path(str(copy) + "-wal").exists()
         assert not Path(str(copy) + "-shm").exists()
 
+    frozen_state = {
+        path: (path.stat().st_mtime_ns, _hash(path))
+        for path in (data / "databases").glob("*.sqlite3")
+    }
     checked = _run_cli(source, data, contract, "reconcile", "--receipt", str(receipt), "--data-root", str(data))
     assert checked.returncode == 0, checked.stderr
     assert json.loads(checked.stdout)["status"] == "ok"
+    assert {
+        path: (path.stat().st_mtime_ns, _hash(path)) for path in frozen_state
+    } == frozen_state
+    assert not list((data / "databases").glob("*.sqlite3-wal"))
+    assert not list((data / "databases").glob("*.sqlite3-shm"))
 
     # A receipt is self-authenticating: a changed recorded observation cannot be replayed.
     receipt.write_text(receipt.read_text().replace("canonical-repository", "forged-repository"))
