@@ -172,6 +172,21 @@ def test_every_source_class_byte_changes_the_independent_revision(
 
 
 @pytest.mark.parametrize("relative", [
+    "canonical-repository.json", "skeleton/config.yaml", "llm/schemas/job_extract.json",
+    "scraper/fixtures/jobkorea_listing.json", "scripts/advance_career_pipeline.py",
+    "requirements-test.lock", "acceptance",
+])
+def test_every_remaining_tracked_source_class_changes_the_independent_revision(
+    isolated_repository: Path, relative: str,
+) -> None:
+    """Configuration, fixtures, locks, and executable sources are digest inputs too."""
+    before = _independent_source_revision(isolated_repository)
+    target = isolated_repository / relative
+    target.write_bytes(target.read_bytes() + b"\nindependent-revision-class-probe\n")
+    assert _independent_source_revision(isolated_repository) != before
+
+
+@pytest.mark.parametrize("relative", [
     "runtime_evidence/jaa01/manual-receipt.json", "runtime_evidence/pytest/manual-receipt.json",
 ])
 def test_generated_receipt_bytes_do_not_change_source_revision(
@@ -218,6 +233,28 @@ def test_certifier_rejects_unsafe_tracked_source_trees(
     )
     assert completed.returncode == 2
     assert expected in completed.stderr
+
+
+@pytest.mark.parametrize("attack", ["mode", "type"])
+def test_certifier_fails_closed_for_tracked_mode_and_type_drift(
+    isolated_repository: Path, attack: str,
+) -> None:
+    """A Git index entry must never be trusted when its checkout type changes."""
+    target = isolated_repository / "README.md"
+    if attack == "mode":
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    else:
+        target.unlink()
+        target.symlink_to("SOURCE_BASELINE.md")
+
+    completed = subprocess.run(
+        (sys.executable, "scripts/certify_jaa01_runtime.py", "--baseline-database", "absent.sqlite3",
+         "--migration-receipt", "absent.json", "--evidence-directory", "evidence"),
+        cwd=isolated_repository, text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 2
+    assert "dirty tracked source tree" in completed.stderr
+    assert not list((isolated_repository / "evidence").glob("*.json"))
 
 
 def test_tampered_and_stale_source_revision_fields_are_rejected_by_independent_verifier(

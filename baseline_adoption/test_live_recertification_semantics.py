@@ -11,10 +11,12 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,43 @@ LIVE_RELATIVE = {
     "raw_jobs": "scraper/data_overnight/jobs.sqlite3",
     "career_pipeline": "outputs/career_automation/career_pipeline.sqlite3",
 }
+SOURCE_REVISION_DOMAIN = b"jaa01-source-content-revision-v1\0"
+SOURCE_REVISION_EXCLUSIONS = (b"runtime_evidence/jaa01/", b"runtime_evidence/pytest/")
+
+
+def _git(root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ("git", *arguments), cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    return completed.stdout
+
+
+def _independent_source_revision(root: Path) -> str:
+    """Reimplement the published byte framing without importing product code."""
+    entries: list[tuple[bytes, bytes]] = []
+    for record in _git(root, "ls-files", "--stage", "-z").split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, path = record.partition(b"\t")
+        mode, _object_id, stage = metadata.split()
+        assert separator and stage == b"0"
+        if not path.startswith(SOURCE_REVISION_EXCLUSIONS):
+            entries.append((path, mode))
+    digest = hashlib.sha256(SOURCE_REVISION_DOMAIN)
+    for path, mode in sorted(entries):
+        candidate = root / os.fsdecode(path)
+        status = candidate.lstat()
+        if mode == b"120000":
+            assert stat.S_ISLNK(status.st_mode)
+            payload = os.fsencode(os.readlink(candidate))
+        else:
+            assert mode in {b"100644", b"100755"} and stat.S_ISREG(status.st_mode)
+            payload = candidate.read_bytes()
+        for field in (path, mode, payload):
+            digest.update(len(field).to_bytes(8, "big"))
+            digest.update(field)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _sha256(path: Path) -> str:
@@ -68,6 +107,16 @@ def _contract(name: str, source_root: Path, path: Path, *, counts: dict[str, int
 
 
 def _run(source_root: Path, evidence: Path, contract: list[dict[str, object]] | None = None) -> subprocess.CompletedProcess[str]:
+    # The command certifies its own tracked source tree.  Run it from a fresh
+    # clone so this test module's deliberately uncommitted edits cannot mask
+    # the source-side behaviour being tested.
+    repository = evidence.parent / "certification-repository"
+    if not repository.exists():
+        cloned = subprocess.run(
+            ("git", "clone", "--no-local", str(ROOT), str(repository)),
+            text=True, capture_output=True, check=False,
+        )
+        assert cloned.returncode == 0, cloned.stderr
     if contract is None:
         command = [sys.executable, "-m", "baseline_adoption.cli"]
     else:
@@ -81,7 +130,7 @@ raise SystemExit(cli.main(sys.argv[2:]))
     return subprocess.run(
         [*command, "recertify-sources", "--source-root", str(source_root),
          "--evidence-directory", str(evidence)],
-        cwd=ROOT, text=True, capture_output=True, check=False, env=os.environ.copy(),
+        cwd=repository, text=True, capture_output=True, check=False, env=os.environ.copy(),
     )
 
 
@@ -112,6 +161,16 @@ def _source_state(path: Path) -> dict[str, bytes | None]:
     }.items()}
 
 
+def _strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for child in value.values() for text in _strings(child)]
+    if isinstance(value, list):
+        return [text for child in value for text in _strings(child)]
+    return []
+
+
 def test_real_operator_sources_recertify_without_path_disclosure_or_source_mutation(tmp_path: Path) -> None:
     """The real operator root is covered without copying it into the repository."""
     paths = {name: LIVE_ROOT / relative for name, relative in LIVE_RELATIVE.items()}
@@ -135,27 +194,65 @@ def test_real_operator_sources_recertify_without_path_disclosure_or_source_mutat
         assert record["historical_observation"]["observed_sha256"] != record["current_measurement"].get("sha256")
 
 
-def test_owner_writable_wal_source_succeeds_and_product_write_probe_is_refused(tmp_path: Path) -> None:
+def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
-    database = source_root / "inputs" / "live.sqlite3"
-    writer = _make_wal(database)
+    raw_jobs = source_root / "inputs" / "raw_jobs.sqlite3"
+    career_pipeline = source_root / "inputs" / "career_pipeline.sqlite3"
+    raw_writer = _make_wal(raw_jobs)
+    pipeline_writer = _make_wal(career_pipeline, rows=11)
     try:
-        contract = [_contract("live", source_root, database)]
-        before = _source_state(database)
+        contract = [
+            _contract("raw_jobs", source_root, raw_jobs),
+            _contract("career_pipeline", source_root, career_pipeline),
+        ]
+        before = {"raw_jobs": _source_state(raw_jobs), "career_pipeline": _source_state(career_pipeline)}
         result = _run(source_root, tmp_path / "evidence", contract)
-        _, document = _receipt(result)
-        record = document["content"]["databases"]["live"]
-        assert record["open_semantics"]["negative_write_probe"] == {
-            "attempted": True, "operation": "transactional-main-schema-create",
-            "rejected": True, "sqlite_primary_error": "SQLITE_READONLY",
+        receipt, document = _receipt(result)
+        content = document["content"]
+        observed = datetime.fromisoformat(content["observed_at_utc"].replace("Z", "+00:00"))
+        assert observed.tzinfo is not None and observed.utcoffset() == timezone.utc.utcoffset(observed)
+        assert content["observed_at_utc"].endswith("Z")
+        assert content["source_content_revision"] == _independent_source_revision(
+            (tmp_path / "evidence").parent / "certification-repository"
+        )
+        assert set(content["databases"]) == {"raw_jobs", "career_pipeline"}
+        assert content["isolation"] == {
+            "source_connections": "read-only-query-only",
+            "source_write_operations": "none-successful; transactional schema probes rejected",
+            "adopted_product_databases": "not-opened-by-recertification",
         }
-        assert record["current_measurement"]["row_counts"] == {"ledger": 8}
-        assert {"main", "wal", "shm"} == set(record["source_observations_start"])
-        assert _source_state(database) == before
-        assert writer.execute("SELECT COUNT(*) FROM ledger").fetchone() == (8,)
-        assert writer.execute("SELECT name FROM sqlite_schema WHERE name='__jaa_recertification_write_probe'").fetchone() is None
+        canonical_content = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        assert document["content_sha256"] == hashlib.sha256(canonical_content).hexdigest()
+        assert receipt.name == f"source-recertification-{document['content_sha256']}.json"
+        assert receipt.read_bytes() == json.dumps(
+            document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode() + b"\n"
+        rendered = receipt.read_text(encoding="utf-8")
+        assert str(source_root) not in rendered and str(tmp_path) not in rendered
+        assert not any(text.startswith("/") for text in _strings(document))
+        for name, expected_rows in (("raw_jobs", 8), ("career_pipeline", 11)):
+            record = content["databases"][name]
+            assert record["source"] == {
+                "label": f"source:{name}",
+                "relative_location": f"inputs/{name}.sqlite3",
+            }
+            assert record["open_semantics"] == {
+                "sqlite_uri_mode": "ro", "query_only": True,
+                "negative_write_probe": {
+                    "attempted": True, "operation": "transactional-main-schema-create",
+                    "rejected": True, "sqlite_primary_error": "SQLITE_READONLY",
+                },
+            }
+            assert record["current_measurement"]["row_counts"] == {"ledger": expected_rows}
+            assert {"main", "wal", "shm"} == set(record["source_observations_start"])
+        assert {"raw_jobs": _source_state(raw_jobs), "career_pipeline": _source_state(career_pipeline)} == before
+        assert raw_writer.execute("SELECT COUNT(*) FROM ledger").fetchone() == (8,)
+        assert pipeline_writer.execute("SELECT COUNT(*) FROM ledger").fetchone() == (11,)
+        for writer in (raw_writer, pipeline_writer):
+            assert writer.execute("SELECT name FROM sqlite_schema WHERE name='__jaa_recertification_write_probe'").fetchone() is None
     finally:
-        writer.close()
+        raw_writer.close()
+        pipeline_writer.close()
 
 
 @pytest.mark.parametrize("case", ["missing", "symlink", "corrupt", "schema", "regression"])
