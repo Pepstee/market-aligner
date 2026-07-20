@@ -24,7 +24,7 @@ contracts, never through source control.
   0 employer dossiers; 0 browser workflows; 0 browser runs.
 - Both databases returned `PRAGMA integrity_check = ok`.
 
-## Locked source receipts
+## Historical source observations
 
 - `scraper/data_overnight/jobs.sqlite3`
   - bytes: `117551104`
@@ -93,13 +93,29 @@ jaa-baseline rollback-manifest \
   --data-root "$JAA_RUNTIME_DATA_ROOT"
 ```
 
-`recertify-sources` is the fail-closed check for the two locked original files. Both files
-must be regular, non-symlink, non-writable files. It hashes each before and after a
-read-only/query-only integrity, schema and complete row-count inspection, and publishes a
-content-addressed receipt only after both sources exactly match the locked receipts above.
-The receipt uses logical labels and repository-relative source locations, never the
-operator's absolute source root. Its evidence directory must be outside the preserved
-source root.
+`recertify-sources` is the fail-closed check for the two original live databases. Owner
+write permissions are expected for running collectors and are not evidence that the
+recertification handle can write. Every SQLite handle is opened with URI `mode=ro`, has
+`PRAGMA query_only=ON`, and must reject a real transactional main-schema write probe with
+`SQLITE_READONLY`. An unexpectedly successful probe, or a different failure, aborts
+certification.
+
+The command accepts existing WAL and SHM sidecars under the online semantics above (and
+refuses a WAL without its SHM). It records path-free main/WAL content observations and SHM
+identity metadata before and after inspection. Publication requires complete, stable,
+unchanged main and WAL content comparisons; disappearance, drift, or an uncertain hash
+fails closed. SHM drift is reported as metadata only and is not treated as database-content
+drift.
+
+The SHA-256 values, sizes, and row counts captured on 20 July 2026 remain historical
+observations. Current live files are not required to retain those obsolete byte hashes or
+exact counts. They must retain the exact historical schema hash, schema-object count, and
+table set, and every current table count must meet or exceed its historical floor. The
+receipt separately records current integrity, schema identity, table set and counts, plus
+the before/after measured main and WAL hashes. It uses logical labels and
+repository-relative source locations, never the operator's absolute source root. Its
+evidence directory must be outside the preserved source root, and neither original nor
+adopted databases are modified.
 
 Every online capture is a new snapshot with a new receipt. Its observed counts never
 retroactively replace the 20 July 2026 observation.

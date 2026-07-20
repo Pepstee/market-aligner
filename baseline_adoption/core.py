@@ -266,27 +266,56 @@ def _verify_database(path: Path, spec: BaselineSpec) -> dict[str, Any]:
 
 
 def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
-    """Recertify one locked source without ever granting SQLite write access."""
+    """Recertify one live source without ever granting SQLite write access."""
     if not path.exists():
         raise AdoptionError(f"{spec.name}: source does not exist")
     if not path.is_file() or path.is_symlink():
         raise AdoptionError(f"{spec.name}: source must be a regular, non-symlink file")
-    before = path.stat()
-    if before.st_mode & 0o222:
-        raise AdoptionError(f"{spec.name}: source database is writable")
-    sidecars = [Path(str(path) + suffix) for suffix in ("-journal", "-wal", "-shm")]
-    if any(sidecar.exists() for sidecar in sidecars):
-        raise AdoptionError(f"{spec.name}: source has SQLite sidecars and is not a closed snapshot")
 
-    hash_before = _hash_file(path)
-    if hash_before != spec.sha256:
+    source_label = f"source:{spec.name}"
+    start = _source_identities(path, source_label)
+    journal = Path(str(path) + "-journal")
+    if journal.exists():
         raise AdoptionError(
-            f"{spec.name}: SHA-256 mismatch: expected {spec.sha256}, got {hash_before}"
+            f"{spec.name}: rollback journal is present; live recertification requires WAL semantics"
         )
+    if start["wal"]["exists"] and not start["shm"]["exists"]:
+        raise AdoptionError(
+            f"{spec.name}: WAL exists without SHM; refusing a read that could initialise source state"
+        )
+
+    write_probe: dict[str, Any]
     try:
         with closing(_readonly_connection(path)) as connection:
             if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
                 raise AdoptionError(f"{spec.name}: read-only query mode was not enforced")
+
+            # This is a real main-schema write, enclosed in a transaction so it
+            # remains harmless even if a defective connection unexpectedly permits it.
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    'CREATE TABLE main."__jaa_recertification_write_probe" (value INTEGER)'
+                )
+            except sqlite3.Error as exc:
+                connection.rollback()
+                error_code = getattr(exc, "sqlite_errorcode", None)
+                if error_code is None or error_code & 0xff != sqlite3.SQLITE_READONLY:
+                    raise AdoptionError(
+                        f"{spec.name}: schema write probe failed for a reason other than read-only"
+                    ) from exc
+                write_probe = {
+                    "attempted": True,
+                    "operation": "transactional-main-schema-create",
+                    "rejected": True,
+                    "sqlite_primary_error": "SQLITE_READONLY",
+                }
+            else:
+                connection.rollback()
+                raise AdoptionError(
+                    f"{spec.name}: schema write probe unexpectedly succeeded"
+                )
+
             integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
             if integrity != ["ok"]:
                 raise AdoptionError(f"{spec.name}: integrity_check failed: {integrity}")
@@ -309,41 +338,57 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
         )
     if tables != sorted(spec.table_counts):
         raise AdoptionError(f"{spec.name}: table set mismatch")
-    expected_counts = dict(sorted(spec.table_counts.items()))
-    if counts != expected_counts:
+    historical_floors = dict(sorted(spec.table_counts.items()))
+    regressed = {
+        table: {"historical_floor": historical_floors[table], "measured": counts[table]}
+        for table in tables if counts[table] < historical_floors[table]
+    }
+    if regressed:
         raise AdoptionError(
-            f"{spec.name}: table count mismatch: expected {expected_counts}, got {counts}"
+            f"{spec.name}: row counts regressed below historical floors: {regressed}"
         )
 
-    hash_after = _hash_file(path)
-    after = path.stat()
-    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-    if hash_after != hash_before or any(
-        getattr(before, field) != getattr(after, field) for field in identity_fields
-    ):
-        raise AdoptionError(f"{spec.name}: source changed during recertification")
+    end = _source_identities(path, source_label)
+    main_content_equal = _stable_content_equal(start["main"], end["main"])
+    wal_content_equal = _stable_content_equal(start["wal"], end["wal"])
+    if main_content_equal is not True or wal_content_equal is not True:
+        raise AdoptionError(
+            f"{spec.name}: main/WAL content changed or was uncertain during recertification"
+        )
+
     return {
         "source": {"label": f"source:{spec.name}", "relative_location": spec.source_relative},
-        "baseline_expectation": {
-            "sha256": spec.sha256,
-            "schema_sha256": spec.schema_sha256,
-            "schema_objects": spec.schema_objects,
-            "table_count": len(spec.table_counts),
-            "row_counts": dict(sorted(spec.table_counts.items())),
+        "historical_observation": _historical_observation(spec),
+        "open_semantics": {
+            "sqlite_uri_mode": "ro",
+            "query_only": True,
+            "negative_write_probe": write_probe,
         },
-        "open_semantics": {"sqlite_uri_mode": "ro", "query_only": True},
-        "sha256_before": hash_before,
-        "sha256_after": hash_after,
-        "integrity_check": integrity,
-        "schema_sha256": schema_hash,
-        "schema_objects": len(schema),
-        "table_count": len(tables),
-        "row_counts": counts,
+        "current_measurement": {
+            "integrity_check": integrity,
+            "schema_sha256": schema_hash,
+            "schema_objects": len(schema),
+            "table_count": len(tables),
+            "table_set": tables,
+            "row_counts": counts,
+        },
+        "source_observations_start": start,
+        "source_observations_end": end,
+        "content_comparison": {
+            "main_unchanged": main_content_equal,
+            "wal_unchanged": wal_content_equal,
+            "main_wal_complete": True,
+            "shm": {
+                "scope": "identity-metadata-only",
+                "metadata_drift_observed": start["shm"] != end["shm"],
+                "content_compared": False,
+            },
+        },
     }
 
 
 def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -> Path:
-    """Fail-closed recertification of both original locked brownfield databases."""
+    """Fail-closed recertification of both original live brownfield databases."""
     source_root = Path(source_root).resolve()
     evidence_directory = Path(evidence_directory).resolve()
     if source_root == evidence_directory or source_root in evidence_directory.parents:
@@ -358,13 +403,13 @@ def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -
         for spec in BASELINES
     }
     content = {
-        "format": "jaa-00-source-recertification/v1",
-        "baseline": {"label": "SOURCE_BASELINE.md", "contract": "locked-source-receipts"},
+        "format": "jaa-00-source-recertification/v2",
+        "baseline": {"label": "SOURCE_BASELINE.md", "contract": "live-source-recertification"},
         "source_root": {"label": "operator-configured-source-root"},
         "databases": databases,
         "isolation": {
             "source_connections": "read-only-query-only",
-            "source_write_operations": "none",
+            "source_write_operations": "none-successful; transactional schema probes rejected",
             "adopted_product_databases": "not-opened-by-recertification",
         },
     }
