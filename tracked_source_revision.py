@@ -10,11 +10,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-SOURCE_CONTENT_REVISION_DOMAIN = b"jaa01-source-content-revision-v1\0"
-SOURCE_CONTENT_REVISION_EXCLUSIONS = (
-    b"runtime_evidence/jaa01/",
-    b"runtime_evidence/pytest/",
-)
+SOURCE_CONTENT_REVISION_DOMAIN = b"jaa-source-content-revision-v2\0"
+SOURCE_CONTENT_REVISION_EXCLUSIONS = (b"runtime_evidence/",)
 
 
 class TrackedSourceRevisionError(RuntimeError):
@@ -25,14 +22,11 @@ def source_content_revision_contract() -> dict[str, Any]:
     """Return the receipt contract implemented by :func:`source_content_revision`."""
     return {
         "algorithm": "sha256",
-        "domain": "jaa01-source-content-revision-v1",
+        "domain": "jaa-source-content-revision-v2",
         "entry_encoding": "uint64be-length-prefixed-path-mode-content",
         "scope": "current-tracked-source-tree",
         "ordering": "repository-relative-path-byte-order",
-        "exclusions": [
-            "runtime_evidence/jaa01/",
-            "runtime_evidence/pytest/",
-        ],
+        "exclusions": ["runtime_evidence/"],
     }
 
 
@@ -111,8 +105,7 @@ def source_content_revision(repository: str | Path) -> str:
 
     pathspec = (
         ".",
-        ":(exclude)runtime_evidence/jaa01/**",
-        ":(exclude)runtime_evidence/pytest/**",
+        ":(exclude)runtime_evidence/**",
     )
     if _git(root, "diff", "--name-only", "-z", "--", *pathspec) or _git(
         root, "diff", "--cached", "--name-only", "-z", "--", *pathspec

@@ -29,8 +29,8 @@ LIVE_RELATIVE = {
     "raw_jobs": "scraper/data_overnight/jobs.sqlite3",
     "career_pipeline": "outputs/career_automation/career_pipeline.sqlite3",
 }
-SOURCE_REVISION_DOMAIN = b"jaa01-source-content-revision-v1\0"
-SOURCE_REVISION_EXCLUSIONS = (b"runtime_evidence/jaa01/", b"runtime_evidence/pytest/")
+SOURCE_REVISION_DOMAIN = b"jaa-source-content-revision-v2\0"
+SOURCE_REVISION_EXCLUSIONS = (b"runtime_evidence/",)
 
 
 def _git(root: Path, *arguments: str) -> bytes:
