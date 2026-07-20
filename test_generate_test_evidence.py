@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import re
@@ -52,9 +53,26 @@ def _public_repository(
     script = root / "scripts" / GENERATOR.name
     script.parent.mkdir(parents=True)
     shutil.copy2(GENERATOR, script)
+    requirements = []
+    for line in (REPOSITORY / "requirements-test.lock").read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            distribution = line.split("==", 1)[0]
+            requirements.append(f"{distribution}=={importlib.metadata.version(distribution)}")
+    (root / "requirements-test.lock").write_text("\n".join(requirements) + "\n", encoding="utf-8")
     (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    (root / "pytest.py").write_text(
+        "import sys\n"
+        f"career = {career_output!r}\n"
+        f"complete = {complete_output!r}\n"
+        "print(career if 'career_automation' in sys.argv else complete)\n"
+        f"raise SystemExit({career_status} if 'career_automation' in sys.argv else {complete_status})\n",
+        encoding="utf-8",
+    )
     subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-    subprocess.run(("git", "add", ".gitignore", "scripts"), cwd=root, check=True)
+    subprocess.run(
+        ("git", "add", ".gitignore", "scripts", "pytest.py", "requirements-test.lock"),
+        cwd=root, check=True,
+    )
     subprocess.run(
         (
             "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
@@ -63,18 +81,6 @@ def _public_repository(
         cwd=root,
         check=True,
     )
-
-    python = root / ".venv" / "bin" / "python"
-    python.parent.mkdir(parents=True)
-    python.write_text(
-        "#!/bin/sh\n"
-        "case \"$*\" in\n"
-        f"  *career_automation*) printf '%s\\n' {career_output!r}; exit {career_status} ;;\n"
-        f"  *) printf '%s\\n' {complete_output!r}; exit {complete_status} ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    python.chmod(0o755)
     return root
 
 
@@ -119,6 +125,32 @@ def test_parse_summary_requires_exact_supported_totals() -> None:
 def test_parse_summary_refuses_failed_or_malformed_output(output: str) -> None:
     with pytest.raises(GENERATOR_MODULE.EvidenceError):
         GENERATOR_MODULE.parse_summary(output)
+
+
+def test_suite_executes_current_interpreter_but_records_portable_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        observed.extend(command)
+        return subprocess.CompletedProcess(command, 0, "==== 3 passed in 0.01s ====\n")
+
+    monkeypatch.setattr(GENERATOR_MODULE.subprocess, "run", fake_run)
+    result = GENERATOR_MODULE.run_suite("complete", GENERATOR_MODULE.COMPLETE_ARGV)
+    assert observed == [sys.executable, "-m", "pytest", "-q"]
+    assert result["argv"] == ["python", "-m", "pytest", "-q"]
+    assert sys.executable not in result["argv"]
+
+
+def test_environment_validation_reports_missing_locked_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "requirements-test.lock"
+    lock.write_text("definitely-absent-distribution==1.0\n", encoding="utf-8")
+    monkeypatch.setattr(GENERATOR_MODULE, "LOCK_FILE", lock)
+    with pytest.raises(GENERATOR_MODULE.EvidenceError, match="missing:.*bootstrap-test-env"):
+        GENERATOR_MODULE.locked_environment()
 
 
 def test_product_revision_is_stable_across_excluded_receipts(
@@ -243,17 +275,27 @@ def test_public_script_writes_hashed_content_revision_bound_and_redacted_receipt
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", document["tested_product_content_revision"])
     assert re.fullmatch(r"[0-9a-f]{40,64}", document["tested_git_parent"])
     assert "tested_source_revision" not in document
+    assert document["schema_version"] == 3
+    assert document["interpreter"] == {
+        "implementation": "CPython", "version": GENERATOR_MODULE.platform.python_version()
+    }
+    assert document["dependency_lock"]["path"] == "requirements-test.lock"
+    assert re.fullmatch(r"[0-9a-f]{64}", document["dependency_lock"]["sha256"])
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", document["environment_identity"])
     complete, career = document["suites"]
     assert complete["name"] == "complete"
+    assert complete["argv"] == ["python", "-m", "pytest", "-q"]
     assert complete["counts"] == {"collected": 75, "passed": 70, "skipped": 5, "failed": 0}
     assert "historical_baseline_passed" not in complete
     assert career["name"] == "career_automation"
+    assert career["argv"] == ["python", "-m", "pytest", "-q", "career_automation"]
     assert career["counts"] == {"collected": 65, "passed": 65, "skipped": 0, "failed": 0}
     assert career["historical_baseline_passed"] == 65
     rendered = payload.decode("utf-8")
     assert str(Path.home()) not in rendered
     assert private_path not in rendered
     assert secret not in rendered
+    assert sys.executable not in rendered
 
 
 @pytest.mark.parametrize("suite, output", [

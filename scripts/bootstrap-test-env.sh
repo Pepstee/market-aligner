@@ -12,3 +12,5 @@ PYTHON_BOOTSTRAP=${PYTHON_BOOTSTRAP:-python3.12}
   --editable "$REPOSITORY_ROOT"
 
 printf '%s\n' "Test environment created at $TEST_ENV"
+printf '%s\n' "Activate it with: . .venv/bin/activate"
+printf '%s\n' "Then validate with: python -m pytest -q"

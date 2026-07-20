@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -16,9 +17,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = Path(".venv/bin/python")
-COMPLETE_COMMAND = (str(PYTHON), "-m", "pytest", "-q")
-CAREER_COMMAND = COMPLETE_COMMAND + ("career_automation",)
+LOCK_FILE = ROOT / "requirements-test.lock"
+COMPLETE_ARGV = ("python", "-m", "pytest", "-q")
+CAREER_ARGV = COMPLETE_ARGV + ("career_automation",)
 RECEIPT_DIRECTORY = ROOT / "runtime_evidence" / "pytest"
 EVIDENCE_PREFIX = b"runtime_evidence/pytest/"
 CONTENT_REVISION_DOMAIN = b"jaa-product-content-revision-v1\0"
@@ -86,10 +87,61 @@ def parse_summary(output: str) -> dict[str, int]:
     return {key: counts[key] for key in ("collected", "passed", "skipped", "failed")}
 
 
-def run_suite(name: str, command: tuple[str, ...]) -> dict[str, object]:
+def locked_environment() -> dict[str, object]:
+    """Validate and describe the activated, locked test environment without its path."""
+    implementation = platform.python_implementation()
+    version = platform.python_version()
+    if implementation != "CPython" or sys.version_info[:2] != (3, 12):
+        raise EvidenceError(
+            f"test evidence requires CPython 3.12; active interpreter is {implementation} {version}"
+        )
+    try:
+        lock_payload = LOCK_FILE.read_bytes()
+    except OSError as exc:
+        raise EvidenceError("requirements-test.lock is missing or unreadable") from exc
+
+    missing: list[str] = []
+    mismatched: list[str] = []
+    for raw_line in lock_payload.decode("utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "==" not in line:
+            raise EvidenceError(f"unsupported unlocked requirement: {line}")
+        distribution, expected = line.split("==", 1)
+        try:
+            actual = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            missing.append(distribution)
+        else:
+            if actual != expected:
+                mismatched.append(f"{distribution}=={actual} (expected {expected})")
+    if missing or mismatched:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if mismatched:
+            details.append("wrong versions: " + ", ".join(mismatched))
+        raise EvidenceError(
+            "locked test dependencies are unavailable ("
+            + "; ".join(details)
+            + "); run ./scripts/bootstrap-test-env.sh and activate .venv"
+        )
+
+    lock_hash = hashlib.sha256(lock_payload).hexdigest()
+    identity_source = f"{implementation}\0{version}\0{lock_hash}".encode()
+    return {
+        "interpreter": {"implementation": implementation, "version": version},
+        "dependency_lock": {"path": "requirements-test.lock", "sha256": lock_hash},
+        "environment_identity": "sha256:" + hashlib.sha256(identity_source).hexdigest(),
+    }
+
+
+def run_suite(name: str, argv: tuple[str, ...]) -> dict[str, object]:
+    execution_command = (sys.executable, *argv[1:])
     try:
         completed = subprocess.run(
-            command,
+            execution_command,
             cwd=ROOT,
             check=False,
             stdout=subprocess.PIPE,
@@ -97,7 +149,7 @@ def run_suite(name: str, command: tuple[str, ...]) -> dict[str, object]:
             text=True,
         )
     except OSError as exc:
-        raise EvidenceError(f"could not run {display_command(command)}: {exc}") from exc
+        raise EvidenceError(f"could not run {display_command(argv)}: {exc}") from exc
 
     if completed.returncode != 0:
         raise EvidenceError(
@@ -106,7 +158,7 @@ def run_suite(name: str, command: tuple[str, ...]) -> dict[str, object]:
     counts = parse_summary(completed.stdout)
     return {
         "name": name,
-        "command": list(command),
+        "argv": list(argv),
         "counts": counts,
     }
 
@@ -199,24 +251,22 @@ def main() -> int:
     try:
         revision = product_content_revision()
         parent = tested_git_parent()
-        complete = run_suite("complete", COMPLETE_COMMAND)
-        career = run_suite("career_automation", CAREER_COMMAND)
+        environment = locked_environment()
+        complete = run_suite("complete", COMPLETE_ARGV)
+        career = run_suite("career_automation", CAREER_ARGV)
         if product_content_revision() != revision:
             raise EvidenceError("tracked product content changed during the test run")
 
         career["historical_baseline_passed"] = 65
         receipt: dict[str, object] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
                 "+00:00", "Z"
             ),
             "tested_product_content_revision": revision,
             "tested_git_parent": parent,
-            "runtime": {
-                "python": platform.python_version(),
-                "python_implementation": platform.python_implementation(),
-                "platform": platform.platform(),
-            },
+            **environment,
+            "platform": platform.platform(),
             "suites": [complete, career],
         }
         payload = canonical_json(receipt)

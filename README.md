@@ -152,7 +152,8 @@ locked CPython 3.12 dependency input and run the complete collected suite:
 
 ```bash
 PYTHON_BOOTSTRAP=python3.12 ./scripts/bootstrap-test-env.sh
-./.venv/bin/python -m pytest -q
+. .venv/bin/activate
+python -m pytest -q
 ```
 
 The pre-adoption observation was **65 passing career-control tests**. That is a labelled
@@ -173,8 +174,11 @@ the separately labelled current `career_automation` scope, which retains the
 65-passing-test historical baseline as metadata, with:
 
 ```bash
-./.venv/bin/python scripts/generate-test-evidence.py
+python scripts/generate-test-evidence.py
 ```
 
 The generator publishes under `runtime_evidence/pytest/` only after both runs
-pass and their pytest totals are parseable and internally consistent.
+pass and their pytest totals are parseable and internally consistent. It executes
+with the activated interpreter while recording the portable `python -m pytest`
+argv contract, interpreter identity, dependency-lock hash and environment identity;
+it rejects missing or incorrectly pinned test dependencies before running a suite.
