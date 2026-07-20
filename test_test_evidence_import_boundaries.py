@@ -136,6 +136,51 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
     assert all(not Path(arg).is_absolute() for suite in receipt["suites"] for arg in suite["argv"])
 
 
+def test_public_generator_refuses_an_apparent_local_source_symlink_escape_before_receipt(
+    tmp_path: Path,
+) -> None:
+    """The complete process must reject a local-looking source that escapes checkout."""
+    checkout = tmp_path / "isolated-checkout"
+    checkout.mkdir()
+    _write_isolated_checkout(checkout)
+
+    external_source = tmp_path / "outside-checkout" / "__init__.py"
+    external_source.parent.mkdir()
+    external_source.write_text("ESCAPED = True\n", encoding="utf-8")
+    local_source = checkout / "skeleton" / "__init__.py"
+    subprocess.run(("git", "rm", "--cached", "skeleton/__init__.py"), cwd=checkout, check=True)
+    (checkout / ".gitignore").write_text(
+        ".venv/\nskeleton/__init__.py\n", encoding="utf-8"
+    )
+    local_source.unlink()
+    local_source.symlink_to(external_source)
+    subprocess.run(("git", "add", ".gitignore"), cwd=checkout, check=True)
+    subprocess.run(
+        (
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "ignore local skeleton source",
+        ),
+        cwd=checkout,
+        check=True,
+    )
+
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        (sys.executable, str(checkout / "scripts" / GENERATOR.name)),
+        cwd=checkout,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "local project import 'skeleton' does not resolve to this repository" in completed.stderr
+    assert not (checkout / "runtime_evidence" / "pytest").exists()
+
+
 def test_local_source_file_rejects_a_root_first_module_resolving_outside_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
