@@ -47,13 +47,44 @@ SOURCE_KIND_POLICY: dict[IntelligenceKind, dict[str, Any]] = {
         "dated": True,
     },
     IntelligenceKind.ROLE: {
-        "source_types": {"official_vacancy", "official_role"},
+        "source_types": {"official_vacancy", "official_role", "corporate_profile"},
         "terms": ("role", "position", "job", "responsibilities", "responsible", "duties"),
     },
     IntelligenceKind.HIRING: {
-        "source_types": {"official_vacancy", "official_careers"},
+        "source_types": {"official_vacancy", "official_careers", "corporate_profile"},
         "terms": ("hiring", "apply", "application", "career", "vacancy", "candidate", "employee"),
     },
+}
+
+_SEMANTIC_PATTERNS: dict[IntelligenceKind, tuple[tuple[str, ...], ...]] = {
+    IntelligenceKind.COMPANY: (
+        (r"\b(?:company|business|organisation|organization|corporation|employer|firm|public service)\b",),
+        (r"\b(?:operates?|provides?|serves?|employs?|headquartered|based|founded|established)\b",),
+    ),
+    IntelligenceKind.ROLE: (
+        (r"\b(?:role|position|job|employee|staff|workforce|team|engineer|manager|responsibilit(?:y|ies)|operations?|activities|development|service|sector|company|organisation|organization)\b",),
+        (r"\b(?:responsibilit(?:y|ies)|duties|holder|work(?:s|ing)?|develops?|delivers?|manages?|leads?|employs?|employees?|operates?|activities|founded|acquired|opened|transferred)\b",),
+    ),
+    IntelligenceKind.PRODUCT: (
+        (r"\b(?:product|service|platform|technology|software|system|application|offering|website|network|app|account|search engine|search aggregator|travel|flights?|agency)\b",),
+        (r"\b(?:customer|client|user|business|provides?|offers?|serves?|gives?|used|using|enables?|designed|compare|book(?:s|ing)?|operates?|operating)\b",),
+    ),
+    IntelligenceKind.HIRING: (
+        (r"\b(?:hiring|recruit(?:s|ing|ment)?|careers?|vacanc(?:y|ies)|candidate|applicant|apply|application|employs?|employees?|staff|workforce)\b",),
+        (r"\b(?:hiring|recruit(?:s|ing|ment)?|vacanc(?:y|ies)|candidate|applicant|apply|application|employs?|employees?|staff|workforce|jobs?)\b",),
+    ),
+    IntelligenceKind.OPERATIONAL_HEALTH: (
+        (r"\b(?:revenue|profit|loss|income|turnover|funding|financial|earnings|sales|operating|operational|budget|workforce|employees?|staff|users?|customers?|stores?|offices?|market value|capitalisation)\b",),
+        (r"\b(?:reported|generated|recorded|rose|fell|grew|declined|increased|decreased|million|billion|percent|%|current|performance|constraints?|budget|market|transactions?|raised|sells?|funded|employs?|employees?|staff|workforce|operates?|opened|closed|acquired)\b",),
+    ),
+}
+
+_SEMANTIC_REJECTIONS: dict[IntelligenceKind, tuple[str, ...]] = {
+    IntelligenceKind.COMPANY: (r"\bfictional\b", r"\bhistorical novel\b"),
+    IntelligenceKind.ROLE: (r"\brole in (?:the )?(?:town|history|society|culture)\b", r"\bexhibition\b"),
+    IntelligenceKind.PRODUCT: (r"\bdiscontinued\b", r"\bsouvenir\b"),
+    IntelligenceKind.HIRING: (r"\balumni hired\b", r"\bhired a speaker\b", r"\bnot a vacancy\b"),
+    IntelligenceKind.OPERATIONAL_HEALTH: (r"\bcolou?r current\b", r"\bwithout financial results\b"),
 }
 
 
@@ -70,12 +101,10 @@ def _kind_relevant(kind: IntelligenceKind, excerpt: str, entry: Mapping[str, Any
     if not isinstance(purposes, list) or kind.value not in purposes:
         return False
     text = _plain_excerpt(excerpt).casefold()
-    configured = entry.get("relevance_terms", policy["terms"])
-    if (not isinstance(configured, list) or not configured
-            or not all(isinstance(term, str) and term.strip() for term in configured)):
+    if any(re.search(pattern, text) for pattern in _SEMANTIC_REJECTIONS[kind]):
         return False
-    if (not any(term.casefold() in text for term in configured)
-            or not any(term.casefold() in text for term in policy["terms"])):
+    if not all(any(re.search(pattern, text) for pattern in alternatives)
+               for alternatives in _SEMANTIC_PATTERNS[kind]):
         return False
     if policy.get("dated") and not (
         re.search(r"\b(?:19|20)\d{2}\b", text)
@@ -234,19 +263,44 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         by_id[citation.id] = source
     plan = dossier.get("source_plan")
     plan_by_id: dict[str, Mapping[str, Any]] = {}
-    if plan is not None:
-        if not isinstance(plan, list) or not plan:
-            raise ValueError("source plan must be a non-empty list")
-        for entry in plan:
-            if not isinstance(entry, Mapping):
-                raise ValueError("source plan entries must be objects")
-            entry_id = str(entry.get("id", ""))
-            kind = IntelligenceKind(entry.get("kind"))
-            if entry_id in plan_by_id or not entry_id or entry.get("source_id") not in by_id:
-                raise ValueError("source plan entry has invalid identity or source")
-            if int(entry.get("freshness_days", -1)) != FRESHNESS_DAYS[kind]:
-                raise ValueError("source plan freshness policy does not match claim kind")
-            plan_by_id[entry_id] = entry
+    if not isinstance(plan, list) or len(plan) != len(IntelligenceKind):
+        raise ValueError("source plan must cover all five intelligence kinds exactly once")
+    plan_kinds: set[IntelligenceKind] = set()
+    plan_source_ids: set[str] = set()
+    for entry in plan:
+        if not isinstance(entry, Mapping):
+            raise ValueError("source plan entries must be objects")
+        entry_id = str(entry.get("id", ""))
+        kind = IntelligenceKind(entry.get("kind"))
+        source_id = str(entry.get("source_id", ""))
+        if (entry_id in plan_by_id or kind in plan_kinds or source_id in plan_source_ids
+                or not entry_id or source_id not in by_id):
+            raise ValueError("source plan entry has invalid or non-unique identity, kind, or source")
+        if entry.get("permitted_purposes") != [kind.value]:
+            raise ValueError("source plan purpose must exactly match its intelligence kind")
+        if entry.get("source_type") not in SOURCE_KIND_POLICY[kind]["source_types"]:
+            raise ValueError("source plan source type is not permitted for its intelligence kind")
+        if type(entry.get("freshness_days")) is not int or entry["freshness_days"] != FRESHNESS_DAYS[kind]:
+            raise ValueError("source plan freshness policy does not match claim kind")
+        source = by_id[source_id]
+        if ("source_content_sha256" in entry
+                and entry.get("source_content_sha256") != source["content_sha256"]):
+            raise ValueError("source plan captured-byte hash differs from its source")
+        if "raw_response_ref" in entry and entry.get("raw_response_ref") != source["raw_response_ref"]:
+            raise ValueError("source plan raw response differs from its source")
+        has_byte_range = "excerpt_byte_start" in entry or "excerpt_byte_length" in entry
+        if has_byte_range and (type(entry.get("excerpt_byte_start")) is not int
+                or type(entry.get("excerpt_byte_length")) is not int
+                or entry["excerpt_byte_start"] < 0 or entry["excerpt_byte_length"] <= 0):
+            raise ValueError("source plan byte range is invalid")
+        excerpt_hash = entry.get("excerpt_sha256")
+        if not isinstance(excerpt_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", excerpt_hash):
+            raise ValueError("source plan requires an excerpt hash")
+        plan_by_id[entry_id] = entry
+        plan_kinds.add(kind)
+        plan_source_ids.add(source_id)
+    if plan_kinds != set(IntelligenceKind) or plan_source_ids != set(by_id):
+        raise ValueError("source plan must cover every intelligence kind and source exactly once")
     claim_ids: set[str] = set()
     for claim in claims:
         if not isinstance(claim, Mapping) or not isinstance(claim.get("text"), str) or not claim["text"].strip():
@@ -270,18 +324,23 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
                 by_id[source_id]["raw_response_ref"], by_id[source_id]["content_sha256"],
             ) for source_id in cited):
                 raise ValueError("citation excerpt does not resolve to cited bytes")
-        if plan is not None:
-            entry = plan_by_id.get(str(claim.get("source_plan_id", "")))
-            if entry is None or entry.get("kind") != kind.value:
-                raise ValueError("claim must bind to a kind-matching source-plan entry")
-            if cited != [entry.get("source_id")]:
-                raise ValueError("claim citations differ from its source-plan entry")
-            if claim.get("source_captured_at") != by_id[cited[0]]["captured_at"]:
-                raise ValueError("claim capture time differs from its cited response")
-            if not isinstance(excerpt, str) or not _kind_relevant(kind, excerpt, entry):
-                raise ValueError(f"kind-irrelevant {kind.value} evidence")
-            if entry.get("excerpt_sha256") != hashlib.sha256(excerpt.encode("utf-8")).hexdigest():
-                raise ValueError("claim excerpt differs from its source-plan selection")
+        entry = plan_by_id.get(str(claim.get("source_plan_id", "")))
+        if entry is None or entry.get("kind") != kind.value:
+            raise ValueError("claim must bind to a kind-matching source-plan entry")
+        if cited != [entry.get("source_id")]:
+            raise ValueError("claim citations differ from its source-plan entry")
+        if claim.get("source_captured_at") != by_id[cited[0]]["captured_at"]:
+            raise ValueError("claim capture time differs from its cited response")
+        if not isinstance(excerpt, str) or not _kind_relevant(kind, excerpt, entry):
+            raise ValueError(f"kind-irrelevant {kind.value} evidence")
+        excerpt_bytes = excerpt.encode("utf-8")
+        if entry.get("excerpt_sha256") != hashlib.sha256(excerpt_bytes).hexdigest():
+            raise ValueError("claim excerpt differs from its source-plan selection")
+        source_body = cache.resolve(by_id[cited[0]]["raw_response_ref"], by_id[cited[0]]["content_sha256"])
+        if "excerpt_byte_start" in entry:
+            start, length = entry["excerpt_byte_start"], entry["excerpt_byte_length"]
+            if length != len(excerpt_bytes) or source_body[start:start + length] != excerpt_bytes:
+                raise ValueError("claim excerpt does not match its declared captured byte range")
         observed = datetime.fromisoformat(str(claim.get("observed_at", "")).replace("Z", "+00:00")).date()
         if as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]) or observed > as_of:
             raise ValueError(f"stale or future {kind.value} claim")
@@ -295,6 +354,10 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             raise ValueError("edge endpoints must resolve to typed claims")
         if edge.get("relation") not in {"supports", "qualifies", "contradicts", "depends_on"}:
             raise ValueError("unknown intelligence edge relation")
+    if len(claims) != len(IntelligenceKind) or {IntelligenceKind(c["kind"]) for c in claims} != set(IntelligenceKind):
+        raise ValueError("claims must cover all five intelligence kinds exactly once")
+    if {str(claim.get("source_plan_id", "")) for claim in claims} != set(plan_by_id):
+        raise ValueError("claims must cover every source-plan entry exactly once")
 
 
 def _public_page_excerpts(body: bytes, count: int | None = None) -> list[tuple[str, str]]:
@@ -339,6 +402,15 @@ def build_reconnaissance_dossier(
     citations = [citation] if isinstance(citation, Citation) else list(citation)
     if not citations or len({item.id for item in citations}) != len(citations):
         raise ValueError("dossier requires distinct captured sources")
+    if source_plan is None and len(citations) == 1:
+        captured = citations[0]
+        citations = [Citation(
+            id=f"{captured.id}:{kind.value}", url=captured.url,
+            captured_at=captured.captured_at, retrieved_at=captured.retrieved_at,
+            content_sha256=captured.content_sha256, raw_response_ref=captured.raw_response_ref,
+            status_code=captured.status_code, requested_url=captured.requested_url,
+            redirect_history=list(captured.redirect_history),
+        ) for kind in IntelligenceKind]
     paragraphs_by_source = {
         item.id: _public_page_excerpts(cache.resolve(item.raw_response_ref, item.content_sha256))
         for item in citations
@@ -357,7 +429,8 @@ def build_reconnaissance_dossier(
     if source_plan is None:
         source_plan = [{
             "id": f"plan:{kind.value}", "kind": kind.value,
-            "source_id": citations[0].id, "source_type": source_type,
+            "source_id": next(item.id for item in citations if item.id.endswith(f":{kind.value}")),
+            "source_type": source_type,
             "permitted_purposes": [kind.value],
             "freshness_days": FRESHNESS_DAYS[kind],
             "relevance_terms": list(SOURCE_KIND_POLICY[kind]["terms"]),
@@ -385,11 +458,22 @@ def build_reconnaissance_dossier(
         if len(eligible) != 1:
             raise ValueError(f"ambiguous or missing {kind.value} evidence: {len(eligible)} eligible excerpts")
         excerpt, summary = eligible[0]
-        entry["excerpt_sha256"] = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+        excerpt_bytes = excerpt.encode("utf-8")
+        cited_source = next(item for item in citations if item.id == entry["source_id"])
+        source_body = cache.resolve(cited_source.raw_response_ref, cited_source.content_sha256)
+        byte_start = source_body.find(excerpt_bytes)
+        if byte_start < 0:
+            raise ValueError("selected excerpt is not present in captured bytes")
+        entry.update({
+            "source_content_sha256": cited_source.content_sha256,
+            "raw_response_ref": cited_source.raw_response_ref,
+            "excerpt_sha256": hashlib.sha256(excerpt_bytes).hexdigest(),
+            "excerpt_byte_start": byte_start,
+            "excerpt_byte_length": len(excerpt_bytes),
+        })
         claim = {"id": claim_id, "kind": kind.value, "classification": classification,
                  "text": f"{company}: {label} derived from the captured paragraph: {summary}",
                  "citation_excerpt": excerpt, "source_plan_id": entry["id"]}
-        cited_source = next(item for item in citations if item.id == entry["source_id"])
         claim_observed = observed_at or cited_source.captured_at
         claim.update({"observed_at": claim_observed, "source_captured_at": cited_source.captured_at,
                       "freshness_classification": "current",
@@ -496,6 +580,7 @@ def load_frozen_dossiers(
     job_keys: set[str] = set()
     normalized_claims = {kind: set() for kind in required_kinds}
     for dossier in dossiers:
+        dossier_captures: set[tuple[str, str]] = set()
         captured_dates = [datetime.fromisoformat(
             str(source["captured_at"]).replace("Z", "+00:00")
         ).date() for source in dossier.get("sources", [])]
@@ -518,10 +603,13 @@ def load_frozen_dossiers(
         for source in dossier["sources"]:
             url = _canonical_public_url(source["url"])
             body = cache.resolve(source["raw_response_ref"], source["content_sha256"])
-            if strict_corpus and (url in urls or source["content_sha256"] in source_hashes):
-                raise ValueError("frozen sources must have distinct URLs and captured bytes")
-            urls.add(url)
-            source_hashes.add(source["content_sha256"])
+            capture_identity = (url, source["content_sha256"])
+            if capture_identity not in dossier_captures:
+                if strict_corpus and (url in urls or source["content_sha256"] in source_hashes):
+                    raise ValueError("frozen captures must have distinct URLs and captured bytes")
+                urls.add(url)
+                source_hashes.add(source["content_sha256"])
+                dossier_captures.add(capture_identity)
             if not body:
                 raise ValueError("frozen source bytes must be non-empty")
         source_by_id = {source["id"]: source for source in dossier["sources"]}
@@ -571,19 +659,23 @@ def ingest_frozen_manifest(
         expected_digest = record.get("content_sha256")
         if enforce_reviewed_bytes and expected_digest is not None and citation.content_sha256 != expected_digest:
             raise ValueError("retrieved source differs from reviewed frozen bytes")
-        claims = record.get("claims") or [{
-            "id": f"claim:{record['id']}", "kind": "company", "classification": "fact",
-            "text": "The employer maintained the cited public corporate page at capture time.",
-            "observed_at": observed_at, "source_ids": [citation.id],
-        }]
-        dossier = {
-            "schema_version": "jaa04.dossier.v1",
-            "job_key": record["id"],
-            "raw_cache_root": str(cache.root),
-            "sources": [vars(citation)],
-            "claims": claims,
-            "edges": [],
-        }
-        validate_dossier(dossier, cache)
+        source_plan = record.get("source_plan")
+        if not isinstance(source_plan, list) or len(source_plan) != len(IntelligenceKind):
+            raise ValueError("manifest record requires a complete source plan")
+        citations = [Citation(
+            id=str(entry["source_id"]), url=citation.url,
+            captured_at=citation.captured_at, retrieved_at=citation.retrieved_at,
+            content_sha256=citation.content_sha256, raw_response_ref=citation.raw_response_ref,
+            status_code=citation.status_code, requested_url=citation.requested_url,
+            redirect_history=list(citation.redirect_history),
+        ) for entry in source_plan]
+        task = type("ManifestResearchTask", (), {
+            "job_key": str(record["id"]),
+            "company": str(record.get("company", "")).strip(),
+            "title": str(record.get("role", "")).strip(),
+        })()
+        dossier = build_reconnaissance_dossier(
+            task, citations, cache, observed_at=observed_at, source_plan=source_plan,
+        )
         dossiers.append(dossier)
     return dossiers
