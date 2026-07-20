@@ -1,1 +1,2 @@
 python3 scripts/accept_jaa_01c.py
+python3 -m pytest -q career_automation/test_jaa_01e_lifecycle_no_bypass.py
