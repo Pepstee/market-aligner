@@ -1,0 +1,144 @@
+meta:
+  app_name: uk-job-matcher
+  app_version: "2.0.0"
+  contract_version: "0.4.0"
+  calibrated: false
+  market: United Kingdom
+  subject: Artiom Gutu
+
+io:
+  job_urls: scraper/data/job_urls.jsonl
+  raw_cache: scraper/data/raw_cache
+  jobs: scraper/data/jobs.jsonl
+  jobs_scored: skeleton/data/jobs_scored.jsonl
+  outputs_dir: outputs
+  candidate_profile: profiler/data/artiom_profile.yaml
+
+scoring:
+  mean_p: 0.0
+  epsilon: 0.05
+  fit_weights:
+    interest: 0.20
+    skill_alignment: 0.20
+    market_readiness: 0.20
+    technical_alignment: 0.20
+    evidence_match: 0.20
+  opportunity_weights:
+    market_demand: 0.35
+    accessibility: 0.35
+    growth_potential: 0.30
+  fit_opportunity_blend: 0.70
+
+boards:
+  enabled: [greenhouse]
+  mode: live
+  rate_limit_seconds: 0.25
+  max_jobs_total: 0
+
+greenhouse:
+  timeout_seconds: 30
+  companies:
+    graphcore: Graphcore
+    anthropic: Anthropic
+    wayve: Wayve
+    speechmatics: Speechmatics
+    polyai: PolyAI
+  uk_location_markers:
+    - " uk"
+    - "united kingdom"
+    - london
+    - bristol
+    - cambridge
+    - manchester
+    - birmingham
+    - edinburgh
+    - glasgow
+    - "remote - uk"
+  exclude_title_terms:
+    - firmware
+    - silicon
+    - electrical
+    - electronics
+    - vehicle safety operator
+    - automotive product security
+    - communications lead
+    - product design
+    - research scientist
+    - director
+    - head of
+    - staff
+    - principal
+    - soc architect
+    - component engineer
+    - language specialist
+    - product owner
+    - counsel
+    - account executive
+    - sales manager
+    - economist
+
+# Broad enough to surface adjacent entry routes; ranking, not discovery, makes
+# the final personal decision.
+search_terms:
+  - agentic ai
+  - ai automation
+  - applied ai
+  - ai engineer
+  - artificial intelligence
+  - generative ai
+  - llm
+  - machine learning
+  - mlops
+  - python engineer
+  - software engineer
+  - platform engineer
+  - cloud engineer
+  - security engineer
+  - solutions engineer
+  - solutions architect
+  - technical product
+  - graduate software
+
+skill_aliases:
+  python: [Python]
+  aws: [AWS, Amazon Web Services]
+  docker: [Docker]
+  kubernetes: [Kubernetes, K8s]
+  terraform: [Terraform]
+  fastapi: [FastAPI]
+  django: [Django]
+  flask: [Flask]
+  pytorch: [PyTorch]
+  tensorflow: [TensorFlow]
+  llm: [LLM, large language model, large language models]
+  rag: [RAG, retrieval augmented generation]
+  agents: [AI agents, agentic AI, multi-agent]
+  mcp: [MCP, Model Context Protocol]
+  sql: [SQL]
+  git: [Git]
+  ci_cd: [CI/CD, continuous integration]
+
+llm:
+  # The scraper remains deterministic. Codex is used only for per-vacancy
+  # structured extraction and evidence-led fit/alignment judgement.
+  backend: codex_cli
+  model: codex-cli-default
+  codex_model: ""
+  cli_timeout_seconds: 180
+  temperature: 0.0
+  cache: true
+  max_retries: 2
+
+candidate_fit_profile:
+  Agentic_AI_Engineer: {interest: 10.0, skill: 8.0, confidence: 0.85, market_readiness: 7.0}
+  AI_Automation_Engineer: {interest: 9.5, skill: 8.0, confidence: 0.85, market_readiness: 7.5}
+  Applied_AI_Engineer: {interest: 9.0, skill: 7.0, confidence: 0.75, market_readiness: 6.5}
+  ML_MLOps_Engineer: {interest: 7.5, skill: 5.5, confidence: 0.65, market_readiness: 5.0}
+  Cloud_Platform_Engineer: {interest: 8.0, skill: 6.5, confidence: 0.75, market_readiness: 6.0}
+  Security_Detection_Engineer: {interest: 8.5, skill: 6.5, confidence: 0.75, market_readiness: 6.0}
+  Backend_Engineer: {interest: 7.5, skill: 6.5, confidence: 0.70, market_readiness: 6.0}
+  Full_Stack_Engineer: {interest: 6.5, skill: 5.5, confidence: 0.60, market_readiness: 5.5}
+  Technical_Solutions_Engineer: {interest: 8.5, skill: 7.5, confidence: 0.80, market_readiness: 7.0}
+  blind_spots:
+    - Internal system sophistication can look like seniority while market proof remains graduate-level.
+    - AI-assisted implementation must be distinguished from personally authored implementation.

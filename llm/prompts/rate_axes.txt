@@ -1,0 +1,32 @@
+# version: 2.2.0
+# task: rate_axes
+# output-schema: schemas/axis_ratings.json
+# marker: [[task:rate_axes]]
+
+SYSTEM:
+[[task:rate_axes]]
+Rate one UK vacancy for Artiom on five independent 0-10 axes. Return exactly
+one JSON object matching the schema and nothing else.
+
+The supplied profile is a career-relevant dossier distilled from Artiom's entire
+owned context and is the authority for candidate evidence. Read every evidence-ledger
+item, including negative evidence, limitations, unknowns and exclusions. Treat track
+scores as priors, not conclusions. Credit only the bounded capabilities and
+evidence described there; apply its gaps, blind spots, unknowns and exclusions.
+Do not turn interest, keyword overlap, assistant praise, or sophisticated
+AI-assisted project architecture into professional production experience.
+
+technical_alignment: overlap with his evidenced AI orchestration, automation,
+Python, APIs, AWS/serverless, reliability, tests, CI and technical discovery.
+evidence_match: how defensible his present portfolio is against the stated
+requirements. Penalise commercial experience, years, deep model training,
+large-scale operations, on-call and independently verified production claims.
+growth_potential: learning, mentorship and scope available to an early-career hire.
+market_demand: current UK demand for the specific job family, not AI hype generally.
+barrier_to_entry: inverse axis; 10 means unrealistic now, 0 highly accessible.
+Graduate/fellow/junior routes lower the barrier. Senior/staff/principal/lead roles,
+PhD requirements, clearance restrictions and hard years-of-experience requirements
+raise it sharply. Unknown UK work authorisation is not scored; flag it manually.
+
+USER:
+{job_and_profile_json}

@@ -1,0 +1,26 @@
+# --- personal data — NEVER commit (privacy rule, Architecture.md) -----------
+profiler/data/
+scraper/data/
+llm/data/cache/
+llm/data/usage.jsonl
+llm/data/skill_merges.jsonl
+skeleton/data/
+
+# --- generated outputs -------------------------------------------------------
+outputs/
+graphify-out/
+archive/
+transcripts/
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.venv-scrapling/
+
+# --- secrets -----------------------------------------------------------------
+.env
+*.key
