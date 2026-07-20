@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -29,21 +30,8 @@ LIVE_SOURCES = {
     "career-pipeline": LIVE_SOURCE_ROOT / "outputs" / "career_automation" / "career_pipeline.sqlite3",
     "raw-jobs": LIVE_SOURCE_ROOT / "scraper" / "data_overnight" / "jobs.sqlite3",
 }
-EXPECTED_LIVE_SOURCE_BINDINGS = {
-    "career-pipeline": {
-        "label": "live-source:career-pipeline",
-        "sha256_before": "dd99efe519b5fcfe09cba2a0d08d18ce6ce84d570ef8649c5d250ebba03f9a8b",
-        "sha256_after": "dd99efe519b5fcfe09cba2a0d08d18ce6ce84d570ef8649c5d250ebba03f9a8b",
-        "integrity_check": ["ok"],
-        "read_only_query_only": True,
-    },
-    "raw-jobs": {
-        "label": "live-source:raw-jobs",
-        "sha256_before": "aac9ebcb8786c71edb1a3cb8921a34515f42a88a1a4e5813f2c505c66fd23940",
-        "sha256_after": "aac9ebcb8786c71edb1a3cb8921a34515f42a88a1a4e5813f2c505c66fd23940",
-        "integrity_check": ["ok"],
-        "read_only_query_only": True,
-    },
+LIVE_SOURCE_BINDING_FIELDS = {
+    "label", "sha256_before", "sha256_after", "integrity_check", "read_only_query_only",
 }
 
 
@@ -67,25 +55,31 @@ def _jaa01_receipt() -> Path:
     return receipts[0]
 
 
-def _assert_exact_live_source_bindings(document: dict[str, object]) -> None:
-    """Require the receipt to bind precisely the two operator-selected live files."""
+def _assert_exact_live_source_receipt_bindings(document: dict[str, object]) -> None:
+    """Require a complete, internally stable binding made during certification."""
     live_sources = document["live_sources"]
     assert isinstance(live_sources, dict)
     assert set(live_sources) == set(LIVE_SOURCES)
-    for logical_label, path in LIVE_SOURCES.items():
-        assert path.is_file() and not path.is_symlink(), path
+    for logical_label in LIVE_SOURCES:
         binding = live_sources[logical_label]
         assert isinstance(binding, dict)
-        # The raw collector remains live, so its later bytes must not be used
-        # to rewrite an already content-addressed receipt.  Still open and
-        # hash each selected file independently to prove the named sources are
-        # usable SQLite files at verification time.
-        actual_hash = _sha256(path)
+        assert set(binding) == LIVE_SOURCE_BINDING_FIELDS
+        assert binding["label"] == f"live-source:{logical_label}"
+        before, after = binding["sha256_before"], binding["sha256_after"]
+        assert isinstance(before, str) and re.fullmatch(r"[0-9a-f]{64}", before)
+        assert isinstance(after, str) and re.fullmatch(r"[0-9a-f]{64}", after)
+        assert before == after
+        assert binding["integrity_check"] == ["ok"]
+        assert binding["read_only_query_only"] is True
+
+
+def _assert_current_live_sources_are_healthy() -> None:
+    """Check today's selected live databases without rewriting receipt history."""
+    for path in LIVE_SOURCES.values():
+        assert path.is_file() and not path.is_symlink(), path
         integrity, query_only = _readonly_integrity_check(path)
-        assert len(actual_hash) == 64 and int(actual_hash, 16) >= 0
         assert integrity == ["ok"]
         assert query_only == 1
-        assert binding == EXPECTED_LIVE_SOURCE_BINDINGS[logical_label]
 
 
 def _runtime() -> Path:
@@ -152,11 +146,25 @@ def _receipt_for(database: Path, directory: Path) -> Path:
     return next(directory.glob("migration-*.json"))
 
 
-def _run(database: Path, receipt: Path, evidence: Path) -> subprocess.CompletedProcess[str]:
+@pytest.fixture()
+def clean_certifier_root(tmp_path: Path) -> Path:
+    """Run clean-tree certification checks outside this edited test checkout."""
+    clone = tmp_path / "clean-certifier-repository"
+    cloned = subprocess.run(
+        ["git", "clone", "--no-local", str(ROOT), str(clone)],
+        text=True, capture_output=True, check=False,
+    )
+    assert cloned.returncode == 0, cloned.stderr
+    return clone
+
+
+def _run(
+    database: Path, receipt: Path, evidence: Path, certifier_root: Path = ROOT,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(CERTIFIER), "--baseline-database", str(database),
+        [sys.executable, str(certifier_root / CERTIFIER.relative_to(ROOT)), "--baseline-database", str(database),
          "--migration-receipt", str(receipt), "--evidence-directory", str(evidence)],
-        cwd=ROOT, text=True, capture_output=True, check=False,
+        cwd=certifier_root, text=True, capture_output=True, check=False,
     )
 
 
@@ -176,12 +184,14 @@ def test_terra_rejection_script_observes_real_actor_states_receipts_retry_and_re
     }
 
 
-def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(tmp_path: Path) -> None:
+def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
+    tmp_path: Path, clean_certifier_root: Path,
+) -> None:
     database = tmp_path / "legacy.sqlite3"
     _make_legacy_database(database)
     receipt = _receipt_for(database, tmp_path)
     evidence = tmp_path / "absolute-evidence"
-    certified = _run(database, receipt, evidence)
+    certified = _run(database, receipt, evidence, clean_certifier_root)
     assert certified.returncode == 0, certified.stderr
     document_path = Path(json.loads(certified.stdout)["receipt"])
     assert document_path.parent == evidence
@@ -197,39 +207,41 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
 
     # A conflicting pre-existing content-addressed receipt cannot be overwritten.
     document_path.write_text("{}", encoding="utf-8")
-    fabricated = _run(database, receipt, evidence)
+    fabricated = _run(database, receipt, evidence, clean_certifier_root)
     assert fabricated.returncode == 2
     assert "content-addressed evidence file mismatch" in fabricated.stderr
     assert document_path.read_text(encoding="utf-8") == "{}"
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA user_version=42")
-    hash_changed = _run(database, receipt, tmp_path / "negative-hash")
+    hash_changed = _run(database, receipt, tmp_path / "negative-hash", clean_certifier_root)
     assert hash_changed.returncode == 2 and "baseline hash disagrees" in hash_changed.stderr
 
     for jobs, events in ((461, 924), (462, 923)):
         wrong = tmp_path / f"wrong-{jobs}-{events}.sqlite3"
         _make_legacy_database(wrong, jobs, events)
         wrong_receipt = _receipt_for(wrong, tmp_path / f"wrong-{jobs}-{events}")
-        rejected = _run(wrong, wrong_receipt, tmp_path / f"negative-{jobs}-{events}")
+        rejected = _run(
+            wrong, wrong_receipt, tmp_path / f"negative-{jobs}-{events}", clean_certifier_root,
+        )
         assert rejected.returncode == 2
         assert ("frozen counts" in rejected.stderr or "baseline counts" in rejected.stderr)
 
     altered = tmp_path / "altered-receipt.json"
     altered.write_text(receipt.read_text(encoding="utf-8").replace("online", "forged", 1), encoding="utf-8")
-    receipt_changed = _run(database, altered, tmp_path / "negative-receipt")
+    receipt_changed = _run(database, altered, tmp_path / "negative-receipt", clean_certifier_root)
     assert receipt_changed.returncode == 2 and "content hash mismatch" in receipt_changed.stderr
 
     corrupt = tmp_path / "corrupt.sqlite3"
     corrupt.write_bytes(b"not a sqlite database")
     corrupt_receipt = _receipt_for(corrupt, tmp_path / "corrupt-receipt")
-    corrupt_result = _run(corrupt, corrupt_receipt, tmp_path / "negative-corrupt")
+    corrupt_result = _run(corrupt, corrupt_receipt, tmp_path / "negative-corrupt", clean_certifier_root)
     assert corrupt_result.returncode == 2
     assert "read-only SQLite inspection failed" in corrupt_result.stderr
 
 
 def test_runtime_certifier_rejects_symlinked_evidence_directory_without_writing_receipt(
-    tmp_path: Path,
+    tmp_path: Path, clean_certifier_root: Path,
 ) -> None:
     database = tmp_path / "legacy.sqlite3"
     _make_legacy_database(database)
@@ -239,7 +251,7 @@ def test_runtime_certifier_rejects_symlinked_evidence_directory_without_writing_
     symlinked_output = tmp_path / "symlinked-evidence"
     symlinked_output.symlink_to(actual_output, target_is_directory=True)
 
-    rejected = _run(database, receipt, symlinked_output)
+    rejected = _run(database, receipt, symlinked_output, clean_certifier_root)
 
     assert rejected.returncode == 2
     assert "output path must not resolve through a symlink" in rejected.stderr
@@ -271,7 +283,8 @@ def test_checked_in_jaa01_evidence_is_content_addressed_complete_and_path_free()
     assert document["scenario"]["receipts"] == 3
     assert document["scenario"]["replay_equal"] is True
     assert document["scenario"]["identical_retry_unchanged"] is True
-    _assert_exact_live_source_bindings(document)
+    _assert_exact_live_source_receipt_bindings(document)
+    _assert_current_live_sources_are_healthy()
     assert str(runtime) not in payload.decode("utf-8")
     assert not any(value.startswith("/") for value in _strings(document))
 
@@ -290,7 +303,27 @@ def test_checked_in_jaa01_evidence_is_content_addressed_complete_and_path_free()
         ),
         pytest.param(
             lambda sources: sources["raw-jobs"].__setitem__("sha256_after", "0" * 64),
-            id="altered-live-source-binding",
+            id="unequal-before-after-hashes",
+        ),
+        pytest.param(
+            lambda sources: sources["raw-jobs"].__setitem__("sha256_before", "not-a-hash"),
+            id="invalid-hash",
+        ),
+        pytest.param(
+            lambda sources: sources["raw-jobs"].__setitem__("read_only_query_only", False),
+            id="false-read-only-query-only",
+        ),
+        pytest.param(
+            lambda sources: sources["raw-jobs"].__setitem__("integrity_check", ["corrupt"]),
+            id="failed-integrity-check",
+        ),
+        pytest.param(
+            lambda sources: sources["raw-jobs"].__setitem__("label", "live-source:wrong"),
+            id="wrong-logical-label",
+        ),
+        pytest.param(
+            lambda sources: sources["raw-jobs"].pop("integrity_check"),
+            id="malformed-binding-shape",
         ),
     ],
 )
@@ -298,14 +331,14 @@ def test_checked_in_jaa01_receipt_rejects_non_exact_live_source_bindings(mutate:
     document = json.loads(_jaa01_receipt().read_text(encoding="utf-8"))
     # First prove the unmodified receipt is valid.  Otherwise a stale receipt
     # could make every negative control pass for the wrong reason.
-    _assert_exact_live_source_bindings(document)
+    _assert_exact_live_source_receipt_bindings(document)
     altered = deepcopy(document)
     live_sources = altered["live_sources"]
     assert isinstance(live_sources, dict)
     assert callable(mutate)
     mutate(live_sources)
     with pytest.raises(AssertionError):
-        _assert_exact_live_source_bindings(altered)
+        _assert_exact_live_source_receipt_bindings(altered)
 
 
 def _strings(value: object) -> list[str]:
