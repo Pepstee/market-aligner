@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from career_automation.database import CareerDatabase
+from career_automation.lifecycle import LifecycleReducer
 from career_automation.migrations import JAA_01_MIGRATIONS
 from scripts.reproduce_jaa01_terra_rejection import reproduce
 from tracked_source_revision import (
@@ -136,12 +136,17 @@ def certify(args: argparse.Namespace) -> Path:
         shutil.copyfile(baseline, migrated)
         pre_migration = readonly_observation(migrated)
         require(pre_migration["counts"] == EXPECTED_COUNTS, "temporary copy changed pre-existing counts")
-        database = CareerDatabase(migrated)
-        database.lifecycle.verify()
+        # JAA-01 evidence must remain pinned to the JAA-01 migration boundary.
+        # Instantiating CareerDatabase here is incorrect once later slices extend
+        # its schema: that production wrapper deliberately applies the latest
+        # migrations and would make a historical JAA-01 proof certify JAA-02 (and
+        # every future migration) by accident.
+        lifecycle = LifecycleReducer(migrated)
+        lifecycle.verify()
         post_migration = readonly_observation(migrated)
         require(post_migration["counts"] == EXPECTED_COUNTS,
                 "migration changed pre-existing pipeline job/event counts")
-        with database.connection() as conn:
+        with sqlite3.connect(migrated) as conn:
             versions = [int(row[0]) for row in conn.execute(
                 "SELECT version FROM career_schema_migrations ORDER BY version"
             )]
