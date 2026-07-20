@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 
+from tracked_source_revision import (
+    TrackedSourceRevisionError,
+    source_content_revision,
+    source_content_revision_contract,
+)
+
 
 class AdoptionError(RuntimeError):
     """A baseline failed certification or could not be copied safely."""
@@ -82,6 +88,29 @@ def _hash_file(path: Path) -> str:
 
 def _canonical_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _validate_recertification_receipt(path: Path) -> None:
+    """Fail closed if an existing event is not canonical and content-addressed."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise AdoptionError("certified recertification receipt content mismatch")
+        payload = path.read_bytes()
+        receipt = json.loads(payload)
+        content = receipt["content"]
+        declared_hash = receipt["content_sha256"]
+        actual_hash = hashlib.sha256(_canonical_bytes(content)).hexdigest()
+        if (
+            not isinstance(declared_hash, str)
+            or declared_hash != actual_hash
+            or path.name != f"source-recertification-{declared_hash}.json"
+            or payload != _canonical_bytes(receipt) + b"\n"
+        ):
+            raise AdoptionError("certified recertification receipt content mismatch")
+    except AdoptionError:
+        raise
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AdoptionError("certified recertification receipt content mismatch") from exc
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
@@ -390,6 +419,11 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
 def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -> Path:
     """Fail-closed recertification of both original live brownfield databases."""
     try:
+        repository = Path(__file__).resolve().parents[1]
+        try:
+            revision = source_content_revision(repository)
+        except TrackedSourceRevisionError as exc:
+            raise AdoptionError(str(exc)) from exc
         source_root = Path(source_root).resolve()
         requested_evidence = Path(evidence_directory).absolute()
         for component in (requested_evidence, *requested_evidence.parents):
@@ -404,8 +438,18 @@ def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -
             spec.name: _recertify_source(source_root / spec.source_relative, spec)
             for spec in BASELINES
         }
+        try:
+            if source_content_revision(repository) != revision:
+                raise AdoptionError("tracked source content changed during recertification")
+        except TrackedSourceRevisionError as exc:
+            raise AdoptionError(str(exc)) from exc
         content = {
             "format": "jaa-00-source-recertification/v2",
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(
+                timespec="microseconds"
+            ).replace("+00:00", "Z"),
+            "source_content_revision": revision,
+            "source_content_revision_contract": source_content_revision_contract(),
             "baseline": {"label": "SOURCE_BASELINE.md", "contract": "live-source-recertification"},
             "source_root": {"label": "operator-configured-source-root"},
             "databases": databases,
@@ -422,6 +466,8 @@ def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -
         for component in (evidence_directory, *evidence_directory.parents):
             if component.is_symlink():
                 raise AdoptionError("recertification evidence path must not contain a symlink")
+        for existing_receipt in evidence_directory.glob("source-recertification-*.json"):
+            _validate_recertification_receipt(existing_receipt)
         destination = evidence_directory / f"source-recertification-{content_hash}.json"
         if destination.exists():
             if destination.is_symlink() or destination.read_bytes() != payload:
