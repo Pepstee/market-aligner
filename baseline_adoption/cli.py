@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from .core import AdoptionError, adopt, reconcile, rollback_manifest
+from .core import AdoptionError, adopt, adopt_online, reconcile, rollback_manifest
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,6 +18,13 @@ def _parser() -> argparse.ArgumentParser:
     adoption.add_argument("--data-root", required=True)
     adoption.add_argument("--repository", default=str(Path(__file__).resolve().parents[1]))
     adoption.add_argument("--secret-reference", action="append", default=[], metavar="NAME")
+    online = sub.add_parser(
+        "adopt-online", help="atomically freeze live databases with SQLite online backup"
+    )
+    online.add_argument("--source-root", required=True)
+    online.add_argument("--data-root", required=True)
+    online.add_argument("--repository", default=str(Path(__file__).resolve().parents[1]))
+    online.add_argument("--secret-reference", action="append", default=[], metavar="NAME")
     for name in ("reconcile", "rollback-manifest"):
         command = sub.add_parser(name)
         command.add_argument("--receipt", required=True)
@@ -30,6 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "adopt":
             result = {"status": "adopted", "receipt": str(adopt(
+                args.source_root, args.data_root, repository=args.repository,
+                secret_references=args.secret_reference))}
+        elif args.command == "adopt-online":
+            result = {"status": "adopted-online", "receipt": str(adopt_online(
                 args.source_root, args.data_root, repository=args.repository,
                 secret_references=args.secret_reference))}
         elif args.command == "reconcile":

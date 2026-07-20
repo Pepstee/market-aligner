@@ -253,3 +253,43 @@ def test_destination_collision_and_idempotent_overwrite_are_rejected_atomically(
     rerun = _adopt(source, fresh, contract)
     assert rerun.returncode == 2 and "refusing to overwrite destination" in rerun.stderr
     assert _receipt(fresh) == first_receipt
+
+
+def test_cli_online_adoption_uses_backup_and_records_new_snapshot_separately(
+    snapshots: tuple[Path, list[dict[str, object]]], tmp_path: Path,
+) -> None:
+    source, contract = snapshots
+    writers = []
+    try:
+        for item in contract:
+            path = source / str(item["source_relative"])
+            writer = sqlite3.connect(path)
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("INSERT INTO records(value) VALUES ('after-historical-observation')")
+            writer.commit()
+            writers.append(writer)
+
+        data = tmp_path / "online"
+        result = _run_cli(
+            source, data, contract, "adopt-online", "--source-root", str(source),
+            "--data-root", str(data), "--repository", str(ROOT)
+        )
+        assert result.returncode == 0, result.stderr
+        receipt = _receipt(data)
+        document = json.loads(receipt.read_text())["content"]
+        assert document["format"] == "jaa-00-online-snapshot-receipt/v2"
+        for item in contract:
+            record = document["databases"][str(item["name"])]
+            assert record["historical_observation"]["observed_table_counts"] == item["table_counts"]
+            assert record["frozen_snapshot"]["table_counts"]["records"] == int(
+                item["table_counts"]["records"]
+            ) + 1
+            assert set(record["capture"]["source_identities_start"]) == {"main", "wal", "shm"}
+            assert set(record["capture"]["source_identities_end"]) == {"main", "wal", "shm"}
+        assert str(source) not in receipt.read_text()
+        checked = _run_cli(source, data, contract, "reconcile", "--receipt", str(receipt),
+                           "--data-root", str(data))
+        assert checked.returncode == 0, checked.stderr
+    finally:
+        for writer in writers:
+            writer.close()

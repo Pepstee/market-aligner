@@ -96,6 +96,62 @@ def _schema_rows(connection: sqlite3.Connection) -> list[tuple[Any, ...]]:
     ).fetchall()
 
 
+def _file_identity(path: Path, label: str) -> dict[str, Any]:
+    """Return a receipt-safe identity without disclosing the host path."""
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {"label": label, "exists": False}
+    if not path.is_file() or path.is_symlink():
+        raise AdoptionError(f"{label}: must be a regular, non-symlink file")
+    return {
+        "label": label,
+        "exists": True,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _source_identities(path: Path, source_label: str) -> dict[str, dict[str, Any]]:
+    return {
+        "main": _file_identity(path, source_label + ":main"),
+        "wal": _file_identity(Path(str(path) + "-wal"), source_label + ":wal"),
+        "shm": _file_identity(Path(str(path) + "-shm"), source_label + ":shm"),
+    }
+
+
+def _inspect_database(path: Path) -> dict[str, Any]:
+    """Measure a closed SQLite snapshot without relying on a historical byte hash."""
+    if not path.is_file() or path.is_symlink():
+        raise AdoptionError("snapshot must be a regular, non-symlink file")
+    try:
+        with closing(_readonly_connection(path)) as connection:
+            integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check").fetchall()]
+            if integrity != ["ok"]:
+                raise AdoptionError(f"snapshot integrity_check failed: {integrity}")
+            schema = _schema_rows(connection)
+            schema_hash = hashlib.sha256(_canonical_bytes(schema)).hexdigest()
+            tables = sorted(row[1] for row in schema if row[0] == "table")
+            counts = {
+                table: int(connection.execute(
+                    'SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"'
+                ).fetchone()[0])
+                for table in tables
+            }
+    except sqlite3.Error as exc:
+        raise AdoptionError(f"snapshot SQLite verification failed: {exc}") from exc
+    return {
+        "bytes": path.stat().st_size,
+        "sha256": _hash_file(path),
+        "schema_sha256": schema_hash,
+        "schema_objects": len(schema),
+        "table_counts": counts,
+        "integrity_check": integrity,
+    }
+
+
 def _verify_database(path: Path, spec: BaselineSpec) -> dict[str, Any]:
     if not path.is_file() or path.is_symlink():
         raise AdoptionError(f"{spec.name}: source must be a regular, non-symlink file")
@@ -213,6 +269,91 @@ def _atomic_copy(source: Path, destination: Path, spec: BaselineSpec) -> dict[st
         temporary.unlink(missing_ok=True)
 
 
+def _historical_observation(spec: BaselineSpec) -> dict[str, Any]:
+    return {
+        "observed_bytes": spec.size,
+        "observed_sha256": spec.sha256,
+        "observed_schema_sha256": spec.schema_sha256,
+        "observed_schema_objects": spec.schema_objects,
+        "observed_table_counts": dict(sorted(spec.table_counts.items())),
+    }
+
+
+def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -> dict[str, Any]:
+    """Freeze a live source with sqlite3_backup and publish it create-if-absent."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        raise AdoptionError(f"refusing to overwrite destination: {spec.destination_relative}")
+
+    source_label = f"source:{spec.name}"
+    start = _source_identities(source, source_label)
+    if not start["main"]["exists"]:
+        raise AdoptionError(f"{spec.name}: live source does not exist")
+    if start["wal"]["exists"] and not start["shm"]["exists"]:
+        raise AdoptionError(
+            f"{spec.name}: WAL exists without SHM; refusing a read that could initialise source state"
+        )
+
+    fd, temporary_name = tempfile.mkstemp(prefix=".snapshotting-", dir=destination.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    started_at = datetime.now(timezone.utc).isoformat()
+    published = False
+    try:
+        try:
+            with closing(_readonly_connection(source)) as source_connection, \
+                    closing(sqlite3.connect(temporary)) as destination_connection:
+                source_connection.backup(destination_connection)
+        except sqlite3.Error as exc:
+            raise AdoptionError(f"{spec.name}: SQLite online backup failed: {exc}") from exc
+        ended_at = datetime.now(timezone.utc).isoformat()
+        end = _source_identities(source, source_label)
+        measured = _inspect_database(temporary)
+
+        # A live baseline may gain rows, but it must still be the expected database family.
+        if (measured["schema_sha256"] != spec.schema_sha256 or
+                measured["schema_objects"] != spec.schema_objects or
+                set(measured["table_counts"]) != set(spec.table_counts)):
+            raise AdoptionError(f"{spec.name}: live source schema does not match the historical baseline")
+
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as exc:
+            raise AdoptionError(f"destination appeared during snapshot: {spec.destination_relative}") from exc
+        published = True
+        os.unlink(temporary)
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+        changed = [name for name in ("main", "wal", "shm") if start[name] != end[name]]
+        return {
+            "capture": {
+                "method": "sqlite-online-backup",
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "source_identities_start": start,
+                "source_identities_end": end,
+                "drift_observed": bool(changed),
+                "changed_components": changed,
+            },
+            "snapshot": measured,
+            "destination_identity": _file_identity(
+                destination, f"destination:{spec.name}"
+            ),
+        }
+    except Exception:
+        if published:
+            destination.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def adopt(source_root: str | Path, data_root: str | Path, *, repository: str | Path,
           secret_references: Sequence[str] = ()) -> Path:
     """Verify both frozen sources, atomically copy them, and write a hashed receipt."""
@@ -275,6 +416,86 @@ def adopt(source_root: str | Path, data_root: str | Path, *, repository: str | P
         raise
 
 
+def adopt_online(source_root: str | Path, data_root: str | Path, *, repository: str | Path,
+                 secret_references: Sequence[str] = ()) -> Path:
+    """Transactionally freeze changing SQLite sources using the online backup API.
+
+    Historical observations identify the database family; the new snapshot's counts,
+    size and digest are measured facts and are never substituted into that history.
+    """
+    source_root, data_root, repository = Path(source_root), Path(data_root), Path(repository)
+    _validate_roots(source_root, data_root, repository)
+    runtime = _runtime_versions()
+    revision = _repository_revision(repository.resolve())
+    invalid_refs = [name for name in secret_references if not name or "=" in name or os.sep in name]
+    if invalid_refs:
+        raise AdoptionError("secret references must be names only, never values or paths")
+
+    destinations = [data_root / spec.destination_relative for spec in BASELINES]
+    for spec, destination in zip(BASELINES, destinations):
+        if destination.exists() or destination.is_symlink():
+            raise AdoptionError(f"refusing to overwrite destination: {spec.destination_relative}")
+
+    captures: dict[str, dict[str, Any]] = {}
+    created: list[Path] = []
+    try:
+        for spec, destination in zip(BASELINES, destinations):
+            captures[spec.name] = _atomic_online_backup(
+                source_root / spec.source_relative, destination, spec
+            )
+            created.append(destination)
+        content = {
+            "format": "jaa-00-online-snapshot-receipt/v2",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "repository": {"label": "canonical-repository", "revision": revision},
+            "runtime": runtime,
+            "secret_references": sorted(set(secret_references)),
+            "databases": {
+                spec.name: {
+                    "source": {"label": f"source:{spec.name}"},
+                    "historical_observation": _historical_observation(spec),
+                    "capture": captures[spec.name]["capture"],
+                    "frozen_snapshot": captures[spec.name]["snapshot"],
+                    "destination": {
+                        "label": f"destination:{spec.name}",
+                        "relative_location": spec.destination_relative,
+                        "identity": captures[spec.name]["destination_identity"],
+                    },
+                    "rollback": {
+                        "preserved_source_label": f"source:{spec.name}",
+                        "remove_destination_label": f"destination:{spec.name}",
+                        "remove_relative_location": spec.destination_relative,
+                    },
+                }
+                for spec in BASELINES
+            },
+        }
+        content_hash = hashlib.sha256(_canonical_bytes(content)).hexdigest()
+        receipt = {"content_sha256": content_hash, "content": content}
+        receipt_dir = data_root / "receipts"
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        receipt_path = receipt_dir / f"migration-{content_hash}.json"
+        payload = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True).encode() + b"\n"
+        fd, temporary_name = tempfile.mkstemp(prefix=".receipt-", dir=receipt_dir)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, receipt_path)
+            except FileExistsError as exc:
+                raise AdoptionError("migration receipt already exists") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        return receipt_path
+    except Exception:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+
+
 def _load_receipt(path: Path) -> dict[str, Any]:
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
@@ -282,9 +503,15 @@ def _load_receipt(path: Path) -> dict[str, Any]:
         expected = receipt["content_sha256"]
     except (OSError, KeyError, json.JSONDecodeError, TypeError) as exc:
         raise AdoptionError(f"invalid receipt: {exc}") from exc
+    if not isinstance(content, dict) or not isinstance(expected, str):
+        raise AdoptionError("invalid receipt: content and content_sha256 have invalid types")
     actual = hashlib.sha256(_canonical_bytes(content)).hexdigest()
     if actual != expected or path.name != f"migration-{actual}.json":
         raise AdoptionError("receipt content hash or filename mismatch")
+    if content.get("format") not in {
+        "jaa-00-migration-receipt/v1", "jaa-00-online-snapshot-receipt/v2"
+    }:
+        raise AdoptionError("unsupported receipt format")
     return receipt
 
 
@@ -294,11 +521,47 @@ def reconcile(receipt_path: str | Path, data_root: str | Path) -> dict[str, Any]
     data_root = Path(data_root)
     results: dict[str, Any] = {}
     for spec in BASELINES:
-        recorded = receipt["content"]["databases"][spec.name]["destination"]
-        result = _verify_database(data_root / spec.destination_relative, spec)
-        for field in ("bytes", "sha256", "schema_sha256", "schema_objects", "table_counts", "integrity_check"):
-            if result[field] != recorded[field]:
-                raise AdoptionError(f"{spec.name}: destination disagrees with migration receipt")
+        try:
+            record = receipt["content"]["databases"][spec.name]
+            if receipt["content"]["format"] == "jaa-00-online-snapshot-receipt/v2":
+                destination_record = record["destination"]
+                if record["historical_observation"] != _historical_observation(spec):
+                    raise AdoptionError(f"{spec.name}: historical observation was rewritten")
+                if record["source"] != {"label": f"source:{spec.name}"}:
+                    raise AdoptionError(f"{spec.name}: unexpected source label in receipt")
+                if (destination_record["label"] != f"destination:{spec.name}" or
+                        destination_record["relative_location"] != spec.destination_relative):
+                    raise AdoptionError(f"{spec.name}: unexpected destination in receipt")
+                expected_rollback = {
+                    "preserved_source_label": f"source:{spec.name}",
+                    "remove_destination_label": f"destination:{spec.name}",
+                    "remove_relative_location": spec.destination_relative,
+                }
+                if record["rollback"] != expected_rollback:
+                    raise AdoptionError(f"{spec.name}: unexpected rollback instructions in receipt")
+                destination = data_root / spec.destination_relative
+                sidecars = [Path(str(destination) + suffix) for suffix in ("-journal", "-wal", "-shm")]
+                if any(item.exists() for item in sidecars):
+                    raise AdoptionError(f"{spec.name}: adopted snapshot has SQLite sidecars")
+                result = _inspect_database(destination)
+                if result != record["frozen_snapshot"]:
+                    raise AdoptionError(f"{spec.name}: destination disagrees with snapshot receipt")
+                if (result["schema_sha256"] != spec.schema_sha256 or
+                        result["schema_objects"] != spec.schema_objects or
+                        set(result["table_counts"]) != set(spec.table_counts)):
+                    raise AdoptionError(f"{spec.name}: destination schema violates baseline contract")
+                identity = _file_identity(destination, f"destination:{spec.name}")
+                if identity != destination_record["identity"]:
+                    raise AdoptionError(f"{spec.name}: destination identity changed")
+            else:
+                recorded = record["destination"]
+                result = _verify_database(data_root / spec.destination_relative, spec)
+                for field in ("bytes", "sha256", "schema_sha256", "schema_objects",
+                              "table_counts", "integrity_check"):
+                    if result[field] != recorded[field]:
+                        raise AdoptionError(f"{spec.name}: destination disagrees with migration receipt")
+        except (KeyError, TypeError) as exc:
+            raise AdoptionError(f"{spec.name}: malformed database receipt") from exc
         results[spec.name] = result
     return {"status": "ok", "receipt_content_sha256": receipt["content_sha256"], "databases": results}
 
@@ -307,15 +570,26 @@ def rollback_manifest(receipt_path: str | Path, data_root: str | Path) -> dict[s
     """Produce an executable-safe manifest; this command intentionally deletes nothing."""
     receipt = _load_receipt(Path(receipt_path))
     root = Path(data_root).resolve()
+    online = receipt["content"]["format"] == "jaa-00-online-snapshot-receipt/v2"
+    if online:
+        reconcile(receipt_path, data_root)
     entries = []
     for spec in BASELINES:
         destination = (root / spec.destination_relative).resolve()
         if root not in destination.parents:
             raise AdoptionError("rollback destination escapes data root")
-        current = _verify_database(destination, spec)
+        record = receipt["content"]["databases"].get(spec.name)
+        if not isinstance(record, dict):
+            raise AdoptionError(f"{spec.name}: malformed database receipt")
+        if online:
+            current = _inspect_database(destination)
+            preserved_source = record["rollback"]["preserved_source_label"]
+        else:
+            current = _verify_database(destination, spec)
+            preserved_source = spec.source_relative
         entries.append({"database": spec.name, "action": "remove_adopted_copy",
                         "target": spec.destination_relative, "expected_sha256": current["sha256"],
-                        "preserved_source": spec.source_relative})
+                        "preserved_source": preserved_source})
     return {"format": "jaa-00-rollback-manifest/v1", "receipt_content_sha256":
             receipt["content_sha256"], "precondition": "reconcile must pass immediately before removal",
             "actions": entries}
