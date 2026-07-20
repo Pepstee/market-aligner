@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,8 +21,8 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.database import CareerDatabase  # noqa: E402
 from career_automation.employer_research import (  # noqa: E402
-    Citation, EmployerResearchWorker, Opportunity1Coordinator, RawResponseCache, content_hash,
-    load_frozen_dossiers, validate_dossier,
+    Citation, EmployerResearchWorker, Opportunity1Coordinator, RawResponseCache,
+    build_reconnaissance_dossier, content_hash, load_frozen_dossiers, validate_dossier,
 )
 from career_automation.engine import OpportunityGate, scored_job_from_payload  # noqa: E402
 from career_automation.models import PipelineState  # noqa: E402
@@ -79,20 +80,18 @@ def _job(job_id: str, opportunity: float = .9):
 
 
 def _runtime_dossier(cache: RawResponseCache, job_key: str) -> dict[str, Any]:
-    body = f"Cited public company evidence for {job_key}.".encode()
+    body = (f"<p>The company operates a technology product platform and service for customers. "
+            f"Its employee team has role responsibilities and duties. The careers vacancy invites "
+            f"each candidate to apply through the hiring application. In 2026 it reported current "
+            f"operational revenue and profit performance for {job_key}.</p>").encode()
     digest, reference = cache.store(body)
     timestamp = "2026-07-20T00:00:00+00:00"
-    return {
-        "schema_version": "jaa04.dossier.v1", "job_key": job_key,
-        "raw_cache_root": str(cache.root),
-        "sources": [{"id": "source", "url": "https://8.8.8.8/public", "captured_at": timestamp,
-                     "retrieved_at": timestamp, "content_sha256": digest,
-                     "raw_response_ref": reference, "status_code": 200}],
-        "claims": [{"id": "claim", "kind": "company", "classification": "fact",
-                    "text": body.decode(), "observed_at": timestamp,
-                    "freshness_classification": "current", "source_ids": ["source"]}],
-        "edges": [],
-    }
+    citation = Citation("source", "https://8.8.8.8/public", timestamp, timestamp,
+                        digest, reference, 200)
+    return build_reconnaissance_dossier(
+        SimpleNamespace(job_key=job_key, company="Example", title="Engineer"),
+        citation, cache, observed_at=timestamp,
+    )
 
 
 def exercise_runtime(work: Path) -> dict[str, Any]:
@@ -112,6 +111,10 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
                 and record["retrieved_at"] == source["retrieved_at"]
                 and record["redirect_history"] == source["redirect_history"],
                 "manifest is not bound to frozen dossier provenance")
+        require(record.get("sources") == dossier["sources"]
+                and record.get("source_plan") == dossier["source_plan"]
+                and record.get("source_ids") == [item["id"] for item in dossier["sources"]],
+                "manifest does not exactly cover dossier sources and source plan")
     source_hashes = {source["content_sha256"] for dossier in frozen for source in dossier["sources"]}
     require(len(source_hashes) == 30, "identical synthetic responses cannot certify JAA-04")
     expected_kinds = {"company", "role", "product", "hiring", "operational_health"}
@@ -178,8 +181,10 @@ def exercise_runtime(work: Path) -> dict[str, Any]:
 
     class CapturedRetriever:
         def retrieve(self, source_id: str, url: str) -> Citation:
-            body = (b"<html><p>Example operates a public technology service with "
-                    b"documented products, customers, delivery scope, and operating constraints.</p></html>")
+            body = (b"<p>The company operates a technology product platform and service for customers. "
+                    b"Its employee team has role responsibilities and duties. The careers vacancy invites "
+                    b"each candidate to apply through the hiring application. In 2026 it reported current "
+                    b"operational revenue and profit performance.</p>")
             digest, reference = cache.store(body)
             timestamp = "2026-07-20T00:00:00+00:00"
             return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,

@@ -110,7 +110,10 @@ def capture(plan_path: Path, destination: Path) -> None:
                     summary.update({"error": str(attempt.get("error", "")),
                                     "message": str(attempt.get("message", ""))})
                 attempts.append(summary)
-            captured_records.append({"job_key": record["id"], "source_id": source_id,
+            captured_records.append({"job_key": record["id"],
+                                     "source_ids": [item["id"] for item in dossier["sources"]],
+                                     "sources": dossier["sources"],
+                                     "source_plan": dossier["source_plan"],
                                      "company": company, "role": task.title,
                                      "intelligence_kinds": sorted({claim["kind"] for claim in dossier["claims"]}),
                                      "classifications": sorted({claim["classification"] for claim in dossier["claims"]}),
@@ -136,6 +139,13 @@ def capture(plan_path: Path, destination: Path) -> None:
                    "captured_count": 30, "manifest_sha256": hashlib.sha256((stage / "research_manifest.json").read_bytes()).hexdigest(),
                    "dossiers_sha256": hashlib.sha256((stage / "frozen_dossiers.json").read_bytes()).hexdigest(),
                    "raw_corpus_sha256": corpus_hash}
+        receipt["source_plan_contract"] = {
+            "intelligence_kinds": sorted(kind.value for kind in __import__(
+                "career_automation.models", fromlist=["IntelligenceKind"]
+            ).IntelligenceKind),
+            "coverage": "one-plan-one-source-one-claim-per-kind",
+            "byte_binding": "sha256-and-exact-byte-range",
+        }
         (stage / "capture_receipt.json").write_bytes(canonical(receipt))
         os.rename(stage, destination)
     except BaseException:
