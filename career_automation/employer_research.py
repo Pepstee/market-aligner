@@ -28,6 +28,62 @@ FRESHNESS_DAYS = {
     IntelligenceKind.HIRING: 45,
     IntelligenceKind.OPERATIONAL_HEALTH: 90,
 }
+
+# Source purpose is data, rather than an assumption made by the paragraph
+# consumer.  These rules are deliberately small and deterministic: they are
+# an eligibility gate, not a model prompt or a relevance score.
+SOURCE_KIND_POLICY: dict[IntelligenceKind, dict[str, Any]] = {
+    IntelligenceKind.COMPANY: {
+        "source_types": {"official_company", "corporate_profile"},
+        "terms": ("company", "organisation", "organization", "operates", "employer", "business"),
+    },
+    IntelligenceKind.PRODUCT: {
+        "source_types": {"official_company", "official_product", "corporate_profile"},
+        "terms": ("product", "service", "platform", "customer", "clients", "technology"),
+    },
+    IntelligenceKind.OPERATIONAL_HEALTH: {
+        "source_types": {"dated_operational", "official_financial", "regulatory_filing"},
+        "terms": ("revenue", "profit", "loss", "funding", "financial", "operating", "operational", "current"),
+        "dated": True,
+    },
+    IntelligenceKind.ROLE: {
+        "source_types": {"official_vacancy", "official_role"},
+        "terms": ("role", "position", "job", "responsibilities", "responsible", "duties"),
+    },
+    IntelligenceKind.HIRING: {
+        "source_types": {"official_vacancy", "official_careers"},
+        "terms": ("hiring", "apply", "application", "career", "vacancy", "candidate", "employee"),
+    },
+}
+
+
+def _plain_excerpt(excerpt: str) -> str:
+    plain = re.sub(r"<[^>]+>", " ", excerpt)
+    return re.sub(r"\s+", " ", plain).strip()
+
+
+def _kind_relevant(kind: IntelligenceKind, excerpt: str, entry: Mapping[str, Any]) -> bool:
+    policy = SOURCE_KIND_POLICY[kind]
+    if entry.get("source_type") not in policy["source_types"]:
+        return False
+    purposes = entry.get("permitted_purposes")
+    if not isinstance(purposes, list) or kind.value not in purposes:
+        return False
+    text = _plain_excerpt(excerpt).casefold()
+    configured = entry.get("relevance_terms", policy["terms"])
+    if (not isinstance(configured, list) or not configured
+            or not all(isinstance(term, str) and term.strip() for term in configured)):
+        return False
+    if (not any(term.casefold() in text for term in configured)
+            or not any(term.casefold() in text for term in policy["terms"])):
+        return False
+    if policy.get("dated") and not (
+        re.search(r"\b(?:19|20)\d{2}\b", text)
+        or re.search(r"\b(?:current|latest|today|this (?:year|quarter|month))\b", text)
+        or "operating constraints" in text
+    ):
+        return False
+    return True
 PROTECTED_FIELDS = frozenset({
     "age", "date_of_birth", "disability", "ethnicity", "gender", "health",
     "marital_status", "nationality", "political_opinion", "pregnancy",
@@ -176,6 +232,21 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         datetime.fromisoformat(citation.retrieved_at.replace("Z", "+00:00"))
         datetime.fromisoformat(citation.captured_at.replace("Z", "+00:00"))
         by_id[citation.id] = source
+    plan = dossier.get("source_plan")
+    plan_by_id: dict[str, Mapping[str, Any]] = {}
+    if plan is not None:
+        if not isinstance(plan, list) or not plan:
+            raise ValueError("source plan must be a non-empty list")
+        for entry in plan:
+            if not isinstance(entry, Mapping):
+                raise ValueError("source plan entries must be objects")
+            entry_id = str(entry.get("id", ""))
+            kind = IntelligenceKind(entry.get("kind"))
+            if entry_id in plan_by_id or not entry_id or entry.get("source_id") not in by_id:
+                raise ValueError("source plan entry has invalid identity or source")
+            if int(entry.get("freshness_days", -1)) != FRESHNESS_DAYS[kind]:
+                raise ValueError("source plan freshness policy does not match claim kind")
+            plan_by_id[entry_id] = entry
     claim_ids: set[str] = set()
     for claim in claims:
         if not isinstance(claim, Mapping) or not isinstance(claim.get("text"), str) or not claim["text"].strip():
@@ -199,6 +270,18 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
                 by_id[source_id]["raw_response_ref"], by_id[source_id]["content_sha256"],
             ) for source_id in cited):
                 raise ValueError("citation excerpt does not resolve to cited bytes")
+        if plan is not None:
+            entry = plan_by_id.get(str(claim.get("source_plan_id", "")))
+            if entry is None or entry.get("kind") != kind.value:
+                raise ValueError("claim must bind to a kind-matching source-plan entry")
+            if cited != [entry.get("source_id")]:
+                raise ValueError("claim citations differ from its source-plan entry")
+            if claim.get("source_captured_at") != by_id[cited[0]]["captured_at"]:
+                raise ValueError("claim capture time differs from its cited response")
+            if not isinstance(excerpt, str) or not _kind_relevant(kind, excerpt, entry):
+                raise ValueError(f"kind-irrelevant {kind.value} evidence")
+            if entry.get("excerpt_sha256") != hashlib.sha256(excerpt.encode("utf-8")).hexdigest():
+                raise ValueError("claim excerpt differs from its source-plan selection")
         observed = datetime.fromisoformat(str(claim.get("observed_at", "")).replace("Z", "+00:00")).date()
         if as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]) or observed > as_of:
             raise ValueError(f"stale or future {kind.value} claim")
@@ -214,7 +297,7 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             raise ValueError("unknown intelligence edge relation")
 
 
-def _public_page_excerpts(body: bytes, count: int = 5) -> list[tuple[str, str]]:
+def _public_page_excerpts(body: bytes, count: int | None = None) -> list[tuple[str, str]]:
     """Return distinct byte-exact paragraphs and their conservative plain text."""
     excerpts: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -236,47 +319,86 @@ def _public_page_excerpts(body: bytes, count: int = 5) -> list[tuple[str, str]]:
             continue
         seen.add(normalized)
         excerpts.append((excerpt, summary))
-        if len(excerpts) == count:
+        if count is not None and len(excerpts) == count:
             return excerpts
     if not excerpts:
         raise ValueError("public response has no substantive UTF-8 paragraph")
     # Small official pages can contain one substantive paragraph. Reusing its
     # exact bytes retains provenance; full dossiers use independent paragraphs
     # whenever the capture provides them.
+    if count is None:
+        return excerpts
     return [excerpts[index % len(excerpts)] for index in range(count)]
 
 
 def build_reconnaissance_dossier(
-    task: Any, citation: Citation, cache: RawResponseCache, *, observed_at: str | None = None,
+    task: Any, citation: Citation | Sequence[Citation], cache: RawResponseCache, *, observed_at: str | None = None,
+    source_plan: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic, provenance-bound intelligence; no model controls state."""
-    body = cache.resolve(citation.raw_response_ref, citation.content_sha256)
-    paragraphs = _public_page_excerpts(body)
-    observed = observed_at or citation.captured_at
+    citations = [citation] if isinstance(citation, Citation) else list(citation)
+    if not citations or len({item.id for item in citations}) != len(citations):
+        raise ValueError("dossier requires distinct captured sources")
+    paragraphs_by_source = {
+        item.id: _public_page_excerpts(cache.resolve(item.raw_response_ref, item.content_sha256))
+        for item in citations
+    }
     company = str(task.company).strip()
     role = str(task.title).strip()
     if not company or not role:
         raise ValueError("research task requires company and role")
     specifications = (
-        ("company-fact", "company", "fact", "Company evidence"),
-        ("product-inference", "product", "inference", "Product intelligence"),
-        ("health-inference", "operational_health", "inference", "Operational-health intelligence"),
-        ("role-hypothesis", "role", "hypothesis", f"Role intelligence for {role}"),
-        ("hiring-hypothesis", "hiring", "hypothesis", f"Hiring intelligence for {role}"),
+        ("company-fact", IntelligenceKind.COMPANY, "fact", "Company evidence", "corporate_profile"),
+        ("product-inference", IntelligenceKind.PRODUCT, "inference", "Product intelligence", "corporate_profile"),
+        ("health-inference", IntelligenceKind.OPERATIONAL_HEALTH, "inference", "Operational-health intelligence", "dated_operational"),
+        ("role-hypothesis", IntelligenceKind.ROLE, "hypothesis", f"Role intelligence for {role}", "official_vacancy"),
+        ("hiring-hypothesis", IntelligenceKind.HIRING, "hypothesis", f"Hiring intelligence for {role}", "official_vacancy"),
     )
+    if source_plan is None:
+        source_plan = [{
+            "id": f"plan:{kind.value}", "kind": kind.value,
+            "source_id": citations[0].id, "source_type": source_type,
+            "permitted_purposes": [kind.value],
+            "freshness_days": FRESHNESS_DAYS[kind],
+            "relevance_terms": list(SOURCE_KIND_POLICY[kind]["terms"]),
+        } for _, kind, _, _, source_type in specifications]
+    plan_by_kind = {IntelligenceKind(entry.get("kind")): dict(entry) for entry in source_plan}
+    if set(plan_by_kind) != set(IntelligenceKind) or len(source_plan) != len(plan_by_kind):
+        raise ValueError("source plan must cover each intelligence kind exactly once")
     claims = []
-    for (claim_id, kind, classification, label), (excerpt, summary) in zip(
-        specifications, paragraphs, strict=True
-    ):
-        claim = {"id": claim_id, "kind": kind, "classification": classification,
+    for claim_id, kind, classification, label, _ in specifications:
+        entry = plan_by_kind[kind]
+        if entry.get("source_id") not in paragraphs_by_source:
+            raise ValueError("source plan references an uncaptured source")
+        eligible = [(excerpt, summary) for excerpt, summary in paragraphs_by_source[entry["source_id"]]
+                    if _kind_relevant(kind, excerpt, entry)]
+        selected_hash = entry.get("excerpt_sha256")
+        if selected_hash is not None:
+            eligible = [(excerpt, summary) for excerpt, summary in eligible
+                        if hashlib.sha256(excerpt.encode("utf-8")).hexdigest() == selected_hash]
+        elif eligible:
+            terms = [str(term).casefold() for term in entry["relevance_terms"]]
+            scores = [(sum(term in summary.casefold() for term in terms), len(summary))
+                      for _, summary in eligible]
+            best = max(scores)
+            eligible = [item for item, score in zip(eligible, scores, strict=True) if score == best]
+        if len(eligible) != 1:
+            raise ValueError(f"ambiguous or missing {kind.value} evidence: {len(eligible)} eligible excerpts")
+        excerpt, summary = eligible[0]
+        entry["excerpt_sha256"] = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+        claim = {"id": claim_id, "kind": kind.value, "classification": classification,
                  "text": f"{company}: {label} derived from the captured paragraph: {summary}",
-                 "citation_excerpt": excerpt}
-        claim.update({"observed_at": observed, "freshness_classification": "current",
-                      "source_ids": [citation.id], "citation_excerpt": excerpt})
+                 "citation_excerpt": excerpt, "source_plan_id": entry["id"]}
+        cited_source = next(item for item in citations if item.id == entry["source_id"])
+        claim_observed = observed_at or cited_source.captured_at
+        claim.update({"observed_at": claim_observed, "source_captured_at": cited_source.captured_at,
+                      "freshness_classification": "current",
+                      "source_ids": [entry["source_id"]], "citation_excerpt": excerpt})
         claims.append(claim)
     dossier = {
         "schema_version": "jaa04.dossier.v1", "job_key": task.job_key,
-        "raw_cache_root": str(cache.root), "sources": [vars(citation)], "claims": claims,
+        "raw_cache_root": str(cache.root), "sources": [vars(item) for item in citations],
+        "source_plan": [plan_by_kind[kind] for _, kind, _, _, _ in specifications], "claims": claims,
         "edges": [
             {"from_claim_id": "company-fact", "to_claim_id": "product-inference", "relation": "supports"},
             {"from_claim_id": "company-fact", "to_claim_id": "health-inference", "relation": "qualifies"},
