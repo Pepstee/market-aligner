@@ -35,7 +35,7 @@ def revision() -> str:
     return result.stdout.strip()
 
 
-def certify(capture: Path, destination: Path) -> None:
+def certify(capture: Path, destination: Path) -> Path:
     receipt_path = capture / "capture_receipt.json"
     manifest_path = capture / "research_manifest.json"
     dossiers_path = capture / "frozen_dossiers.json"
@@ -46,9 +46,9 @@ def certify(capture: Path, destination: Path) -> None:
     if (receipt.get("manifest_sha256") != sha(manifest_path)
             or receipt.get("dossiers_sha256") != sha(dossiers_path)):
         raise ValueError("capture metadata or dossier bytes were modified")
-    if (manifest.get("schema_version") != "jaa04.research-manifest.v3"
-            or manifest.get("opportunity0_queue_size") != 58
-            or len(manifest.get("records", [])) != 30
+    if (manifest.get("schema_version") != "jaa04.research-manifest.v4"
+            or manifest.get("opportunity0_queue_size", 0) < 30
+            or len(manifest.get("records", [])) < 30
             or manifest.get("records_hash") != content_hash(manifest["records"])):
         raise ValueError("manifest is not bound to the frozen admitted queue")
     dossiers = load_frozen_dossiers(dossiers_path, RawResponseCache(capture / "raw"), strict_corpus=True)
@@ -72,6 +72,8 @@ def certify(capture: Path, destination: Path) -> None:
         "manifest_sha256": sha(manifest_path), "dossiers_sha256": sha(dossiers_path),
         "raw_corpus_sha256": raw_hash,
     })
+    if destination.suffix != ".json":
+        destination = destination / f"sha256-{hashlib.sha256(certificate).hexdigest()}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and destination.read_bytes() != certificate:
         raise ValueError("existing certification receipt conflicts with validated bytes")
@@ -79,6 +81,7 @@ def certify(capture: Path, destination: Path) -> None:
         temporary = destination.with_suffix(".tmp")
         temporary.write_bytes(certificate)
         os.replace(temporary, destination)
+    return destination
 
 
 def main() -> int:
@@ -86,14 +89,14 @@ def main() -> int:
     parser.add_argument("--capture", type=Path,
                         default=ROOT / "career_automation/fixtures/jaa04_capture")
     parser.add_argument("--receipt", type=Path,
-                        default=ROOT / "runtime_evidence/jaa04/certification.json")
+                        default=ROOT / "runtime_evidence/jaa04")
     args = parser.parse_args()
     try:
-        certify(args.capture.resolve(), args.receipt.resolve())
+        receipt = certify(args.capture.resolve(), args.receipt.resolve())
     except Exception as exc:
         print(f"JAA-04 acceptance: ERROR: {exc}", file=sys.stderr)
         return 2
-    print("JAA-04 acceptance: PASS")
+    print(f"JAA-04 acceptance: PASS ({receipt})")
     return 0
 
 

@@ -17,13 +17,12 @@ DESTINATION = ROOT / "career_automation/fixtures/jaa04_capture"
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--queue-snapshot", type=Path, required=True)
-    parser.add_argument("--authority-plan", type=Path, required=True)
     args = parser.parse_args()
     fresh = Path(tempfile.mkdtemp(prefix="jaa04-authentic-", dir=DESTINATION.parent))
     fresh.rmdir()
     previous = DESTINATION.with_name(DESTINATION.name + ".previous")
     try:
-        capture(args.queue_snapshot.resolve(), args.authority_plan.resolve(), fresh)
+        capture(args.queue_snapshot.resolve(), fresh)
         if previous.exists():
             raise RuntimeError("previous corpus recovery directory already exists")
         if DESTINATION.exists():

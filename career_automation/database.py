@@ -370,7 +370,7 @@ class CareerDatabase:
     ) -> None:
         """Persist a provenance-validated probabilistic research result."""
         from .employer_research import RawResponseCache, content_hash, validate_dossier
-        strict = dossier.get("schema_version") in {"jaa04.dossier.v1", "jaa04.dossier.v2"}
+        strict = dossier.get("schema_version") in {"jaa04.dossier.v1", "jaa04.dossier.v2", "jaa04.dossier.v3"}
         if strict:
             cache_root = dossier.get("raw_cache_root")
             if not isinstance(cache_root, str) or not cache_root:
@@ -384,7 +384,9 @@ class CareerDatabase:
         source_ids = {str(source.get("id")) for source in sources if isinstance(source, dict)}
         for claim in dossier.get("claims", []):
             cited = {str(value) for value in claim.get("source_ids", [])} if isinstance(claim, dict) else set()
-            if not cited or not cited.issubset(source_ids):
+            unsupported = (isinstance(claim, dict)
+                           and claim.get("outcome") in {"unknown", "abstained"})
+            if (not cited and not unsupported) or not cited.issubset(source_ids):
                 raise ValueError("every dossier claim must cite known source IDs")
         model = self._dossier_model(dossier)
         observation = {
@@ -446,6 +448,10 @@ class CareerDatabase:
             )
             if strict:
                 for claim in dossier["claims"]:
+                    if claim.get("outcome") in {"unknown", "abstained"}:
+                        # The outcome remains durable in dossier_json; it is
+                        # deliberately absent from the positive-claim index.
+                        continue
                     conn.execute(
                         """INSERT OR IGNORE INTO employer_intelligence
                            (job_key,claim_id,kind,classification,claim_json) VALUES(?,?,?,?,?)""",

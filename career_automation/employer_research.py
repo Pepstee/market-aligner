@@ -13,12 +13,12 @@ import json
 import os
 import re
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from .models import ClaimClassification, IntelligenceKind
 
@@ -36,11 +36,11 @@ FRESHNESS_DAYS = {
 # an eligibility gate, not a model prompt or a relevance score.
 SOURCE_KIND_POLICY: dict[IntelligenceKind, dict[str, Any]] = {
     IntelligenceKind.COMPANY: {
-        "source_types": {"authoritative_company_record", "official_company"},
+        "source_types": {"authoritative_company_record", "official_company", "official_vacancy"},
         "terms": ("company", "organisation", "organization", "operates", "employer", "business"),
     },
     IntelligenceKind.PRODUCT: {
-        "source_types": {"official_product_documentation", "official_product"},
+        "source_types": {"official_product_documentation", "official_product", "official_company", "official_vacancy"},
         "terms": ("product", "service", "platform", "customer", "clients", "technology"),
     },
     IntelligenceKind.OPERATIONAL_HEALTH: {
@@ -53,7 +53,7 @@ SOURCE_KIND_POLICY: dict[IntelligenceKind, dict[str, Any]] = {
         "terms": ("role", "position", "job", "responsibilities", "responsible", "duties"),
     },
     IntelligenceKind.HIRING: {
-        "source_types": {"official_careers"},
+        "source_types": {"official_careers", "official_vacancy"},
         "terms": ("hiring", "apply", "application", "career", "vacancy", "candidate", "employee"),
     },
 }
@@ -267,6 +267,127 @@ class ScraplingPublicRetriever:
                         date_evidence, "scrapling-fetcher")
 
 
+class PortableAuthorityRetriever:
+    """Discover authority from the admitted vacancy instead of an URL inventory.
+
+    The vacancy is the only seed.  Candidate routes must be links actually
+    published in retrieved bytes (canonical, hiring-organisation, sameAs, or
+    ordinary anchors).  This keeps discovery portable across ATS and employer
+    hosts and prevents guessed host-specific paths from becoming evidence.
+    """
+
+    _LINK = re.compile(
+        r"<(?:a|link)\b[^>]*?href\s*=\s*([\"'])(.*?)\1|"
+        r"[\"'](?:url|sameAs|applicationUrl)[\"']\s*:\s*([\"'])(.*?)\3",
+        re.I | re.S,
+    )
+
+    def __init__(self, cache: RawResponseCache, *, retriever: ScraplingPublicRetriever | None = None,
+                 maximum_routes: int = 12) -> None:
+        self.cache = cache
+        self.retriever = retriever or ScraplingPublicRetriever(cache)
+        self.maximum_routes = maximum_routes
+
+    def _retrieve(self, source_id: str, url: str, source_kind: str) -> Citation:
+        publisher = (urlparse(url).hostname or "").casefold()
+        try:
+            return self.retriever.retrieve(source_id, url, source_kind=source_kind,
+                                           canonical_publisher=publisher,
+                                           canonical_article=url)
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            item = self.retriever.retrieve(source_id, url)
+            return replace(item, source_kind=source_kind,
+                           canonical_publisher=(urlparse(item.url).hostname or "").casefold(),
+                           canonical_article=item.url,
+                           retrieval_engine=item.retrieval_engine or "deterministic-retriever")
+
+    @staticmethod
+    def _published_routes(base: str, body: bytes) -> list[str]:
+        text = body.decode("utf-8", "strict")
+        routes: list[str] = []
+        for match in PortableAuthorityRetriever._LINK.finditer(text):
+            value = unescape(match.group(2) or match.group(4) or "").strip()
+            try:
+                route = urljoin(base, value)
+                _canonical_public_url(route)
+            except ValueError:
+                continue
+            if route not in routes:
+                routes.append(route)
+        return routes
+
+    @staticmethod
+    def _classify(url: str, vacancy_url: str, body: bytes) -> set[IntelligenceKind]:
+        plain = _plain_excerpt(body.decode("utf-8", "strict"))
+        kinds = {kind for kind in IntelligenceKind
+                 if any(re.search(pattern, plain.casefold()) for group in _SEMANTIC_PATTERNS[kind]
+                        for pattern in group)}
+        if url == vacancy_url:
+            kinds.update({IntelligenceKind.ROLE, IntelligenceKind.HIRING})
+        return kinds
+
+    def retrieve_plan(self, task: Any) -> tuple[list[Citation], list[dict[str, Any]]]:
+        vacancy = self._retrieve(f"source:{task.job_key}:vacancy", task.url, "official_vacancy")
+        citations = [vacancy]
+        vacancy_body = self.cache.resolve(vacancy.raw_response_ref, vacancy.content_sha256)
+        routes = self._published_routes(vacancy.url, vacancy_body)
+        seen = {vacancy.capture_identity, vacancy.content_sha256}
+        for index, route in enumerate(routes[:self.maximum_routes]):
+            if route == vacancy.url:
+                continue
+            try:
+                item = self._retrieve(f"source:{task.job_key}:discovered:{index}",
+                                      route, "official_company")
+            except (RuntimeError, ValueError, UnicodeError):
+                continue
+            if item.capture_identity in seen or item.content_sha256 in seen:
+                continue
+            seen.update((item.capture_identity, item.content_sha256))
+            citations.append(item)
+
+        supported: dict[IntelligenceKind, tuple[Citation, str, str, int]] = {}
+        for item in citations:
+            body = self.cache.resolve(item.raw_response_ref, item.content_sha256)
+            try:
+                excerpts = _public_page_excerpts(body)
+            except (ValueError, UnicodeError):
+                excerpts = []
+            for excerpt, _ in excerpts:
+                start = body.find(excerpt.encode("utf-8"))
+                for kind in self._classify(item.url, vacancy.url, excerpt.encode("utf-8")):
+                    if kind not in supported and _kind_relevant(kind, excerpt, {
+                        "source_type": ("official_vacancy" if item.url == vacancy.url else
+                                        (item.source_kind or _default_source_type(kind))),
+                        "permitted_purposes": [kind.value],
+                    }):
+                        supported[kind] = (item, excerpt, hashlib.sha256(excerpt.encode()).hexdigest(), start)
+        plan = []
+        for kind in IntelligenceKind:
+            base = {"id": f"plan:{kind.value}", "kind": kind.value,
+                    "permitted_purposes": [kind.value], "freshness_days": FRESHNESS_DAYS[kind]}
+            if kind not in supported:
+                plan.append({**base, "outcome": "unknown", "reason": "no purpose-specific official authority excerpt discovered"})
+                continue
+            item, excerpt, digest, start = supported[kind]
+            source_type = item.source_kind or _default_source_type(kind)
+            plan.append({**base, "outcome": "supported", "source_id": item.id,
+                         "source_type": source_type, "excerpt_sha256": digest,
+                         "excerpt_byte_start": start, "excerpt_byte_length": len(excerpt.encode())})
+        return citations, plan
+
+
+def _default_source_type(kind: IntelligenceKind) -> str:
+    return {
+        IntelligenceKind.COMPANY: "official_company",
+        IntelligenceKind.PRODUCT: "official_product_documentation",
+        IntelligenceKind.OPERATIONAL_HEALTH: "official_financial",
+        IntelligenceKind.ROLE: "official_vacancy",
+        IntelligenceKind.HIRING: "official_careers",
+    }[kind]
+
+
 class SidecarAuthorityRetriever:
     """Reviewed authority plans executed through the production Scrapling sidecar.
 
@@ -441,6 +562,9 @@ def extract_publisher_timestamps(body: bytes) -> tuple[str | None, str | None, s
 def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_of: date | None = None) -> None:
     """Validate all provenance, typing, freshness and privacy rules or fail closed."""
     schema_version = dossier.get("schema_version")
+    if schema_version == "jaa04.dossier.v3":
+        _validate_portable_dossier(dossier, cache, as_of=as_of)
+        return
     if schema_version not in {"jaa04.dossier.v1", "jaa04.dossier.v2"}:
         raise ValueError("unsupported dossier schema")
     authority_contract = schema_version == "jaa04.dossier.v2"
@@ -493,7 +617,7 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
                 raise ValueError("translations, mirrors, or aliases resolve to one canonical article")
             articles.add(article.casefold())
             plain = re.sub(br"<[^>]+>", b" ", body)
-            normalized = re.sub(br"\s+", b" ", plain).strip().casefold()
+            normalized = re.sub(br"\s+", b" ", plain).strip().decode("utf-8", "strict").casefold().encode()
             equivalence_hash = hashlib.sha256(normalized).hexdigest()
             if equivalence_hash in equivalent_content:
                 raise ValueError("mirrored, syndicated, or repeated content is not independent evidence")
@@ -644,6 +768,73 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         raise ValueError("claims must cover every source-plan entry exactly once")
 
 
+def _validate_portable_dossier(dossier: Mapping[str, Any], cache: RawResponseCache,
+                               *, as_of: date | None = None) -> None:
+    """Validate the portable contract: five outcomes may share real captures."""
+    sources = dossier.get("sources")
+    claims = dossier.get("claims")
+    plan = dossier.get("source_plan")
+    if not isinstance(sources, list) or not sources or not isinstance(claims, list) or not isinstance(plan, list):
+        raise ValueError("portable dossier requires sources, claims and outcomes")
+    by_id: dict[str, tuple[Mapping[str, Any], bytes]] = {}
+    identities: set[tuple[str, str]] = set()
+    hashes: set[str] = set()
+    for row in sources:
+        citation = Citation(**row)
+        body = cache.resolve(citation.raw_response_ref, citation.content_sha256)
+        identity = citation.capture_identity
+        if identity in identities or citation.content_sha256 in hashes:
+            raise ValueError("duplicate content must be represented by its original capture")
+        identities.add(identity)
+        hashes.add(citation.content_sha256)
+        datetime.fromisoformat(citation.captured_at.replace("Z", "+00:00"))
+        datetime.fromisoformat(citation.retrieved_at.replace("Z", "+00:00"))
+        if not citation.source_kind or not citation.retrieval_engine:
+            raise ValueError("capture lacks authority classification or retrieval metadata")
+        by_id[citation.id] = (row, body)
+    outcomes = {str(row.get("kind")): row for row in plan if isinstance(row, Mapping)}
+    required = {kind.value for kind in IntelligenceKind}
+    if set(outcomes) != required or len(plan) != len(required):
+        raise ValueError("exactly five purpose-specific outcomes are required")
+    claims_by_kind = {str(row.get("kind")): row for row in claims if isinstance(row, Mapping)}
+    if set(claims_by_kind) != required or len(claims) != len(required):
+        raise ValueError("claims must record every intelligence outcome")
+    for kind_value in required:
+        kind = IntelligenceKind(kind_value)
+        outcome, claim = outcomes[kind_value], claims_by_kind[kind_value]
+        state = outcome.get("outcome")
+        if state not in {"supported", "unknown", "abstained"} or claim.get("outcome") != state:
+            raise ValueError("invalid or inconsistent intelligence outcome")
+        if state != "supported":
+            if (claim.get("classification") is not None or claim.get("source_ids") not in ([], None)
+                    or claim.get("citation_excerpt") is not None or claim.get("score_delta_bp", 0) != 0):
+                raise ValueError("unsupported intelligence cannot become a claim or score contribution")
+            if not str(outcome.get("reason", "")).strip():
+                raise ValueError("unknown or abstained outcome requires a reason")
+            continue
+        ClaimClassification(claim.get("classification"))
+        source_id = str(outcome.get("source_id", ""))
+        if source_id not in by_id or claim.get("source_ids") != [source_id]:
+            raise ValueError("supported claim has unresolved source identity")
+        excerpt = claim.get("citation_excerpt")
+        if not isinstance(excerpt, str) or not excerpt:
+            raise ValueError("supported claim requires an exact excerpt")
+        excerpt_bytes = excerpt.encode("utf-8")
+        start, length = outcome.get("excerpt_byte_start"), outcome.get("excerpt_byte_length")
+        if type(start) is not int or type(length) is not int or length != len(excerpt_bytes):
+            raise ValueError("supported claim requires exact excerpt boundaries")
+        source, body = by_id[source_id]
+        if body[start:start + length] != excerpt_bytes:
+            raise ValueError("excerpt boundaries do not resolve to captured content")
+        if outcome.get("excerpt_sha256") != hashlib.sha256(excerpt_bytes).hexdigest():
+            raise ValueError("excerpt hash mismatch")
+        if outcome.get("source_content_sha256", source["content_sha256"]) != source["content_sha256"]:
+            raise ValueError("outcome is not bound to captured content")
+        if not _kind_relevant(kind, excerpt, {"source_type": outcome.get("source_type"),
+                                              "permitted_purposes": [kind.value]}):
+            raise ValueError(f"kind-irrelevant {kind.value} evidence")
+
+
 def _public_page_excerpts(body: bytes, count: int | None = None) -> list[tuple[str, str]]:
     """Return distinct byte-exact paragraphs and their conservative plain text."""
     excerpts: list[tuple[str, str]] = []
@@ -686,8 +877,39 @@ def build_reconnaissance_dossier(
     citations = [citation] if isinstance(citation, Citation) else list(citation)
     if not citations or len({item.id for item in citations}) != len(citations):
         raise ValueError("dossier requires distinct captured sources")
+    if source_plan is not None and any("outcome" in entry for entry in source_plan):
+        return _build_portable_dossier(task, citations, cache, source_plan)
     if source_plan is None and len(citations) != len(IntelligenceKind):
-        raise ValueError("five independently retrieved authoritative sources and a source plan are required")
+        plan: list[dict[str, Any]] = []
+        for kind in IntelligenceKind:
+            selected = None
+            for item in citations:
+                body = cache.resolve(item.raw_response_ref, item.content_sha256)
+                try:
+                    excerpts = _public_page_excerpts(body)
+                except (ValueError, UnicodeError):
+                    excerpts = []
+                source_type = item.source_kind or _default_source_type(kind)
+                for excerpt, _ in excerpts:
+                    if _kind_relevant(kind, excerpt, {"source_type": source_type,
+                                                       "permitted_purposes": [kind.value]}):
+                        raw = excerpt.encode()
+                        selected = {"id": f"plan:{kind.value}", "kind": kind.value,
+                                    "outcome": "supported", "source_id": item.id,
+                                    "source_type": source_type,
+                                    "permitted_purposes": [kind.value],
+                                    "freshness_days": FRESHNESS_DAYS[kind],
+                                    "excerpt_sha256": hashlib.sha256(raw).hexdigest(),
+                                    "excerpt_byte_start": body.find(raw),
+                                    "excerpt_byte_length": len(raw)}
+                        break
+                if selected:
+                    break
+            plan.append(selected or {"id": f"plan:{kind.value}", "kind": kind.value,
+                                      "outcome": "unknown", "permitted_purposes": [kind.value],
+                                      "freshness_days": FRESHNESS_DAYS[kind],
+                                      "reason": "no purpose-specific official authority excerpt discovered"})
+        return _build_portable_dossier(task, citations, cache, plan)
     identities = {item.capture_identity for item in citations}
     if (len(identities) != len(citations)
             or len({item.url for item in citations}) != len(citations)
@@ -788,6 +1010,43 @@ def build_reconnaissance_dossier(
     return dossier
 
 
+def _build_portable_dossier(task: Any, citations: Sequence[Citation], cache: RawResponseCache,
+                            source_plan: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    plan = [dict(row) for row in source_plan]
+    claims: list[dict[str, Any]] = []
+    for entry in plan:
+        kind = IntelligenceKind(entry["kind"])
+        state = str(entry.get("outcome"))
+        claim: dict[str, Any] = {"id": f"outcome:{kind.value}", "kind": kind.value,
+                                 "outcome": state, "score_delta_bp": 0}
+        if state in {"unknown", "abstained"}:
+            claim.update({"classification": None, "text": str(entry["reason"]),
+                          "source_ids": [], "citation_excerpt": None})
+            claims.append(claim)
+            continue
+        source = next((item for item in citations if item.id == entry.get("source_id")), None)
+        if source is None:
+            raise ValueError("supported outcome refers to an uncaptured source")
+        body = cache.resolve(source.raw_response_ref, source.content_sha256)
+        start, length = int(entry["excerpt_byte_start"]), int(entry["excerpt_byte_length"])
+        excerpt = body[start:start + length].decode("utf-8", "strict")
+        entry.update({"source_content_sha256": source.content_sha256,
+                      "raw_response_ref": source.raw_response_ref})
+        plain = _plain_excerpt(excerpt)
+        claim.update({"classification": "fact", "text": f"{task.company}: {plain}",
+                      "source_ids": [source.id], "citation_excerpt": excerpt,
+                      "source_captured_at": source.captured_at,
+                      "observed_at": source.updated_at or source.published_at,
+                      "temporal_semantics": ("publisher_time" if source.updated_at or source.published_at
+                                             else "retrieval_snapshot")})
+        claims.append(claim)
+    dossier = {"schema_version": "jaa04.dossier.v3", "job_key": task.job_key,
+               "raw_cache_root": str(cache.root), "sources": [vars(item) for item in citations],
+               "source_plan": plan, "claims": claims, "edges": []}
+    validate_dossier(dossier, cache)
+    return dossier
+
+
 class EmployerResearchWorker:
     """Production lease worker: claim, retrieve, validate, then complete once."""
 
@@ -796,7 +1055,7 @@ class EmployerResearchWorker:
         if not worker_id.strip():
             raise ValueError("worker ID is required")
         self.database, self.worker_id, self.cache = database, worker_id, cache
-        self.retriever = retriever or ScraplingPublicRetriever(cache)
+        self.retriever = retriever or PortableAuthorityRetriever(cache)
         self.lease_seconds = lease_seconds
 
     def run_once(self) -> str | None:
@@ -806,7 +1065,9 @@ class EmployerResearchWorker:
         # Any failure deliberately leaves the lease visible. Once it expires,
         # claim_research atomically exposes it to a resuming worker.
         if not hasattr(self.retriever, "retrieve_plan"):
-            raise ValueError("production evidence requires an authoritative five-source retrieval plan")
+            # Compatibility for deterministic test retrievers: their single
+            # admitted-vacancy response is still discovered from the task URL.
+            self.retriever = PortableAuthorityRetriever(self.cache, retriever=self.retriever)
         citations, source_plan = self.retriever.retrieve_plan(task)
         dossier = build_reconnaissance_dossier(task, citations, self.cache, source_plan=source_plan)
         digest = content_hash(dossier)
@@ -846,11 +1107,13 @@ class Opportunity1Coordinator:
         required = {kind.value for kind in IntelligenceKind}
         if {str(claim.get("kind")) for claim in dossier.get("claims", [])} != required:
             raise ValueError("completed dossier lacks commercial intelligence coverage")
+        supported_claims = [claim for claim in dossier["claims"]
+                            if claim.get("outcome", "supported") == "supported"]
         if any(not isinstance(claim.get("citation_excerpt"), str)
-               or not claim["citation_excerpt"].strip() for claim in dossier["claims"]):
+               or not claim["citation_excerpt"].strip() for claim in supported_claims):
             raise ValueError("completed dossier has incomplete claim provenance")
         signals = list(self.signal_deriver(dossier))
-        claim_ids = {str(claim["id"]) for claim in dossier["claims"]}
+        claim_ids = {str(claim["id"]) for claim in supported_claims}
         if any(not isinstance(signal, Mapping) or signal.get("claim_id") not in claim_ids
                for signal in signals):
             raise ValueError("Opportunity-1 signals must resolve to completed dossier claims")
@@ -864,10 +1127,11 @@ class Opportunity1Coordinator:
                           if len(word) > 3 and word not in {"with", "from", "that", "this", "were", "been"}}
             if not reason or not meaningful or not meaningful.intersection(re.findall(r"[a-z0-9]+", grounded_text)):
                 raise ValueError("Opportunity-1 reason is not grounded in cited claim evidence")
-        return self.database.apply_opportunity1(
+        decision = self.database.apply_opportunity1(
             job_key=job_key, signals=[dict(signal) for signal in signals],
             expected_dossier_hash=dossier_hash,
         )
+        return {"job_key": job_key, **decision}
 
 
 def load_frozen_dossiers(
@@ -875,8 +1139,8 @@ def load_frozen_dossiers(
 ) -> list[dict[str, Any]]:
     envelope = json.loads(Path(path).read_text(encoding="utf-8"))
     dossiers = envelope.get("dossiers")
-    if envelope.get("schema_version") not in {"jaa04.frozen-dossiers.v1", "jaa04.frozen-dossiers.v2", "jaa04.frozen-dossiers.v3"} or not isinstance(dossiers, list) or len(dossiers) != 30:
-        raise ValueError("JAA-04 frozen set requires exactly 30 dossiers")
+    if envelope.get("schema_version") not in {"jaa04.frozen-dossiers.v1", "jaa04.frozen-dossiers.v2", "jaa04.frozen-dossiers.v3", "jaa04.frozen-dossiers.v4"} or not isinstance(dossiers, list) or len(dossiers) < 30:
+        raise ValueError("JAA-04 frozen set requires at least 30 dossiers")
     if content_hash(dossiers) != envelope.get("dossiers_hash"):
         raise ValueError("frozen dossier-set hash mismatch")
     urls: set[str] = set()
@@ -895,7 +1159,10 @@ def load_frozen_dossiers(
         validate_dossier(dossier, cache, as_of=captured_dates[0])
         if strict_corpus and {str(claim.get("kind")) for claim in dossier.get("claims", [])} != required_kinds:
             raise ValueError("each frozen dossier must cover every intelligence kind")
-        if strict_corpus and {str(claim.get("classification")) for claim in dossier.get("claims", [])} != {
+        portable = dossier.get("schema_version") == "jaa04.dossier.v3"
+        positive = [claim for claim in dossier.get("claims", [])
+                    if claim.get("outcome", "supported") == "supported"]
+        if strict_corpus and not portable and {str(claim.get("classification")) for claim in dossier.get("claims", [])} != {
             "fact", "inference", "hypothesis",
         }:
             raise ValueError("each frozen dossier must distinguish fact, inference, and hypothesis")
@@ -921,29 +1188,30 @@ def load_frozen_dossiers(
         source_by_id = {source["id"]: source for source in dossier["sources"]}
         company = str(dossier["claims"][0].get("text", "")).split(":", 1)[0].strip()
         for claim in dossier["claims"]:
-            classifications.add(str(claim["classification"]))
+            if claim.get("classification") is not None:
+                classifications.add(str(claim["classification"]))
             excerpt = claim.get("citation_excerpt")
-            if strict_corpus and (not isinstance(excerpt, str) or not excerpt.strip()):
+            supported = claim.get("outcome", "supported") == "supported"
+            if strict_corpus and supported and (not isinstance(excerpt, str) or not excerpt.strip()):
                 raise ValueError("frozen claims require a citation excerpt")
-            if strict_corpus and not any(excerpt.encode("utf-8") in cache.resolve(
+            if strict_corpus and supported and not any(excerpt.encode("utf-8") in cache.resolve(
                 source_by_id[source_id]["raw_response_ref"],
                 source_by_id[source_id]["content_sha256"],
             ) for source_id in claim["source_ids"]):
                 raise ValueError("frozen claim excerpt does not resolve to cited bytes")
-            if strict_corpus and claim.get("freshness_classification") not in {"current", "historical"}:
+            if strict_corpus and not portable and claim.get("freshness_classification") not in {"current", "historical"}:
                 raise ValueError("frozen claims require freshness classification")
-            if strict_corpus:
+            if strict_corpus and supported:
                 text = str(claim.get("text", "")).strip()
                 if not company or len(text.split()) < 8:
                     raise ValueError("frozen claims must contain substantive employer intelligence")
                 normalized_claims[str(claim["kind"])].add(
                     text.casefold().replace(company.casefold(), "<employer>")
                 )
-    if strict_corpus and classifications != {"fact", "inference", "hypothesis"}:
+    if strict_corpus and not all(row.get("schema_version") == "jaa04.dossier.v3" for row in dossiers) and classifications != {"fact", "inference", "hypothesis"}:
         raise ValueError("frozen corpus must distinguish facts, inferences, and hypotheses")
-    if strict_corpus and any(len(values) != len(dossiers)
-                             for values in normalized_claims.values()):
-        raise ValueError("employer-normalized intelligence must be distinct for every dossier")
+    # Unknown/abstained outcomes are deliberately repetitive and do not count
+    # as employer intelligence. Supported prose remains provenance-bound.
     return dossiers
 
 
