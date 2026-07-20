@@ -119,63 +119,74 @@ def test_terra_rejection_script_observes_real_actor_states_receipts_retry_and_re
     }
 
 
-def test_runtime_certifier_uses_repository_relative_evidence_and_fails_closed(tmp_path: Path) -> None:
+def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(tmp_path: Path) -> None:
     database = tmp_path / "legacy.sqlite3"
     _make_legacy_database(database)
     receipt = _receipt_for(database, tmp_path)
-    absolute_output = _run(database, receipt, tmp_path / "absolute-evidence")
-    assert absolute_output.returncode == 2
-    assert "evidence directory must be repository-relative" in absolute_output.stderr
-    relative_evidence = Path("runtime_evidence") / "pytest-jaa01-adversarial"
-    output = ROOT / relative_evidence
-    if output.exists():
-        pytest.fail(f"unexpected test output directory already exists: {output}")
-    try:
-        certified = _run(database, receipt, relative_evidence)
-        assert certified.returncode == 0, certified.stderr
-        document_path = output / json.loads(certified.stdout)["receipt"].split("/")[-1]
-        document = json.loads(document_path.read_text(encoding="utf-8"))
-        assert document["expected_counts"] == {"pipeline_jobs": 462, "pipeline_events": 924}
-        assert document["observed_counts"]["baseline_before"] == {"pipeline_jobs": 462, "pipeline_events": 924}
-        assert document["migration_versions"] == [1]
-        assert document["scenario"]["replay_equal"] is True
-        assert str(tmp_path) not in document_path.read_text(encoding="utf-8")
+    evidence = tmp_path / "absolute-evidence"
+    certified = _run(database, receipt, evidence)
+    assert certified.returncode == 0, certified.stderr
+    document_path = Path(json.loads(certified.stdout)["receipt"])
+    assert document_path.parent == evidence
+    payload = document_path.read_text(encoding="utf-8")
+    document = json.loads(payload)
+    assert document_path.name == f"sha256-{hashlib.sha256(document_path.read_bytes()).hexdigest()}.json"
+    assert document["expected_counts"] == {"pipeline_jobs": 462, "pipeline_events": 924}
+    assert document["observed_counts"]["baseline_before"] == {"pipeline_jobs": 462, "pipeline_events": 924}
+    assert document["migration_versions"] == [1]
+    assert document["scenario"]["replay_equal"] is True
+    assert str(tmp_path) not in payload
+    assert not any(value.startswith("/") for value in _strings(document))
 
-        # A content-addressed receipt cannot be overwritten with fabricated content.
-        document_path.write_text("{}", encoding="utf-8")
-        fabricated = _run(database, receipt, relative_evidence)
-        assert fabricated.returncode == 2
-        assert "content-addressed evidence file mismatch" in fabricated.stderr
-    finally:
-        if output.exists():
-            for child in output.iterdir():
-                child.unlink()
-            output.rmdir()
+    # A conflicting pre-existing content-addressed receipt cannot be overwritten.
+    document_path.write_text("{}", encoding="utf-8")
+    fabricated = _run(database, receipt, evidence)
+    assert fabricated.returncode == 2
+    assert "content-addressed evidence file mismatch" in fabricated.stderr
+    assert document_path.read_text(encoding="utf-8") == "{}"
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA user_version=42")
-    hash_changed = _run(database, receipt, Path("runtime_evidence") / "jaa01-negative-hash")
+    hash_changed = _run(database, receipt, tmp_path / "negative-hash")
     assert hash_changed.returncode == 2 and "baseline hash disagrees" in hash_changed.stderr
 
     for jobs, events in ((461, 924), (462, 923)):
         wrong = tmp_path / f"wrong-{jobs}-{events}.sqlite3"
         _make_legacy_database(wrong, jobs, events)
         wrong_receipt = _receipt_for(wrong, tmp_path / f"wrong-{jobs}-{events}")
-        rejected = _run(wrong, wrong_receipt, Path("runtime_evidence") / f"jaa01-negative-{jobs}-{events}")
+        rejected = _run(wrong, wrong_receipt, tmp_path / f"negative-{jobs}-{events}")
         assert rejected.returncode == 2
         assert ("frozen counts" in rejected.stderr or "baseline counts" in rejected.stderr)
 
     altered = tmp_path / "altered-receipt.json"
     altered.write_text(receipt.read_text(encoding="utf-8").replace("online", "forged", 1), encoding="utf-8")
-    receipt_changed = _run(database, altered, Path("runtime_evidence") / "jaa01-negative-receipt")
+    receipt_changed = _run(database, altered, tmp_path / "negative-receipt")
     assert receipt_changed.returncode == 2 and "content hash mismatch" in receipt_changed.stderr
 
     corrupt = tmp_path / "corrupt.sqlite3"
     corrupt.write_bytes(b"not a sqlite database")
     corrupt_receipt = _receipt_for(corrupt, tmp_path / "corrupt-receipt")
-    corrupt_result = _run(corrupt, corrupt_receipt, Path("runtime_evidence") / "jaa01-negative-corrupt")
+    corrupt_result = _run(corrupt, corrupt_receipt, tmp_path / "negative-corrupt")
     assert corrupt_result.returncode == 2
     assert "read-only SQLite inspection failed" in corrupt_result.stderr
+
+
+def test_runtime_certifier_rejects_symlinked_evidence_directory_without_writing_receipt(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "legacy.sqlite3"
+    _make_legacy_database(database)
+    receipt = _receipt_for(database, tmp_path)
+    actual_output = tmp_path / "actual-evidence"
+    actual_output.mkdir()
+    symlinked_output = tmp_path / "symlinked-evidence"
+    symlinked_output.symlink_to(actual_output, target_is_directory=True)
+
+    rejected = _run(database, receipt, symlinked_output)
+
+    assert rejected.returncode == 2
+    assert "output path must not resolve through a symlink" in rejected.stderr
+    assert list(actual_output.iterdir()) == []
 
 
 def test_checked_in_jaa01_evidence_is_content_addressed_complete_and_path_free() -> None:
