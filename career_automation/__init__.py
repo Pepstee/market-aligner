@@ -13,6 +13,11 @@ from .documents import DocumentSidecarPolicy
 from .engine import OpportunityGate, OpportunityPolicy
 from .fetching import FetchControlStore, default_job_fetch_policy
 from .migrations import JAA_01_MIGRATIONS, MigrationRunner, apply_jaa_01_migrations
+from .lifecycle import (
+    LEGAL_TRANSITIONS, IdempotencyConflict, InvalidTransition, LedgerDivergence, LifecycleError,
+    LifecycleReducer, ModelIdentity, PolicyIdentity, TransitionReceipt,
+    canonical_hash, canonical_json,
+)
 from .models import ActorKind, PipelineState
 from .observability import ObservabilityStore
 from .retrieval import HybridEvidenceIndex
@@ -27,6 +32,15 @@ __all__ = [
     "FetchControlStore",
     "HybridEvidenceIndex",
     "JAA_01_MIGRATIONS",
+    "LEGAL_TRANSITIONS",
+    "LifecycleReducer",
+    "LifecycleError",
+    "PolicyIdentity",
+    "ModelIdentity",
+    "TransitionReceipt",
+    "InvalidTransition",
+    "IdempotencyConflict",
+    "LedgerDivergence",
     "MigrationRunner",
     "ObservabilityStore",
     "OpportunityGate",
@@ -36,5 +50,7 @@ __all__ = [
     "backend_capability_authorizer",
     "apply_jaa_01_migrations",
     "career_pipeline_flow",
+    "canonical_hash",
+    "canonical_json",
     "default_job_fetch_policy",
 ]
