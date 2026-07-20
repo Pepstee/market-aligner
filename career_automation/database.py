@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .migrations import apply_jaa_01_migrations
+from .migrations import apply_jaa_02_migrations
 from .lifecycle import (
     LifecycleReducer,
     ModelIdentity,
@@ -125,7 +125,7 @@ class CareerDatabase:
         # The canonical lifecycle migration uses CREATE IF NOT EXISTS for the
         # deployed jobs/event tables, so existing ledgers are retained while
         # new databases receive the same schema and migration identity.
-        apply_jaa_01_migrations(self.path)
+        apply_jaa_02_migrations(self.path)
         with self.connection() as conn:
             conn.executescript(SCHEMA)
         self.lifecycle = LifecycleReducer(self.path)

@@ -208,6 +208,188 @@ JAA_01_MIGRATIONS: tuple[Migration, ...] = (
 )
 
 
+JAA_02_MIGRATIONS: tuple[Migration, ...] = JAA_01_MIGRATIONS + (
+    Migration(
+        2,
+        "jaa_02_candidate_fact_evidence_claim_graph",
+        (
+            """CREATE TABLE candidate_provenance(
+                 provenance_id TEXT PRIMARY KEY,
+                 source_identity TEXT NOT NULL CHECK(length(trim(source_identity)) > 0),
+                 source_kind TEXT NOT NULL,
+                 source_hash TEXT NOT NULL CHECK(length(source_hash)=64),
+                 source_locator TEXT,
+                 observed_at TEXT NOT NULL,
+                 imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 metadata_json TEXT NOT NULL DEFAULT '{}'
+               )""",
+            """CREATE TABLE candidate_records(
+                 record_id TEXT NOT NULL,
+                 version INTEGER NOT NULL CHECK(version > 0),
+                 record_kind TEXT NOT NULL CHECK(record_kind IN
+                   ('fact','constraint','preference','work_right')),
+                 subject TEXT NOT NULL,
+                 value_json TEXT NOT NULL,
+                 epistemic_state TEXT NOT NULL CHECK(epistemic_state IN
+                   ('fact','evidence','inference','unknown','expired','disputed','unverified')),
+                 jurisdiction TEXT,
+                 contract_type TEXT,
+                 valid_from TEXT,
+                 valid_until TEXT,
+                 supersedes_version INTEGER,
+                 provenance_id TEXT NOT NULL REFERENCES candidate_provenance(provenance_id),
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY(record_id,version),
+                 FOREIGN KEY(record_id,supersedes_version)
+                   REFERENCES candidate_records(record_id,version)
+               )""",
+            """CREATE INDEX candidate_records_release_lookup ON candidate_records(
+                 record_kind,subject,epistemic_state,jurisdiction,contract_type,valid_until)""",
+            """CREATE TABLE candidate_evidence(
+                 evidence_id TEXT NOT NULL,
+                 version INTEGER NOT NULL CHECK(version > 0),
+                 evidence_kind TEXT NOT NULL,
+                 statement TEXT NOT NULL CHECK(length(trim(statement)) > 0),
+                 source_identity TEXT NOT NULL CHECK(length(trim(source_identity)) > 0),
+                 epistemic_state TEXT NOT NULL CHECK(epistemic_state IN
+                   ('fact','evidence','inference','unknown','expired','disputed','unverified')),
+                 approval_state TEXT NOT NULL DEFAULT 'pending' CHECK(approval_state IN
+                   ('pending','approved','rejected','quarantined')),
+                 negative INTEGER NOT NULL DEFAULT 0 CHECK(negative IN (0,1)),
+                 confidence REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+                 valid_until TEXT,
+                 content_hash TEXT NOT NULL CHECK(length(content_hash)=64),
+                 provenance_id TEXT NOT NULL REFERENCES candidate_provenance(provenance_id),
+                 discovered_by TEXT,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY(evidence_id,version)
+               )""",
+            """CREATE TABLE candidate_claims(
+                 claim_id TEXT NOT NULL,
+                 version INTEGER NOT NULL CHECK(version > 0),
+                 claim_type TEXT NOT NULL,
+                 statement TEXT NOT NULL CHECK(length(trim(statement)) > 0),
+                 epistemic_state TEXT NOT NULL CHECK(epistemic_state IN
+                   ('fact','evidence','inference','unknown','expired','disputed','unverified')),
+                 approval_state TEXT NOT NULL DEFAULT 'pending' CHECK(approval_state IN
+                   ('pending','approved','rejected','quarantined')),
+                 valid_until TEXT,
+                 provenance_id TEXT NOT NULL REFERENCES candidate_provenance(provenance_id),
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY(claim_id,version)
+               )""",
+            """CREATE TABLE candidate_artefacts(
+                 artefact_id TEXT NOT NULL,
+                 version INTEGER NOT NULL CHECK(version > 0),
+                 artefact_type TEXT NOT NULL,
+                 source_identity TEXT NOT NULL,
+                 content_hash TEXT NOT NULL CHECK(length(content_hash)=64),
+                 provenance_id TEXT NOT NULL REFERENCES candidate_provenance(provenance_id),
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY(artefact_id,version)
+               )""",
+            """CREATE TABLE candidate_claim_edges(
+                 edge_id TEXT PRIMARY KEY,
+                 claim_id TEXT NOT NULL,
+                 claim_version INTEGER NOT NULL,
+                 edge_type TEXT NOT NULL CHECK(edge_type IN
+                   ('supports','contradicts','derived_from','demonstrated_by','documented_in')),
+                 evidence_id TEXT,
+                 evidence_version INTEGER,
+                 artefact_id TEXT,
+                 artefact_version INTEGER,
+                 provenance_id TEXT NOT NULL REFERENCES candidate_provenance(provenance_id),
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 FOREIGN KEY(claim_id,claim_version) REFERENCES candidate_claims(claim_id,version),
+                 FOREIGN KEY(evidence_id,evidence_version)
+                   REFERENCES candidate_evidence(evidence_id,version),
+                 FOREIGN KEY(artefact_id,artefact_version)
+                   REFERENCES candidate_artefacts(artefact_id,version),
+                 CHECK((evidence_id IS NOT NULL AND evidence_version IS NOT NULL
+                         AND artefact_id IS NULL AND artefact_version IS NULL)
+                    OR (artefact_id IS NOT NULL AND artefact_version IS NOT NULL
+                         AND evidence_id IS NULL AND evidence_version IS NULL))
+               )""",
+            """CREATE INDEX candidate_claim_edges_claim
+                 ON candidate_claim_edges(claim_id,claim_version,edge_type)""",
+            """CREATE TABLE candidate_verification_decisions(
+                 decision_id TEXT PRIMARY KEY,
+                 target_kind TEXT NOT NULL CHECK(target_kind IN ('record','evidence','claim')),
+                 target_id TEXT NOT NULL,
+                 target_version INTEGER NOT NULL,
+                 decision TEXT NOT NULL CHECK(decision IN ('approved','rejected','abstained')),
+                 verifier_kind TEXT NOT NULL CHECK(verifier_kind IN ('deterministic','configured','human')),
+                 policy_id TEXT NOT NULL,
+                 policy_version TEXT NOT NULL,
+                 policy_hash TEXT NOT NULL CHECK(length(policy_hash)=64),
+                 reason TEXT NOT NULL,
+                 provenance_id TEXT NOT NULL REFERENCES candidate_provenance(provenance_id),
+                 decided_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+               )""",
+            """CREATE TABLE candidate_quarantine(
+                 quarantine_id TEXT PRIMARY KEY,
+                 target_kind TEXT NOT NULL,
+                 target_id TEXT NOT NULL,
+                 target_version INTEGER NOT NULL,
+                 reason_code TEXT NOT NULL,
+                 matched_pattern TEXT,
+                 content_hash TEXT NOT NULL CHECK(length(content_hash)=64),
+                 provenance_id TEXT NOT NULL REFERENCES candidate_provenance(provenance_id),
+                 quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 UNIQUE(target_kind,target_id,target_version)
+               )""",
+            """CREATE TRIGGER approved_claim_requires_approved_evidence_insert
+                 BEFORE INSERT ON candidate_claims WHEN NEW.approval_state='approved'
+                 BEGIN SELECT RAISE(ABORT,'approved claim requires approved evidence'); END""",
+            """CREATE TRIGGER approved_evidence_requires_verification_insert
+                 BEFORE INSERT ON candidate_evidence WHEN NEW.approval_state='approved'
+                 BEGIN SELECT RAISE(ABORT,'approved evidence requires verification'); END""",
+            """CREATE TRIGGER approved_evidence_requires_verification_update
+                 BEFORE UPDATE OF approval_state ON candidate_evidence
+                 WHEN NEW.approval_state='approved' AND OLD.approval_state<>'approved'
+                   AND NOT EXISTS(
+                     SELECT 1 FROM candidate_verification_decisions decision
+                     WHERE decision.target_kind='evidence'
+                       AND decision.target_id=NEW.evidence_id
+                       AND decision.target_version=NEW.version
+                       AND decision.decision='approved'
+                   )
+                 BEGIN SELECT RAISE(ABORT,'approved evidence requires verification'); END""",
+            """CREATE TRIGGER approved_claim_requires_approved_evidence_update
+                 BEFORE UPDATE OF approval_state ON candidate_claims
+                 WHEN NEW.approval_state='approved' AND NOT EXISTS(
+                   SELECT 1 FROM candidate_claim_edges edge
+                   JOIN candidate_evidence evidence
+                     ON evidence.evidence_id=edge.evidence_id
+                    AND evidence.version=edge.evidence_version
+                   WHERE edge.claim_id=NEW.claim_id AND edge.claim_version=NEW.version
+                     AND edge.edge_type IN ('supports','demonstrated_by')
+                     AND evidence.approval_state='approved'
+                     AND evidence.epistemic_state IN ('fact','evidence')
+                     AND (evidence.valid_until IS NULL OR evidence.valid_until >= date('now'))
+                 ) BEGIN SELECT RAISE(ABORT,'approved claim requires approved evidence'); END""",
+            """CREATE TRIGGER approved_evidence_cannot_be_degraded
+                 BEFORE UPDATE OF approval_state,epistemic_state,valid_until ON candidate_evidence
+                 WHEN EXISTS(
+                   SELECT 1 FROM candidate_claim_edges edge
+                   JOIN candidate_claims claim ON claim.claim_id=edge.claim_id
+                     AND claim.version=edge.claim_version
+                   WHERE edge.evidence_id=OLD.evidence_id AND edge.evidence_version=OLD.version
+                     AND claim.approval_state='approved'
+                 ) AND (NEW.approval_state<>'approved'
+                   OR NEW.epistemic_state NOT IN ('fact','evidence')
+                   OR (NEW.valid_until IS NOT NULL AND NEW.valid_until < date('now')))
+                 BEGIN SELECT RAISE(ABORT,'evidence supports an approved claim'); END""",
+        ),
+    ),
+)
+
+
 def apply_jaa_01_migrations(path: str | Path) -> tuple[int, ...]:
     """Apply the canonical JAA-01 schema to a configured SQLite database."""
     return MigrationRunner(path).apply(JAA_01_MIGRATIONS)
+
+
+def apply_jaa_02_migrations(path: str | Path) -> tuple[int, ...]:
+    """Apply JAA-01 and the forward-only canonical candidate graph schema."""
+    return MigrationRunner(path).apply(JAA_02_MIGRATIONS)

@@ -1,2 +1,3 @@
 #!/usr/bin/env bash
 python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.py"
+python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa_02.py"
