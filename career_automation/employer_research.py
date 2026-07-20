@@ -142,8 +142,12 @@ def _canonical_public_url(url: str) -> str:
         literal = None
     if literal is not None and not literal.is_global:
         raise ValueError("private source URL is forbidden")
+    # Evidence URLs identify published resources. Query parameters are not a
+    # legitimate way to manufacture multiple captures of the same resource.
+    if parsed.query:
+        raise ValueError("canonical evidence URL must not contain a query string")
     canonical = urlunparse((parsed.scheme.casefold(), parsed.netloc.casefold(),
-                            parsed.path or "/", "", parsed.query, ""))
+                            parsed.path or "/", "", "", ""))
     if canonical != url:
         raise ValueError("source URL must be canonical")
     return canonical
@@ -172,6 +176,13 @@ class Citation:
     status_code: int
     requested_url: str | None = None
     redirect_history: list[dict[str, Any]] = field(default_factory=list)
+    published_at: str | None = None
+    updated_at: str | None = None
+
+    @property
+    def capture_identity(self) -> tuple[str, str]:
+        """Identity is the canonical final URL and the bytes returned for it."""
+        return (_canonical_public_url(self.url), self.content_sha256)
 
 
 class RawResponseCache:
@@ -204,7 +215,8 @@ class ScraplingPublicRetriever:
     def __init__(self, cache: RawResponseCache, *, timeout_seconds: int = 45) -> None:
         self.cache, self.timeout_seconds = cache, timeout_seconds
 
-    def retrieve(self, source_id: str, url: str, *, captured_at: str | None = None) -> Citation:
+    def retrieve(self, source_id: str, url: str, *, published_at: str | None = None,
+                 updated_at: str | None = None) -> Citation:
         _public_url(url)
         try:
             from scrapling.fetchers import Fetcher  # type: ignore
@@ -229,8 +241,10 @@ class ScraplingPublicRetriever:
                 "url": _canonical_public_url(str(getattr(item, "url"))),
                 "status_code": int(getattr(item, "status", getattr(item, "status_code", 0))),
             })
-        return Citation(source_id, final_url, captured_at or now, now, digest, reference,
-                        status, url, history)
+        # Retrieval is an observation about this fetch, never evidence of when
+        # the publisher created or changed the document.
+        return Citation(source_id, final_url, now, now, digest, reference,
+                        status, url, history, published_at, updated_at)
 
 
 def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_of: date | None = None) -> None:
@@ -244,6 +258,9 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
     if not isinstance(sources, list) or not sources or not isinstance(claims, list) or not claims:
         raise ValueError("dossier requires non-empty sources and claims")
     by_id: dict[str, Mapping[str, Any]] = {}
+    identities: set[tuple[str, str]] = set()
+    urls: set[str] = set()
+    bodies: set[str] = set()
     for source in sources:
         citation = Citation(**source)
         if citation.id in by_id or citation.status_code < 200 or citation.status_code >= 300:
@@ -260,6 +277,16 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         cache.resolve(citation.raw_response_ref, citation.content_sha256)
         datetime.fromisoformat(citation.retrieved_at.replace("Z", "+00:00"))
         datetime.fromisoformat(citation.captured_at.replace("Z", "+00:00"))
+        identity = citation.capture_identity
+        if identity in identities or identity[0] in urls or identity[1] in bodies:
+            raise ValueError("URL aliases or duplicate response bodies are not independent evidence")
+        identities.add(identity)
+        urls.add(identity[0])
+        bodies.add(identity[1])
+        for field_name in ("published_at", "updated_at"):
+            value = getattr(citation, field_name)
+            if value is not None:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
         by_id[citation.id] = source
     plan = dossier.get("source_plan")
     plan_by_id: dict[str, Mapping[str, Any]] = {}
@@ -341,7 +368,18 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             start, length = entry["excerpt_byte_start"], entry["excerpt_byte_length"]
             if length != len(excerpt_bytes) or source_body[start:start + length] != excerpt_bytes:
                 raise ValueError("claim excerpt does not match its declared captured byte range")
-        observed = datetime.fromisoformat(str(claim.get("observed_at", "")).replace("Z", "+00:00")).date()
+        source = by_id[cited[0]]
+        temporal = source.get("updated_at") or source.get("published_at")
+        if temporal is None:
+            if kind in {IntelligenceKind.ROLE, IntelligenceKind.HIRING,
+                        IntelligenceKind.OPERATIONAL_HEALTH} or claim.get("freshness_classification") == "current":
+                raise ValueError(f"freshness-sensitive {kind.value} claim lacks publisher time evidence")
+            observed_value = claim.get("observed_at")
+        else:
+            observed_value = temporal
+            if claim.get("observed_at") != temporal:
+                raise ValueError("claim observation time must be publisher-provided time")
+        observed = datetime.fromisoformat(str(observed_value or "").replace("Z", "+00:00")).date()
         if as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]) or observed > as_of:
             raise ValueError(f"stale or future {kind.value} claim")
         freshness = claim.get("freshness_classification")
@@ -402,15 +440,13 @@ def build_reconnaissance_dossier(
     citations = [citation] if isinstance(citation, Citation) else list(citation)
     if not citations or len({item.id for item in citations}) != len(citations):
         raise ValueError("dossier requires distinct captured sources")
-    if source_plan is None and len(citations) == 1:
-        captured = citations[0]
-        citations = [Citation(
-            id=f"{captured.id}:{kind.value}", url=captured.url,
-            captured_at=captured.captured_at, retrieved_at=captured.retrieved_at,
-            content_sha256=captured.content_sha256, raw_response_ref=captured.raw_response_ref,
-            status_code=captured.status_code, requested_url=captured.requested_url,
-            redirect_history=list(captured.redirect_history),
-        ) for kind in IntelligenceKind]
+    if source_plan is None and len(citations) != len(IntelligenceKind):
+        raise ValueError("five independently retrieved authoritative sources and a source plan are required")
+    identities = {item.capture_identity for item in citations}
+    if (len(identities) != len(citations)
+            or len({item.url for item in citations}) != len(citations)
+            or len({item.content_sha256 for item in citations}) != len(citations)):
+        raise ValueError("duplicate bodies and URL aliases cannot provide independent evidence")
     paragraphs_by_source = {
         item.id: _public_page_excerpts(cache.resolve(item.raw_response_ref, item.content_sha256))
         for item in citations
@@ -474,7 +510,13 @@ def build_reconnaissance_dossier(
         claim = {"id": claim_id, "kind": kind.value, "classification": classification,
                  "text": f"{company}: {label} derived from the captured paragraph: {summary}",
                  "citation_excerpt": excerpt, "source_plan_id": entry["id"]}
-        claim_observed = observed_at or cited_source.captured_at
+        claim_observed = cited_source.updated_at or cited_source.published_at
+        if claim_observed is None and kind in {IntelligenceKind.ROLE, IntelligenceKind.HIRING,
+                                               IntelligenceKind.OPERATIONAL_HEALTH}:
+            raise ValueError(f"{kind.value} evidence requires a publisher date")
+        claim_observed = claim_observed or observed_at
+        if claim_observed is None:
+            raise ValueError("publication time is unknown; retrieval time cannot substitute")
         claim.update({"observed_at": claim_observed, "source_captured_at": cited_source.captured_at,
                       "freshness_classification": "current",
                       "source_ids": [entry["source_id"]], "citation_excerpt": excerpt})
@@ -511,8 +553,10 @@ class EmployerResearchWorker:
             return None
         # Any failure deliberately leaves the lease visible. Once it expires,
         # claim_research atomically exposes it to a resuming worker.
-        citation = self.retriever.retrieve(f"source:{task.job_key}", task.url)
-        dossier = build_reconnaissance_dossier(task, citation, self.cache)
+        if not hasattr(self.retriever, "retrieve_plan"):
+            raise ValueError("production evidence requires an authoritative five-source retrieval plan")
+        citations, source_plan = self.retriever.retrieve_plan(task)
+        dossier = build_reconnaissance_dossier(task, citations, self.cache, source_plan=source_plan)
         digest = content_hash(dossier)
         validate_dossier(dossier, self.cache)
         self.database.complete_research(job_key=task.job_key, worker_id=self.worker_id,
@@ -558,6 +602,16 @@ class Opportunity1Coordinator:
         if any(not isinstance(signal, Mapping) or signal.get("claim_id") not in claim_ids
                for signal in signals):
             raise ValueError("Opportunity-1 signals must resolve to completed dossier claims")
+        claims_by_id = {str(claim["id"]): claim for claim in dossier["claims"]}
+        for signal in signals:
+            reason = str(signal.get("reason", "")).strip().casefold()
+            claim = claims_by_id[str(signal["claim_id"])]
+            grounded_text = " ".join((str(claim.get("text", "")),
+                                      str(claim.get("citation_excerpt", "")))).casefold()
+            meaningful = {word for word in re.findall(r"[a-z0-9]+", reason)
+                          if len(word) > 3 and word not in {"with", "from", "that", "this", "were", "been"}}
+            if not reason or not meaningful or not meaningful.intersection(re.findall(r"[a-z0-9]+", grounded_text)):
+                raise ValueError("Opportunity-1 reason is not grounded in cited claim evidence")
         return self.database.apply_opportunity1(
             job_key=job_key, signals=[dict(signal) for signal in signals],
             expected_dossier_hash=dossier_hash,
