@@ -9,6 +9,8 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -23,6 +25,12 @@ from scripts.reproduce_jaa01_terra_rejection import reproduce
 
 EXPECTED_COUNTS = {"pipeline_jobs": 462, "pipeline_events": 924}
 FORMAT = "jaa01-runtime-certification/v1"
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE_REVISION_DOMAIN = b"jaa01-source-content-revision-v1\0"
+SOURCE_REVISION_EXCLUSIONS = (
+    b"runtime_evidence/jaa01/",
+    b"runtime_evidence/pytest/",
+)
 
 
 class CertificationError(RuntimeError):
@@ -41,6 +49,95 @@ def hash_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def git(*arguments: str) -> bytes:
+    completed = subprocess.run(
+        ("git", *arguments),
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode(errors="replace").strip()
+        raise CertificationError(f"git {' '.join(arguments)} failed: {detail}")
+    return completed.stdout
+
+
+def excluded_source_path(path: bytes) -> bool:
+    return any(path.startswith(prefix) for prefix in SOURCE_REVISION_EXCLUSIONS)
+
+
+def source_content_revision() -> str:
+    """Hash the clean current tracked source tree, except generated evidence."""
+    entries: list[tuple[bytes, bytes]] = []
+    seen: set[bytes] = set()
+    for record in git("ls-files", "--stage", "-z").split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, path = record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            raise CertificationError("malformed tracked source path record")
+        mode, _object_id, stage = fields
+        if stage != b"0":
+            raise CertificationError(f"unmerged tracked source path: {os.fsdecode(path)}")
+        if path in seen:
+            raise CertificationError(f"duplicate tracked source path: {os.fsdecode(path)}")
+        seen.add(path)
+        if excluded_source_path(path):
+            continue
+        if mode not in {b"100644", b"100755", b"120000"}:
+            raise CertificationError(
+                f"unsupported tracked source mode {mode.decode()}: {os.fsdecode(path)}"
+            )
+        entries.append((path, mode))
+
+    pathspec = (
+        ".",
+        ":(exclude)runtime_evidence/jaa01/**",
+        ":(exclude)runtime_evidence/pytest/**",
+    )
+    if git("diff", "--name-only", "-z", "--", *pathspec) or git(
+        "diff", "--cached", "--name-only", "-z", "--", *pathspec
+    ):
+        raise CertificationError("dirty tracked source tree")
+
+    root = ROOT.resolve()
+    digest = hashlib.sha256(SOURCE_REVISION_DOMAIN)
+    for path, mode in sorted(entries):
+        display_path = os.fsdecode(path)
+        file_path = ROOT / display_path
+        try:
+            status = file_path.lstat()
+            if mode == b"120000":
+                if not stat.S_ISLNK(status.st_mode):
+                    raise CertificationError(f"dirty tracked source type: {display_path}")
+                payload = os.fsencode(os.readlink(file_path))
+                resolved_target = file_path.resolve(strict=True)
+                resolved_target.relative_to(root)
+                actual_mode = b"120000"
+            else:
+                if not stat.S_ISREG(status.st_mode):
+                    raise CertificationError(f"non-regular tracked source refused: {display_path}")
+                payload = file_path.read_bytes()
+                actual_mode = b"100755" if status.st_mode & 0o111 else b"100644"
+        except CertificationError:
+            raise
+        except (OSError, ValueError) as exc:
+            message = (
+                "tracked symlink escapes or has a missing target"
+                if mode == b"120000"
+                else "missing or unreadable tracked source file"
+            )
+            raise CertificationError(f"{message}: {display_path}") from exc
+        if actual_mode != mode:
+            raise CertificationError(f"dirty tracked source mode: {display_path}")
+        for field in (path, mode, payload):
+            digest.update(len(field).to_bytes(8, "big"))
+            digest.update(field)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def readonly_observation(path: Path) -> dict[str, Any]:
@@ -112,6 +209,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def certify(args: argparse.Namespace) -> Path:
+    revision = source_content_revision()
     baseline = Path(args.baseline_database)
     migration_receipt = Path(args.migration_receipt)
     evidence_directory = Path(args.evidence_directory)
@@ -171,8 +269,23 @@ def certify(args: argparse.Namespace) -> Path:
             "read_only_query_only": after["query_only"] == 1,
         }
 
+    require(source_content_revision() == revision,
+            "tracked source content changed during certification")
+
     evidence: dict[str, Any] = {
         "format": FORMAT,
+        "source_content_revision": revision,
+        "source_content_revision_contract": {
+            "algorithm": "sha256",
+            "domain": "jaa01-source-content-revision-v1",
+            "entry_encoding": "uint64be-length-prefixed-path-mode-content",
+            "scope": "current-tracked-source-tree",
+            "ordering": "repository-relative-path-byte-order",
+            "exclusions": [
+                "runtime_evidence/jaa01/",
+                "runtime_evidence/pytest/",
+            ],
+        },
         "labels": {
             "baseline": "frozen-baseline:career-pipeline",
             "migration_receipt": "jaa00:migration-receipt",
