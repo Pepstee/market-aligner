@@ -1,0 +1,87 @@
+evidence: JAA-00:first-adopted-frozen-baseline
+receipt:
+  label: runtime:job-application-baseline-20260720-v2:receipt
+  content_sha256: 4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66
+repository:
+  label: canonical-repository
+  revision: d74c77cac3c121cd6c09f0f8b8f64cd46014e4ec
+reconciliation:
+  result: ok
+  receipt_filename_matches_content_sha256: true
+  adopted_database_hashes_match: true
+  integrity_check: ok
+  counts_match: true
+  schema_matches: true
+  adopted_snapshots_sidecar_free: true
+databases:
+  raw_jobs:
+    source_label: source:raw_jobs
+    destination_label: destination:raw_jobs
+    snapshot_sha256: bfa5454885d6428fa93ba9f41c9fefc3fe2b1bc5ca234fb5e76949a51ae8965f
+    schema_sha256: d40bb9b317ccbbf30cc60fecd6bab4231b663782ccd37226966f353ba064040c
+    schema_objects: 6
+    counts:
+      collection_runs: 0
+      normalised_jobs: 549
+      postings: 9453
+      scores: 549
+      source_state: 39
+    historical_observation:
+      status: superseded
+      snapshot_sha256: 87aefc638ae5c0d5b11e6dd8dfb8da5cd8bbfaed5cdba630f5aa3216bf170e57
+      schema_sha256: d40bb9b317ccbbf30cc60fecd6bab4231b663782ccd37226966f353ba064040c
+      schema_objects: 6
+      counts:
+        collection_runs: 0
+        normalised_jobs: 548
+        postings: 9407
+        scores: 548
+        source_state: 39
+  career_pipeline:
+    source_label: source:career_pipeline
+    destination_label: destination:career_pipeline
+    snapshot_sha256: 6f57c4d62ea22cfd303a9481e2620cc6f747540597d9de96b5e5822abcb7b328
+    schema_sha256: 2b582efd6d32d907149fbbc0eb1002a78f78c7b161b524fc5d0e14381f269205
+    schema_objects: 39
+    counts:
+      browser_workflow_checkpoints: 0
+      browser_workflow_definitions: 0
+      browser_workflow_events: 0
+      browser_workflow_runs: 0
+      ca_fetch_attempts: 0
+      ca_fetch_policies: 2
+      ca_fetch_relocations: 0
+      ca_fetch_selector_fingerprints: 0
+      ca_obs_events: 0
+      ca_obs_flows: 2
+      ca_obs_outbox: 0
+      ca_obs_spans: 0
+      ca_obs_traces: 0
+      career_deployment_checks: 0
+      career_deployment_events: 0
+      career_deployment_releases: 0
+      career_schema_migrations: 0
+      employer_dossiers: 0
+      employer_research_queue: 58
+      pipeline_events: 924
+      pipeline_jobs: 462
+capture_and_drift_semantics:
+  method: sqlite-online-backup
+  adopted_snapshot: frozen
+  live_source_after_capture: may_continue_changing
+  source_open: read-only-query-only
+  source_write_operations: none
+  raw_jobs:
+    main_content_unchanged_during_capture: true
+    wal_content_unchanged_during_capture: true
+    drift_observed: false
+  career_pipeline:
+    main_content_unchanged_during_capture: true
+    wal_content_unchanged_during_capture: true
+    drift_observed: true
+    changed_components: [shm]
+    shm_comparison: identity-metadata-only
+rollback:
+  precondition: reconcile-must-pass-immediately-before-removal
+  preserved_source_labels: [source:raw_jobs, source:career_pipeline]
+  removable_destination_labels: [destination:raw_jobs, destination:career_pipeline]
