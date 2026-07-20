@@ -219,4 +219,5 @@ def test_acceptance_declaration_commands_are_independent_and_direct_execution_fa
         'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.py" || exit $?',
         'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa_02.py" || exit $?',
         'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa02_receipt.py" || exit $?',
+        'python3 "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/accept_jaa_03.py" || exit $?',
     ]
