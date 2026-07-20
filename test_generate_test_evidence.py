@@ -121,12 +121,35 @@ def test_parse_summary_requires_exact_supported_totals() -> None:
     }
 
 
+def test_parse_summary_preserves_successful_subtests_without_inflating_collection() -> None:
+    assert GENERATOR_MODULE.parse_summary(
+        "================ 219 passed, 25 subtests passed in 1.23s ================\n"
+    ) == {
+        "collected": 219,
+        "passed": 219,
+        "skipped": 0,
+        "failed": 0,
+        "subtests_passed": 25,
+    }
+
+
 @pytest.mark.parametrize("output", [
     "================ 1 failed, 4 passed in 0.01s ================\n",
+    "================ 1 error, 4 passed in 0.01s ================\n",
     "pytest output without a final summary\n",
     "================ 4 passed, 1 xfailed in 0.01s ================\n",
+    "================ 4 passed, 1 mysterious in 0.01s ================\n",
+    "================ 4 passed, 2 passed in 0.01s ================\n",
+    "================ 4 passed, 1 subtests failed in 0.01s ================\n",
+    "================ 4 passed, broken outcome in 0.01s ================\n",
+    (
+        "================ 4 passed in 0.01s ================\n"
+        "================ 4 passed in 0.01s ================\n"
+    ),
 ])
-def test_parse_summary_refuses_failed_or_malformed_output(output: str) -> None:
+def test_parse_summary_refuses_failed_unknown_duplicate_or_ambiguous_output(
+    output: str,
+) -> None:
     with pytest.raises(GENERATOR_MODULE.EvidenceError):
         GENERATOR_MODULE.parse_summary(output)
 
@@ -372,6 +395,24 @@ def test_public_script_writes_hashed_content_revision_bound_and_redacted_receipt
     assert private_path not in rendered
     assert secret not in rendered
     assert sys.executable not in rendered
+
+
+def test_public_receipt_preserves_subtest_count_separately(tmp_path: Path) -> None:
+    completed = _public_generator(
+        tmp_path,
+        "================ 219 passed, 25 subtests passed in 0.10s ================",
+        "================ 65 passed in 0.05s ================",
+    )
+    assert completed.returncode == 0, completed.stderr
+    root = tmp_path / "isolated-repository"
+    receipt = json.loads((root / completed.stdout.strip()).read_text(encoding="utf-8"))
+    assert receipt["suites"][0]["counts"] == {
+        "collected": 219,
+        "passed": 219,
+        "skipped": 0,
+        "failed": 0,
+        "subtests_passed": 25,
+    }
 
 
 @pytest.mark.parametrize("suite, output", [

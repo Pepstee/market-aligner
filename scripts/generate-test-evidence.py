@@ -28,8 +28,8 @@ LOCAL_IMPORT = "skeleton"
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SUMMARY_ITEM = re.compile(
-    r"(?P<count>\d+) (?P<outcome>passed|failed|skipped|error|errors|"
-    r"xfailed|xpassed|deselected)\b"
+    r"^(?P<count>\d+) (?P<subtests>subtests )?"
+    r"(?P<outcome>[A-Za-z][A-Za-z_-]*)$"
 )
 SUMMARY_LINE = re.compile(
     r"^(?:=+\s*)?(?P<body>.*?\b(?:passed|failed|skipped)\b.*?)"
@@ -126,16 +126,29 @@ def parse_summary(output: str) -> dict[str, int]:
         match = SUMMARY_LINE.match(line.strip())
         if not match:
             continue
-        items = list(SUMMARY_ITEM.finditer(match.group("body")))
-        if not items:
-            continue
+        raw_items = [item.strip() for item in match.group("body").split(",")]
         outcomes: dict[str, int] = {}
-        for item in items:
+        subtests_passed: int | None = None
+        for raw_item in raw_items:
+            item = SUMMARY_ITEM.fullmatch(raw_item)
+            if item is None:
+                raise EvidenceError(f"unparseable pytest outcome in summary: {raw_item}")
             outcome = item.group("outcome")
             outcome = "error" if outcome == "errors" else outcome
+            if item.group("subtests"):
+                if outcome != "passed":
+                    raise EvidenceError(
+                        f"pytest reported subtest outcome that prevents acceptance: {outcome}"
+                    )
+                if subtests_passed is not None:
+                    raise EvidenceError("duplicate pytest outcome in summary: subtests passed")
+                subtests_passed = int(item.group("count"))
+                continue
             if outcome in outcomes:
                 raise EvidenceError(f"duplicate pytest outcome in summary: {outcome}")
             outcomes[outcome] = int(item.group("count"))
+        if subtests_passed is not None:
+            outcomes["subtests_passed"] = subtests_passed
         candidates.append(outcomes)
 
     if len(candidates) != 1:
@@ -144,7 +157,7 @@ def parse_summary(output: str) -> dict[str, int]:
         )
 
     outcomes = candidates[0]
-    unsupported = set(outcomes) - ALLOWED_OUTCOMES
+    unsupported = set(outcomes) - ALLOWED_OUTCOMES - {"subtests_passed"}
     if unsupported:
         raise EvidenceError(
             "pytest reported outcomes that prevent an internally consistent total: "
@@ -157,7 +170,10 @@ def parse_summary(output: str) -> dict[str, int]:
         raise EvidenceError("pytest collected no tests")
     if counts["failed"] != 0:
         raise EvidenceError("pytest reported failed tests")
-    return {key: counts[key] for key in ("collected", "passed", "skipped", "failed")}
+    result = {key: counts[key] for key in ("collected", "passed", "skipped", "failed")}
+    if "subtests_passed" in outcomes:
+        result["subtests_passed"] = outcomes["subtests_passed"]
+    return result
 
 
 def locked_environment() -> dict[str, object]:
