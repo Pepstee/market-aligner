@@ -1,39 +1,41 @@
 #!/usr/bin/env python3
-"""Rebuild JAA-04 only by retrieving every canonical public source again."""
+"""Atomically replace JAA-04 with a newly acquired authentic corpus."""
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from capture_jaa_04 import ROOT, capture
 
-from scripts.capture_jaa_04 import capture  # noqa: E402
-
-PLAN = ROOT / "career_automation/fixtures/jaa04_capture_plan.json"
 DESTINATION = ROOT / "career_automation/fixtures/jaa04_capture"
 
 
 def main() -> int:
-    parent = DESTINATION.parent
-    fresh = Path(tempfile.mkdtemp(prefix="jaa04-authentic-", dir=parent))
-    fresh.rmdir()  # capture deliberately requires a destination that does not exist
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--queue-snapshot", type=Path, required=True)
+    parser.add_argument("--authority-plan", type=Path, required=True)
+    args = parser.parse_args()
+    fresh = Path(tempfile.mkdtemp(prefix="jaa04-authentic-", dir=DESTINATION.parent))
+    fresh.rmdir()
+    previous = DESTINATION.with_name(DESTINATION.name + ".previous")
     try:
-        capture(PLAN, fresh)
-        previous = DESTINATION.with_name(DESTINATION.name + ".previous")
+        capture(args.queue_snapshot.resolve(), args.authority_plan.resolve(), fresh)
         if previous.exists():
-            shutil.rmtree(previous)
-        os.rename(DESTINATION, previous)
+            raise RuntimeError("previous corpus recovery directory already exists")
+        if DESTINATION.exists():
+            os.rename(DESTINATION, previous)
         try:
             os.rename(fresh, DESTINATION)
         except BaseException:
-            os.rename(previous, DESTINATION)
+            if previous.exists():
+                os.rename(previous, DESTINATION)
             raise
-        shutil.rmtree(previous)
+        if previous.exists():
+            shutil.rmtree(previous)
     except BaseException:
         shutil.rmtree(fresh, ignore_errors=True)
         raise

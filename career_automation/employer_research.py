@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import socket
 from dataclasses import dataclass, field
@@ -39,11 +40,11 @@ SOURCE_KIND_POLICY: dict[IntelligenceKind, dict[str, Any]] = {
         "terms": ("company", "organisation", "organization", "operates", "employer", "business"),
     },
     IntelligenceKind.PRODUCT: {
-        "source_types": {"official_product_documentation"},
+        "source_types": {"official_product_documentation", "official_product"},
         "terms": ("product", "service", "platform", "customer", "clients", "technology"),
     },
     IntelligenceKind.OPERATIONAL_HEALTH: {
-        "source_types": {"regulatory_filing", "regulatory_status_record", "independent_reporting"},
+        "source_types": {"regulatory_filing", "regulatory_status_record", "independent_reporting", "official_financial"},
         "terms": ("revenue", "profit", "loss", "funding", "financial", "operating", "operational", "current"),
         "dated": True,
     },
@@ -183,6 +184,7 @@ class Citation:
     canonical_publisher: str | None = None
     canonical_article: str | None = None
     publisher_date_evidence: str | None = None
+    retrieval_engine: str | None = None
 
     @property
     def capture_identity(self) -> tuple[str, str]:
@@ -201,7 +203,15 @@ class RawResponseCache:
         if target.exists() and target.read_bytes() != body:
             raise RuntimeError("content-addressed cache collision")
         if not target.exists():
-            target.write_bytes(body)
+            try:
+                with target.open("xb") as stream:
+                    stream.write(body)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                target.chmod(0o444)
+            except FileExistsError:
+                if target.read_bytes() != body:
+                    raise RuntimeError("content-addressed cache collision")
         return digest, str(target.relative_to(self.root))
 
     def resolve(self, reference: str, expected_sha256: str) -> bytes:
@@ -254,7 +264,116 @@ class ScraplingPublicRetriever:
         return Citation(source_id, final_url, now, now, digest, reference,
                         status, url, history, published_at, updated_at,
                         source_kind, canonical_publisher, canonical_article,
-                        date_evidence)
+                        date_evidence, "scrapling-fetcher")
+
+
+class SidecarAuthorityRetriever:
+    """Reviewed authority plans executed through the production Scrapling sidecar.
+
+    Plan fields may classify and locate evidence, but response-derived metadata
+    and claim excerpts always come from immutable bytes returned by the worker.
+    """
+
+    def __init__(self, records: Sequence[Mapping[str, Any]], cache: RawResponseCache,
+                 *, root: str | Path) -> None:
+        from scraper.scrapling_client import ScraplingClient
+        self.cache = cache
+        self.records = {str(record["job_key"]): dict(record) for record in records}
+        self.client = ScraplingClient(Path(root), {"fallback_chain": [
+            {"engine": "http", "method": "get", "kwargs": {"timeout": 45}},
+            {"engine": "dynamic", "kwargs": {"network_idle": True}},
+            {"engine": "stealth", "kwargs": {}},
+        ]})
+        if not self.client.available:
+            raise RuntimeError("configured production Scrapling runtime is unavailable")
+
+    def retrieve_plan(self, task: Any) -> tuple[list[Citation], list[dict[str, Any]]]:
+        import base64
+        record = self.records.get(str(task.job_key))
+        if record is None:
+            raise ValueError("claimed vacancy is outside the reviewed authority cohort")
+        if (record.get("vacancy_url") != task.url or record.get("company") != task.company
+                or record.get("role") != task.title):
+            raise ValueError("claimed vacancy identity differs from the frozen authority record")
+        citations: list[Citation] = []
+        plan: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        seen_hashes: set[str] = set()
+        seen_articles: set[str] = set()
+        for specification in record["sources"]:
+            kind = IntelligenceKind(str(specification.get("kind")))
+            source_type = str(specification.get("source_type", ""))
+            production_types = {
+                IntelligenceKind.COMPANY: {"authoritative_company_record", "official_company"},
+                IntelligenceKind.PRODUCT: {"official_product_documentation"},
+                IntelligenceKind.OPERATIONAL_HEALTH: {
+                    "regulatory_filing", "regulatory_status_record", "independent_reporting",
+                },
+                IntelligenceKind.ROLE: {"official_vacancy"},
+                IntelligenceKind.HIRING: {"official_careers"},
+            }
+            if source_type not in production_types[kind]:
+                raise ValueError("authority source type cannot support its assigned purpose")
+            requested_url = str(specification.get("url", ""))
+            _public_url(requested_url)
+            if kind is IntelligenceKind.ROLE and requested_url != task.url:
+                raise ValueError("role authority is not the admitted vacancy URL")
+            publisher = str(specification.get("canonical_publisher", "")).casefold().strip()
+            article = str(specification.get("canonical_article", "")).strip()
+            requested_host = (urlparse(requested_url).hostname or "").casefold()
+            if (not publisher or (publisher != requested_host and not requested_host.endswith("." + publisher))
+                    or not article or article.casefold() in seen_articles):
+                raise ValueError("source is not an independent publisher-owned authority")
+            result = self.client.fetch_with_chain(requested_url)
+            response = result.response
+            status = int(response.get("status", 0))
+            if not 200 <= status < 300:
+                raise RuntimeError(f"authority retrieval failed with HTTP {status}")
+            body = base64.b64decode(response["body_base64"], validate=True)
+            if len(body) != int(response.get("body_bytes", -1)):
+                raise RuntimeError("authority response byte count is inconsistent")
+            digest, reference = self.cache.store(body)
+            final_url = str(response.get("url", ""))
+            _public_url(final_url)
+            final_host = (urlparse(final_url).hostname or "").casefold()
+            if publisher != final_host and not final_host.endswith("." + publisher):
+                raise ValueError("redirect escaped the reviewed authoritative publisher")
+            if article != final_url:
+                raise ValueError("reviewed canonical article differs from the retrieved final URL")
+            if final_url in seen_urls or digest in seen_hashes:
+                raise ValueError("duplicate authority capture cannot support another purpose")
+            seen_urls.add(final_url)
+            seen_hashes.add(digest)
+            seen_articles.add(article.casefold())
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body.decode("utf-8", "strict"))).casefold()
+            company_terms = [part for part in re.findall(r"[a-z0-9]+", str(task.company).casefold()) if len(part) > 2]
+            if company_terms and not any(term in text for term in company_terms):
+                raise ValueError("captured authority does not identify the admitted employer")
+            published_at, updated_at, date_evidence = extract_publisher_timestamps(body)
+            history = [{"url": str(item["url"]), "status_code": int(item["status"])}
+                       for item in response.get("history", [])]
+            now = datetime.now(timezone.utc).isoformat()
+            source_id = f"source:{task.job_key}:{kind.value}"
+            citation = Citation(
+                source_id, final_url, now, now, digest, reference, status,
+                requested_url, history, published_at, updated_at, source_type,
+                publisher, article, date_evidence, result.engine,
+            )
+            if specification.get("requires_current") is True and not (published_at or updated_at):
+                raise ValueError("freshness-sensitive authority has no verified publisher date")
+            citations.append(citation)
+            terms = specification.get("relevance_terms")
+            if not isinstance(terms, list) or not terms:
+                raise ValueError("authority purpose requires reviewed semantic terms")
+            plan.append({
+                "id": f"plan:{kind.value}", "kind": kind.value, "source_id": source_id,
+                "source_type": source_type, "permitted_purposes": [kind.value],
+                "freshness_days": FRESHNESS_DAYS[kind], "relevance_terms": terms,
+                "requires_current": specification.get("requires_current") is True,
+                **({"excerpt_sha256": specification["excerpt_sha256"]}
+                   if specification.get("excerpt_sha256") else {}),
+            })
+        return citations, plan
 
 
 _DATE_FIELDS = {
@@ -307,9 +426,15 @@ def extract_publisher_timestamps(body: bytes) -> tuple[str | None, str | None, s
         field = "updated" if "modified" in match.group(2).casefold() or "updated" in match.group(2).casefold() else "published"
         if stamp := _iso_publisher_time(match.group(4)):
             candidates.append((field, stamp, match.group(0)))
-    published = next((value for field, value, _ in candidates if field == "published"), None)
-    updated = next((value for field, value, _ in candidates if field == "updated"), None)
-    evidence = next((raw for field, _, raw in candidates if field == ("updated" if updated else "published")), None)
+    # Multiple equivalent metadata declarations are acceptable. Conflicting
+    # publisher values are ambiguous and therefore deliberately remain unknown.
+    published_values = {value for field, value, _ in candidates if field == "published"}
+    updated_values = {value for field, value, _ in candidates if field == "updated"}
+    published = next(iter(published_values)) if len(published_values) == 1 else None
+    updated = next(iter(updated_values)) if len(updated_values) == 1 else None
+    chosen_field = "updated" if updated else ("published" if published else None)
+    evidence = next((raw for field, value, raw in candidates
+                     if field == chosen_field and value == (updated or published)), None)
     return published, updated, evidence
 
 
@@ -356,17 +481,17 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         if authority_contract:
             host = (urlparse(citation.url).hostname or "").casefold()
             publisher = str(citation.canonical_publisher or "").casefold().strip()
-            article = str(citation.canonical_article or "").casefold().strip()
+            article = str(citation.canonical_article or "").strip()
             if not citation.source_kind or not publisher or not article:
                 raise ValueError("source lacks classified kind or canonical publisher/article identity")
             if publisher != host and not host.endswith("." + publisher):
                 raise ValueError("canonical publisher does not own the captured URL")
             _canonical_public_url(article)
-            if article.encode("utf-8") not in body.lower():
-                raise ValueError("canonical article identity does not resolve to publisher bytes")
-            if article in articles:
+            if article != _canonical_public_url(citation.url):
+                raise ValueError("canonical article identity differs from the captured final URL")
+            if article.casefold() in articles:
                 raise ValueError("translations, mirrors, or aliases resolve to one canonical article")
-            articles.add(article)
+            articles.add(article.casefold())
             plain = re.sub(br"<[^>]+>", b" ", body)
             normalized = re.sub(br"\s+", b" ", plain).strip().casefold()
             equivalence_hash = hashlib.sha256(normalized).hexdigest()
@@ -380,6 +505,8 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
                 extracted = extract_publisher_timestamps(body)
                 if (citation.published_at, citation.updated_at) != extracted[:2]:
                     raise ValueError("publisher timestamp differs from captured metadata")
+            if not citation.retrieval_engine:
+                raise ValueError("authority capture lacks its production retrieval engine")
         for field_name in ("published_at", "updated_at"):
             value = getattr(citation, field_name)
             if value is not None:
@@ -477,11 +604,12 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
                 raise ValueError("claim excerpt does not match its declared captured byte range")
         source = by_id[cited[0]]
         temporal = source.get("updated_at") or source.get("published_at")
-        if authority_contract and (temporal is None or not source.get("publisher_date_evidence")):
+        if authority_contract and temporal is not None and not source.get("publisher_date_evidence"):
             raise ValueError(f"{kind.value} claim lacks byte-resolvable publisher date")
         if temporal is None:
-            if kind in {IntelligenceKind.ROLE, IntelligenceKind.HIRING,
-                        IntelligenceKind.OPERATIONAL_HEALTH} or claim.get("freshness_classification") == "current":
+            if (entry.get("requires_current") is True
+                    or kind in {IntelligenceKind.ROLE, IntelligenceKind.HIRING,
+                                IntelligenceKind.OPERATIONAL_HEALTH}):
                 raise ValueError(f"freshness-sensitive {kind.value} claim lacks publisher time evidence")
             observed_value = claim.get("observed_at")
         else:
@@ -489,8 +617,12 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             if claim.get("observed_at") != temporal:
                 raise ValueError("claim observation time must be publisher-provided time")
         freshness = claim.get("freshness_classification")
-        if freshness not in {"current", "historical"}:
+        if freshness not in {"current", "historical", "unknown"}:
             raise ValueError("unknown freshness classification")
+        if freshness == "unknown":
+            if temporal is not None or observed_value is not None:
+                raise ValueError("unknown freshness may only represent absent publisher time")
+            continue
         observed = datetime.fromisoformat(str(observed_value or "").replace("Z", "+00:00")).date()
         age = as_of - observed
         if observed > as_of:
@@ -628,13 +760,13 @@ def build_reconnaissance_dossier(
         if claim_observed is None and kind in {IntelligenceKind.ROLE, IntelligenceKind.HIRING,
                                                IntelligenceKind.OPERATIONAL_HEALTH}:
             raise ValueError(f"{kind.value} evidence requires a publisher date")
-        claim_observed = claim_observed or observed_at
         if claim_observed is None:
-            raise ValueError("publication time is unknown; retrieval time cannot substitute")
-        evidence_date = datetime.fromisoformat(claim_observed.replace("Z", "+00:00")).date()
-        capture_date = datetime.fromisoformat(cited_source.captured_at.replace("Z", "+00:00")).date()
-        freshness = ("current" if capture_date - evidence_date <= timedelta(days=FRESHNESS_DAYS[kind])
-                     else "historical")
+            freshness = "unknown"
+        else:
+            evidence_date = datetime.fromisoformat(claim_observed.replace("Z", "+00:00")).date()
+            capture_date = datetime.fromisoformat(cited_source.captured_at.replace("Z", "+00:00")).date()
+            freshness = ("current" if capture_date - evidence_date <= timedelta(days=FRESHNESS_DAYS[kind])
+                         else "historical")
         if entry.get("requires_current") is True and freshness != "current":
             raise ValueError(f"current {kind.value} claim has no temporally valid authoritative evidence")
         claim.update({"observed_at": claim_observed, "source_captured_at": cited_source.captured_at,
@@ -743,7 +875,7 @@ def load_frozen_dossiers(
 ) -> list[dict[str, Any]]:
     envelope = json.loads(Path(path).read_text(encoding="utf-8"))
     dossiers = envelope.get("dossiers")
-    if envelope.get("schema_version") not in {"jaa04.frozen-dossiers.v1", "jaa04.frozen-dossiers.v2"} or not isinstance(dossiers, list) or len(dossiers) != 30:
+    if envelope.get("schema_version") not in {"jaa04.frozen-dossiers.v1", "jaa04.frozen-dossiers.v2", "jaa04.frozen-dossiers.v3"} or not isinstance(dossiers, list) or len(dossiers) != 30:
         raise ValueError("JAA-04 frozen set requires exactly 30 dossiers")
     if content_hash(dossiers) != envelope.get("dossiers_hash"):
         raise ValueError("frozen dossier-set hash mismatch")

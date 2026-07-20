@@ -108,7 +108,7 @@ class ScraplingClient:
         chain = list(self.config.get("fallback_chain") or ())
         if not chain:
             chain = [
-                {"engine": "static", "method": "get", "kwargs": {}},
+                {"engine": "http", "method": "get", "kwargs": {}},
                 {"engine": "dynamic", "kwargs": {}},
                 {"engine": "stealth", "kwargs": {"solve_cloudflare": True}},
             ]
