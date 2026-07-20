@@ -41,6 +41,16 @@ def repository(tmp_path: Path) -> Path:
     assert completed.returncode == 0, completed.stderr
     assert _git(clone, "config", "user.name", "JAA-02 certification test").returncode == 0
     assert _git(clone, "config", "user.email", "jaa02@example.test").returncode == 0
+    tracked_receipts = [
+        line for line in _git(
+            clone, "ls-files", "runtime_evidence/jaa02/sha256-*.json"
+        ).stdout.splitlines() if line
+    ]
+    if tracked_receipts:
+        removed = _git(clone, "rm", "-f", "--", *tracked_receipts)
+        assert removed.returncode == 0, removed.stderr
+        committed = _git(clone, "commit", "-m", "remove checked receipt for certifier test")
+        assert committed.returncode == 0, committed.stderr
     return clone
 
 
@@ -105,7 +115,7 @@ def test_certifier_rejects_symlinked_output_without_writing(repository: Path, tm
 
 def test_certifier_refuses_conflicting_existing_receipt(repository: Path) -> None:
     directory = repository / "runtime_evidence" / "jaa02"
-    directory.mkdir(parents=True)
+    directory.mkdir(parents=True, exist_ok=True)
     conflict = directory / f"sha256-{'0' * 64}.json"
     conflict.write_text("{}\n", encoding="utf-8")
     completed = _run(repository, str(CERTIFIER))
@@ -175,7 +185,7 @@ def test_validator_rejects_absent_and_multiple_checked_receipts(repository: Path
     assert "found 0" in absent.stderr
 
     directory = repository / "runtime_evidence" / "jaa02"
-    directory.mkdir(parents=True)
+    directory.mkdir(parents=True, exist_ok=True)
     first = directory / f"sha256-{'1' * 64}.json"
     second = directory / f"sha256-{'2' * 64}.json"
     first.write_text("{}\n", encoding="utf-8")

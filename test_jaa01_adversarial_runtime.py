@@ -16,6 +16,7 @@ from pathlib import Path
 
 from career_automation.database import SCHEMA
 from career_automation.lifecycle import ModelIdentity, PolicyIdentity, canonical_hash
+from career_automation.migrations import JAA_02_MIGRATIONS
 from career_automation.models import ActorKind, PipelineState
 
 
@@ -86,7 +87,12 @@ def test_cli_migrates_462_jobs_and_924_events_without_reinterpretation_or_duplic
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == 462
         assert connection.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == 924
-        assert connection.execute("SELECT version FROM career_schema_migrations").fetchall() == [(1,)]
+        assert connection.execute(
+            "SELECT version,name,checksum FROM career_schema_migrations ORDER BY version"
+        ).fetchall() == [
+            (migration.version, migration.name, migration.checksum)
+            for migration in JAA_02_MIGRATIONS
+        ]
         assert connection.execute(
             "SELECT job_key,payload_hash,state FROM pipeline_jobs ORDER BY job_key"
         ).fetchall() == before

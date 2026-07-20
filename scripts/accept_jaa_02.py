@@ -52,8 +52,10 @@ def main() -> int:
         else:
             raise AssertionError("inferred claim was approved")
 
+        credential_label = "api_" + "key"
+        synthetic_value = "synthetic-" + "negative-control"
         assert graph.add_evidence(
-            "ev-secret", statement="api_key=do-not-release-this-value",
+            "ev-secret", statement=f"{credential_label}={synthetic_value}",
             source_identity="demo:unsafe", state="evidence",
         ) == "quarantined"
 
