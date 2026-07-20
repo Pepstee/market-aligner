@@ -40,7 +40,10 @@ Prefer public ATS endpoints that publish their own timestamps:
   the distinct board jobs endpoint for hiring evidence; parse JSON fields and escaped job content
   rather than forcing these responses through the HTML-paragraph extractor.
 - Ashby public job board API: `https://api.ashbyhq.com/posting-api/job-board/{board}`;
-  records contain `publishedAt`.
+  records contain `publishedAt`. The admitted Lendable vacancy
+  `e972b604-832b-4726-9fbb-83d0dec4f1cf` and board API were likewise verified through the
+  sidecar: both returned HTTP 200; the hosted vacancy exposes JSON-LD `datePosted` and the board
+  response exposes `publishedAt`. Treat these structured fields as publisher-time evidence.
 - Lever public postings may supply official role and hiring bodies, but do not use them for a
   current claim unless the publisher supplies a verifiable publication/update time.
 - SEC EDGAR submissions/filings are suitable dated operational evidence for US public
