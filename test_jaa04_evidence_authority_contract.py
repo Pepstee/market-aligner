@@ -24,6 +24,40 @@ from career_automation.models import IntelligenceKind
 
 ROOT = Path(__file__).resolve().parent
 CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
+CAPTURE_PLAN = ROOT / "career_automation/fixtures/jaa04_capture_plan.json"
+
+
+def test_capture_plan_uses_purpose_specific_authorities() -> None:
+    """Different URLs do not become different authorities merely by relabelling them."""
+    payload = json.loads(CAPTURE_PLAN.read_text(encoding="utf-8"))
+    assert payload.get("schema_version") == "jaa04.capture-plan.v2"
+    assert len(payload.get("records", [])) == 30
+    permitted_types = {
+        "company": {"official_company", "corporate_profile"},
+        "product": {"official_company", "official_product"},
+        "role": {"official_vacancy", "official_role"},
+        "hiring": {"official_vacancy", "official_careers"},
+        "operational_health": {
+            "dated_operational", "official_financial", "regulatory_filing",
+        },
+    }
+    for record in payload["records"]:
+        sources = record.get("sources", [])
+        assert {source.get("kind") for source in sources} == set(permitted_types)
+        identities = {
+            ((urlparse(str(source.get("url", ""))).hostname or "").casefold(),
+             urlparse(str(source.get("url", ""))).path)
+            for source in sources
+        }
+        assert len(identities) == 5, f"{record['id']} aliases one publication across purposes"
+        for source in sources:
+            kind = source["kind"]
+            host = (urlparse(source["url"]).hostname or "").casefold()
+            assert source.get("source_type") in permitted_types[kind], (
+                f"{record['id']} labels {source.get('source_type')} as {kind} authority"
+            )
+            if kind in {"role", "hiring", "operational_health"}:
+                assert not host.endswith("wikipedia.org")
 
 
 def test_frozen_source_purposes_are_distinct_and_authority_bound() -> None:
