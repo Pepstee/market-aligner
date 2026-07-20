@@ -265,6 +265,137 @@ def _verify_database(path: Path, spec: BaselineSpec) -> dict[str, Any]:
             "schema_objects": len(schema), "table_counts": counts, "integrity_check": integrity}
 
 
+def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
+    """Recertify one locked source without ever granting SQLite write access."""
+    if not path.exists():
+        raise AdoptionError(f"{spec.name}: source does not exist")
+    if not path.is_file() or path.is_symlink():
+        raise AdoptionError(f"{spec.name}: source must be a regular, non-symlink file")
+    before = path.stat()
+    if before.st_mode & 0o222:
+        raise AdoptionError(f"{spec.name}: source database is writable")
+    sidecars = [Path(str(path) + suffix) for suffix in ("-journal", "-wal", "-shm")]
+    if any(sidecar.exists() for sidecar in sidecars):
+        raise AdoptionError(f"{spec.name}: source has SQLite sidecars and is not a closed snapshot")
+
+    hash_before = _hash_file(path)
+    if hash_before != spec.sha256:
+        raise AdoptionError(
+            f"{spec.name}: SHA-256 mismatch: expected {spec.sha256}, got {hash_before}"
+        )
+    try:
+        with closing(_readonly_connection(path)) as connection:
+            if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                raise AdoptionError(f"{spec.name}: read-only query mode was not enforced")
+            integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
+            if integrity != ["ok"]:
+                raise AdoptionError(f"{spec.name}: integrity_check failed: {integrity}")
+            schema = _schema_rows(connection)
+            schema_hash = hashlib.sha256(_canonical_bytes(schema)).hexdigest()
+            tables = sorted(row[1] for row in schema if row[0] == "table")
+            counts = {
+                table: int(connection.execute(
+                    'SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"'
+                ).fetchone()[0])
+                for table in tables
+            }
+    except sqlite3.Error as exc:
+        raise AdoptionError(f"{spec.name}: read-only SQLite verification failed: {exc}") from exc
+
+    if len(schema) != spec.schema_objects or schema_hash != spec.schema_sha256:
+        raise AdoptionError(
+            f"{spec.name}: schema mismatch: expected {spec.schema_objects} objects/"
+            f"{spec.schema_sha256}, got {len(schema)} objects/{schema_hash}"
+        )
+    if tables != sorted(spec.table_counts):
+        raise AdoptionError(f"{spec.name}: table set mismatch")
+    expected_counts = dict(sorted(spec.table_counts.items()))
+    if counts != expected_counts:
+        raise AdoptionError(
+            f"{spec.name}: table count mismatch: expected {expected_counts}, got {counts}"
+        )
+
+    hash_after = _hash_file(path)
+    after = path.stat()
+    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+    if hash_after != hash_before or any(
+        getattr(before, field) != getattr(after, field) for field in identity_fields
+    ):
+        raise AdoptionError(f"{spec.name}: source changed during recertification")
+    return {
+        "source": {"label": f"source:{spec.name}", "relative_location": spec.source_relative},
+        "baseline_expectation": {
+            "sha256": spec.sha256,
+            "schema_sha256": spec.schema_sha256,
+            "schema_objects": spec.schema_objects,
+            "table_count": len(spec.table_counts),
+            "row_counts": dict(sorted(spec.table_counts.items())),
+        },
+        "open_semantics": {"sqlite_uri_mode": "ro", "query_only": True},
+        "sha256_before": hash_before,
+        "sha256_after": hash_after,
+        "integrity_check": integrity,
+        "schema_sha256": schema_hash,
+        "schema_objects": len(schema),
+        "table_count": len(tables),
+        "row_counts": counts,
+    }
+
+
+def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -> Path:
+    """Fail-closed recertification of both original locked brownfield databases."""
+    source_root = Path(source_root).resolve()
+    evidence_directory = Path(evidence_directory).resolve()
+    if source_root == evidence_directory or source_root in evidence_directory.parents:
+        raise AdoptionError("recertification evidence must be outside the preserved source root")
+    for component in (evidence_directory, *evidence_directory.parents):
+        if component.is_symlink():
+            raise AdoptionError("recertification evidence path must not contain a symlink")
+
+    # Complete every source check before creating or changing the evidence directory.
+    databases = {
+        spec.name: _recertify_source(source_root / spec.source_relative, spec)
+        for spec in BASELINES
+    }
+    content = {
+        "format": "jaa-00-source-recertification/v1",
+        "baseline": {"label": "SOURCE_BASELINE.md", "contract": "locked-source-receipts"},
+        "source_root": {"label": "operator-configured-source-root"},
+        "databases": databases,
+        "isolation": {
+            "source_connections": "read-only-query-only",
+            "source_write_operations": "none",
+            "adopted_product_databases": "not-opened-by-recertification",
+        },
+    }
+    content_hash = hashlib.sha256(_canonical_bytes(content)).hexdigest()
+    receipt = {"content": content, "content_sha256": content_hash}
+    payload = _canonical_bytes(receipt) + b"\n"
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    for component in (evidence_directory, *evidence_directory.parents):
+        if component.is_symlink():
+            raise AdoptionError("recertification evidence path must not contain a symlink")
+    destination = evidence_directory / f"source-recertification-{content_hash}.json"
+    if destination.exists():
+        if destination.is_symlink() or destination.read_bytes() != payload:
+            raise AdoptionError("certified recertification receipt content mismatch")
+        return destination
+    temporary_fd, temporary_name = tempfile.mkstemp(prefix=".recertifying-", dir=evidence_directory)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(temporary_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as exc:
+            raise AdoptionError("recertification receipt appeared during publication") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
 def _runtime_versions() -> dict[str, Any]:
     if sys.version_info < (3, 10):
         raise AdoptionError("Python >=3.10 is required")

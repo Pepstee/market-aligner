@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from .core import AdoptionError, adopt, adopt_online, reconcile, rollback_manifest
+from .core import AdoptionError, adopt, adopt_online, recertify_sources, reconcile, rollback_manifest
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -25,6 +25,11 @@ def _parser() -> argparse.ArgumentParser:
     online.add_argument("--data-root", required=True)
     online.add_argument("--repository", required=True)
     online.add_argument("--secret-reference", action="append", default=[], metavar="NAME")
+    recertify = sub.add_parser(
+        "recertify-sources", help="recertify both locked original databases read-only"
+    )
+    recertify.add_argument("--source-root", required=True)
+    recertify.add_argument("--evidence-directory", required=True)
     for name in ("reconcile", "rollback-manifest"):
         command = sub.add_parser(name)
         command.add_argument("--receipt", required=True)
@@ -43,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
             result = {"status": "adopted-online", "receipt": str(adopt_online(
                 args.source_root, args.data_root, repository=args.repository,
                 secret_references=args.secret_reference))}
+        elif args.command == "recertify-sources":
+            result = {"status": "recertified", "receipt": str(recertify_sources(
+                args.source_root, args.evidence_directory))}
         elif args.command == "reconcile":
             result = reconcile(args.receipt, args.data_root)
         else:

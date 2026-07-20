@@ -1,3 +1,2 @@
-python3 scripts/accept_jaa_01c.py
-python3 -m pytest -q career_automation/test_jaa_01e_lifecycle_no_bypass.py
-python3 scripts/reproduce_jaa01_terra_rejection.py
+#!/usr/bin/env bash
+bash "$(test -n "${BASH_SOURCE:-}" && dirname "${BASH_SOURCE}" || pwd)/scripts/run_acceptance.sh"

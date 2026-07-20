@@ -75,6 +75,10 @@ Operator commands (replace the shell variables with local roots; they are not wr
 the receipt):
 
 ```bash
+jaa-baseline recertify-sources \
+  --source-root "$JAA_LIVE_SOURCE_ROOT" \
+  --evidence-directory "$JAA_RECERTIFICATION_EVIDENCE_DIR"
+
 jaa-baseline adopt-online \
   --source-root "$JAA_LIVE_SOURCE_ROOT" \
   --data-root "$JAA_RUNTIME_DATA_ROOT" \
@@ -88,6 +92,14 @@ jaa-baseline rollback-manifest \
   --receipt "$JAA_RUNTIME_DATA_ROOT/receipts/migration-<sha256>.json" \
   --data-root "$JAA_RUNTIME_DATA_ROOT"
 ```
+
+`recertify-sources` is the fail-closed check for the two locked original files. Both files
+must be regular, non-symlink, non-writable files. It hashes each before and after a
+read-only/query-only integrity, schema and complete row-count inspection, and publishes a
+content-addressed receipt only after both sources exactly match the locked receipts above.
+The receipt uses logical labels and repository-relative source locations, never the
+operator's absolute source root. Its evidence directory must be outside the preserved
+source root.
 
 Every online capture is a new snapshot with a new receipt. Its observed counts never
 retroactively replace the 20 July 2026 observation.
