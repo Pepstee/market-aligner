@@ -1,6 +1,6 @@
 # UK Job Matcher
 
-An evidence-led job-search pipeline tailored to **Artiom Gutu** and the United
+An evidence-led, configurable candidate job-search pipeline for the United
 Kingdom AI/IT market. It discovers live vacancies, extracts structured role
 requirements, ranks them against a corpus-derived candidate profile, and writes
 an application shortlist plus a skills-gap workbook.
@@ -141,5 +141,5 @@ Scrapling surface and commands.
 ./.venv/bin/python -m unittest career_automation.test_engine -v
 ```
 
-The original Korean/Hyun files remain as historical reproducibility fixtures;
+The original guided-pass files remain as generic reproducibility fixtures;
 the active config, profile, contracts, prompts and reports no longer load them.

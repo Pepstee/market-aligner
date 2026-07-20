@@ -22,7 +22,7 @@ from typing import Any, Iterable, Iterator, Optional
 CONTRACT_VERSION = "0.4.0"  # 0.4.0: complete requirements and vacancy-detail fields
 
 # The ten careers under comparison. Keys are canonical and must match the
-# hyun_profile keys in config.yaml exactly.
+# candidate_preferences keys in config.yaml exactly.
 CAREERS: tuple[str, ...] = (
     "UX_UI",
     "Spatial_VMD",
@@ -36,8 +36,8 @@ CAREERS: tuple[str, ...] = (
     "Motion_Graphic",
 )
 
-# Artiom's corpus-derived UK AI/IT search tracks. CAREERS remains above only so
-# the legacy Hyun profiler can still reproduce its historical output.
+# Generic UK AI/IT search tracks. CAREERS remains above for the guided-pass
+# questionnaire scorer and its stable scoring contract.
 TARGET_TRACKS: tuple[str, ...] = (
     "Agentic_AI_Engineer",
     "AI_Automation_Engineer",
@@ -115,7 +115,7 @@ class JobRow:
     benefits: list[str] = field(default_factory=list)
     application_deadline: str = ""
 
-    # Lifestyle wiring (Hyun's constraints, confirmed 2026-07-14):
+    # Optional candidate lifestyle constraints:
     remote_flag: Optional[bool] = None     # True if 재택/원격/하이브리드; False if explicit office-only; None unclear
     site_intensity: Optional[float] = None # 0-10: 0 = pure desk work, 10 = constant 현장/시공/설치 presence
 
@@ -145,7 +145,7 @@ class JobRow:
 
 
 # --------------------------------------------------------------------------- #
-# C4 — a scored row (skeleton.scoring; the deterministic join with hyun_profile)
+# C4 — a scored row (skeleton.scoring; deterministic candidate-profile join)
 # --------------------------------------------------------------------------- #
 @dataclass
 class ScoredRow:
@@ -161,7 +161,7 @@ class ScoredRow:
 
 
 # --------------------------------------------------------------------------- #
-# hyun_profile — the human calibration input (profiler → skeleton.scoring)
+# candidate_preferences — guided-pass calibration input
 # --------------------------------------------------------------------------- #
 @dataclass
 class FieldProfile:
@@ -171,14 +171,14 @@ class FieldProfile:
 
 
 @dataclass
-class HyunProfile:
+class CandidatePreferenceProfile:
     fields: dict[str, FieldProfile] = field(default_factory=dict)  # keyed by CAREERS
     blind_spots: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_config(cls, cfg: dict[str, Any]) -> "HyunProfile":
-        """Build from the `hyun_profile` block of config.yaml."""
-        raw = cfg.get("hyun_profile", {}) or {}
+    def from_config(cls, cfg: dict[str, Any]) -> "CandidatePreferenceProfile":
+        """Build from the ``candidate_preferences`` configuration block."""
+        raw = cfg.get("candidate_preferences", {}) or {}
         blind = list(raw.get("blind_spots", []) or [])
         fields: dict[str, FieldProfile] = {}
         for name in CAREERS:
@@ -276,8 +276,8 @@ if __name__ == "__main__":
         cls = type(s)
         assert from_dict(cls, to_dict(s)) == s, f"round-trip failed for {cls.__name__}"
 
-    prof = HyunProfile.from_config(
-        {"hyun_profile": {"UX_UI": {"interest": 7, "skill": 5, "confidence": 0.4},
+    prof = CandidatePreferenceProfile.from_config(
+        {"candidate_preferences": {"UX_UI": {"interest": 7, "skill": 5, "confidence": 0.4},
                           "blind_spots": ["Technical_Artist"]}}
     )
     assert prof.fields["UX_UI"].interest == 7.0

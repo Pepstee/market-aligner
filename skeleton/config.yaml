@@ -4,7 +4,6 @@ meta:
   contract_version: "0.4.0"
   calibrated: false
   market: United Kingdom
-  subject: Artiom Gutu
 
 io:
   job_urls: scraper/data/job_urls.jsonl
@@ -12,7 +11,8 @@ io:
   jobs: scraper/data/jobs.jsonl
   jobs_scored: skeleton/data/jobs_scored.jsonl
   outputs_dir: outputs
-  candidate_profile: profiler/data/artiom_profile.yaml
+  # Override with CANDIDATE_PROFILE_PATH or a private path in a local config.
+  candidate_profile: profiler/data/candidate_profile.yaml
 
 scoring:
   mean_p: 0.0
@@ -129,16 +129,6 @@ llm:
   cache: true
   max_retries: 2
 
-candidate_fit_profile:
-  Agentic_AI_Engineer: {interest: 10.0, skill: 8.0, confidence: 0.85, market_readiness: 7.0}
-  AI_Automation_Engineer: {interest: 9.5, skill: 8.0, confidence: 0.85, market_readiness: 7.5}
-  Applied_AI_Engineer: {interest: 9.0, skill: 7.0, confidence: 0.75, market_readiness: 6.5}
-  ML_MLOps_Engineer: {interest: 7.5, skill: 5.5, confidence: 0.65, market_readiness: 5.0}
-  Cloud_Platform_Engineer: {interest: 8.0, skill: 6.5, confidence: 0.75, market_readiness: 6.0}
-  Security_Detection_Engineer: {interest: 8.5, skill: 6.5, confidence: 0.75, market_readiness: 6.0}
-  Backend_Engineer: {interest: 7.5, skill: 6.5, confidence: 0.70, market_readiness: 6.0}
-  Full_Stack_Engineer: {interest: 6.5, skill: 5.5, confidence: 0.60, market_readiness: 5.5}
-  Technical_Solutions_Engineer: {interest: 8.5, skill: 7.5, confidence: 0.80, market_readiness: 7.0}
-  blind_spots:
-    - Internal system sophistication can look like seniority while market proof remains graduate-level.
-    - AI-assisted implementation must be distinguished from personally authored implementation.
+# Deliberately empty in the distributable default. Runtime candidate facts are
+# loaded from io.candidate_profile; this block is only an offline fallback.
+candidate_fit_profile: {}

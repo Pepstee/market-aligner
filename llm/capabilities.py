@@ -98,7 +98,7 @@ def rate_axes(
 ) -> dict[str, Any]:
     """Rate one posting on the seven 0-10 axes (axis_ratings schema).
 
-    `job` is an extracted row; `profile` is optional context (e.g. Hyun's field
+    `job` is an extracted row; `profile` is optional candidate context
     priors) that nudges relevance. The deterministic scoring stays in the skeleton.
     """
     client = client or _client
@@ -116,7 +116,7 @@ def assess_portfolio(
     items: list[dict[str, Any]],
     client: Optional[LLMClient] = None,
 ) -> dict[str, Any]:
-    """Rough read of Hyun's portfolio items → per-field evidence (profiler-facing).
+    """Rough read of candidate portfolio items → per-field evidence (profiler-facing).
 
     Only the item titles/descriptions passed in are sent to the model — never the
     whole profiler/data tree (privacy rule).

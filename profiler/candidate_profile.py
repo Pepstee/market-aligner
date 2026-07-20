@@ -5,8 +5,8 @@ from a questionnaire.  It consumes a curated evidence ledger whose claims are
 traceable to the owned corpus, separates interest from demonstrated skill and
 market readiness, and preserves unknowns rather than filling them with guesses.
 
-Input:  ``profiler/data/artiom_evidence.yaml``
-Output: ``profiler/data/artiom_profile.yaml``
+Runtime input and output paths are configurable. Candidate data belongs under
+the ignored ``profiler/data`` directory and is never distributed.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+import argparse
+import os
 import re
 
 import yaml
@@ -22,8 +24,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "profiler" / "data"
-DEFAULT_EVIDENCE = DATA_DIR / "artiom_evidence.yaml"
-DEFAULT_OUTPUT = DATA_DIR / "artiom_profile.yaml"
+DEFAULT_EVIDENCE = Path(os.environ.get("CANDIDATE_EVIDENCE_PATH", DATA_DIR / "candidate_evidence.yaml"))
+DEFAULT_OUTPUT = Path(os.environ.get("CANDIDATE_PROFILE_PATH", DATA_DIR / "candidate_profile.yaml"))
 
 _PUBLIC_TRACK_FIELDS = (
     "interest",
@@ -173,7 +175,7 @@ def public_llm_context_from_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "exclusions": list(candidate.get("exclusions") or []),
         "judging_instruction": (
             "Use the entire evidence ledger and its negative evidence. Judge this vacancy "
-            "against Artiom's actual present proof; do not infer professional seniority from "
+            "against the candidate's actual present proof; do not infer professional seniority from "
             "project sophistication or interest."
         ),
     }
@@ -325,8 +327,14 @@ def run(
 
 
 if __name__ == "__main__":
-    built = run()
-    print(f"Wrote {DEFAULT_OUTPUT}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+    built = build_profile(load_evidence(args.evidence))
+    write_profile(built, args.output, force=args.force)
+    print(f"Wrote {args.output}")
     for name, track in built.tracks.items():
         print(
             f"  {name:<30} interest={track.interest:>4.1f} "

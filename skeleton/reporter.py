@@ -11,7 +11,7 @@ Input: a list of C4 ScoredRow. Output, all under ``outputs/``:
                                  median Fit  (the actual "which field" table).
     requirements_ranked.xlsx
         • canonical skill, frequency, % of postings, top fields demanding it —
-          Artiom's evidence/portfolio to-do list.
+          the candidate's evidence/portfolio to-do list.
     fit_opportunity.png
         • Fit-vs-Opportunity 2D scatter (high-fit/high-opp = sweet spot).
 

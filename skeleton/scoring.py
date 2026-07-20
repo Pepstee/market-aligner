@@ -2,7 +2,7 @@
 skeleton/scoring.py — the deterministic scoring maths (Build-Spec §5).
 
 This is the ONLY place scraper data (a C3 JobRow's LLM-rated axes) meets
-profiler data (Artiom's evidence-led CandidateFitProfile). It joins them
+profiler data (an evidence-led CandidateFitProfile). It joins them
 with pure, reproducible arithmetic — no LLM calls, no I/O, no globals — so a
 weight change re-scores instantly and identically run-to-run.
 
@@ -17,7 +17,7 @@ The maths, verbatim from Build-Spec §5:
     Opportunity = M_p(market demand, accessibility, growth potential)
     Final       = 100 · ( blend·Fit + (1-blend)·Opportunity )
 
-    interest & skill_alignment are Hyun's 0–10 priors for the row's
+    interest & skill_alignment are the candidate's 0–10 priors for the row's
     mapped_career (constant within a field); the rest come from the posting.
 
 Field-level aggregation (the actual "which field" decision):
@@ -170,7 +170,7 @@ def _floor(v: float, epsilon: float) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# Sub-score extraction — normalise a JobRow's axes + Hyun's priors to 0–1.
+# Sub-score extraction — normalise a JobRow's axes + candidate priors to 0–1.
 # --------------------------------------------------------------------------- #
 def _n10(value: Optional[float]) -> float:
     """Normalise a 0–10 axis rating to 0–1. Missing → 0 (then ε-floored)."""
@@ -188,7 +188,7 @@ def accessibility(barrier_to_entry: Optional[float]) -> float:
 
 
 def _profile_for(profile: CandidateFitProfile, career: str) -> CandidateTrackProfile:
-    """Artiom's evidence-led priors for the row's mapped track.
+    """Evidence-led priors for the row's mapped track.
 
     Unknown / `other` career → zeros (row can't claim personal fit it lacks a
     prior for). ε-floor keeps it from zero-collapsing Fit entirely.
@@ -253,7 +253,7 @@ def opportunity_score(row: JobRow, params: ScoringParams) -> float:
 
 
 def score_row(row: JobRow, profile: CandidateFitProfile, params: ScoringParams) -> ScoredRow:
-    """Join a C3 JobRow with Hyun's priors → a C4 ScoredRow.
+    """Join a C3 JobRow with candidate priors → a C4 ScoredRow.
 
     Final = 100 · ( blend·Fit + (1-blend)·Opportunity ).
     Fit and Opportunity are kept on the 0–1 scale in the ScoredRow so the

@@ -15,7 +15,7 @@ What gives it teeth (each is enforced in code, not documented as etiquette):
   T5  strict backend fail-closed: if graphify is required but absent -> raises
   T6  a file lock serialises graph writes so parallel agents can't corrupt it
 
-Privacy: the graph build NEVER ingests personal data. IGNORED_PATHS (Hyun's
+Privacy: the graph build NEVER ingests personal data. IGNORED_PATHS (candidate
 profiler data, the raw scrape cache) are excluded from what graphify sees,
 because graphify sends semantic content to an upstream model.
 

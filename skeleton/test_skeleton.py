@@ -140,7 +140,7 @@ def test_power_mean_ordering():
 
 
 # --------------------------------------------------------------------------- #
-# score_row / axes — the join with Artiom's priors.
+# score_row / axes — the join with candidate priors.
 # --------------------------------------------------------------------------- #
 def test_accessibility_inverts_barrier():
     assert _equal(scoring.accessibility(0.0), 1.0)

@@ -1,8 +1,8 @@
 """Candidate profiler.
 
-The default profiler is evidence-led and subject-generic.  The original Hyun
-guided-pass implementation remains available as ``profiler.score_profile`` for
-reproducibility, but is legacy data and is not the source for Artiom's search.
+The default profiler is evidence-led and subject-generic. The guided-pass
+implementation remains available as ``profiler.score_profile`` with generic
+contracts and private runtime inputs.
 
 Exports are loaded lazily so ``python -m profiler.candidate_profile`` can run
 without importing the target module twice.

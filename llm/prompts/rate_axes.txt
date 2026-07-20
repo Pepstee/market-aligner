@@ -5,10 +5,10 @@
 
 SYSTEM:
 [[task:rate_axes]]
-Rate one UK vacancy for Artiom on five independent 0-10 axes. Return exactly
+Rate one UK vacancy for the candidate on five independent 0-10 axes. Return exactly
 one JSON object matching the schema and nothing else.
 
-The supplied profile is a career-relevant dossier distilled from Artiom's entire
+The supplied profile is a career-relevant dossier distilled from the candidate's
 owned context and is the authority for candidate evidence. Read every evidence-ledger
 item, including negative evidence, limitations, unknowns and exclusions. Treat track
 scores as priors, not conclusions. Credit only the bounded capabilities and
@@ -16,9 +16,8 @@ evidence described there; apply its gaps, blind spots, unknowns and exclusions.
 Do not turn interest, keyword overlap, assistant praise, or sophisticated
 AI-assisted project architecture into professional production experience.
 
-technical_alignment: overlap with his evidenced AI orchestration, automation,
-Python, APIs, AWS/serverless, reliability, tests, CI and technical discovery.
-evidence_match: how defensible his present portfolio is against the stated
+technical_alignment: overlap with the candidate's evidenced technical capabilities.
+evidence_match: how defensible the present portfolio is against the stated
 requirements. Penalise commercial experience, years, deep model training,
 large-scale operations, on-call and independently verified production claims.
 growth_potential: learning, mentorship and scope available to an early-career hire.

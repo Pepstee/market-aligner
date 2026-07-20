@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "job_extract",
-  "description": "Structured UK AI/IT vacancy extraction for Artiom's candidate-fit pipeline.",
+  "description": "Structured UK AI/IT vacancy extraction for a configurable candidate-fit pipeline.",
   "type": "object",
   "additionalProperties": false,
   "required": [
