@@ -352,17 +352,20 @@ class PortableAuthorityRetriever:
     def _retrieve(self, source_id: str, url: str, source_kind: str) -> Citation:
         publisher = (urlparse(url).hostname or "").casefold()
         try:
-            return self.retriever.retrieve(source_id, url, source_kind=source_kind,
+            item = self.retriever.retrieve(source_id, url, source_kind=source_kind,
                                            canonical_publisher=publisher,
                                            canonical_article=url)
         except TypeError as exc:
             if "unexpected keyword" not in str(exc):
                 raise
             item = self.retriever.retrieve(source_id, url)
-            return replace(item, source_kind=source_kind,
+            item = replace(item, source_kind=source_kind,
                            canonical_publisher=(urlparse(item.url).hostname or "").casefold(),
                            canonical_article=item.url,
                            retrieval_engine=item.retrieval_engine or "deterministic-retriever")
+        if source_kind == "official_vacancy" and item.published_at is None:
+            item = replace(item, published_at=item.updated_at)
+        return item
 
     @staticmethod
     def _canary_for(task: Any) -> ATSAuthorityCanary | None:
@@ -378,8 +381,13 @@ class PortableAuthorityRetriever:
         return record
 
     @staticmethod
-    def _validate_canary_capture(record: ATSAuthorityCanary, citation: Citation, body: bytes,
+    def _validate_canary_capture(record: ATSAuthorityCanary, citation: Citation,
+                                 artifact: bytes | RawResponseCache,
                                  *, require_temporal: bool = True) -> None:
+        body = (artifact.resolve(citation.raw_response_ref, citation.content_sha256)
+                if isinstance(artifact, RawResponseCache) else artifact)
+        if hashlib.sha256(body).hexdigest() != citation.content_sha256:
+            raise ValueError("ATS authority bytes differ from the cited SHA-256 artifact")
         parsed = urlparse(citation.url)
         if ((parsed.hostname or "").casefold() not in record.authority_hosts
                 or parsed.path not in record.final_paths):
@@ -395,10 +403,33 @@ class PortableAuthorityRetriever:
         text = _plain_excerpt(body.decode("utf-8", "strict")).casefold()
         if record.company.casefold() not in text or record.title.casefold() not in text:
             raise ValueError("ATS authority bytes do not identify the admitted employer and vacancy")
-        if (require_temporal
-                and (not (citation.published_at or citation.updated_at)
-                     or not citation.publisher_date_evidence)):
-            raise ValueError("ATS authority bytes lack required publisher metadata")
+        if require_temporal:
+            published, updated, evidence = extract_publisher_timestamps(body)
+            if published is not None and updated is not None and published != updated:
+                raise ValueError("ATS publisher metadata dates disagree")
+            publisher_date = published or updated
+            if publisher_date is None or evidence is None:
+                raise ValueError("ATS authority bytes lack an unambiguous publisher date")
+            cited_published = (_iso_publisher_time(citation.published_at)
+                               if citation.published_at else None)
+            cited_evidence = citation.publisher_date_evidence
+            evidence_published = None
+            if cited_evidence:
+                evidence_published, evidence_updated, _ = extract_publisher_timestamps(
+                    cited_evidence.encode("utf-8")
+                )
+                if (evidence_published is not None and evidence_updated is not None
+                        and evidence_published != evidence_updated):
+                    raise ValueError("ATS publisher date evidence is ambiguous")
+                evidence_published = evidence_published or evidence_updated
+            if (cited_published != publisher_date or evidence_published != publisher_date
+                    or cited_evidence != evidence):
+                raise ValueError("ATS publisher dates differ from the cited response bytes")
+            if citation.updated_at is not None:
+                cited_updated = (_iso_publisher_time(citation.updated_at)
+                                 if citation.updated_at else None)
+                if cited_updated != publisher_date:
+                    raise ValueError("ATS publisher metadata dates disagree")
 
     @staticmethod
     def _published_routes(base: str, body: bytes) -> list[str]:
@@ -452,16 +483,14 @@ class PortableAuthorityRetriever:
         canary = self._canary_for(task)
         if canary is not None:
             seed = self._retrieve(f"source:{task.job_key}:admitted", task.url, "official_vacancy")
-            seed_body = self.cache.resolve(seed.raw_response_ref, seed.content_sha256)
-            self._validate_canary_capture(canary, seed, seed_body,
+            self._validate_canary_capture(canary, seed, self.cache,
                                           require_temporal=canary.authority_url == task.url)
             if canary.authority_url == task.url:
                 citations = [seed]
             else:
                 authority = self._retrieve(f"source:{task.job_key}:typed-authority",
                                            canary.authority_url, "official_vacancy")
-                authority_body = self.cache.resolve(authority.raw_response_ref, authority.content_sha256)
-                self._validate_canary_capture(canary, authority, authority_body)
+                self._validate_canary_capture(canary, authority, self.cache)
                 citations = [authority]
             return self._plan_from_citations(task, citations, citations[0])
 
@@ -719,6 +748,8 @@ def extract_publisher_timestamps(body: bytes) -> tuple[str | None, str | None, s
     # publisher values are ambiguous and therefore deliberately remain unknown.
     published_values = {value for field, value, _ in candidates if field == "published"}
     updated_values = {value for field, value, _ in candidates if field == "updated"}
+    if len(published_values) > 1 or len(updated_values) > 1:
+        return None, None, None
     published = next(iter(published_values)) if len(published_values) == 1 else None
     updated = next(iter(updated_values)) if len(updated_values) == 1 else None
     chosen_field = "updated" if updated else ("published" if published else None)
