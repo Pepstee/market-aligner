@@ -109,6 +109,47 @@ class BaselineAdoptionTests(unittest.TestCase):
         with self.assertRaisesRegex(core.AdoptionError, "live or dirty"):
             core._verify_database(self.source / self.specs[0].source_relative, self.specs[0])
 
+    def test_online_backup_freezes_live_wal_and_preserves_historical_observation(self) -> None:
+        writers = []
+        try:
+            for spec in self.specs:
+                path = self.source / spec.source_relative
+                writer = sqlite3.connect(path)
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("INSERT INTO records(value) VALUES ('newly-observed')")
+                writer.commit()
+                writers.append(writer)
+
+            data = self.root / "online-data"
+            repository = self.root / "repository"
+            repository.mkdir(exist_ok=True)
+            with patch.object(core, "BASELINES", tuple(self.specs)), \
+                 patch.object(core, "_runtime_versions", return_value={"python": "test"}), \
+                 patch.object(core, "_repository_revision", return_value="b" * 40):
+                receipt = core.adopt_online(self.source, data, repository=repository)
+                document = json.loads(receipt.read_text())
+                self.assertEqual(document["content"]["format"],
+                                 "jaa-00-online-snapshot-receipt/v2")
+                for spec in self.specs:
+                    record = document["content"]["databases"][spec.name]
+                    self.assertEqual(record["historical_observation"]["observed_table_counts"],
+                                     {"records": 1})
+                    self.assertEqual(record["frozen_snapshot"]["table_counts"], {"records": 2})
+                    self.assertEqual(record["capture"]["method"], "sqlite-online-backup")
+                    self.assertEqual(record["capture"]["source_identities_start"]["wal"]["label"],
+                                     f"source:{spec.name}:wal")
+                    self.assertNotIn(str(self.root), json.dumps(record))
+                self.assertEqual(core.reconcile(receipt, data)["status"], "ok")
+
+            with patch.object(core, "BASELINES", tuple(self.specs)):
+                with self.assertRaisesRegex(core.AdoptionError, "live or dirty"):
+                    core._verify_database(
+                        self.source / self.specs[0].source_relative, self.specs[0]
+                    )
+        finally:
+            for writer in writers:
+                writer.close()
+
 
 if __name__ == "__main__":
     unittest.main()
