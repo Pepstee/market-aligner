@@ -363,8 +363,6 @@ class PortableAuthorityRetriever:
                            canonical_publisher=(urlparse(item.url).hostname or "").casefold(),
                            canonical_article=item.url,
                            retrieval_engine=item.retrieval_engine or "deterministic-retriever")
-        if source_kind == "official_vacancy" and item.published_at is None:
-            item = replace(item, published_at=item.updated_at)
         return item
 
     @staticmethod
@@ -405,31 +403,19 @@ class PortableAuthorityRetriever:
             raise ValueError("ATS authority bytes do not identify the admitted employer and vacancy")
         if require_temporal:
             published, updated, evidence = extract_publisher_timestamps(body)
-            if published is not None and updated is not None and published != updated:
-                raise ValueError("ATS publisher metadata dates disagree")
-            publisher_date = published or updated
-            if publisher_date is None or evidence is None:
+            if (published is None and updated is None) or evidence is None:
                 raise ValueError("ATS authority bytes lack an unambiguous publisher date")
             cited_published = (_iso_publisher_time(citation.published_at)
                                if citation.published_at else None)
+            cited_updated = (_iso_publisher_time(citation.updated_at)
+                             if citation.updated_at else None)
+            if ((citation.published_at is not None and cited_published is None)
+                    or (citation.updated_at is not None and cited_updated is None)):
+                raise ValueError("ATS publisher date is not verifiable")
             cited_evidence = citation.publisher_date_evidence
-            evidence_published = None
-            if cited_evidence:
-                evidence_published, evidence_updated, _ = extract_publisher_timestamps(
-                    cited_evidence.encode("utf-8")
-                )
-                if (evidence_published is not None and evidence_updated is not None
-                        and evidence_published != evidence_updated):
-                    raise ValueError("ATS publisher date evidence is ambiguous")
-                evidence_published = evidence_published or evidence_updated
-            if (cited_published != publisher_date or evidence_published != publisher_date
+            if (cited_published != published or cited_updated != updated
                     or cited_evidence != evidence):
                 raise ValueError("ATS publisher dates differ from the cited response bytes")
-            if citation.updated_at is not None:
-                cited_updated = (_iso_publisher_time(citation.updated_at)
-                                 if citation.updated_at else None)
-                if cited_updated != publisher_date:
-                    raise ValueError("ATS publisher metadata dates disagree")
 
     @staticmethod
     def _published_routes(base: str, body: bytes) -> list[str]:
