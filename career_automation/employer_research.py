@@ -205,6 +205,41 @@ class Citation:
         return (_canonical_public_url(self.url), self.content_sha256)
 
 
+@dataclass(frozen=True)
+class ATSAuthorityCanary:
+    job_key: str
+    company: str
+    title: str
+    admitted_url: str
+    authority_url: str
+    authority_hosts: tuple[str, ...]
+    final_paths: tuple[str, ...]
+
+
+ATS_AUTHORITY_CANARIES = (
+    ATSAuthorityCanary("greenhouse:anthropic:5030244008", "Anthropic",
+        "Anthropic Fellows Program, AI Security",
+        "https://job-boards.greenhouse.io/anthropic/jobs/5030244008",
+        "https://api.greenhouse.io/v1/boards/anthropic/jobs/5030244008",
+        ("job-boards.greenhouse.io", "api.greenhouse.io"),
+        ("/anthropic/jobs/5030244008", "/v1/boards/anthropic/jobs/5030244008")),
+    ATSAuthorityCanary("ashby:lendable:36d47627-9b4e-4864-9f05-2dbbd1052380", "Lendable",
+        "Graduate Analytics Engineer",
+        "https://jobs.ashbyhq.com/lendable/36d47627-9b4e-4864-9f05-2dbbd1052380",
+        "https://jobs.ashbyhq.com/lendable/36d47627-9b4e-4864-9f05-2dbbd1052380",
+        ("jobs.ashbyhq.com",),
+        ("/lendable/36d47627-9b4e-4864-9f05-2dbbd1052380",)),
+    ATSAuthorityCanary("workable:cogna:847CFBC5F4", "Cogna", "Software Engineer",
+        "https://apply.workable.com/j/847CFBC5F4",
+        "https://apply.workable.com/cogna/jobs/view/847CFBC5F4.md",
+        ("apply.workable.com",),
+        ("/j/847CFBC5F4", "/cogna/j/847CFBC5F4", "/cogna/j/847CFBC5F4/",
+         "/cogna/jobs/view/847CFBC5F4.md")),
+)
+_ATS_CANARY_BY_KEY = {record.job_key: record for record in ATS_AUTHORITY_CANARIES}
+_TYPED_ATS_HOSTS = frozenset(host for record in ATS_AUTHORITY_CANARIES for host in record.authority_hosts)
+
+
 class RawResponseCache:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
@@ -330,6 +365,42 @@ class PortableAuthorityRetriever:
                            retrieval_engine=item.retrieval_engine or "deterministic-retriever")
 
     @staticmethod
+    def _canary_for(task: Any) -> ATSAuthorityCanary | None:
+        record = _ATS_CANARY_BY_KEY.get(str(task.job_key))
+        seed_host = (urlparse(str(task.url)).hostname or "").casefold()
+        if record is None:
+            if seed_host in _TYPED_ATS_HOSTS:
+                raise ValueError("ATS vacancy is outside the exact admitted authority canaries")
+            return None
+        if (str(task.company) != record.company or str(task.title) != record.title
+                or str(task.url) != record.admitted_url):
+            raise ValueError("ATS vacancy identity differs from its exact admitted record")
+        return record
+
+    @staticmethod
+    def _validate_canary_capture(record: ATSAuthorityCanary, citation: Citation, body: bytes,
+                                 *, require_temporal: bool = True) -> None:
+        parsed = urlparse(citation.url)
+        if ((parsed.hostname or "").casefold() not in record.authority_hosts
+                or parsed.path not in record.final_paths):
+            raise ValueError("redirect escaped the admitted ATS authority chain")
+        redirect_hosts = [(urlparse(str(row["url"])).hostname or "").casefold()
+                          for row in citation.redirect_history]
+        if any(host not in record.authority_hosts for host in redirect_hosts):
+            raise ValueError("redirect escaped the admitted ATS authority chain")
+        path = parsed.path.casefold()
+        if (path.endswith((".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico"))
+                or "/apply" in path or "/application" in path):
+            raise ValueError("assets and application forms are not ATS vacancy authority")
+        text = _plain_excerpt(body.decode("utf-8", "strict")).casefold()
+        if record.company.casefold() not in text or record.title.casefold() not in text:
+            raise ValueError("ATS authority bytes do not identify the admitted employer and vacancy")
+        if (require_temporal
+                and (not (citation.published_at or citation.updated_at)
+                     or not citation.publisher_date_evidence)):
+            raise ValueError("ATS authority bytes lack required publisher metadata")
+
+    @staticmethod
     def _published_routes(base: str, body: bytes) -> list[str]:
         text = body.decode("utf-8", "strict")
         routes: list[str] = []
@@ -378,6 +449,22 @@ class PortableAuthorityRetriever:
         return tuple(dict.fromkeys(types))
 
     def retrieve_plan(self, task: Any) -> tuple[list[Citation], list[dict[str, Any]]]:
+        canary = self._canary_for(task)
+        if canary is not None:
+            seed = self._retrieve(f"source:{task.job_key}:admitted", task.url, "official_vacancy")
+            seed_body = self.cache.resolve(seed.raw_response_ref, seed.content_sha256)
+            self._validate_canary_capture(canary, seed, seed_body,
+                                          require_temporal=canary.authority_url == task.url)
+            if canary.authority_url == task.url:
+                citations = [seed]
+            else:
+                authority = self._retrieve(f"source:{task.job_key}:typed-authority",
+                                           canary.authority_url, "official_vacancy")
+                authority_body = self.cache.resolve(authority.raw_response_ref, authority.content_sha256)
+                self._validate_canary_capture(canary, authority, authority_body)
+                citations = [authority]
+            return self._plan_from_citations(task, citations, citations[0])
+
         vacancy = self._retrieve(f"source:{task.job_key}:vacancy", task.url, "official_vacancy")
         citations = [vacancy]
         vacancy_body = self.cache.resolve(vacancy.raw_response_ref, vacancy.content_sha256)
@@ -396,6 +483,10 @@ class PortableAuthorityRetriever:
             seen.update((item.capture_identity, item.content_sha256))
             citations.append(item)
 
+        return self._plan_from_citations(task, citations, vacancy)
+
+    def _plan_from_citations(self, task: Any, citations: list[Citation],
+                             vacancy: Citation) -> tuple[list[Citation], list[dict[str, Any]]]:
         supported: dict[IntelligenceKind, tuple[Citation, str, str, int]] = {}
         admitted_ranges: dict[str, set[tuple[int, int]]] = {}
         for item in citations:
@@ -576,6 +667,15 @@ def _iso_publisher_time(value: str) -> str | None:
             from email.utils import parsedate_to_datetime
             parsed = parsedate_to_datetime(value)
         except (TypeError, ValueError, OverflowError):
+            parsed = None
+        if parsed is None:
+            for pattern in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
+                try:
+                    parsed = datetime.strptime(value, pattern)
+                    break
+                except ValueError:
+                    continue
+        if parsed is None:
             return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -600,13 +700,21 @@ def extract_publisher_timestamps(body: bytes) -> tuple[str | None, str | None, s
         if field and value and (stamp := _iso_publisher_time(value)):
             candidates.append((field, stamp, match.group(0)))
     json_pattern = re.compile(
-        r'([\"\'])(datePublished|dateCreated|dateModified|dateUpdated)\1\s*:\s*([\"\'])(.*?)\3',
+        r'([\"\'])(datePublished|dateCreated|datePosted|publishedAt|updated_at|dateModified|dateUpdated)\1\s*:\s*([\"\'])(.*?)\3',
         re.I | re.S,
     )
     for match in json_pattern.finditer(text):
-        field = "updated" if "modified" in match.group(2).casefold() or "updated" in match.group(2).casefold() else "published"
+        key = match.group(2).casefold()
+        field = "updated" if "modified" in key or "updated" in key else "published"
         if stamp := _iso_publisher_time(match.group(4)):
             candidates.append((field, stamp, match.group(0)))
+    for match in re.finditer(
+            r"(?im)^(?:\*\*)?Posted(?:\*\*)?\s*:?\s*(?:\*\*)?([^\r\n*]+)(?:\*\*)?\s*$", text):
+        if stamp := _iso_publisher_time(match.group(1)):
+            candidates.append(("published", stamp, match.group(0)))
+    for match in re.finditer(r"(?i)\bPosted\s+((?:19|20)\d{2}-\d{2}-\d{2})\b", text):
+        if stamp := _iso_publisher_time(match.group(1)):
+            candidates.append(("published", stamp, match.group(0)))
     # Multiple equivalent metadata declarations are acceptable. Conflicting
     # publisher values are ambiguous and therefore deliberately remain unknown.
     published_values = {value for field, value, _ in candidates if field == "published"}
@@ -935,9 +1043,11 @@ def _validate_portable_dossier(dossier: Mapping[str, Any], cache: RawResponseCac
         if purpose != [kind.value] or outcome.get("source_type") not in SOURCE_KIND_POLICY[kind]["source_types"]:
             raise ValueError("outcome authority is not permitted for its purpose")
         byte_range = (start, start + length)
-        if byte_range in used_ranges.setdefault(source_id, set()):
-            raise ValueError("one capture may support multiple kinds only through distinct excerpts")
-        used_ranges[source_id].add(byte_range)
+        ranges = used_ranges.setdefault(source_id, set())
+        if any(start < previous_end and previous_start < start + length
+               for previous_start, previous_end in ranges):
+            raise ValueError("one capture may support multiple kinds only through disjoint excerpts")
+        ranges.add(byte_range)
         if not _kind_relevant(kind, excerpt, {"source_type": outcome.get("source_type"),
                                               "permitted_purposes": purpose}):
             raise ValueError(f"kind-irrelevant {kind.value} evidence")
