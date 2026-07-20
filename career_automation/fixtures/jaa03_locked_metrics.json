@@ -1,0 +1,91 @@
+{
+  "error_slices": [
+    "source",
+    "role_family",
+    "geography"
+  ],
+  "locked_set_hash": "sha256:902a549e0577c37ca7243fd0321093574bd3ddc95cb5b2970b3ad05c910ba523",
+  "metrics": {
+    "count": 100,
+    "schema_version": "jaa03.metrics.v1",
+    "slices": {
+      "geography:Bristol UK": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "geography:Edinburgh UK": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "geography:London UK": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "geography:Manchester UK": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "geography:Remote UK": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "overall": {
+        "accuracy_bp": 10000,
+        "correct": 100,
+        "count": 100
+      },
+      "role_family:automation": {
+        "accuracy_bp": 10000,
+        "correct": 25,
+        "count": 25
+      },
+      "role_family:data": {
+        "accuracy_bp": 10000,
+        "correct": 25,
+        "count": 25
+      },
+      "role_family:security": {
+        "accuracy_bp": 10000,
+        "correct": 25,
+        "count": 25
+      },
+      "role_family:software": {
+        "accuracy_bp": 10000,
+        "correct": 25,
+        "count": 25
+      },
+      "source:greenhouse": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "source:lever": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "source:reed": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "source:remoteok": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      },
+      "source:workday": {
+        "accuracy_bp": 10000,
+        "correct": 20,
+        "count": 20
+      }
+    }
+  },
+  "replay_mismatches": 0,
+  "schema_version": "jaa03.locked-metrics.v1"
+}
