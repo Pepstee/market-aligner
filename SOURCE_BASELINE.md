@@ -40,17 +40,30 @@ or SHM sidecar; it must never directly copy a live WAL database.
 ## Online snapshot contract
 
 For a collector that is still writing, `adopt-online` opens each source with SQLite
-`mode=ro` and freezes it through SQLite's online backup API. SQLite chooses a consistent
-read transaction while the collector remains available. The command never checkpoints,
-pauses, writes, renames, or directly copies the source database. A WAL without its SHM is refused,
-because opening that state could require SQLite to initialise source-side coordination.
+`mode=ro`, immediately enables `PRAGMA query_only=ON`, and freezes it through SQLite's
+online backup API. SQLite chooses a consistent read transaction while the collector
+remains available. No source connection is ever opened read-write. The command never
+executes a database write, checkpoint, or source journal-mode change; it never deletes,
+renames, or truncates the source main database, WAL, or SHM, and never pauses the writer or
+directly copies those files. A WAL without its SHM is refused, because opening that state
+could require SQLite to initialise source-side coordination.
+
+SQLite's WAL protocol may update reader-lock metadata in an existing SHM file while a
+lawful read-only connection is active. That coordination is not a write to the database
+or WAL, and the command does not claim that the SHM lock region is byte-immutable. It
+records SHM identity metadata at capture start and end and reports metadata drift, but
+does not hash or compare SHM content. Main database and WAL content are hashed at both
+boundaries when each file remains stable while read; equality is reported for a quiescent
+source, while an actively changing or disappearing WAL produces an indeterminate or drift
+observation rather than a false preservation claim.
 
 The destination is first built in its destination directory, fully closed, checked with
 `PRAGMA integrity_check`, measured, fsynced, and then published with atomic
 create-if-absent semantics. Existing destinations are never overwritten. The content-hashed
 receipt records, under logical labels:
 
-- source main/WAL/SHM identities at capture start and end, plus observed drift;
+- source main/WAL content observations and SHM identity-metadata observations at capture
+  start and end, plus component, content-comparison, and SHM metadata drift conclusions;
 - the newly frozen integrity result, schema identity, per-table counts, bytes and SHA-256;
 - destination identity, repository revision, and rollback labels;
 - the historical observations above in a separate `historical_observation` object.
