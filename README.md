@@ -166,3 +166,13 @@ Clean-bootstrap verification on 20 July 2026: **94 passed, 5 skipped, 0 failed**
 
 The original guided-pass files remain as generic reproducibility fixtures;
 the active config, profile, contracts, prompts and reports no longer load them.
+
+Generate a content-addressed JSON receipt for both the current complete suite and
+the separately labelled 65-test historical `career_automation` scope with:
+
+```bash
+python3 scripts/generate-test-evidence.py
+```
+
+The generator publishes under `runtime_evidence/pytest/` only after both runs
+pass and their pytest totals are parseable and internally consistent.
