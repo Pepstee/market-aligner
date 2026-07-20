@@ -5,11 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "market-aligner"
 version = "1.0.0"
-description = "Evidence-led UK AI/IT vacancy matcher tailored to Artiom Gutu."
+description = "Evidence-led, configurable UK AI/IT vacancy matcher."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Proprietary — personal project" }
-authors = [{ name = "Artiom Gutu", email = "gutu.artiom444@gmail.com" }]
+license = { text = "Proprietary" }
 dependencies = [
     "pyyaml>=6.0",
     "requests>=2.31",

@@ -1,13 +1,11 @@
 """
 profiler/score_profile.py — the v1 Guided-Pass scoring key.
 
-Reads a filled answer set (profiler/data/sample_answers.yaml, the fixture
-"Hyun") and turns it into a `HyunProfile` (skeleton/contracts.py), then writes
-`profiler/data/hyun_profile.yaml` in the exact `hyun_profile` shape that
-config.yaml expects.
+Reads a filled answer set and turns it into a ``CandidatePreferenceProfile``.
+Both input and output are configurable ignored runtime files.
 
 The maths is deliberately simple and deterministic — no model calls. It follows
-Profiler_v1_Guided_Pass.md, "Scoring key -> hyun_profile", to the letter:
+the v1 guided-pass scoring key:
 
   Interest[field] (0-10):
     Interest = 10 * ( 0.5*norm(enjoy) + 0.3*norm(energy) + 0.2*rank_score )
@@ -35,6 +33,8 @@ Deps: stdlib + pyyaml only.
 from __future__ import annotations
 
 import sys
+import argparse
+import os
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any
@@ -44,7 +44,7 @@ import yaml
 # Repo layout: profiler/score_profile.py -> repo root is parent.parent.
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "skeleton"))
-from contracts import CAREERS, FieldProfile, HyunProfile  # noqa: E402
+from contracts import CAREERS, CandidatePreferenceProfile, FieldProfile  # noqa: E402
 
 from instrument.questions import (  # noqa: E402
     FIELD_TO_CAREER,
@@ -54,8 +54,12 @@ from instrument.questions import (  # noqa: E402
 
 # Default IO paths (all inside profiler/data/).
 DATA_DIR = _ROOT / "profiler" / "data"
-DEFAULT_ANSWERS = DATA_DIR / "sample_answers.yaml"
-DEFAULT_OUTPUT = DATA_DIR / "hyun_profile.yaml"
+DEFAULT_ANSWERS = Path(
+    os.environ.get("CANDIDATE_ANSWERS_PATH", DATA_DIR / "candidate_answers.yaml")
+)
+DEFAULT_OUTPUT = Path(
+    os.environ.get("CANDIDATE_PREFERENCES_PATH", DATA_DIR / "candidate_preferences.yaml")
+)
 
 # Confidence mapping: Section-C value 0..3 -> 0..1.
 CONFIDENCE_MAP = {0: 0.0, 1: 0.33, 2: 0.67, 3: 1.0}
@@ -247,8 +251,8 @@ def score_answers(answers: dict) -> dict[str, FieldScore]:
     return scores
 
 
-def build_profile(answers: dict) -> HyunProfile:
-    """Score answers and pack them into the contract's HyunProfile."""
+def build_profile(answers: dict) -> CandidatePreferenceProfile:
+    """Score answers and pack them into the generic preference contract."""
     scores = score_answers(answers)
     fields: dict[str, FieldProfile] = {}
     blind_spots: list[str] = []
@@ -263,7 +267,7 @@ def build_profile(answers: dict) -> HyunProfile:
             blind_spots.append(s.career)
     # Emit in canonical CAREERS order.
     ordered = {c: fields[c] for c in CAREERS}
-    return HyunProfile(fields=ordered, blind_spots=blind_spots)
+    return CandidatePreferenceProfile(fields=ordered, blind_spots=blind_spots)
 
 
 # --------------------------------------------------------------------------- #
@@ -275,8 +279,8 @@ def load_answers(path: str | Path = DEFAULT_ANSWERS) -> dict:
     return doc.get("answers", {}) or {}
 
 
-def profile_to_config_block(profile: HyunProfile) -> dict[str, Any]:
-    """Render a HyunProfile as the `hyun_profile` block config.yaml expects."""
+def profile_to_config_block(profile: CandidatePreferenceProfile) -> dict[str, Any]:
+    """Render a profile as the ``candidate_preferences`` configuration block."""
     block: dict[str, Any] = {}
     for career in CAREERS:
         fp = profile.fields.get(career)
@@ -291,9 +295,9 @@ def profile_to_config_block(profile: HyunProfile) -> dict[str, Any]:
     return block
 
 
-def write_profile(profile: HyunProfile, path: str | Path = DEFAULT_OUTPUT,
+def write_profile(profile: CandidatePreferenceProfile, path: str | Path = DEFAULT_OUTPUT,
                   force: bool = False) -> Path:
-    """Write hyun_profile.yaml (under a top-level `hyun_profile:` key).
+    """Write preferences under a top-level ``candidate_preferences`` key.
 
     GUARD: refuses to overwrite a REAL (calibrated, non-v1) profile at the
     target path unless force=True. The live profile is real excavation data;
@@ -321,7 +325,7 @@ def write_profile(profile: HyunProfile, path: str | Path = DEFAULT_OUTPUT,
             "version": "v1-guided-pass",
             "uncertainty": "high (all skill priors provisional in v1)",
         },
-        "hyun_profile": block,
+        "candidate_preferences": block,
     }
     path.write_text(
         yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False),
@@ -331,8 +335,8 @@ def write_profile(profile: HyunProfile, path: str | Path = DEFAULT_OUTPUT,
 
 
 def run(answers_path: str | Path = DEFAULT_ANSWERS,
-        output_path: str | Path = DEFAULT_OUTPUT) -> HyunProfile:
-    """End-to-end: load answers -> score -> write hyun_profile.yaml."""
+        output_path: str | Path = DEFAULT_OUTPUT) -> CandidatePreferenceProfile:
+    """End-to-end: load answers, score them, and write the preferences."""
     answers = load_answers(answers_path)
     profile = build_profile(answers)
     write_profile(profile, output_path)
@@ -340,8 +344,14 @@ def run(answers_path: str | Path = DEFAULT_ANSWERS,
 
 
 if __name__ == "__main__":  # pragma: no cover
-    prof = run()
-    print(f"Wrote {DEFAULT_OUTPUT}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--answers", type=Path, default=DEFAULT_ANSWERS)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+    prof = build_profile(load_answers(args.answers))
+    write_profile(prof, args.output, force=args.force)
+    print(f"Wrote {args.output}")
     print("Per-field (interest / skill / confidence):")
     for career in CAREERS:
         fp = prof.fields[career]

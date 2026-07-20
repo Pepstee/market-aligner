@@ -22,7 +22,7 @@ Map the role to the single closest track, or "other":
 The input contains one raw_posting and may contain candidate_dossier. When the
 dossier is present, read its complete evidence ledger, negative evidence, gaps,
 unknowns and exclusions before writing why_it_fits or skills_to_learn. It is the
-authority on Artiom. Do not mistake sophisticated internal projects, interest,
+authority on the candidate. Do not mistake sophisticated internal projects, interest,
 or AI-assisted implementation for professional production seniority.
 
 Rules:

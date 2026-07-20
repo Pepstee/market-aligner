@@ -2,13 +2,13 @@
 profiler/test_profiler.py — standalone self-test for the Profiler module.
 
 Feeds the fixture answers (profiler/data/sample_answers.yaml) through the v1
-scorer, writes profiler/data/hyun_profile.yaml, and asserts the contract:
+scorer, writes a private candidate-preferences file, and asserts the contract:
 
   * all ten CAREERS are present in the emitted profile
   * every interest and skill sits in [0, 10]
   * every confidence sits in [0, 1]
   * blind_spots is a list (of career names, each a real CAREER)
-  * the written YAML loads back via contracts.HyunProfile.from_config
+  * the written YAML loads back via CandidatePreferenceProfile.from_config
   * a few known scoring behaviours hold (forced-choice wins, evidence over
     self-claim, the C-only cap, and both blind-spot directions)
 
@@ -27,7 +27,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "skeleton"))
 sys.path.insert(0, str(_ROOT / "profiler"))
 
-from contracts import CAREERS, HyunProfile  # noqa: E402
+from contracts import CAREERS, CandidatePreferenceProfile  # noqa: E402
 import score_profile as sp  # noqa: E402
 from instrument.questions import FIELD_TO_CAREER  # noqa: E402
 
@@ -43,7 +43,7 @@ def main() -> int:
     # and the real (v2-excavation) profile lives there. The self-test scores
     # the SAMPLE fixture, so it writes to a sandbox path instead.
     # (Bug caught 2026-07-14: this test used to clobber the real profile.)
-    out_path = sp.DATA_DIR / "_selftest" / "hyun_profile.yaml"
+    out_path = sp.DATA_DIR / "_selftest" / "candidate_preferences.yaml"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     _check(answers_path.exists(), f"missing fixture: {answers_path}")
@@ -52,7 +52,7 @@ def main() -> int:
     answers = sp.load_answers(answers_path)
     profile = sp.build_profile(answers)
     written = sp.write_profile(profile, out_path)
-    _check(written.exists(), "hyun_profile.yaml was not written")
+    _check(written.exists(), "candidate preferences were not written")
 
     # --- contract: all ten careers present -------------------------------
     _check(set(profile.fields.keys()) == set(CAREERS),
@@ -73,8 +73,8 @@ def main() -> int:
 
     # --- it loads back through the contract from the written YAML ---------
     doc = yaml.safe_load(out_path.read_text(encoding="utf-8")) or {}
-    _check("hyun_profile" in doc, "written file has no top-level hyun_profile block")
-    reloaded = HyunProfile.from_config(doc)
+    _check("candidate_preferences" in doc, "written file has no candidate_preferences block")
+    reloaded = CandidatePreferenceProfile.from_config(doc)
     _check(set(reloaded.fields.keys()) == set(CAREERS),
            "reloaded profile must carry all ten CAREERS")
     _check(reloaded.blind_spots == profile.blind_spots,

@@ -37,6 +37,7 @@ Run from the repo root:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -155,14 +156,14 @@ def _try_llm():
 
 
 def _profile_block(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Artiom's public-safe evidence profile for the rate_axes context.
+    """Load the candidate's public-safe evidence profile for LLM context.
 
     Prefer the profiler's generated, privacy-screened projection.  The compact
     config block remains a fallback so the skeleton can still run by itself.
     """
-    configured = str(
+    configured = os.environ.get("CANDIDATE_PROFILE_PATH") or str(
         ((cfg or {}).get("io", {}) or {}).get(
-            "candidate_profile", "profiler/data/artiom_profile.yaml"
+            "candidate_profile", "profiler/data/candidate_profile.yaml"
         )
     )
     profile_path = Path(configured)
@@ -456,7 +457,7 @@ def stage_extract(ctx: RunContext) -> Optional[Path]:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 4 — score  (WIRED FOR REAL: scoring.py, C3 + hyun_profile → C4)
+# Stage 4 — score (scoring.py, C3 + candidate profile → C4)
 # --------------------------------------------------------------------------- #
 def _load_job_rows(ctx: RunContext) -> list[JobRow]:
     """C3 rows, from the fixture override if given, else jobs.jsonl."""

@@ -1,4 +1,4 @@
-"""Standalone tests for the evidence-led Artiom profiler."""
+"""Standalone tests for the generic evidence-led candidate profiler."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from pathlib import Path
 import yaml
 
 from profiler.candidate_profile import (
-    DEFAULT_EVIDENCE,
     build_profile,
     load_evidence,
     load_public_llm_context,
@@ -20,13 +19,27 @@ from profiler.candidate_profile import (
 
 
 def main() -> int:
-    doc = load_evidence(DEFAULT_EVIDENCE)
+    doc = {
+        "meta": {"subject": "Example Candidate", "version": "test-v1"},
+        "evidence": [{
+            "id": "example-1", "kind": "project", "claim": "Completed a sample project",
+            "source": "synthetic fixture", "status": "verified", "confidence": 1.0,
+        }],
+        "career_tracks": {"Example_Track": {
+            "interest": 7, "skill": 6, "confidence": 0.8, "market_readiness": 5,
+            "evidence": ["example-1"], "rationale": "Synthetic test rationale",
+            "gaps": ["Synthetic test gap"],
+        }},
+        "capabilities": {"example": ["synthetic capability"]},
+        "constraints": {"target_geography": "configured at runtime", "privacy": "private"},
+        "blind_spots": ["Synthetic blind spot"],
+        "unknowns": ["Synthetic unknown"],
+        "exclusions": ["Synthetic exclusion"],
+    }
     profile = build_profile(doc)
 
-    assert profile.subject == "Artiom Gutu"
-    assert len(profile.tracks) >= 8
-    assert "Agentic_AI_Engineer" in profile.tracks
-    assert "Security_Detection_Engineer" in profile.tracks
+    assert profile.subject == "Example Candidate"
+    assert set(profile.tracks) == {"Example_Track"}
     assert profile.evidence
     assert profile.unknowns
     assert all(track.evidence for track in profile.tracks.values())
@@ -37,29 +50,25 @@ def main() -> int:
 
     rendered = profile_to_dict(profile)
     assert "candidate_profile" in rendered
-    assert "hyun_profile" not in rendered
-    constraints = rendered["candidate_profile"]["constraints"]
-    assert constraints["target_geography"].startswith("UK-resident search")
-    assert constraints["work_authorisation_eu"].startswith("confirmed")
-    assert constraints["work_authorisation_uk"].startswith("confirmed")
-    assert constraints["work_authorisation_switzerland"].startswith("eligible")
-    assert constraints["residence"] == "fixed in the United Kingdom; no relocation"
-
+    assert "candidate_preferences" not in rendered
     llm_context = public_llm_context_from_doc(rendered)
-    assert llm_context["subject"] == "Artiom Gutu"
+    assert llm_context["subject"] == profile.subject
     assert "capabilities" in llm_context
-    assert "gaps" in llm_context["tracks"]["Agentic_AI_Engineer"]
+    assert "gaps" in llm_context["tracks"]["Example_Track"]
     assert "evidence" not in llm_context
-    assert "evidence" not in llm_context["tracks"]["Agentic_AI_Engineer"]
+    assert "evidence" not in llm_context["tracks"]["Example_Track"]
     assert "privacy" not in llm_context["constraints"]
-    assert llm_context["constraints"]["career_deadline"] == "2026-12-31"
+    assert llm_context["constraints"]["target_geography"] == "configured at runtime"
     json.dumps(llm_context)  # the rate_axes payload must always be serialisable
 
     with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "artiom_profile.yaml"
+        evidence_path = Path(tmp) / "candidate_evidence.yaml"
+        evidence_path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+        assert load_evidence(evidence_path) == doc
+        out = Path(tmp) / "candidate_profile.yaml"
         write_profile(profile, out)
         loaded = yaml.safe_load(out.read_text(encoding="utf-8"))
-        assert loaded["meta"]["subject"] == "Artiom Gutu"
+        assert loaded["meta"]["subject"] == profile.subject
         assert set(loaded["candidate_profile"]["tracks"]) == set(profile.tracks)
         assert load_public_llm_context(out) == public_llm_context_from_doc(loaded)
 

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "portfolio_assess",
-  "description": "Advisory evidence read of Artiom's portfolio against the UK AI/IT tracks.",
+  "description": "Advisory evidence read of a candidate portfolio against configured UK AI/IT tracks.",
   "type": "object",
   "additionalProperties": false,
   "required": ["per_field", "detected_skills", "overall_summary"],
