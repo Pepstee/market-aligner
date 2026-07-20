@@ -553,7 +553,9 @@ class _BoundedCapture:
             getattr(stream, "close")()
 
 
-def _posix_resource_limiter(policy: SubprocessPolicy) -> Callable[[], None] | None:
+def _posix_resource_limiter(
+    policy: SubprocessPolicy, wall_timeout: float
+) -> Callable[[], None] | None:
     if os.name != "posix":
         return None
     try:
@@ -562,6 +564,11 @@ def _posix_resource_limiter(policy: SubprocessPolicy) -> Callable[[], None] | No
         return None
 
     def apply_limits() -> None:
+        # Keep a direct-child timeout available when a macOS sandbox denies the
+        # parent's process-group signal.  The delay leaves killpg as the normal
+        # POSIX path; wait() below verifies that this fallback actually exited.
+        signal.setitimer(signal.ITIMER_REAL, wall_timeout + 1.0)
+
         def supported(limit: int, bounds: tuple[int, int]) -> None:
             # macOS exposes RLIMIT_AS but rejects attempts to set it.  Resource
             # limits are defence in depth, so apply each supported limit without
@@ -647,7 +654,7 @@ class BoundedSubprocessRunner:
         if timeout <= 0 or timeout > self.policy.max_runtime_seconds:
             raise SecurityPolicyError("timeout must be positive and no greater than the policy limit")
 
-        limiter = _posix_resource_limiter(self.policy)
+        limiter = _posix_resource_limiter(self.policy, timeout)
         started = time.monotonic()
         stdout_capture = _BoundedCapture(self.policy.max_stdout_bytes)
         stderr_capture = _BoundedCapture(self.policy.max_stderr_bytes)
@@ -681,9 +688,13 @@ class BoundedSubprocessRunner:
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+                    except PermissionError:
+                        # The direct child's inherited timer is the bounded
+                        # fallback where the sandbox denies parent signalling.
+                        pass
                 else:
                     process.kill()
-                process.wait()
+                process.wait(timeout=2.0)
             finally:
                 for reader in readers:
                     reader.join(timeout=2.0)
