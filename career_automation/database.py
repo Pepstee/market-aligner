@@ -397,14 +397,20 @@ class CareerDatabase:
         transition_key = f"research-complete:{job_key}:{dossier_hash}"
         with self.transaction(immediate=True) as conn:
             queue = conn.execute(
-                """SELECT q.status,q.lease_owner,d.worker_id AS dossier_worker
+                """SELECT q.status,q.lease_owner,q.lease_until,d.worker_id AS dossier_worker
                    FROM employer_research_queue q
                    LEFT JOIN employer_dossiers d ON d.job_key=q.job_key
                    WHERE q.job_key=?""",
                 (job_key,),
             ).fetchone()
+            lease_is_current = False
+            if queue is not None and queue["lease_until"]:
+                lease_is_current = datetime.fromisoformat(
+                    str(queue["lease_until"]).replace("Z", "+00:00")
+                ) >= datetime.now(timezone.utc)
             is_owner = queue is not None and (
-                (queue["status"] == "leased" and queue["lease_owner"] == worker_id)
+                (queue["status"] == "leased" and queue["lease_owner"] == worker_id
+                 and lease_is_current)
                 or (queue["status"] == "completed" and queue["dossier_worker"] == worker_id)
             )
             if not is_owner:

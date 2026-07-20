@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 import socket
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -190,6 +191,14 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         cited = claim.get("source_ids")
         if not isinstance(cited, list) or not cited or not set(cited).issubset(by_id):
             raise ValueError("claim citations must resolve within the dossier")
+        excerpt = claim.get("citation_excerpt")
+        if excerpt is not None:
+            if not isinstance(excerpt, str) or not excerpt.strip():
+                raise ValueError("citation excerpt must be non-empty text")
+            if not any(excerpt.encode("utf-8") in cache.resolve(
+                by_id[source_id]["raw_response_ref"], by_id[source_id]["content_sha256"],
+            ) for source_id in cited):
+                raise ValueError("citation excerpt does not resolve to cited bytes")
         observed = datetime.fromisoformat(str(claim.get("observed_at", "")).replace("Z", "+00:00")).date()
         if as_of - observed > timedelta(days=FRESHNESS_DAYS[kind]) or observed > as_of:
             raise ValueError(f"stale or future {kind.value} claim")
@@ -205,6 +214,84 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
             raise ValueError("unknown intelligence edge relation")
 
 
+def _public_page_excerpt(body: bytes) -> tuple[str, str]:
+    """Return one byte-exact paragraph and a conservative plain-text summary."""
+    for match in re.finditer(br"<p(?:\s[^>]*)?>.*?</p\s*>", body, re.I | re.S):
+        raw = match.group(0)
+        plain = re.sub(br"<[^>]+>", b" ", raw)
+        plain = re.sub(br"\s+", b" ", plain).strip()
+        if len(plain) >= 80:
+            return raw.decode("utf-8", "strict"), plain.decode("utf-8", "strict")
+    raise ValueError("public response has no substantive UTF-8 paragraph")
+
+
+def build_reconnaissance_dossier(
+    task: Any, citation: Citation, cache: RawResponseCache, *, observed_at: str | None = None,
+) -> dict[str, Any]:
+    """Build deterministic, provenance-bound intelligence; no model controls state."""
+    body = cache.resolve(citation.raw_response_ref, citation.content_sha256)
+    excerpt, summary = _public_page_excerpt(body)
+    observed = observed_at or citation.captured_at
+    company = str(task.company).strip()
+    role = str(task.title).strip()
+    if not company or not role:
+        raise ValueError("research task requires company and role")
+    prefix = f"{company}: "
+    claims = [
+        {"id": "company-fact", "kind": "company", "classification": "fact",
+         "text": prefix + summary, "citation_excerpt": excerpt},
+        {"id": "product-inference", "kind": "product", "classification": "inference",
+         "text": prefix + "the cited public description indicates the products or services an applicant should understand."},
+        {"id": "health-inference", "kind": "operational_health", "classification": "inference",
+         "text": prefix + "the described operating scope may create delivery, reliability, or regulatory constraints; current health is not established by this source alone."},
+        {"id": "role-hypothesis", "kind": "role", "classification": "hypothesis",
+         "text": f"Hypothesis for {company}'s {role}: role scope may intersect the cited products or operating model and requires verification against the vacancy."},
+        {"id": "hiring-hypothesis", "kind": "hiring", "classification": "hypothesis",
+         "text": f"Hypothesis for {company}: candidates for {role} should verify current team, location, and hiring status with an official vacancy source."},
+    ]
+    for claim in claims:
+        claim.update({"observed_at": observed, "freshness_classification": "current",
+                      "source_ids": [citation.id], "citation_excerpt": excerpt})
+    dossier = {
+        "schema_version": "jaa04.dossier.v1", "job_key": task.job_key,
+        "raw_cache_root": str(cache.root), "sources": [vars(citation)], "claims": claims,
+        "edges": [
+            {"from_claim_id": "company-fact", "to_claim_id": "product-inference", "relation": "supports"},
+            {"from_claim_id": "company-fact", "to_claim_id": "health-inference", "relation": "qualifies"},
+            {"from_claim_id": "product-inference", "to_claim_id": "role-hypothesis", "relation": "supports"},
+            {"from_claim_id": "company-fact", "to_claim_id": "hiring-hypothesis", "relation": "qualifies"},
+        ],
+    }
+    validate_dossier(dossier, cache)
+    return dossier
+
+
+class EmployerResearchWorker:
+    """Production lease worker: claim, retrieve, validate, then complete once."""
+
+    def __init__(self, database: Any, worker_id: str, cache: RawResponseCache, *,
+                 retriever: Any | None = None, lease_seconds: int = 900) -> None:
+        if not worker_id.strip():
+            raise ValueError("worker ID is required")
+        self.database, self.worker_id, self.cache = database, worker_id, cache
+        self.retriever = retriever or ScraplingPublicRetriever(cache)
+        self.lease_seconds = lease_seconds
+
+    def run_once(self) -> str | None:
+        task = self.database.claim_research(self.worker_id, self.lease_seconds)
+        if task is None:
+            return None
+        # Any failure deliberately leaves the lease visible. Once it expires,
+        # claim_research atomically exposes it to a resuming worker.
+        citation = self.retriever.retrieve(f"source:{task.job_key}", task.url)
+        dossier = build_reconnaissance_dossier(task, citation, self.cache)
+        digest = content_hash(dossier)
+        validate_dossier(dossier, self.cache)
+        self.database.complete_research(job_key=task.job_key, worker_id=self.worker_id,
+                                        dossier=dossier, dossier_hash=digest)
+        return task.job_key
+
+
 def load_frozen_dossiers(
     path: str | Path, cache: RawResponseCache, *, strict_corpus: bool = False,
 ) -> list[dict[str, Any]]:
@@ -217,6 +304,7 @@ def load_frozen_dossiers(
     urls: set[str] = set()
     source_hashes: set[str] = set()
     classifications: set[str] = set()
+    required_kinds = {kind.value for kind in IntelligenceKind}
     job_keys: set[str] = set()
     for dossier in dossiers:
         captured_dates = [datetime.fromisoformat(
@@ -225,6 +313,15 @@ def load_frozen_dossiers(
         if not captured_dates or len(set(captured_dates)) != 1:
             raise ValueError("frozen dossier requires one unambiguous capture date")
         validate_dossier(dossier, cache, as_of=captured_dates[0])
+        if strict_corpus and {str(claim.get("kind")) for claim in dossier.get("claims", [])} != required_kinds:
+            raise ValueError("each frozen dossier must cover every intelligence kind")
+        if strict_corpus and {str(claim.get("classification")) for claim in dossier.get("claims", [])} != {
+            "fact", "inference", "hypothesis",
+        }:
+            raise ValueError("each frozen dossier must distinguish fact, inference, and hypothesis")
+        if strict_corpus and not any(edge.get("relation") in {"qualifies", "contradicts"}
+                                     for edge in dossier.get("edges", [])):
+            raise ValueError("each frozen dossier requires a typed qualification or contradiction")
         job_key = str(dossier.get("job_key", ""))
         if not job_key or job_key in job_keys:
             raise ValueError("frozen dossier job keys must be distinct")
