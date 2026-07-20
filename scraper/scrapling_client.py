@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -36,7 +37,12 @@ class ScraplingClient:
     def __init__(self, root: Path, config: Mapping[str, Any] | None = None) -> None:
         self.root = Path(root).resolve()
         self.config = dict(config or {})
-        configured = self.config.get("runtime_python", ".venv-scrapling/bin/python")
+        if "runtime_python" in self.config:
+            configured = self.config["runtime_python"]
+        elif runtime_directory := os.environ.get("AGENTIC_SCRAPLING_RUNTIME_DIR"):
+            configured = Path(runtime_directory) / "bin" / "python"
+        else:
+            configured = ".venv-scrapling/bin/python"
         runtime = Path(str(configured))
         self.runtime = runtime if runtime.is_absolute() else self.root / runtime
         self.worker_module = str(self.config.get("worker_module", "scraper.scrapling_worker"))
