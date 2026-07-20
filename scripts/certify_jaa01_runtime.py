@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -91,6 +92,15 @@ def parse_live_source(value: str) -> tuple[str, Path]:
     return label, Path(raw_path)
 
 
+def require_unlinked_output_path(path: Path) -> None:
+    """Reject an output path containing any existing symbolic-link component."""
+    absolute = Path(os.path.abspath(path))
+    for component in (absolute, *absolute.parents):
+        require(not component.is_symlink(), f"output path must not resolve through a symlink: {path}")
+    require(absolute.resolve(strict=False) == absolute,
+            f"output path must not resolve through a symlink: {path}")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--baseline-database", required=True)
@@ -105,7 +115,7 @@ def certify(args: argparse.Namespace) -> Path:
     baseline = Path(args.baseline_database)
     migration_receipt = Path(args.migration_receipt)
     evidence_directory = Path(args.evidence_directory)
-    require(not evidence_directory.is_absolute(), "evidence directory must be repository-relative")
+    require_unlinked_output_path(evidence_directory)
 
     baseline_hash_before = hash_file(baseline)
     receipt, receipt_file_hash_before = load_migration_receipt(migration_receipt)
@@ -201,7 +211,9 @@ def certify(args: argparse.Namespace) -> Path:
     payload = (json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
     content_hash = hashlib.sha256(payload).hexdigest()
     evidence_directory.mkdir(parents=True, exist_ok=True)
+    require_unlinked_output_path(evidence_directory)
     destination = evidence_directory / f"sha256-{content_hash}.json"
+    require_unlinked_output_path(destination)
     existing = list(evidence_directory.glob("*.json"))
     require(not existing or existing == [destination],
             "refusing to retain multiple JAA-01 certification receipts")
@@ -209,6 +221,7 @@ def certify(args: argparse.Namespace) -> Path:
         require(destination.read_bytes() == payload, "content-addressed evidence file mismatch")
     else:
         destination.write_bytes(payload)
+    require_unlinked_output_path(destination)
     return destination
 
 
