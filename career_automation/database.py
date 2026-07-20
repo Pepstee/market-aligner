@@ -10,7 +10,29 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .migrations import apply_jaa_01_migrations
+from .lifecycle import (
+    LifecycleReducer,
+    ModelIdentity,
+    PolicyIdentity,
+    canonical_hash,
+)
 from .models import ActorKind, PipelineState, ResearchTask, ScoredJob
+
+
+RESEARCH_LEASE_POLICY = PolicyIdentity(
+    "career.research-lease", "1",
+    canonical_hash({"rule": "lease queued work; advance only queued jobs"}),
+)
+RESEARCH_COMPLETION_POLICY = PolicyIdentity(
+    "career.research-completion-validation", "1",
+    canonical_hash({
+        "rules": [
+            "lease owner must match",
+            "at least one public source is required",
+            "every claim cites known source IDs",
+        ]
+    }),
+)
 
 
 SCHEMA = """
@@ -106,6 +128,7 @@ class CareerDatabase:
         apply_jaa_01_migrations(self.path)
         with self.connection() as conn:
             conn.executescript(SCHEMA)
+        self.lifecycle = LifecycleReducer(self.path)
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
@@ -199,38 +222,41 @@ class CareerDatabase:
             PipelineState.EMPLOYER_RESEARCH_QUEUED.value
             if passed else PipelineState.OPPORTUNITY_REJECTED.value
         )
+        if passed and priority is None:
+            raise ValueError("passed opportunity requires research priority")
+        policy = PolicyIdentity("career.opportunity-gate", "1", policy_hash)
         with self.transaction(immediate=True) as conn:
             current = conn.execute(
                 "SELECT state,payload_hash FROM pipeline_jobs WHERE job_key=?", (job_key,)
             ).fetchone()
             if current is None:
                 raise KeyError(job_key)
+            event_key = f"opportunity-gate:{job_key}:{current['payload_hash']}:{policy_hash}"
+            self.lifecycle.commit_in_transaction(
+                conn,
+                job_key=job_key,
+                to_state=PipelineState(target),
+                policy=policy,
+                inputs={"payload_hash": current["payload_hash"]},
+                outputs={
+                    "decision": decision,
+                    "reason": reason,
+                    "priority": priority,
+                },
+                idempotency_key=event_key,
+            )
             if current["state"] in {
                 PipelineState.EMPLOYER_RESEARCHING.value,
                 PipelineState.EMPLOYER_RESEARCHED.value,
             }:
                 return
             conn.execute(
-                """UPDATE pipeline_jobs SET state=?,opportunity_decision=?,
-                     opportunity_reason=?,policy_hash=?,updated_at=CURRENT_TIMESTAMP
+                """UPDATE pipeline_jobs SET opportunity_decision=?,
+                     opportunity_reason=?,updated_at=CURRENT_TIMESTAMP
                    WHERE job_key=?""",
-                (target, decision, reason, policy_hash, job_key),
-            )
-            event_key = f"opportunity-gate:{job_key}:{current['payload_hash']}:{policy_hash}"
-            conn.execute(
-                """INSERT OR IGNORE INTO pipeline_events(
-                     job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
-                   ) VALUES(?,?,?,?,?,?,?)""",
-                (
-                    job_key, "opportunity_gate_decided", current["state"], target,
-                    ActorKind.DETERMINISTIC.value,
-                    json.dumps({"decision": decision, "reason": reason}, sort_keys=True),
-                    event_key,
-                ),
+                (decision, reason, job_key),
             )
             if passed:
-                if priority is None:
-                    raise ValueError("passed opportunity requires research priority")
                 conn.execute(
                     """INSERT INTO employer_research_queue(job_key,priority)
                        VALUES(?,?) ON CONFLICT(job_key) DO UPDATE SET
@@ -272,7 +298,7 @@ class CareerDatabase:
         with self.transaction(immediate=True) as conn:
             row = conn.execute(
                 """SELECT q.job_key,j.title,j.company,j.url,j.opportunity,q.priority,
-                          q.research_depth,q.attempts
+                          q.research_depth,q.attempts,q.status,j.state
                    FROM employer_research_queue q
                    JOIN pipeline_jobs j ON j.job_key=q.job_key
                    WHERE (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
@@ -286,24 +312,23 @@ class CareerDatabase:
                      lease_owner=?,lease_until=?,updated_at=CURRENT_TIMESTAMP WHERE job_key=?""",
                 (worker_id, lease_until.isoformat(), row["job_key"]),
             )
-            conn.execute(
-                "UPDATE pipeline_jobs SET state=?,updated_at=CURRENT_TIMESTAMP WHERE job_key=?",
-                (PipelineState.EMPLOYER_RESEARCHING.value, row["job_key"]),
-            )
-            conn.execute(
-                """INSERT INTO pipeline_events(
-                     job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
-                   ) VALUES(?,?,?,?,?,?,?)""",
-                (
-                    row["job_key"], "employer_research_leased",
-                    PipelineState.EMPLOYER_RESEARCH_QUEUED.value,
-                    PipelineState.EMPLOYER_RESEARCHING.value,
-                    ActorKind.DETERMINISTIC.value,
-                    json.dumps({"worker_id": worker_id, "lease_until": lease_until.isoformat()}),
-                    f"research-lease:{row['job_key']}:{worker_id}:{now.isoformat()}",
-                ),
-            )
+            if row["state"] == PipelineState.EMPLOYER_RESEARCH_QUEUED.value:
+                attempt = int(row["attempts"]) + 1
+                self.lifecycle.commit_in_transaction(
+                    conn,
+                    job_key=row["job_key"],
+                    to_state=PipelineState.EMPLOYER_RESEARCHING,
+                    policy=RESEARCH_LEASE_POLICY,
+                    inputs={"queue_status": row["status"], "attempt": attempt},
+                    outputs={
+                        "worker_id": worker_id,
+                        "lease_until": lease_until.isoformat(),
+                    },
+                    idempotency_key=f"research-lease:{row['job_key']}:{attempt}",
+                )
             task = dict(row)
+            task.pop("status")
+            task.pop("state")
             task["attempts"] = int(task["attempts"]) + 1
             return ResearchTask(**task)
 
@@ -326,13 +351,48 @@ class CareerDatabase:
             cited = {str(value) for value in claim.get("source_ids", [])}
             if not cited or not cited.issubset(source_ids):
                 raise ValueError("every dossier claim must cite known source IDs")
+        model = self._dossier_model(dossier)
+        observation = {
+            "dossier": dossier,
+            "dossier_hash": dossier_hash,
+            "source_ids": sorted(source_ids),
+            "worker_id": worker_id,
+        }
+        proposal_key = f"research-observation:{job_key}:{dossier_hash}"
+        transition_key = f"research-complete:{job_key}:{dossier_hash}"
         with self.transaction(immediate=True) as conn:
             queue = conn.execute(
-                "SELECT status,lease_owner FROM employer_research_queue WHERE job_key=?",
+                """SELECT q.status,q.lease_owner,d.worker_id AS dossier_worker
+                   FROM employer_research_queue q
+                   LEFT JOIN employer_dossiers d ON d.job_key=q.job_key
+                   WHERE q.job_key=?""",
                 (job_key,),
             ).fetchone()
-            if queue is None or queue["status"] != "leased" or queue["lease_owner"] != worker_id:
+            is_owner = queue is not None and (
+                (queue["status"] == "leased" and queue["lease_owner"] == worker_id)
+                or (queue["status"] == "completed" and queue["dossier_worker"] == worker_id)
+            )
+            if not is_owner:
                 raise RuntimeError("research task is not leased by this worker")
+            self.lifecycle.record_proposal_in_transaction(
+                conn,
+                job_key=job_key,
+                proposed_state=PipelineState.EMPLOYER_RESEARCHED,
+                actor=ActorKind.PROBABILISTIC,
+                observation=observation,
+                idempotency_key=proposal_key,
+                model=model,
+            )
+            self.lifecycle.commit_in_transaction(
+                conn,
+                job_key=job_key,
+                to_state=PipelineState.EMPLOYER_RESEARCHED,
+                policy=RESEARCH_COMPLETION_POLICY,
+                inputs=observation,
+                outputs={"validated": True, "queue_status": "completed"},
+                idempotency_key=transition_key,
+                model=model,
+            )
             conn.execute(
                 """INSERT INTO employer_dossiers(job_key,dossier_json,dossier_hash,worker_id)
                    VALUES(?,?,?,?) ON CONFLICT(job_key) DO UPDATE SET
@@ -345,23 +405,19 @@ class CareerDatabase:
                      lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE job_key=?""",
                 (job_key,),
             )
-            conn.execute(
-                "UPDATE pipeline_jobs SET state=?,updated_at=CURRENT_TIMESTAMP WHERE job_key=?",
-                (PipelineState.EMPLOYER_RESEARCHED.value, job_key),
-            )
-            conn.execute(
-                """INSERT OR IGNORE INTO pipeline_events(
-                     job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
-                   ) VALUES(?,?,?,?,?,?,?)""",
-                (
-                    job_key, "employer_research_completed",
-                    PipelineState.EMPLOYER_RESEARCHING.value,
-                    PipelineState.EMPLOYER_RESEARCHED.value,
-                    ActorKind.PROBABILISTIC.value,
-                    json.dumps({"worker_id": worker_id, "dossier_hash": dossier_hash}),
-                    f"research-complete:{job_key}:{dossier_hash}",
-                ),
-            )
+
+    @staticmethod
+    def _dossier_model(dossier: dict[str, Any]) -> ModelIdentity | None:
+        value = dossier.get("model")
+        if not isinstance(value, dict):
+            return None
+        provider = value.get("provider")
+        model_id = value.get("model_id", value.get("id"))
+        version = value.get("version")
+        if all(isinstance(item, str) and item.strip()
+               for item in (provider, model_id, version)):
+            return ModelIdentity(provider, model_id, version)
+        return None
 
     def stats(self) -> dict[str, int]:
         with self.connection() as conn:

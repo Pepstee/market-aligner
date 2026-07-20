@@ -87,7 +87,7 @@ class OpportunityPolicy:
     @property
     def policy_hash(self) -> str:
         body = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 class OpportunityGate:
