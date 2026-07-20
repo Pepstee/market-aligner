@@ -33,12 +33,13 @@ def test_capture_plan_uses_purpose_specific_authorities() -> None:
     assert payload.get("schema_version") == "jaa04.capture-plan.v2"
     assert len(payload.get("records", [])) == 30
     permitted_types = {
-        "company": {"official_company", "corporate_profile"},
-        "product": {"official_company", "official_product"},
+        "company": {"official_company", "corporate_profile", "authoritative_company_record"},
+        "product": {"official_company", "official_product", "official_product_documentation"},
         "role": {"official_vacancy", "official_role"},
         "hiring": {"official_vacancy", "official_careers"},
         "operational_health": {
             "dated_operational", "official_financial", "regulatory_filing",
+            "regulatory_status_record", "independent_reporting",
         },
     }
     for record in payload["records"]:
