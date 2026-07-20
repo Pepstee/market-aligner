@@ -53,7 +53,9 @@ fill the gap with Wikipedia or a synthetic date. The corpus needs 30 qualifying 
    an HTML `<p>` extractor.
 3. Derive `published_at` and `updated_at` from the captured response body or publisher header.
    The plan may carry a deterministic extraction selector/path; it may not supply the timestamp
-   value accepted as evidence.
+   value accepted as evidence. An undated company or product reference remains explicitly
+   undated; only role, hiring and operational-health evidence may satisfy a current-state claim,
+   and only with publisher-supported time inside its freshness window.
 4. Bind each selected excerpt/value to a byte range or deterministic structured-data pointer,
    plus its hash. A page title alone is not substantive employer intelligence.
 5. Apply freshness from publisher time. Retrieval time records observation only and never makes

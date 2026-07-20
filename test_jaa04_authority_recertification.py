@@ -130,15 +130,21 @@ def test_each_frozen_dossier_has_byte_resolvable_publisher_dates() -> None:
         assert dossier["schema_version"] == "jaa04.dossier.v2"
         sources = {source["id"]: source for source in dossier["sources"]}
         assert len(sources) == 5
+        freshness_sensitive = {"role", "hiring", "operational_health"}
+        plans = {entry["id"]: entry for entry in dossier["source_plan"]}
         for claim in dossier["claims"]:
             source = sources[claim["source_ids"][0]]
             assert source["captured_at"]
-            assert source.get("published_at") or source.get("updated_at")
-            assert source["publisher_date_evidence"]
-            assert claim["observed_at"] in {source.get("updated_at"), source.get("published_at")}
-            assert source["publisher_date_evidence"].encode() in cache.resolve(
-                source["raw_response_ref"], source["content_sha256"]
-            )
+            requires_current = plans[claim["source_plan_id"]].get("requires_current") is True
+            if claim["kind"] in freshness_sensitive or requires_current:
+                assert source.get("published_at") or source.get("updated_at")
+                assert source["publisher_date_evidence"]
+                assert claim["observed_at"] in {
+                    source.get("updated_at"), source.get("published_at"),
+                }
+                assert source["publisher_date_evidence"].encode() in cache.resolve(
+                    source["raw_response_ref"], source["content_sha256"]
+                )
         validate_dossier(dossier, cache)
 
 
