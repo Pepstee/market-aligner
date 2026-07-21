@@ -1,8 +1,9 @@
 """Black-box JAA-02 receipt identity tamper tests.
 
 These checks intentionally use the checked-in validator through subprocesses.
-Each attack is made in an isolated clone, so a valid receipt must first prove
-that it binds the clone's exact source revision and CPython runtime.
+Each attack is made in an isolated clone. The legacy receipt remains immutable
+historical runtime evidence; current source is bound by the orchestrator's
+scoped component certificate rather than this former whole-tree receipt.
 """
 
 from __future__ import annotations
@@ -60,10 +61,21 @@ def _commit_runtime_evidence(root: Path, message: str) -> None:
     assert committed.returncode == 0, committed.stderr
 
 
-def test_authentic_jaa02_receipt_binds_current_source_and_runtime(certified_clone: Path) -> None:
+def test_authentic_jaa02_historical_receipt_binds_runtime(certified_clone: Path) -> None:
     accepted = _validate(certified_clone)
     assert accepted.returncode == 0, accepted.stderr
     assert json.loads(accepted.stdout)["status"] == "accepted"
+
+
+def test_unrelated_source_change_does_not_rewrite_historical_runtime_evidence(
+    certified_clone: Path,
+) -> None:
+    readme = certified_clone / "README.md"
+    readme.write_text(readme.read_text(encoding="utf-8") + "\nunrelated documentation\n", encoding="utf-8")
+    assert _git(certified_clone, "add", "README.md").returncode == 0
+    assert _git(certified_clone, "commit", "-m", "unrelated documentation").returncode == 0
+    accepted = _validate(certified_clone)
+    assert accepted.returncode == 0, accepted.stderr
 
 
 def test_jaa02_validator_rejects_missing_receipt(certified_clone: Path) -> None:

@@ -253,7 +253,7 @@ def test_release_order_and_acceptance_declaration_are_deterministic_and_data_onl
         ("__PYTHON__", "scripts/run_acceptance.py"),
         ("__PYTHON__", "scripts/accept_jaa_02.py"),
         ("__PYTHON__", "scripts/accept_jaa02_receipt.py"),
-        ("__PYTHON__", "scripts/accept_jaa_03.py"),
+        ("__PYTHON__", "scripts/accept_jaa03_receipt.py"),
         ("__PYTHON__", "scripts/accept_jaa04_coordination.py"),
         ("__PYTHON__", "scripts/accept_jaa_04.py"),
     )

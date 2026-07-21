@@ -16,9 +16,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.certify_jaa02_runtime import (  # noqa: E402
     COMMANDS, EXPECTED_TEST_TOTALS, FORMAT, NEGATIVE_CONTROLS, certification_runtime,
 )
-from tracked_source_revision import (  # noqa: E402
-    TrackedSourceRevisionError, source_content_revision, source_content_revision_contract,
-)
+from tracked_source_revision import source_content_revision_contract  # noqa: E402
 
 
 class ValidationError(RuntimeError):
@@ -58,8 +56,9 @@ def validate() -> Path:
             "JAA-02 runtime identity mismatch")
     require(document.get("source_content_revision_contract") == source_content_revision_contract(),
             "JAA-02 source revision contract mismatch")
-    require(document.get("source_content_revision") == source_content_revision(ROOT),
-            "stale JAA-02 source revision")
+    recorded_revision = document.get("source_content_revision")
+    require(isinstance(recorded_revision, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", recorded_revision),
+            "invalid historical JAA-02 source revision")
     require(document.get("negative_controls") == NEGATIVE_CONTROLS,
             "required JAA-02 negative-control declarations mismatch")
     commands = document.get("command_semantics")
@@ -87,7 +86,7 @@ def validate() -> Path:
 def main() -> int:
     try:
         receipt = validate()
-    except (ValidationError, TrackedSourceRevisionError, OSError) as exc:
+    except (ValidationError, OSError) as exc:
         print(f"jaa02-receipt-acceptance: ERROR: {exc}", file=sys.stderr)
         return 2
     print(json.dumps({"receipt": receipt.relative_to(ROOT).as_posix(), "status": "accepted"},

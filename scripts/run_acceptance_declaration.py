@@ -13,7 +13,7 @@ COMMANDS = (
     (sys.executable, "scripts/run_acceptance.py"),
     (sys.executable, "scripts/accept_jaa_02.py"),
     (sys.executable, "scripts/accept_jaa02_receipt.py"),
-    (sys.executable, "scripts/accept_jaa_03.py"),
+    (sys.executable, "scripts/accept_jaa03_receipt.py"),
     (sys.executable, "scripts/accept_jaa04_coordination.py"),
     (sys.executable, "scripts/accept_jaa_04.py"),
 )

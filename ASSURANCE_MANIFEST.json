@@ -117,6 +117,7 @@
         "career_automation/fixtures/jaa03_locked_metrics.json",
         "career_automation/fixtures/jaa03_vacancies.json",
         "scripts/accept_jaa_03.py",
+        "scripts/accept_jaa03_receipt.py",
         "scripts/build_jaa03_locked_set.py",
         "runtime_evidence/jaa03/*.json"
       ],
@@ -126,8 +127,8 @@
       "tests": [
         {
           "id": "JAA-03-opportunity-zero",
-          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py"],
-          "files": ["test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py", "test_jaa03_historical_receipt.py"],
+          "files": ["test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py", "test_jaa03_historical_receipt.py"]
         },
         {
           "id": "JAA-03-negative-controls",
