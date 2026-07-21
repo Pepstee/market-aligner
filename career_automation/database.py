@@ -541,23 +541,18 @@ class CareerDatabase:
                 "SELECT dossier_json,dossier_hash,worker_id FROM employer_dossiers WHERE job_key=?",
                 (job_key,),
             ).fetchall()
-            receipts = conn.execute(
-                """SELECT policy_hash,output_hash FROM lifecycle_transition_receipts
-                   WHERE job_key=? AND from_state=? AND to_state=?
-                         AND policy_id='career.opportunity-1'""",
-                (job_key, PipelineState.EMPLOYER_RESEARCHED.value,
-                 PipelineState.OPPORTUNITY_1_ASSESSED.value),
-            ).fetchall()
-            receipts = conn.execute(
+            research_completion_receipts = conn.execute(
                 """SELECT input_hash FROM lifecycle_transition_receipts
-                   WHERE job_key=? AND to_state=? AND policy_id=?""",
-                (job_key, PipelineState.EMPLOYER_RESEARCHED.value,
+                   WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
+                (job_key, PipelineState.EMPLOYER_RESEARCHING.value,
+                 PipelineState.EMPLOYER_RESEARCHED.value,
                  RESEARCH_COMPLETION_POLICY.policy_id),
             ).fetchall()
         present = (job is not None, queue is not None, bool(rows))
         if not any(present):
             return None
-        if not all(present) or len(rows) != 1 or len(receipts) != 1:
+        if (not all(present) or len(rows) != 1
+                or len(research_completion_receipts) != 1):
             raise RuntimeError("post-research dossier state is incomplete or duplicated")
         if queue["status"] != "completed" or str(job["state"]) not in POST_RESEARCH_STATES:
             raise RuntimeError("dossier is not in a completed post-research lifecycle state")
@@ -577,7 +572,8 @@ class CareerDatabase:
                             if isinstance(source, dict))
         observation = {"dossier": dossier, "dossier_hash": dossier_hash,
                        "source_ids": source_ids, "worker_id": str(row["worker_id"])}
-        if canonical_hash(observation) != str(receipts[0]["input_hash"]):
+        if canonical_hash(observation) != str(
+                research_completion_receipts[0]["input_hash"]):
             raise RuntimeError("completed dossier does not match its immutable receipt")
         return dossier, dossier_hash
 
@@ -591,6 +587,9 @@ class CareerDatabase:
         if expected_dossier_hash is not None and dossier_hash != expected_dossier_hash:
             raise RuntimeError("Opportunity-1 reassessment is bound to a different dossier")
         with self.connection() as conn:
+            lifecycle_state = conn.execute(
+                "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+            ).fetchone()
             rows = conn.execute(
                 """SELECT r.opportunity0_score_bp,r.opportunity1_score_bp,r.decision,
                           r.changes_json,r.policy_hash,j.opportunity,j.state
@@ -598,10 +597,21 @@ class CareerDatabase:
                    JOIN pipeline_jobs j ON j.job_key=r.job_key WHERE r.job_key=?""",
                 (job_key,),
             ).fetchall()
-        if len(rows) == 0:
+            opportunity1_receipts = conn.execute(
+                """SELECT input_hash,output_hash,policy_hash
+                   FROM lifecycle_transition_receipts
+                   WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
+                (job_key, PipelineState.EMPLOYER_RESEARCHED.value,
+                 PipelineState.OPPORTUNITY_1_ASSESSED.value,
+                 "career.opportunity-1"),
+            ).fetchall()
+        if (len(rows) == 0 and len(opportunity1_receipts) == 0
+                and lifecycle_state is not None
+                and str(lifecycle_state["state"])
+                == PipelineState.EMPLOYER_RESEARCHED.value):
             return None
-        if len(rows) != 1 or len(receipts) != 1:
-            raise RuntimeError("Opportunity-1 reassessment is duplicated")
+        if len(rows) != 1 or len(opportunity1_receipts) != 1:
+            raise RuntimeError("Opportunity-1 reassessment or receipt is absent or duplicated")
         row = rows[0]
         if str(row["state"]) == PipelineState.EMPLOYER_RESEARCHED.value:
             raise RuntimeError("Opportunity-1 reassessment exists before lifecycle advancement")
@@ -622,13 +632,20 @@ class CareerDatabase:
             signals.append(change)
         expected = asdict(reassess_opportunity1(original, signals))
         expected["changes"] = list(expected["changes"])
+        expected_inputs = {
+            "opportunity0_score_bp": original,
+            "dossier_hash": dossier_hash,
+            "signals": changes,
+        }
+        opportunity1_receipt = opportunity1_receipts[0]
         if (int(row["opportunity0_score_bp"]) != original
                 or int(row["opportunity1_score_bp"]) != expected["score_bp"]
                 or str(row["decision"]) != expected["decision"]
                 or changes != expected["changes"]
                 or str(row["policy_hash"]) != expected["policy_hash"]
-                or str(receipts[0]["policy_hash"]) != expected["policy_hash"]
-                or str(receipts[0]["output_hash"]) != canonical_hash(expected)):
+                or str(opportunity1_receipt["policy_hash"]) != expected["policy_hash"]
+                or str(opportunity1_receipt["input_hash"]) != canonical_hash(expected_inputs)
+                or str(opportunity1_receipt["output_hash"]) != canonical_hash(expected)):
             raise RuntimeError("Opportunity-1 reassessment is inconsistent")
         return {**expected, "dossier_hash": dossier_hash}
 
@@ -651,12 +668,13 @@ class CareerDatabase:
                 raise RuntimeError("completed research changed before Opportunity-1")
             result = reassess_opportunity1(round(float(row["opportunity"]) * 10_000), signals)
             output = asdict(result)
+            ordered_signals = list(output["changes"])
             key = f"opportunity-1:{job_key}:{row['dossier_hash']}:{result.policy_hash}"
             self.lifecycle.commit_in_transaction(
                 conn, job_key=job_key, to_state=PipelineState.OPPORTUNITY_1_ASSESSED,
                 policy=PolicyIdentity("career.opportunity-1", "1", result.policy_hash),
                 inputs={"opportunity0_score_bp": result.opportunity0_score_bp,
-                        "dossier_hash": row["dossier_hash"], "signals": signals},
+                        "dossier_hash": row["dossier_hash"], "signals": ordered_signals},
                 outputs=output, idempotency_key=key,
             )
             conn.execute(
