@@ -96,7 +96,7 @@
       "tests": [
         {
           "id": "JAA-02-claim-graph",
-          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_jaa03_receipt_tamper_controls.py"],
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_jaa03_receipt_tamper_controls.py::test_jaa02_rehashed_command_omission_and_reordering_fail_closed"],
           "files": ["test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_jaa03_receipt_tamper_controls.py"]
         },
         {
