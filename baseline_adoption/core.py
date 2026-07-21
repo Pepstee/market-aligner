@@ -76,6 +76,16 @@ BASELINES: tuple[BaselineSpec, ...] = (
 REQUIRED_DISTRIBUTIONS = ("PyYAML", "requests", "openpyxl", "pypdf")
 CANONICAL_MARKER = "canonical-repository.json"
 CANONICAL_REPOSITORY_ID = "market-aligner"
+PRE_ADOPTION_TEST_OBSERVATION = {
+    "label": "pre-adoption career-control observation",
+    "observed_on": "2026-07-20",
+    "passed": 65,
+    "classification": "historical-observation-not-current-suite-total",
+}
+_FORBIDDEN_TRACKED_DATA_PREFIXES = (
+    "outputs/", "profiler/data/", "scraper/data/", "state/",
+)
+_FORBIDDEN_TRACKED_DATA_SUFFIXES = (".sqlite", ".sqlite3", ".db", "-wal", "-shm")
 
 
 def _hash_file(path: Path) -> str:
@@ -511,6 +521,56 @@ def _runtime_versions() -> dict[str, Any]:
             "platform": platform.platform(), "dependencies": dependencies}
 
 
+def _tracked_inventory(repository: Path) -> dict[str, Any]:
+    """Inventory tracked inputs and reject persisted runtime data or known secrets."""
+    try:
+        output = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=repository, check=True, capture_output=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AdoptionError("canonical tracked-file inventory is unavailable") from exc
+    names = sorted(item.decode("utf-8") for item in output.split(b"\0") if item)
+    forbidden = [
+        name for name in names
+        if name.startswith(_FORBIDDEN_TRACKED_DATA_PREFIXES)
+        or name.endswith(_FORBIDDEN_TRACKED_DATA_SUFFIXES)
+    ]
+    if forbidden:
+        raise AdoptionError("tracked inventory contains private or runtime database material")
+
+    digest = hashlib.sha256()
+    configured_secret_names: list[str] = []
+    configured_secret_values: list[tuple[str, bytes]] = []
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+                 "AWS_SECRET_ACCESS_KEY"):
+        value = os.environ.get(name)
+        if value:
+            configured_secret_names.append(name)
+            if len(value) >= 8:
+                configured_secret_values.append((name, value.encode("utf-8")))
+    for name in names:
+        path = repository / name
+        if path.is_symlink() or not path.is_file():
+            raise AdoptionError("tracked inventory contains a non-regular path")
+        content = path.read_bytes()
+        leaked = [secret_name for secret_name, value in configured_secret_values if value in content]
+        if leaked:
+            raise AdoptionError("tracked inventory contains a configured credential value")
+        encoded = name.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return {
+        "tracked_files": len(names),
+        "content_inventory_sha256": digest.hexdigest(),
+        "runtime_or_private_database_files_tracked": False,
+        "configured_credential_values_tracked": False,
+        "configured_credential_names_checked": sorted(configured_secret_names),
+        "secret_policy": "receipt-retains-reference-names-only-never-values-or-host-paths",
+    }
+
+
 def _repository_revision(repository: Path) -> str:
     _validate_canonical_marker(repository)
     try:
@@ -944,3 +1004,57 @@ def rollback_manifest(receipt_path: str | Path, data_root: str | Path) -> dict[s
     return {"format": "jaa-00-rollback-manifest/v1", "receipt_content_sha256":
             receipt["content_sha256"], "precondition": "reconcile must pass immediately before removal",
             "actions": entries}
+
+
+def independent_review(receipt_path: str | Path, data_root: str | Path,
+                       repository: str | Path) -> dict[str, Any]:
+    """Compose the JAA-00 evidence into one deterministic, fail-closed review."""
+    repository_path = Path(repository)
+    current_revision = _repository_revision(repository_path)
+    runtime = _runtime_versions()
+    receipt = _load_receipt(Path(receipt_path))
+    content = receipt["content"]
+    repository_record = content.get("repository")
+    if not isinstance(repository_record, dict):
+        raise AdoptionError("receipt canonical repository identity is missing")
+    receipt_identity = repository_record.get("label", repository_record.get("identity"))
+    adoption_revision = repository_record.get("revision")
+    if receipt_identity != "canonical-repository" or not isinstance(adoption_revision, str) \
+            or len(adoption_revision) != 40:
+        raise AdoptionError("receipt canonical repository identity is invalid")
+
+    marker = json.loads((repository_path / CANONICAL_MARKER).read_text(encoding="utf-8"))
+    canonical = marker["canonical_repository"]
+    reconciled = reconcile(receipt_path, data_root)
+    rollback = rollback_manifest(receipt_path, data_root)
+    secret_references = content.get("secret_references", [])
+    if (not isinstance(secret_references, list)
+            or any(not isinstance(item, str) or not item or "=" in item or os.sep in item
+                   for item in secret_references)):
+        raise AdoptionError("receipt secret inventory is not reference-name-only")
+    return {
+        "format": "jaa-00-independent-review/v1",
+        "status": "certified",
+        "canonical_repository": {
+            "id": canonical["id"],
+            "product_name": canonical["product_name"],
+            "status": canonical["status"],
+            "marker": CANONICAL_MARKER,
+            "current_revision": current_revision,
+            "adoption_revision": adoption_revision,
+        },
+        "preserved_originals_and_rollback": rollback,
+        "secret_free_inventory": {
+            **_tracked_inventory(repository_path),
+            "receipt_secret_reference_names": sorted(set(secret_references)),
+            "receipt_secret_values_persisted": False,
+        },
+        "database_reconciliation": reconciled,
+        "runtime_prerequisites": {
+            "required_python": ">=3.10",
+            "required_distributions": list(REQUIRED_DISTRIBUTIONS),
+            "observed": runtime,
+            "result": "ok",
+        },
+        "pre_adoption_test_observation": dict(PRE_ADOPTION_TEST_OBSERVATION),
+    }

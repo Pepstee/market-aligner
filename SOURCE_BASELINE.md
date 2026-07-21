@@ -113,7 +113,20 @@ jaa-baseline reconcile \
 jaa-baseline rollback-manifest \
   --receipt "$JAA_RUNTIME_DATA_ROOT/receipts/migration-<sha256>.json" \
   --data-root "$JAA_RUNTIME_DATA_ROOT"
+
+jaa-baseline independent-review \
+  --receipt "$JAA_RUNTIME_DATA_ROOT/receipts/migration-<sha256>.json" \
+  --data-root "$JAA_RUNTIME_DATA_ROOT" \
+  --repository "$JAA_REPOSITORY_ROOT"
 ```
+
+`independent-review` (also available as `certify`) is the single read-only reviewer
+surface. It composes canonical identity, preserved-original rollback actions, the
+secret-free tracked inventory, frozen-database reconciliation, and runtime prerequisites.
+It also reports the **65 passing career-control tests** strictly as the labelled 20 July
+2026 pre-adoption observation, never as a current suite result. Any unverified component,
+including an altered adopted database or missing required distribution, returns exit code
+2 and no certificate.
 
 `recertify-sources` is the fail-closed check for the two original live databases. Owner
 write permissions are expected for running collectors and are not evidence that the

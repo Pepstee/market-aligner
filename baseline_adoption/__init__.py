@@ -4,8 +4,12 @@ from .core import (
     AdoptionError,
     adopt,
     adopt_online,
+    independent_review,
     reconcile,
     rollback_manifest,
 )
 
-__all__ = ["AdoptionError", "adopt", "adopt_online", "reconcile", "rollback_manifest"]
+__all__ = [
+    "AdoptionError", "adopt", "adopt_online", "independent_review", "reconcile",
+    "rollback_manifest",
+]

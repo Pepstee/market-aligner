@@ -7,7 +7,15 @@ import json
 import sys
 from pathlib import Path
 
-from .core import AdoptionError, adopt, adopt_online, recertify_sources, reconcile, rollback_manifest
+from .core import (
+    AdoptionError,
+    adopt,
+    adopt_online,
+    independent_review,
+    recertify_sources,
+    reconcile,
+    rollback_manifest,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,6 +42,11 @@ def _parser() -> argparse.ArgumentParser:
         command = sub.add_parser(name)
         command.add_argument("--receipt", required=True)
         command.add_argument("--data-root", required=True)
+    for name in ("independent-review", "certify"):
+        command = sub.add_parser(name, help="fail-closed independent JAA-00 certification")
+        command.add_argument("--receipt", required=True)
+        command.add_argument("--data-root", required=True)
+        command.add_argument("--repository", required=True)
     return parser
 
 
@@ -53,8 +66,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.source_root, args.evidence_directory))}
         elif args.command == "reconcile":
             result = reconcile(args.receipt, args.data_root)
-        else:
+        elif args.command == "rollback-manifest":
             result = rollback_manifest(args.receipt, args.data_root)
+        else:
+            result = independent_review(
+                args.receipt, args.data_root, repository=args.repository
+            )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except AdoptionError as exc:
