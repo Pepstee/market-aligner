@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.certify_jaa02_runtime import (  # noqa: E402
-    COMMANDS, EXPECTED_TEST_TOTALS, FORMAT, NEGATIVE_CONTROLS,
+    COMMANDS, EXPECTED_TEST_TOTALS, FORMAT, NEGATIVE_CONTROLS, certification_runtime,
 )
 from tracked_source_revision import (  # noqa: E402
     TrackedSourceRevisionError, source_content_revision, source_content_revision_contract,
@@ -54,6 +54,8 @@ def validate() -> Path:
         raise ValidationError(f"invalid JAA-02 receipt JSON: {exc}") from exc
     require(isinstance(document, dict) and document.get("format") == FORMAT,
             "unsupported JAA-02 receipt format")
+    require(document.get("runtime") == certification_runtime(),
+            "JAA-02 runtime identity mismatch")
     require(document.get("source_content_revision_contract") == source_content_revision_contract(),
             "JAA-02 source revision contract mismatch")
     require(document.get("source_content_revision") == source_content_revision(ROOT),
