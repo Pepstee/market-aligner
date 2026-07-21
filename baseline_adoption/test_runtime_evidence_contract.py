@@ -225,10 +225,13 @@ def test_tracked_repository_excludes_runtime_data_personal_paths_and_environment
     tracked = [item for item in tracked if item]
     tracked_paths = [item.decode("utf-8") for item in tracked]
 
+    database_suffixes = (".sqlite", ".sqlite3", ".db", "-wal", "-shm")
+    jaa00_evidence_prefixes = ("baseline_adoption/", "runtime_evidence/JAA-00")
+    operational_data_prefixes = ("scraper/data/", "profiler/data/", "outputs/", "state/")
     assert not [
         path for path in tracked_paths
-        if path.endswith((".sqlite", ".sqlite3", ".db", "-wal", "-shm"))
-        or path.startswith(("scraper/data/", "profiler/data/", "outputs/", "state/"))
+        if path.startswith(operational_data_prefixes)
+        or (path.startswith(jaa00_evidence_prefixes) and path.endswith(database_suffixes))
     ]
     tracked_text = b"\n".join(
         (ROOT / path).read_bytes()

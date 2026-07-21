@@ -200,11 +200,15 @@ def test_corruption_missing_dependency_and_receipt_tampering_fail_closed(
     snapshots: tuple[Path, list[dict[str, object]]], tmp_path: Path,
 ) -> None:
     source, contract = snapshots
-    missing_dependency = _run_cli(source, tmp_path / "missing-dependency", contract, "adopt",
-                                  "--source-root", str(source), "--data-root", str(tmp_path / "missing-dependency"),
-                                  "--repository", str(ROOT), no_site=True)
+    dependency_data = tmp_path / "missing-dependency"
+    assert _adopt(source, dependency_data, contract).returncode == 0
+    missing_dependency = _run_cli(
+        source, dependency_data, contract, "certify",
+        "--receipt", str(_receipt(dependency_data)), "--data-root", str(dependency_data),
+        "--repository", str(ROOT), no_site=True,
+    )
     assert missing_dependency.returncode == 2 and "missing runtime dependencies" in missing_dependency.stderr
-    _assert_no_accepted_receipt(tmp_path / "missing-dependency")
+    assert "certified" not in missing_dependency.stdout
 
     data = tmp_path / "tampered"
     assert _adopt(source, data, contract).returncode == 0
@@ -253,6 +257,46 @@ def test_destination_collision_and_idempotent_overwrite_are_rejected_atomically(
     rerun = _adopt(source, fresh, contract)
     assert rerun.returncode == 2 and "refusing to overwrite destination" in rerun.stderr
     assert _receipt(fresh) == first_receipt
+
+    adopted_copy = fresh / str(contract[0]["destination_relative"])
+    adopted_copy.write_bytes(adopted_copy.read_bytes() + b"altered-after-adoption")
+    rejected = _run_cli(source, fresh, contract, "reconcile", "--receipt", str(first_receipt),
+                        "--data-root", str(fresh))
+    assert rejected.returncode == 2
+    assert "byte size mismatch" in rejected.stderr or "SHA-256 mismatch" in rejected.stderr
+
+
+def test_credential_value_never_reaches_evidence_logs_or_migration_manifest(
+    snapshots: tuple[Path, list[dict[str, object]]], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, contract = snapshots
+    credential = "jaa00-canary-" + hashlib.sha256(os.urandom(32)).hexdigest()
+    monkeypatch.setenv("DEPLOY_TOKEN_NAME", credential)
+    data = tmp_path / "credential-canary"
+
+    adoption = _adopt(source, data, contract)
+    assert adoption.returncode == 0, adoption.stderr
+    receipt = _receipt(data)
+    manifest = _run_cli(source, data, contract, "rollback-manifest", "--receipt", str(receipt),
+                        "--data-root", str(data))
+    assert manifest.returncode == 0, manifest.stderr
+
+    emitted_logs_and_evidence = "".join((
+        adoption.stdout, adoption.stderr, manifest.stdout, manifest.stderr,
+        receipt.read_text(encoding="utf-8"),
+    ))
+    assert credential not in emitted_logs_and_evidence
+    assert "DEPLOY_TOKEN_NAME" in receipt.read_text(encoding="utf-8")
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True,
+    ).stdout.split(b"\0")
+    leaked_to_tracked_files = [
+        relative.decode("utf-8", errors="replace")
+        for relative in tracked if relative and credential.encode() in (ROOT / os.fsdecode(relative)).read_bytes()
+    ]
+    assert not leaked_to_tracked_files
 
 
 def test_cli_online_adoption_uses_backup_and_records_new_snapshot_separately(
