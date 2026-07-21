@@ -14,13 +14,16 @@ import re
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
+from career_automation.employer_research import (
+    FRESHNESS_DAYS, IntelligenceKind, extract_publisher_timestamps,
+)
 from career_automation.opportunity_calibration import (
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
     calibration_policy_json, decide_opportunity0,
@@ -37,6 +40,9 @@ AGGREGATORS = frozenset({
     "adzuna", "arbeitnow", "himalayas", "jobicy", "jooble", "muse",
     "reed", "remotefirst", "remoteok", "remotive", "weworkremotely",
 })
+VACANCY_FRESHNESS_DAYS = FRESHNESS_DAYS[IntelligenceKind.ROLE]
+if VACANCY_FRESHNESS_DAYS != FRESHNESS_DAYS[IntelligenceKind.HIRING]:
+    raise RuntimeError("ROLE and HIRING vacancy freshness policies differ")
 
 
 def _canonical(value: Any) -> bytes:
@@ -162,17 +168,78 @@ def _validate_config(payload: Any) -> tuple[list[str], dict[str, dict[str, Any]]
     return names, {name: dict(boards[name] or {}) for name in names}, [str(x) for x in terms]
 
 
+def _temporal_admission(refs: list[dict[str, Any]], raw_root: Path,
+                        as_of: datetime) -> dict[str, Any]:
+    """Replay the downstream ROLE/HIRING publisher-time prerequisite.
+
+    Only a final, successful detail response can supply the publisher time.
+    The response receipt time is deliberately recorded but never considered as
+    a fallback for absent or invalid publisher metadata.
+    """
+    finals = [ref for ref in refs if ref.get("status") == 200
+              and ref.get("response_url") == ref.get("final_url")]
+    response = finals[-1] if finals else None
+    response_hash = response.get("sha256") if response else None
+    published_at: str | None = None
+    updated_at: str | None = None
+    publisher_date_evidence: str | None = None
+    publisher_time: str | None = None
+    reason = "publisher_time_missing_or_malformed"
+    if response is not None:
+        relative = Path(str(response.get("raw_response", "")))
+        path = (raw_root / relative).resolve()
+        try:
+            if raw_root.resolve() not in path.parents or not path.is_file():
+                raise ValueError("detail response bytes are unavailable")
+            body = path.read_bytes()
+            if hashlib.sha256(body).hexdigest() != response_hash:
+                raise ValueError("detail response hash differs from captured bytes")
+            published_at, updated_at, publisher_date_evidence = extract_publisher_timestamps(body)
+            publisher_time = updated_at or published_at
+        except (OSError, UnicodeDecodeError, ValueError, TypeError):
+            publisher_time = None
+    admitted = False
+    if publisher_time is not None:
+        try:
+            publisher = datetime.fromisoformat(publisher_time.replace("Z", "+00:00"))
+            if publisher.tzinfo is None:
+                raise ValueError("publisher time has no timezone")
+            publisher = publisher.astimezone(timezone.utc)
+            publisher_time = publisher.isoformat()
+            if publisher > as_of:
+                reason = "publisher_time_in_future"
+            elif as_of - publisher > timedelta(days=VACANCY_FRESHNESS_DAYS):
+                reason = "publisher_time_stale"
+            else:
+                admitted, reason = True, "publisher_time_current"
+        except (TypeError, ValueError, OverflowError):
+            publisher_time = None
+            reason = "publisher_time_missing_or_malformed"
+    return {
+        "admitted": admitted,
+        "reason": reason,
+        "publisher_time": publisher_time,
+        "published_at": published_at,
+        "updated_at": updated_at,
+        "publisher_date_evidence": publisher_date_evidence,
+        "temporal_semantics": "publisher_time",
+        "as_of": as_of.isoformat(),
+        "as_of_date": as_of.date().isoformat(),
+        "freshness_days": VACANCY_FRESHNESS_DAYS,
+        "authority_response_sha256": response_hash,
+    }
+
+
 def build(config_path: Path, output: Path, raw_root: Path) -> dict[str, Any]:
     if output.exists():
         raise RuntimeError("output snapshot already exists")
     boards, configs, terms = _validate_config(yaml.safe_load(config_path.read_text(encoding="utf-8")))
     recorder = ResponseRecorder(raw_root)
     candidates: list[dict[str, Any]] = []
+    temporal_decisions: list[dict[str, Any]] = []
     errors: list[str] = []
     policy = CalibrationPolicy()
-    seen_identity: set[str] = set()
-    seen_url: set[str] = set()
-    seen_body: set[str] = set()
+    as_of = datetime.now(timezone.utc)
     with recorder.installed():
         for board in boards:
             adapter = load_adapter(board, config=configs[board])
@@ -192,7 +259,8 @@ def build(config_path: Path, output: Path, raw_root: Path) -> dict[str, Any]:
                 except Exception as exc:
                     errors.append(f"{job.key}: detail failed: {exc}")
                     continue
-                refs = [*discovery_refs, *recorder.records[detail_start:]]
+                detail_refs = recorder.records[detail_start:]
+                refs = [*discovery_refs, *detail_refs]
                 if not refs or refs[-1]["status"] != 200:
                     continue
                 inputs, confidence = _opportunity(vacancy)
@@ -206,11 +274,12 @@ def build(config_path: Path, output: Path, raw_root: Path) -> dict[str, Any]:
                 if decision.decision != "include" or opportunity.decision != "pass":
                     continue
                 identity = f"{board}:{job.job_id}"
+                temporal = _temporal_admission(detail_refs, raw_root, as_of)
+                temporal_decisions.append({"job_key": identity, **temporal})
+                if not temporal["admitted"]:
+                    continue
                 url = _normal_url(vacancy.url)
                 body_hash = hashlib.sha256(vacancy.body.encode("utf-8")).hexdigest()
-                if identity in seen_identity or url in seen_url or body_hash in seen_body:
-                    continue
-                seen_identity.add(identity); seen_url.add(url); seen_body.add(body_hash)
                 official_hashes = sorted({ref["sha256"] for ref in refs})
                 payload_hash = hashlib.sha256(_canonical({
                     "source_identity": identity, "official_response_hashes": official_hashes,
@@ -227,20 +296,43 @@ def build(config_path: Path, output: Path, raw_root: Path) -> dict[str, Any]:
                     "viability_decision": asdict(decision),
                     "opportunity0_input": asdict(inputs), "confidence": asdict(confidence),
                     "opportunity0_decision": asdict(opportunity),
+                    "temporal_admission": temporal,
                 })
     candidates.sort(key=lambda row: (-row["opportunity0_decision"]["score_bp"], row["job_key"]))
-    if len(candidates) < COHORT_SIZE:
-        raise RuntimeError(f"only {len(candidates)} current unique official vacancies survived; need exactly 30; "
+    records: list[dict[str, Any]] = []
+    seen_identity: set[str] = set()
+    seen_url: set[str] = set()
+    seen_body: set[str] = set()
+    for candidate in candidates:
+        identity = candidate["job_key"]
+        url = _normal_url(candidate["url"])
+        body_hash = candidate["content_sha256"]
+        if identity in seen_identity or url in seen_url or body_hash in seen_body:
+            continue
+        seen_identity.add(identity); seen_url.add(url); seen_body.add(body_hash)
+        records.append(candidate)
+        if len(records) == COHORT_SIZE:
+            break
+    if len(records) < COHORT_SIZE:
+        raise RuntimeError(f"only {len(records)} current unique official vacancies survived; need exactly 30; "
                            + "; ".join(errors[:10]))
-    records = candidates[:COHORT_SIZE]
+    temporal_decisions.sort(key=lambda row: (row["job_key"], str(row["authority_response_sha256"])))
     envelope = {
         "schema_version": "jaa04.official-admitted-queue.v2",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": as_of.isoformat(),
         "selection": "highest Opportunity-0 score then vacancy identity; exact 30",
         "policy": {"identity": DECISION_RULE_VERSION, "hash": policy.policy_hash,
                    "parameters": calibration_policy_json(policy)},
         "raw_store": {"layout": "sha256-prefix/content-sha256.response",
                       "root": str(raw_root)},
+        "temporal_policy": {
+            "purposes": [IntelligenceKind.ROLE.value, IntelligenceKind.HIRING.value],
+            "temporal_semantics": "publisher_time", "as_of": as_of.isoformat(),
+            "as_of_date": as_of.date().isoformat(),
+            "freshness_days": VACANCY_FRESHNESS_DAYS,
+        },
+        "temporal_decisions": temporal_decisions,
+        "temporal_decisions_hash": hashlib.sha256(_canonical(temporal_decisions)).hexdigest(),
         "records": records,
         "records_hash": hashlib.sha256(_canonical(records)).hexdigest(),
     }
