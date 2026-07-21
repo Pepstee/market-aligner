@@ -25,6 +25,7 @@ ALLOWED_REASONS = {
     "viable", "expired", "inaccessible", "ineligible", "implausibly_senior",
     "low_confidence_extraction", "below_opportunity_threshold",
 }
+_POLICY_HASH_PREFIX = "sha256:"
 
 
 def canonical_json(value: Any) -> bytes:
@@ -93,6 +94,24 @@ class CalibrationPolicy:
     @property
     def policy_hash(self) -> str:
         return content_hash(vars(self))
+
+
+def calibration_policy_digest(policy_hash: str, policy: CalibrationPolicy) -> str:
+    """Validate a JAA-03 identity and return its lifecycle-compatible digest.
+
+    JAA-03 owns the prefixed identity.  The lifecycle ledger deliberately owns a
+    different, digest-only contract, so conversion is confined to this boundary.
+    """
+    if (not isinstance(policy_hash, str)
+            or not policy_hash.startswith(_POLICY_HASH_PREFIX)
+            or len(policy_hash) != len(_POLICY_HASH_PREFIX) + 64):
+        raise ValueError("JAA-03 policy hash must be sha256:<64 lowercase hex>")
+    digest = policy_hash[len(_POLICY_HASH_PREFIX):]
+    if any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("JAA-03 policy hash must be sha256:<64 lowercase hex>")
+    if policy_hash != policy.policy_hash:
+        raise ValueError("JAA-03 policy hash does not match the typed CalibrationPolicy")
+    return digest
 
 
 def calibration_policy_json(policy: CalibrationPolicy) -> dict[str, Any]:
