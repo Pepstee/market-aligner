@@ -11,6 +11,9 @@ outputs/
 graphify-out/
 archive/
 transcripts/
+runtime_evidence/jaa04/corpus/
+career_automation/fixtures/jaa04_capture
+career_automation/fixtures/.jaa04_capture-releases/
 
 # --- python ------------------------------------------------------------------
 __pycache__/
