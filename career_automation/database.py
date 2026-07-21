@@ -11,6 +11,7 @@ from typing import Any, Iterator
 
 from .migrations import apply_jaa_02_migrations
 from .lifecycle import (
+    LEGAL_TRANSITIONS,
     LifecycleReducer,
     ModelIdentity,
     PolicyIdentity,
@@ -33,6 +34,22 @@ RESEARCH_COMPLETION_POLICY = PolicyIdentity(
         ]
     }),
 )
+
+
+def _research_and_successor_states() -> frozenset[str]:
+    """Return the lifecycle closure rooted at durable research completion."""
+    pending = [PipelineState.EMPLOYER_RESEARCHED]
+    reached: set[PipelineState] = set()
+    while pending:
+        state = pending.pop()
+        if state in reached:
+            continue
+        reached.add(state)
+        pending.extend(LEGAL_TRANSITIONS[state])
+    return frozenset(state.value for state in reached)
+
+
+POST_RESEARCH_STATES = _research_and_successor_states()
 
 
 SCHEMA = """
@@ -505,6 +522,115 @@ class CareerDatabase:
         if not isinstance(dossier, dict):
             raise ValueError("completed dossier is not an object")
         return dossier, str(row["dossier_hash"])
+
+    def post_research_dossier(self, job_key: str) -> tuple[dict[str, Any], str] | None:
+        """Read an immutable dossier at research completion or any successor.
+
+        This is deliberately separate from :meth:`completed_research`, which is
+        the exact-state gate used before Opportunity-1.  Partial or contradictory
+        durable state is an error rather than an absent dossier.
+        """
+        with self.connection() as conn:
+            job = conn.execute(
+                "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+            ).fetchone()
+            queue = conn.execute(
+                "SELECT status FROM employer_research_queue WHERE job_key=?", (job_key,),
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT dossier_json,dossier_hash,worker_id FROM employer_dossiers WHERE job_key=?",
+                (job_key,),
+            ).fetchall()
+            receipts = conn.execute(
+                """SELECT policy_hash,output_hash FROM lifecycle_transition_receipts
+                   WHERE job_key=? AND from_state=? AND to_state=?
+                         AND policy_id='career.opportunity-1'""",
+                (job_key, PipelineState.EMPLOYER_RESEARCHED.value,
+                 PipelineState.OPPORTUNITY_1_ASSESSED.value),
+            ).fetchall()
+            receipts = conn.execute(
+                """SELECT input_hash FROM lifecycle_transition_receipts
+                   WHERE job_key=? AND to_state=? AND policy_id=?""",
+                (job_key, PipelineState.EMPLOYER_RESEARCHED.value,
+                 RESEARCH_COMPLETION_POLICY.policy_id),
+            ).fetchall()
+        present = (job is not None, queue is not None, bool(rows))
+        if not any(present):
+            return None
+        if not all(present) or len(rows) != 1 or len(receipts) != 1:
+            raise RuntimeError("post-research dossier state is incomplete or duplicated")
+        if queue["status"] != "completed" or str(job["state"]) not in POST_RESEARCH_STATES:
+            raise RuntimeError("dossier is not in a completed post-research lifecycle state")
+        row = rows[0]
+        try:
+            dossier = json.loads(row["dossier_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("completed dossier is not valid JSON") from exc
+        dossier_hash = str(row["dossier_hash"])
+        if (not isinstance(dossier, dict) or dossier.get("job_key") != job_key
+                or canonical_hash(dossier) != dossier_hash):
+            raise RuntimeError("completed dossier identity or hash is invalid")
+        sources = dossier.get("sources")
+        if not isinstance(sources, list):
+            raise RuntimeError("completed dossier source identity is invalid")
+        source_ids = sorted(str(source.get("id")) for source in sources
+                            if isinstance(source, dict))
+        observation = {"dossier": dossier, "dossier_hash": dossier_hash,
+                       "source_ids": source_ids, "worker_id": str(row["worker_id"])}
+        if canonical_hash(observation) != str(receipts[0]["input_hash"]):
+            raise RuntimeError("completed dossier does not match its immutable receipt")
+        return dossier, dossier_hash
+
+    def opportunity1_reassessment(self, job_key: str, *,
+                                  expected_dossier_hash: str | None = None) -> dict[str, Any] | None:
+        """Recover and validate the one durable Opportunity-1 decision."""
+        completed = self.post_research_dossier(job_key)
+        if completed is None:
+            return None
+        dossier, dossier_hash = completed
+        if expected_dossier_hash is not None and dossier_hash != expected_dossier_hash:
+            raise RuntimeError("Opportunity-1 reassessment is bound to a different dossier")
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT r.opportunity0_score_bp,r.opportunity1_score_bp,r.decision,
+                          r.changes_json,r.policy_hash,j.opportunity,j.state
+                   FROM opportunity_reassessments r
+                   JOIN pipeline_jobs j ON j.job_key=r.job_key WHERE r.job_key=?""",
+                (job_key,),
+            ).fetchall()
+        if len(rows) == 0:
+            return None
+        if len(rows) != 1 or len(receipts) != 1:
+            raise RuntimeError("Opportunity-1 reassessment is duplicated")
+        row = rows[0]
+        if str(row["state"]) == PipelineState.EMPLOYER_RESEARCHED.value:
+            raise RuntimeError("Opportunity-1 reassessment exists before lifecycle advancement")
+        try:
+            changes = json.loads(row["changes_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Opportunity-1 changes are not valid JSON") from exc
+        if not isinstance(changes, list):
+            raise ValueError("Opportunity-1 changes must be a list")
+        from dataclasses import asdict
+        from .opportunity1 import reassess_opportunity1
+        original = round(float(row["opportunity"]) * 10_000)
+        signals = []
+        dossier_claim_ids = {str(claim.get("id")) for claim in dossier.get("claims", [])}
+        for change in changes:
+            if not isinstance(change, dict) or str(change.get("claim_id")) not in dossier_claim_ids:
+                raise RuntimeError("Opportunity-1 change does not match the completed dossier")
+            signals.append(change)
+        expected = asdict(reassess_opportunity1(original, signals))
+        expected["changes"] = list(expected["changes"])
+        if (int(row["opportunity0_score_bp"]) != original
+                or int(row["opportunity1_score_bp"]) != expected["score_bp"]
+                or str(row["decision"]) != expected["decision"]
+                or changes != expected["changes"]
+                or str(row["policy_hash"]) != expected["policy_hash"]
+                or str(receipts[0]["policy_hash"]) != expected["policy_hash"]
+                or str(receipts[0]["output_hash"]) != canonical_hash(expected)):
+            raise RuntimeError("Opportunity-1 reassessment is inconsistent")
+        return {**expected, "dossier_hash": dossier_hash}
 
     def apply_opportunity1(self, *, job_key: str, signals: list[dict[str, Any]],
                            expected_dossier_hash: str | None = None) -> dict[str, Any]:

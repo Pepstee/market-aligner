@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import RawResponseCache, content_hash, load_frozen_dossiers  # noqa: E402
 from career_automation.corpus_publication import sha256_file, validate_inventory  # noqa: E402
+from career_automation.opportunity1 import reassess_opportunity1  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
 FORMAT = "jaa04-revision-certification/v2"
@@ -58,17 +59,39 @@ def certify(capture: Path, destination: Path) -> Path:
         raise ValueError("manifest is not bound to the frozen admitted queue")
     dossiers = load_frozen_dossiers(dossiers_path, RawResponseCache(capture / "raw"), strict_corpus=True)
     dossier_by_key = {row["job_key"]: row for row in dossiers}
-    if {row["job_key"] for row in manifest["records"]} != set(dossier_by_key):
+    record_keys = [row.get("job_key") for row in manifest["records"]]
+    if (len(record_keys) != len(set(record_keys))
+            or set(record_keys) != set(dossier_by_key)):
         raise ValueError("vacancy-to-dossier linkage is incomplete")
     for record in manifest["records"]:
         dossier = dossier_by_key[record["job_key"]]
+        reassessment = record.get("opportunity1_reassessment")
         if (record.get("dossier_hash") != content_hash(dossier)
                 or record.get("source_ids") != [source["id"] for source in dossier["sources"]]
                 or record.get("capture_identities") != [
                     {"url": source["url"], "sha256": source["content_sha256"]}
                     for source in dossier["sources"]
-                ]):
+                ]
+                or not isinstance(reassessment, dict)
+                or reassessment.get("dossier_hash") != record.get("dossier_hash")
+                or reassessment.get("opportunity0_score_bp") is None
+                or reassessment.get("score_bp") is None
+                or reassessment.get("decision") not in {"pass", "reject"}
+                or not isinstance(reassessment.get("changes"), list)
+                or not isinstance(reassessment.get("policy_hash"), str)
+                or not reassessment["policy_hash"]):
             raise ValueError("manifest dossier or capture identity binding is invalid")
+        claim_ids = {str(claim.get("id")) for claim in dossier.get("claims", [])}
+        changes = reassessment["changes"]
+        if any(not isinstance(change, dict)
+               or str(change.get("claim_id")) not in claim_ids for change in changes):
+            raise ValueError("Opportunity-1 changes do not match the bound dossier")
+        expected = reassess_opportunity1(reassessment["opportunity0_score_bp"], changes)
+        if (expected.score_bp != reassessment["score_bp"]
+                or expected.decision != reassessment["decision"]
+                or expected.policy_hash != reassessment["policy_hash"]
+                or [vars(change) for change in expected.changes] != changes):
+            raise ValueError("Opportunity-1 reassessment is inconsistent")
     raw_files = sorted(path for path in (capture / "raw").rglob("*") if path.is_file())
     raw_hash = hashlib.sha256(b"".join(
         path.relative_to(capture).as_posix().encode() + b"\0" + path.read_bytes()
