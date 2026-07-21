@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -49,6 +50,16 @@ class CertificationError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise CertificationError(message)
+
+
+def certification_runtime() -> dict[str, str]:
+    """Return the canonical identity of the CPython running certification."""
+    implementation = platform.python_implementation()
+    require(implementation == "CPython", "JAA-02 certification requires CPython")
+    return {
+        "python_implementation": implementation,
+        "python_version": platform.python_version(),
+    }
 
 
 def _unlinked(path: Path) -> None:
@@ -132,6 +143,7 @@ def _publish(directory: Path, payload: bytes) -> Path:
 
 
 def certify(evidence_directory: Path) -> Path:
+    runtime = certification_runtime()
     try:
         revision = source_content_revision(ROOT)
     except TrackedSourceRevisionError as exc:
@@ -144,6 +156,7 @@ def certify(evidence_directory: Path) -> Path:
         raise CertificationError(str(exc)) from exc
     document = {
         "format": FORMAT,
+        "runtime": runtime,
         "source_content_revision": revision,
         "source_content_revision_contract": source_content_revision_contract(),
         "command_semantics": commands,
