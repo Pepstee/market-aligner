@@ -341,7 +341,7 @@
       "increment": "complete",
       "depends_on": ["JAA-15"],
       "owns": ["career_automation/release_certification.py"],
-      "inputs": ["career_automation/operations.py", "acceptance"],
+      "inputs": ["career_automation/operations.py", "acceptance", "scripts/run_acceptance_declaration.py"],
       "interfaces": [],
       "environment": [],
       "tests": [
