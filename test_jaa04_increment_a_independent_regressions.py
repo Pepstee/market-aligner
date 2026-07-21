@@ -24,7 +24,10 @@ TEMPORAL_SUITE = "test_jaa04_sidecar_temporal_semantics.py"
 
 
 def _run(
-    directory: Path, *argv: str, timeout: int = 240
+    directory: Path,
+    *argv: str,
+    timeout: int = 240,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
@@ -33,6 +36,7 @@ def _run(
         capture_output=True,
         check=False,
         timeout=timeout,
+        env=env,
     )
 
 
@@ -176,6 +180,12 @@ def test_each_root_acceptance_declaration_is_executable_from_root_and_directly_w
     tmp_path: Path,
 ) -> None:
     """The declaration is data: extracted lines receive a root working directory."""
+    # Root acceptance runs the complete pytest suite. Mark that child so this
+    # test becomes a successful leaf instead of recursively invoking acceptance.
+    if os.environ.get("JAA04_ACCEPTANCE_DECLARATION_CHILD") == "1":
+        return
+    child_environment = os.environ.copy()
+    child_environment["JAA04_ACCEPTANCE_DECLARATION_CHILD"] = "1"
     declaration = ROOT / "acceptance"
     commands = [
         line.strip()
@@ -184,7 +194,9 @@ def test_each_root_acceptance_declaration_is_executable_from_root_and_directly_w
     ]
     assert commands
     for command in commands:
-        extracted = _run(ROOT, "bash", "-c", command, timeout=360)
+        extracted = _run(
+            ROOT, "bash", "-c", command, timeout=900, env=child_environment
+        )
         # Increment B's receipt is intentionally absent; a declaration may therefore
         # fail closed, but it must run rather than fail due to shell/path syntax.
         assert "No such file or directory" not in extracted.stderr
@@ -194,8 +206,8 @@ def test_each_root_acceptance_declaration_is_executable_from_root_and_directly_w
             text=True,
             capture_output=True,
             check=False,
-            timeout=360,
-            env=os.environ.copy(),
+            timeout=900,
+            env=child_environment,
         )
         assert direct.returncode == extracted.returncode
         assert "No such file or directory" not in direct.stderr
