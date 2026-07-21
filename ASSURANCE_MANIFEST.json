@@ -127,13 +127,13 @@
       "tests": [
         {
           "id": "JAA-03-opportunity-zero",
-          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py", "test_jaa03_historical_receipt.py"],
-          "files": ["test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py", "test_jaa03_historical_receipt.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa03_independent_acceptance.py", "test_jaa03_historical_receipt.py"],
+          "files": ["test_jaa03_independent_acceptance.py", "test_jaa03_historical_receipt.py"]
         },
         {
           "id": "JAA-03-negative-controls",
-          "argv": ["{python}", "scripts/accept_jaa_03.py"],
-          "files": ["scripts/accept_jaa_03.py"],
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_jaa03_receipt_tamper_controls.py"],
+          "files": ["test_jaa02_jaa03_receipt_tamper_controls.py"],
           "negative_control": true
         }
       ],

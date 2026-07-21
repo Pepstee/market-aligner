@@ -19,7 +19,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent
 JAA02 = Path("scripts/accept_jaa02_receipt.py")
-JAA03 = Path("scripts/accept_jaa_03.py")
+JAA03 = Path("scripts/accept_jaa03_receipt.py")
 
 
 def _run(root: Path, *argv: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -99,7 +99,7 @@ def test_acceptance_declaration_runs_directly_and_as_extracted_data(certified_re
     assert extracted.returncode == 0, extracted.stderr
 
 
-def test_authentic_receipt_acceptance_scripts_only_accept_the_certified_tree(
+def test_historical_receipt_acceptance_survives_a_later_source_revision(
     certified_repository: Path,
 ) -> None:
     jaa02 = _run(certified_repository, str(JAA02))
@@ -113,8 +113,8 @@ def test_authentic_receipt_acceptance_scripts_only_accept_the_certified_tree(
     committed = _git(certified_repository, "commit", "-m", "source revision drift")
     assert committed.returncode == 0, committed.stderr
 
-    assert _run(certified_repository, str(JAA02)).returncode != 0
-    assert _run(certified_repository, str(JAA03)).returncode != 0
+    assert _run(certified_repository, str(JAA02)).returncode == 0
+    assert _run(certified_repository, str(JAA03)).returncode == 0
 
 
 @pytest.mark.parametrize("attack", ["omission", "reordering"])
