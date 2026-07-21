@@ -32,7 +32,7 @@ from career_automation.engine import OpportunityGate  # noqa: E402
 from career_automation.models import ScoredJob  # noqa: E402
 from career_automation.opportunity_calibration import (  # noqa: E402
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
-    calibration_policy_from_json, decide_opportunity0,
+    calibration_policy_digest, calibration_policy_from_json, decide_opportunity0,
 )
 from scraper.viability import Vacancy, local_decision  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
@@ -85,6 +85,7 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
     calibrated = CalibrationPolicy()
     try:
         snapshot_policy = calibration_policy_from_json(policy.get("parameters"))
+        calibration_policy_digest(policy.get("hash"), snapshot_policy)
     except ValueError as exc:
         raise RuntimeError("official admitted queue policy does not match JAA-03") from exc
     if (set(policy) != {"identity", "hash", "parameters"}
@@ -155,6 +156,100 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
     return result
 
 
+def _bootstrap_is_complete(work_db: Path, records: list[dict[str, object]],
+                           policy: CalibrationPolicy) -> bool:
+    """Recognise only a fully committed JSON-to-lifecycle bootstrap."""
+    expected = {str(record["job_key"]): record for record in records}
+    try:
+        with sqlite3.connect(f"file:{work_db}?mode=ro", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            jobs = connection.execute(
+                """SELECT job_key,state,opportunity,opportunity_decision,
+                          opportunity_reason,policy_hash
+                   FROM pipeline_jobs"""
+            ).fetchall()
+            queues = connection.execute(
+                "SELECT job_key FROM employer_research_queue"
+            ).fetchall()
+            receipts = connection.execute(
+                """SELECT job_key,policy_hash FROM lifecycle_transition_receipts
+                   WHERE policy_id='career.opportunity-gate' AND policy_version='1'"""
+            ).fetchall()
+    except (OSError, sqlite3.DatabaseError):
+        return False
+    if ({str(row["job_key"]) for row in jobs} != set(expected)
+            or {str(row["job_key"]) for row in queues} != set(expected)
+            or {str(row["job_key"]) for row in receipts} != set(expected)):
+        return False
+    receipt_by_key = {str(row["job_key"]): str(row["policy_hash"]) for row in receipts}
+    for row in jobs:
+        record = expected[str(row["job_key"])]
+        decision = record["opportunity0_decision"]
+        digest = calibration_policy_digest(str(decision["policy_hash"]), policy)
+        if (int(round(float(row["opportunity"]) * 10_000)) != decision["score_bp"]
+                or row["opportunity_decision"] != decision["decision"]
+                or row["opportunity_reason"] != decision["reason"]
+                or (row["state"] == "employer_research_queued"
+                    and row["policy_hash"] != decision["policy_hash"])
+                or receipt_by_key[str(row["job_key"])] != digest):
+            return False
+    return True
+
+
+def _has_completed_dossier(work_db: Path) -> bool:
+    try:
+        with sqlite3.connect(f"file:{work_db}?mode=ro", uri=True) as connection:
+            return connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM employer_dossiers LIMIT 1)"
+            ).fetchone()[0] == 1
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _bootstrap_json_database(work_db: Path, records: list[dict[str, object]],
+                             policy: CalibrationPolicy) -> None:
+    """Build the entire admitted cohort off to the side, then publish it."""
+    staged = work_db.with_name(f".{work_db.name}.bootstrap")
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(str(staged) + suffix)
+        if candidate.exists():
+            candidate.unlink()
+    jobs = [
+        ScoredJob(key=str(record["job_key"]), board=str(record["board"]),
+                  job_id=str(record["job_key"]).split(":", 1)[1],
+                  url=str(record["url"]), title=str(record["title"]),
+                  company=str(record["company"]), fit=None,
+                  opportunity=record["opportunity0_decision"]["score_bp"] / 10_000,
+                  final_score=None,
+                  extraction_confidence=min(record["confidence"].values()) / 10_000,
+                  payload={"official_snapshot_record": record},
+                  payload_hash=str(record["payload_hash"]))
+        for record in records
+    ]
+    try:
+        database = CareerDatabase(staged)
+        OpportunityGate(database).import_jobs(jobs)
+        for record in records:
+            decision = record["opportunity0_decision"]
+            score = decision["score_bp"]
+            database.apply_opportunity_result(
+                job_key=str(record["job_key"]), passed=True,
+                reason=str(decision["reason"]), policy_hash=str(decision["policy_hash"]),
+                lifecycle_policy_hash=calibration_policy_digest(
+                    str(decision["policy_hash"]), policy,
+                ),
+                priority=(2 if score >= 7500 else 1) * 1_000_000 + score * 10,
+            )
+        if not _bootstrap_is_complete(staged, records, policy):
+            raise RuntimeError("JSON cohort bootstrap did not commit all admitted decisions")
+        os.replace(staged, work_db)
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(staged) + suffix)
+            if candidate.exists():
+                candidate.unlink()
+
+
 def capture(database_path: Path, destination: Path, *, workspace: Path | None = None,
             maximum_routes: int = 12, timeout_seconds: int = 45) -> None:
     if destination.exists():
@@ -164,6 +259,7 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
     admitted = _admitted_input(database_path)
     selected = set(sorted(admitted)[:CORPUS_SIZE])
     records = [admitted[key] for key in sorted(selected)]
+    calibrated = CalibrationPolicy()
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     workspace = (workspace or destination.with_name(f".{destination.name}.inflight")).resolve()
@@ -178,32 +274,15 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
             raise RuntimeError("in-flight workspace belongs to a different admitted cohort")
     else:
         state_path.write_bytes(canonical(state))
-    if not work_db.exists():
-        if database_path.suffix.casefold() != ".json":
-            shutil.copyfile(database_path, work_db)
-        else:
-            jobs = [
-                ScoredJob(key=record["job_key"], board=record["board"],
-                          job_id=record["job_key"].split(":", 1)[1],
-                          url=record["url"], title=record["title"], company=record["company"],
-                          fit=None, opportunity=record["opportunity0_decision"]["score_bp"] / 10_000,
-                          final_score=None,
-                          extraction_confidence=min(record["confidence"].values()) / 10_000,
-                          payload={"official_snapshot_record": record},
-                          payload_hash=record["payload_hash"])
-                for record in records
-            ]
-            database = CareerDatabase(work_db)
-            gate = OpportunityGate(database)
-            gate.import_jobs(jobs)
-            for record in records:
-                score = record["opportunity0_decision"]["score_bp"]
-                database.apply_opportunity_result(
-                    job_key=record["job_key"], passed=True,
-                    reason=record["opportunity0_decision"]["reason"],
-                    policy_hash=record["opportunity0_decision"]["policy_hash"],
-                    priority=(2 if score >= 7500 else 1) * 1_000_000 + score * 10,
-                )
+    if database_path.suffix.casefold() == ".json":
+        if work_db.exists() and not _bootstrap_is_complete(work_db, records, calibrated):
+            if _has_completed_dossier(work_db):
+                raise RuntimeError("completed dossier work exists in an inconsistent cohort workspace")
+            _bootstrap_json_database(work_db, records, calibrated)
+        elif not work_db.exists():
+            _bootstrap_json_database(work_db, records, calibrated)
+    elif not work_db.exists():
+        shutil.copyfile(database_path, work_db)
     stage: Path | None = None
     try:
         with sqlite3.connect(work_db) as connection:

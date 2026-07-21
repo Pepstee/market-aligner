@@ -259,6 +259,7 @@ class CareerDatabase:
         reason: str,
         policy_hash: str,
         priority: int | None,
+        lifecycle_policy_hash: str | None = None,
     ) -> None:
         """Atomically materialise the gate and its research-queue consequence."""
         decision = "pass" if passed else "reject"
@@ -268,7 +269,10 @@ class CareerDatabase:
         )
         if passed and priority is None:
             raise ValueError("passed opportunity requires research priority")
-        policy = PolicyIdentity("career.opportunity-gate", "1", policy_hash)
+        policy = PolicyIdentity(
+            "career.opportunity-gate", "1",
+            policy_hash if lifecycle_policy_hash is None else lifecycle_policy_hash,
+        )
         with self.transaction(immediate=True) as conn:
             current = conn.execute(
                 "SELECT state,payload_hash FROM pipeline_jobs WHERE job_key=?", (job_key,)
@@ -296,9 +300,9 @@ class CareerDatabase:
                 return
             conn.execute(
                 """UPDATE pipeline_jobs SET opportunity_decision=?,
-                     opportunity_reason=?,updated_at=CURRENT_TIMESTAMP
+                     opportunity_reason=?,policy_hash=?,updated_at=CURRENT_TIMESTAMP
                    WHERE job_key=?""",
-                (decision, reason, job_key),
+                (decision, reason, policy_hash, job_key),
             )
             if passed:
                 conn.execute(
