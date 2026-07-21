@@ -344,10 +344,11 @@ class PortableAuthorityRetriever:
     )
 
     def __init__(self, cache: RawResponseCache, *, retriever: ScraplingPublicRetriever | None = None,
-                 maximum_routes: int = 12) -> None:
+                 maximum_routes: int = 12, exact_canaries: bool = True) -> None:
         self.cache = cache
         self.retriever = retriever or ScraplingPublicRetriever(cache)
         self.maximum_routes = maximum_routes
+        self.exact_canaries = exact_canaries
 
     def _retrieve(self, source_id: str, url: str, source_kind: str) -> Citation:
         publisher = (urlparse(url).hostname or "").casefold()
@@ -466,7 +467,7 @@ class PortableAuthorityRetriever:
         return tuple(dict.fromkeys(types))
 
     def retrieve_plan(self, task: Any) -> tuple[list[Citation], list[dict[str, Any]]]:
-        canary = self._canary_for(task)
+        canary = self._canary_for(task) if self.exact_canaries else _ATS_CANARY_BY_KEY.get(str(task.job_key))
         if canary is not None:
             seed = self._retrieve(f"source:{task.job_key}:admitted", task.url, "official_vacancy")
             self._validate_canary_capture(canary, seed, self.cache,
@@ -1387,6 +1388,8 @@ def load_frozen_dossiers(
     dossiers = envelope.get("dossiers")
     if envelope.get("schema_version") not in {"jaa04.frozen-dossiers.v1", "jaa04.frozen-dossiers.v2", "jaa04.frozen-dossiers.v3", "jaa04.frozen-dossiers.v4"} or not isinstance(dossiers, list) or len(dossiers) < 30:
         raise ValueError("JAA-04 frozen set requires at least 30 dossiers")
+    if strict_corpus and len(dossiers) != 30:
+        raise ValueError("certified JAA-04 corpus requires exactly 30 dossiers")
     if content_hash(dossiers) != envelope.get("dossiers_hash"):
         raise ValueError("frozen dossier-set hash mismatch")
     classifications: set[str] = set()

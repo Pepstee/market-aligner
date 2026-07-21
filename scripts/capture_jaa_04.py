@@ -23,9 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.database import CareerDatabase  # noqa: E402
+from career_automation.corpus_publication import sha256_file, write_inventory  # noqa: E402
 from career_automation.employer_research import (  # noqa: E402
     EmployerResearchWorker, Opportunity1Coordinator, PortableAuthorityRetriever, RawResponseCache,
-    content_hash, load_frozen_dossiers,
+    ScraplingPublicRetriever, content_hash, load_frozen_dossiers,
 )
 from career_automation.engine import OpportunityGate  # noqa: E402
 from career_automation.models import ScoredJob  # noqa: E402
@@ -72,7 +73,8 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
                                   "payload_hash": str(row["payload_hash"])} for row in records}
 
 
-def capture(database_path: Path, destination: Path) -> None:
+def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
+            timeout_seconds: int = 45) -> None:
     if destination.exists():
         raise RuntimeError("capture destination already exists")
     if not database_path.is_file():
@@ -103,7 +105,13 @@ def capture(database_path: Path, destination: Path) -> None:
                 tuple(sorted(selected)),
             )
         cache = RawResponseCache(stage / "raw")
-        retriever = PortableAuthorityRetriever(cache)
+        # Increment A keeps exact canaries as its default contract. Production
+        # acquisition is queue-bound instead: all admitted records may proceed,
+        # while the same byte, authority, purpose and temporal validators remain.
+        transport = ScraplingPublicRetriever(cache, timeout_seconds=timeout_seconds, root=ROOT)
+        retriever = PortableAuthorityRetriever(cache, retriever=transport,
+                                               maximum_routes=maximum_routes,
+                                               exact_canaries=False)
         database = CareerDatabase(work_db)
         worker = EmployerResearchWorker(database, "jaa04-corpus-acquisition", cache,
                                         retriever=retriever)
@@ -129,7 +137,13 @@ def capture(database_path: Path, destination: Path) -> None:
                 "job_key": job_key, "vacancy_url": record["url"],
                 "company": record["company"], "role": record["title"],
                 "dossier_hash": dossier_hash,
+                "admitted_payload_hash": record.get("payload_hash"),
+                "content_sha256": dossier["sources"][0]["content_sha256"],
                 "source_ids": [source["id"] for source in dossier["sources"]],
+                "capture_identities": [
+                    {"url": source["url"], "sha256": source["content_sha256"]}
+                    for source in dossier["sources"]
+                ],
             })
         envelope = {"schema_version": "jaa04.frozen-dossiers.v4", "dossiers": dossiers,
                     "dossiers_hash": content_hash(dossiers)}
@@ -139,11 +153,29 @@ def capture(database_path: Path, destination: Path) -> None:
                     "records_hash": content_hash(manifest_records)}
         (stage / "frozen_dossiers.json").write_bytes(canonical(envelope))
         (stage / "research_manifest.json").write_bytes(canonical(manifest))
-        load_frozen_dossiers(stage / "frozen_dossiers.json", cache, strict_corpus=True)
+        validated = load_frozen_dossiers(stage / "frozen_dossiers.json", cache, strict_corpus=True)
+        if len(validated) != CORPUS_SIZE:
+            raise RuntimeError("publication requires exactly 30 validated dossiers")
+        # Capture uniqueness is a corpus admission rule, not merely a retrieval
+        # optimisation. URL aliases and repeated bodies cannot masquerade as
+        # independently acquired authority.
+        identities: set[tuple[str, str]] = set()
+        body_hashes: set[str] = set()
+        source_ids: set[str] = set()
+        for dossier in validated:
+            for source in dossier["sources"]:
+                identity = (str(source["url"]), str(source["content_sha256"]))
+                if (identity in identities or source["content_sha256"] in body_hashes
+                        or source["id"] in source_ids):
+                    raise RuntimeError("duplicated authority capture in staged corpus")
+                identities.add(identity)
+                body_hashes.add(str(source["content_sha256"]))
+                source_ids.add(str(source["id"]))
         files = sorted(path for path in (stage / "raw").rglob("*") if path.is_file())
         corpus_hash = hashlib.sha256(b"".join(
             path.relative_to(stage).as_posix().encode() + b"\0" + path.read_bytes()
             for path in files)).hexdigest()
+        inventory_path = write_inventory(stage)
         receipt = {
             "schema_version": "jaa04.capture-receipt.v4", "status": "SUCCESS",
             "captured_count": CORPUS_SIZE,
@@ -154,6 +186,7 @@ def capture(database_path: Path, destination: Path) -> None:
             "dossiers_sha256": hashlib.sha256((stage / "frozen_dossiers.json").read_bytes()).hexdigest(),
             "raw_corpus_sha256": corpus_hash, "source_revision": _revision(),
             "source_content_revision": source_content_revision(ROOT),
+            "inventory_sha256": sha256_file(inventory_path),
         }
         (stage / "capture_receipt.json").write_bytes(canonical(receipt))
         work_db.unlink()
@@ -171,9 +204,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--queue-snapshot", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--maximum-routes", type=int, default=12)
+    parser.add_argument("--timeout-seconds", type=int, default=45)
     args = parser.parse_args()
     try:
-        capture(args.queue_snapshot.resolve(), args.destination.resolve())
+        if args.maximum_routes < 1 or args.timeout_seconds < 1:
+            raise ValueError("retrieval limits must be positive")
+        capture(args.queue_snapshot.resolve(), args.destination.resolve(),
+                maximum_routes=args.maximum_routes, timeout_seconds=args.timeout_seconds)
     except Exception as exc:
         print(f"JAA-04 capture: ERROR: {exc}", file=sys.stderr)
         return 2

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import RawResponseCache, content_hash, load_frozen_dossiers  # noqa: E402
+from career_automation.corpus_publication import sha256_file, validate_inventory  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
 FORMAT = "jaa04-revision-certification/v2"
@@ -46,14 +47,28 @@ def certify(capture: Path, destination: Path) -> Path:
     if (receipt.get("manifest_sha256") != sha(manifest_path)
             or receipt.get("dossiers_sha256") != sha(dossiers_path)):
         raise ValueError("capture metadata or dossier bytes were modified")
+    inventory_path = capture / "corpus_inventory.json"
+    validate_inventory(capture)
+    if receipt.get("inventory_sha256") != sha256_file(inventory_path):
+        raise ValueError("capture inventory is not bound to the acquisition receipt")
     if (manifest.get("schema_version") != "jaa04.research-manifest.v4"
             or manifest.get("opportunity0_queue_size", 0) < 30
-            or len(manifest.get("records", [])) < 30
+            or len(manifest.get("records", [])) != 30
             or manifest.get("records_hash") != content_hash(manifest["records"])):
         raise ValueError("manifest is not bound to the frozen admitted queue")
     dossiers = load_frozen_dossiers(dossiers_path, RawResponseCache(capture / "raw"), strict_corpus=True)
-    if {row["job_key"] for row in manifest["records"]} != {row["job_key"] for row in dossiers}:
+    dossier_by_key = {row["job_key"]: row for row in dossiers}
+    if {row["job_key"] for row in manifest["records"]} != set(dossier_by_key):
         raise ValueError("vacancy-to-dossier linkage is incomplete")
+    for record in manifest["records"]:
+        dossier = dossier_by_key[record["job_key"]]
+        if (record.get("dossier_hash") != content_hash(dossier)
+                or record.get("source_ids") != [source["id"] for source in dossier["sources"]]
+                or record.get("capture_identities") != [
+                    {"url": source["url"], "sha256": source["content_sha256"]}
+                    for source in dossier["sources"]
+                ]):
+            raise ValueError("manifest dossier or capture identity binding is invalid")
     raw_files = sorted(path for path in (capture / "raw").rglob("*") if path.is_file())
     raw_hash = hashlib.sha256(b"".join(
         path.relative_to(capture).as_posix().encode() + b"\0" + path.read_bytes()
