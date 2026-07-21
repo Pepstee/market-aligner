@@ -13,6 +13,10 @@ python3 scripts/rebuild_jaa04_corpus.py \
   --queue-snapshot career_automation/fixtures/jaa04_admitted_queue.json
 ```
 
+Collection is deterministic and model-independent. Operators may bound route
+discovery and transport latency with `--maximum-routes` and
+`--timeout-seconds`; neither option weakens admission or freshness policy.
+
 The command creates a production queue and lets `EmployerResearchWorker` and
 `Opportunity1Coordinator` complete every selected vacancy. Discovery begins at
 the admitted vacancy and follows only routes published in captured canonical,
@@ -27,6 +31,11 @@ unknown. Unknown dates cannot pass a `requires_current` gate and can only
 produce `unknown` freshness for non-time-sensitive company/product evidence.
 
 Publication is atomic: no destination appears unless all 30 dossiers validate.
+Each immutable release contains `corpus_inventory.json`, which binds every
+dossier, manifest and raw response by path, byte length and SHA-256. The public
+`jaa04_capture` path is a single atomically replaced symlink to that release;
+failed acquisition or validation therefore cannot move or alter the prior
+certified corpus. The successful acquisition receipt binds the inventory hash.
 The capture receipt binds the queue snapshot, discovery mode, manifest,
 dossiers, raw corpus, Git commit, and tracked source-content revision. Certify
 the result with:
