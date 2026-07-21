@@ -6,6 +6,7 @@ they do not rely on the executable acceptance demonstration for their results.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import sqlite3
@@ -218,10 +219,44 @@ def test_release_order_and_acceptance_declaration_are_deterministic_and_data_onl
     assert [item["id"] for item in graph.worker_projection(as_of=AS_OF)["claims"]] == ["alpha", "zeta"]
 
     root = Path(__file__).resolve().parent
-    lines = [line.strip() for line in (root / "acceptance").read_text(encoding="utf-8").splitlines()
-             if line.strip() and not line.lstrip().startswith("#")]
-    assert lines and all("-c" not in line for line in lines)
-    assert any("scripts/accept_jaa_02.py" in line for line in lines)
+    declaration = root / "acceptance"
+    commands = [
+        line.strip() for line in declaration.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    # The declaration is executable data: each record is one shell command,
+    # rather than an embedded multi-line program or a JAA-02 demo shortcut.
+    assert commands == [
+        'python3 "${BASH_SOURCE[0]:+${BASH_SOURCE[0]%/*}/}scripts/run_acceptance_declaration.py"',
+    ]
+    assert all("-c" not in command and "$0" not in command for command in commands)
+
+    # Keep this inventory independent of the runner module: parse the source
+    # and compare its literal command declaration with the release contract.
+    runner = ast.parse((root / "scripts" / "run_acceptance_declaration.py").read_text(encoding="utf-8"))
+    commands_node = next(
+        node for node in runner.body
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "COMMANDS" for target in node.targets
+        )
+    )
+    assert isinstance(commands_node.value, ast.Tuple)
+    inventory = tuple(
+        tuple(
+            "__PYTHON__" if ast.unparse(argument) == "sys.executable" else ast.literal_eval(argument)
+            for argument in command.elts
+        )
+        for command in commands_node.value.elts
+        if isinstance(command, (ast.Tuple, ast.List))
+    )
+    assert inventory == (
+        ("__PYTHON__", "scripts/run_acceptance.py"),
+        ("__PYTHON__", "scripts/accept_jaa_02.py"),
+        ("__PYTHON__", "scripts/accept_jaa02_receipt.py"),
+        ("__PYTHON__", "scripts/accept_jaa_03.py"),
+        ("__PYTHON__", "scripts/accept_jaa04_coordination.py"),
+        ("__PYTHON__", "scripts/accept_jaa_04.py"),
+    )
 
 
 def test_direct_root_acceptance_fails_closed_when_its_first_declared_gate_fails(tmp_path: Path) -> None:

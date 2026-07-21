@@ -179,6 +179,34 @@ def test_validator_rejects_rehashed_wrong_test_totals(repository: Path) -> None:
     assert "test totals mismatch" in rejected.stderr
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda commands: commands.reverse(), "command semantics mismatch"),
+        (lambda commands: commands.pop(), "must contain exactly two commands"),
+    ],
+)
+def test_validator_rejects_rehashed_reordered_or_omitted_acceptance_commands(
+    repository: Path, mutation, message: str,
+) -> None:
+    """The receipt is an ordered, complete execution record—not a command set."""
+    receipt, document = _certify(repository)
+    commands = document["command_semantics"]
+    assert isinstance(commands, list)
+    mutation(commands)
+    payload = (
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    replacement = receipt.with_name(f"sha256-{hashlib.sha256(payload).hexdigest()}.json")
+    receipt.unlink()
+    replacement.write_bytes(payload)
+    _track_receipt(repository, replacement)
+
+    rejected = _run(repository, str(VALIDATOR))
+    assert rejected.returncode == 2
+    assert message in rejected.stderr
+
+
 def test_validator_rejects_absent_and_multiple_checked_receipts(repository: Path) -> None:
     absent = _run(repository, str(VALIDATOR))
     assert absent.returncode == 2
