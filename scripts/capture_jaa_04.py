@@ -174,7 +174,7 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
             raise RuntimeError(
                 "research queue did not drain; retry with the same workspace: " + "; ".join(details)
             )
-        completed = {key for key in selected if database.completed_research(key) is not None}
+        completed = {key for key in selected if database.post_research_dossier(key) is not None}
         if completed != selected or len(completed) != CORPUS_SIZE:
             raise RuntimeError("production worker did not complete the selected admitted cohort")
 
@@ -182,12 +182,20 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         manifest_records = []
         for record in records:
             job_key = str(record["job_key"])
-            result = database.completed_research(job_key)
+            result = database.post_research_dossier(job_key)
             if result is None:
                 raise RuntimeError(f"missing completed dossier for {job_key}")
             dossier, _ = result
+            reassessment = database.opportunity1_reassessment(
+                job_key, expected_dossier_hash=content_hash(dossier),
+            )
+            if reassessment is None:
+                raise RuntimeError(f"missing Opportunity-1 reassessment for {job_key}")
             dossier["raw_cache_root"] = "raw"
             dossier_hash = content_hash(dossier)
+            # The persisted dossier contains an absolute in-flight cache root;
+            # bind the published reassessment to the portable dossier identity.
+            reassessment = {**reassessment, "dossier_hash": dossier_hash}
             dossiers.append(dossier)
             manifest_records.append({
                 "job_key": job_key, "vacancy_url": record["url"],
@@ -200,6 +208,7 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
                     {"url": source["url"], "sha256": source["content_sha256"]}
                     for source in dossier["sources"]
                 ],
+                "opportunity1_reassessment": reassessment,
             })
         envelope = {"schema_version": "jaa04.frozen-dossiers.v4", "dossiers": dossiers,
                     "dossiers_hash": content_hash(dossiers)}
