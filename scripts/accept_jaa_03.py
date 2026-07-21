@@ -156,6 +156,7 @@ def validate_existing_receipts() -> list[tuple[Path, dict[str, Any]]]:
 
 def reusable_receipt(
     source_revision: str,
+    runtime: dict[str, str],
     runtime_inputs: dict[str, str],
     configuration: dict[str, Any],
     acceptance_result: dict[str, Any],
@@ -175,6 +176,7 @@ def reusable_receipt(
             document.get("source_content_revision") == source_revision
             and document.get("source_content_revision_contract")
             == source_content_revision_contract()
+            and document.get("runtime") == runtime
             and document.get("runtime_inputs") == runtime_inputs
             and document.get("configuration") == configuration
             and document.get("acceptance_result") == acceptance_result
@@ -250,7 +252,13 @@ def main() -> int:
             },
             "policy_hash": policy.policy_hash,
         }
-        existing = reusable_receipt(source_before, inputs_before, configuration, result)
+        runtime = {
+            "python_implementation": platform.python_implementation(),
+            "python_version": platform.python_version(),
+        }
+        existing = reusable_receipt(
+            source_before, runtime, inputs_before, configuration, result,
+        )
         if existing is not None:
             print(json.dumps({"receipt": existing.relative_to(ROOT).as_posix(), "status": "PASS"},
                              sort_keys=True))
@@ -261,10 +269,7 @@ def main() -> int:
             "source_revision": revision_before,
             "source_content_revision": source_before,
             "source_content_revision_contract": source_content_revision_contract(),
-            "runtime": {
-                "python_implementation": platform.python_implementation(),
-                "python_version": platform.python_version(),
-            },
+            "runtime": runtime,
             "runtime_inputs": inputs_before,
             "configuration": configuration,
             "acceptance_result": result,
