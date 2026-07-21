@@ -14,6 +14,8 @@ transcripts/
 runtime_evidence/jaa04/corpus/
 career_automation/fixtures/jaa04_capture
 career_automation/fixtures/.jaa04_capture-releases/
+*.jaa04-inflight/
+.jaa04-inflight/
 
 # --- python ------------------------------------------------------------------
 __pycache__/

@@ -73,8 +73,8 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
                                   "payload_hash": str(row["payload_hash"])} for row in records}
 
 
-def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
-            timeout_seconds: int = 45) -> None:
+def capture(database_path: Path, destination: Path, *, workspace: Path | None = None,
+            maximum_routes: int = 12, timeout_seconds: int = 45) -> None:
     if destination.exists():
         raise RuntimeError("capture destination already exists")
     if not database_path.is_file():
@@ -84,19 +84,31 @@ def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
     records = [admitted[key] for key in sorted(selected)]
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix="jaa04-acquisition-", dir=destination.parent))
-    work_db = stage / "queue.sqlite3"
-    if database_path.suffix.casefold() != ".json":
-        shutil.copyfile(database_path, work_db)
+    workspace = (workspace or destination.with_name(f".{destination.name}.inflight")).resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    work_db = workspace / "queue.sqlite3"
+    state_path = workspace / "acquisition_state.json"
+    snapshot_sha256 = hashlib.sha256(database_path.read_bytes()).hexdigest()
+    state = {"schema_version": "jaa04.acquisition-state.v1", "queue_snapshot_sha256": snapshot_sha256,
+             "selected_job_keys": sorted(selected), "status": "in_flight"}
+    if state_path.exists():
+        if json.loads(state_path.read_text(encoding="utf-8")) != state:
+            raise RuntimeError("in-flight workspace belongs to a different admitted cohort")
     else:
-        database = CareerDatabase(work_db)
-        OpportunityGate(database).bootstrap([
-            ScoredJob(key=record["job_key"], board="jaa04", job_id=record["job_key"],
-                      url=record["url"], title=record["title"], company=record["company"],
-                      fit=None, opportunity=.9, final_score=None, extraction_confidence=1.0,
-                      payload={}, payload_hash=record["payload_hash"])
-            for record in records
-        ])
+        state_path.write_bytes(canonical(state))
+    if not work_db.exists():
+        if database_path.suffix.casefold() != ".json":
+            shutil.copyfile(database_path, work_db)
+        else:
+            database = CareerDatabase(work_db)
+            OpportunityGate(database).bootstrap([
+                ScoredJob(key=record["job_key"], board="jaa04", job_id=record["job_key"],
+                          url=record["url"], title=record["title"], company=record["company"],
+                          fit=None, opportunity=.9, final_score=None, extraction_confidence=1.0,
+                          payload={}, payload_hash=record["payload_hash"])
+                for record in records
+            ])
+    stage: Path | None = None
     try:
         with sqlite3.connect(work_db) as connection:
             placeholders = ",".join("?" for _ in selected)
@@ -104,7 +116,14 @@ def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
                 f"DELETE FROM employer_research_queue WHERE job_key NOT IN ({placeholders})",
                 tuple(sorted(selected)),
             )
-        cache = RawResponseCache(stage / "raw")
+            # A process interruption leaves a visible lease. Explicit resume
+            # makes it claimable without waiting while completed rows remain
+            # immutable and are never processed twice.
+            connection.execute(
+                "UPDATE employer_research_queue SET lease_until='1970-01-01T00:00:00+00:00' "
+                "WHERE status='leased'"
+            )
+        cache = RawResponseCache(workspace / "raw")
         # Increment A keeps exact canaries as its default contract. Production
         # acquisition is queue-bound instead: all admitted records may proceed,
         # while the same byte, authority, purpose and temporal validators remain.
@@ -115,11 +134,11 @@ def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
         database = CareerDatabase(work_db)
         worker = EmployerResearchWorker(database, "jaa04-corpus-acquisition", cache,
                                         retriever=retriever)
-        completed: list[str] = []
         coordinator = Opportunity1Coordinator(database, worker)
         while (result := coordinator.run_once()) is not None:
-            completed.append(str(result["job_key"]))
-        if set(completed) != selected or len(completed) != CORPUS_SIZE:
+            pass
+        completed = {key for key in selected if database.completed_research(key) is not None}
+        if completed != selected or len(completed) != CORPUS_SIZE:
             raise RuntimeError("production worker did not complete the selected admitted cohort")
 
         dossiers = []
@@ -151,9 +170,12 @@ def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
                     "opportunity0_queue_size": len(admitted),
                     "records": manifest_records,
                     "records_hash": content_hash(manifest_records)}
+        stage = Path(tempfile.mkdtemp(prefix="jaa04-complete-", dir=destination.parent))
         (stage / "frozen_dossiers.json").write_bytes(canonical(envelope))
         (stage / "research_manifest.json").write_bytes(canonical(manifest))
-        validated = load_frozen_dossiers(stage / "frozen_dossiers.json", cache, strict_corpus=True)
+        shutil.copytree(workspace / "raw", stage / "raw", copy_function=os.link)
+        staged_cache = RawResponseCache(stage / "raw")
+        validated = load_frozen_dossiers(stage / "frozen_dossiers.json", staged_cache, strict_corpus=True)
         if len(validated) != CORPUS_SIZE:
             raise RuntimeError("publication requires exactly 30 validated dossiers")
         # Capture uniqueness is a corpus admission rule, not merely a retrieval
@@ -180,8 +202,8 @@ def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
             "schema_version": "jaa04.capture-receipt.v4", "status": "SUCCESS",
             "captured_count": CORPUS_SIZE,
             "source_count": sum(len(row["sources"]) for row in dossiers),
-            "queue_snapshot_sha256": hashlib.sha256(database_path.read_bytes()).hexdigest(),
-            "discovery_mode": "vacancy-seeded-published-links",
+            "queue_snapshot_sha256": snapshot_sha256,
+            "discovery_mode": "typed-ats-and-official-route-validation",
             "manifest_sha256": hashlib.sha256((stage / "research_manifest.json").read_bytes()).hexdigest(),
             "dossiers_sha256": hashlib.sha256((stage / "frozen_dossiers.json").read_bytes()).hexdigest(),
             "raw_corpus_sha256": corpus_hash, "source_revision": _revision(),
@@ -189,14 +211,11 @@ def capture(database_path: Path, destination: Path, *, maximum_routes: int = 12,
             "inventory_sha256": sha256_file(inventory_path),
         }
         (stage / "capture_receipt.json").write_bytes(canonical(receipt))
-        work_db.unlink()
-        for suffix in ("-wal", "-shm"):
-            candidate = Path(str(work_db) + suffix)
-            if candidate.exists():
-                candidate.unlink()
         os.rename(stage, destination)
+        stage = None
     except BaseException:
-        shutil.rmtree(stage, ignore_errors=True)
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
         raise
 
 
@@ -204,13 +223,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--queue-snapshot", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--workspace", type=Path, required=True,
+                        help="stable external in-flight queue and content-addressed byte store")
     parser.add_argument("--maximum-routes", type=int, default=12)
     parser.add_argument("--timeout-seconds", type=int, default=45)
     args = parser.parse_args()
     try:
         if args.maximum_routes < 1 or args.timeout_seconds < 1:
             raise ValueError("retrieval limits must be positive")
-        capture(args.queue_snapshot.resolve(), args.destination.resolve(),
+        capture(args.queue_snapshot.resolve(), args.destination.resolve(), workspace=args.workspace.resolve(),
                 maximum_routes=args.maximum_routes, timeout_seconds=args.timeout_seconds)
     except Exception as exc:
         print(f"JAA-04 capture: ERROR: {exc}", file=sys.stderr)
