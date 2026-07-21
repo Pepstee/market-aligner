@@ -77,6 +77,8 @@ def publish_by_pointer(staged: Path, destination: Path,
     acquisition or validator can neither expose partial bytes nor disturb the
     previously certified release.
     """
+    staged = staged.resolve()
+    destination = destination.absolute()
     if not staged.is_dir() or destination.exists() and not destination.is_symlink():
         raise RuntimeError("atomic corpus destination must be absent or a managed symlink")
     validator(staged)

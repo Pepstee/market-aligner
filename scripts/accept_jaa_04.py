@@ -101,8 +101,8 @@ def certify(capture: Path, destination: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--capture", type=Path,
-                        default=ROOT / "career_automation/fixtures/jaa04_capture")
+    parser.add_argument("--capture", type=Path, required=True,
+                        help="external published corpus pointer or release path")
     parser.add_argument("--receipt", type=Path,
                         default=ROOT / "runtime_evidence/jaa04")
     args = parser.parse_args()

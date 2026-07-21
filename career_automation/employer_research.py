@@ -240,6 +240,91 @@ _ATS_CANARY_BY_KEY = {record.job_key: record for record in ATS_AUTHORITY_CANARIE
 _TYPED_ATS_HOSTS = frozenset(host for record in ATS_AUTHORITY_CANARIES for host in record.authority_hosts)
 
 
+AGGREGATOR_HOSTS = frozenset({
+    "himalayas.app", "www.himalayas.app", "jobicy.com", "www.jobicy.com",
+    "remotefirstjobs.com", "www.remotefirstjobs.com", "remoteok.com",
+    "www.remoteok.com", "weworkremotely.com", "www.weworkremotely.com",
+    "remotive.com", "www.remotive.com", "themuse.com", "www.themuse.com",
+    "arbeitnow.com", "www.arbeitnow.com", "adzuna.co.uk", "www.adzuna.co.uk",
+    "reed.co.uk", "www.reed.co.uk", "jooble.org", "uk.jooble.org",
+})
+
+
+@dataclass(frozen=True)
+class ATSRouteAdapter:
+    """Deterministic authority transform bound to an admitted ATS identity."""
+
+    family: str
+    admitted_hosts: tuple[str, ...]
+    authority_hosts: tuple[str, ...]
+
+    def authority_url(self, task: Any) -> str:
+        parts = str(task.job_key).split(":")
+        if len(parts) != 3 or parts[0].casefold() != self.family:
+            raise ValueError("ATS job key is not a canonical family:tenant:vacancy identity")
+        tenant, vacancy = parts[1], parts[2]
+        parsed = urlparse(str(task.url))
+        host, path = (parsed.hostname or "").casefold(), parsed.path.rstrip("/")
+        if host not in self.admitted_hosts:
+            raise ValueError("admitted ATS URL host does not match its typed identity")
+        if self.family == "greenhouse":
+            expected = f"/{tenant}/jobs/{vacancy}"
+            if path != expected:
+                raise ValueError("Greenhouse admitted path does not match its typed identity")
+            return f"https://api.greenhouse.io/v1/boards/{tenant}/jobs/{vacancy}"
+        if self.family == "ashby":
+            if path != f"/{tenant}/{vacancy}":
+                raise ValueError("Ashby admitted path does not match its typed identity")
+            return str(task.url)
+        if self.family == "lever":
+            if path != f"/{tenant}/{vacancy}":
+                raise ValueError("Lever admitted path does not match its typed identity")
+            return str(task.url)
+        if self.family == "smartrecruiters":
+            segments = [part for part in path.split("/") if part]
+            if len(segments) != 2 or segments[0] != tenant or not segments[1].startswith(vacancy):
+                raise ValueError("SmartRecruiters admitted path does not match its typed identity")
+            return f"https://api.smartrecruiters.com/v1/companies/{tenant}/postings/{vacancy}"
+        if self.family == "workable":
+            if path.casefold() != f"/j/{vacancy}".casefold():
+                raise ValueError("Workable admitted path does not match its typed identity")
+            return str(task.url)
+        raise ValueError("unsupported ATS family")
+
+    def validate_capture(self, task: Any, citation: Citation, cache: "RawResponseCache") -> None:
+        body = cache.resolve(citation.raw_response_ref, citation.content_sha256)
+        if citation.status_code < 200 or citation.status_code >= 300 or not body:
+            raise ValueError("ATS authority response is not a live non-empty success")
+        urls = [citation.requested_url or "", *(str(row.get("url", "")) for row in citation.redirect_history), citation.url]
+        for value in urls:
+            parsed = urlparse(value)
+            if (parsed.hostname or "").casefold() not in set(self.admitted_hosts + self.authority_hosts):
+                raise ValueError("ATS authority redirect escaped its allowed hosts")
+        final = urlparse(citation.url)
+        parts = str(task.job_key).split(":")
+        identity = parts[2].casefold()
+        if identity not in final.path.casefold() and identity not in body.decode("utf-8", "strict").casefold():
+            raise ValueError("ATS response does not contain the admitted vacancy identity")
+        text = _plain_excerpt(body.decode("utf-8", "strict")).casefold()
+        company_tokens = [token for token in re.findall(r"[a-z0-9]+", str(task.company).casefold()) if len(token) > 2]
+        title_tokens = [token for token in re.findall(r"[a-z0-9]+", str(task.title).casefold()) if len(token) > 3]
+        if not company_tokens or not any(token in text for token in company_tokens):
+            raise ValueError("ATS response does not identify the admitted employer")
+        if not title_tokens or sum(token in text for token in title_tokens) < min(2, len(title_tokens)):
+            raise ValueError("ATS response does not identify the admitted vacancy title")
+
+
+DEFAULT_ATS_ROUTE_ADAPTERS = {
+    row.family: row for row in (
+        ATSRouteAdapter("greenhouse", ("job-boards.greenhouse.io",), ("api.greenhouse.io",)),
+        ATSRouteAdapter("workable", ("apply.workable.com",), ("apply.workable.com",)),
+        ATSRouteAdapter("ashby", ("jobs.ashbyhq.com",), ("jobs.ashbyhq.com",)),
+        ATSRouteAdapter("lever", ("jobs.lever.co",), ("jobs.lever.co",)),
+        ATSRouteAdapter("smartrecruiters", ("jobs.smartrecruiters.com",), ("api.smartrecruiters.com",)),
+    )
+}
+
+
 class RawResponseCache:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
@@ -344,11 +429,13 @@ class PortableAuthorityRetriever:
     )
 
     def __init__(self, cache: RawResponseCache, *, retriever: ScraplingPublicRetriever | None = None,
-                 maximum_routes: int = 12, exact_canaries: bool = True) -> None:
+                 maximum_routes: int = 12, exact_canaries: bool = True,
+                 ats_adapters: Mapping[str, ATSRouteAdapter] | None = None) -> None:
         self.cache = cache
         self.retriever = retriever or ScraplingPublicRetriever(cache)
         self.maximum_routes = maximum_routes
         self.exact_canaries = exact_canaries
+        self.ats_adapters = dict(ats_adapters or DEFAULT_ATS_ROUTE_ADAPTERS)
 
     def _retrieve(self, source_id: str, url: str, source_kind: str) -> Citation:
         publisher = (urlparse(url).hostname or "").casefold()
@@ -451,6 +538,20 @@ class PortableAuthorityRetriever:
         return bool(tokens) and any(token in text for token in tokens)
 
     @staticmethod
+    def _vacancy_bound(task: Any, citation: Citation, body: bytes) -> bool:
+        if citation.status_code < 200 or citation.status_code >= 300 or not body:
+            return False
+        text = _plain_excerpt(body.decode("utf-8", "strict")).casefold()
+        if re.search(r"\b(?:job|vacancy|position) (?:is )?(?:closed|expired|removed|no longer available)\b", text):
+            return False
+        title = str(getattr(task, "title", "")).strip()
+        title_tokens = [token for token in re.findall(r"[a-z0-9]+", title.casefold())
+                        if len(token) > 3 and token not in {"with", "from", "the", "and"}]
+        return (PortableAuthorityRetriever._employer_bound(str(task.company), body)
+                and (not title or (bool(title_tokens)
+                     and sum(token in text for token in title_tokens) >= min(2, len(title_tokens)))))
+
+    @staticmethod
     def _source_types(item: Citation, vacancy: Citation, body: bytes) -> tuple[str, ...]:
         if item.id == vacancy.id:
             return ("official_vacancy",)
@@ -481,24 +582,53 @@ class PortableAuthorityRetriever:
                 citations = [authority]
             return self._plan_from_citations(task, citations, citations[0])
 
-        vacancy = self._retrieve(f"source:{task.job_key}:vacancy", task.url, "official_vacancy")
-        citations = [vacancy]
+        family = str(task.job_key).split(":", 1)[0].casefold()
+        adapter = self.ats_adapters.get(family)
+        if adapter is not None:
+            authority_url = adapter.authority_url(task)
+            authority = self._retrieve(f"source:{task.job_key}:typed-authority",
+                                       authority_url, "official_vacancy")
+            adapter.validate_capture(task, authority, self.cache)
+            return self._plan_from_citations(task, [authority], authority)
+
+        admitted_host = (urlparse(str(task.url)).hostname or "").casefold()
+        discovery_only = admitted_host in AGGREGATOR_HOSTS
+        vacancy = self._retrieve(f"source:{task.job_key}:vacancy", task.url,
+                                 "discovery_input" if discovery_only else "official_vacancy")
+        citations = [] if discovery_only else [vacancy]
         vacancy_body = self.cache.resolve(vacancy.raw_response_ref, vacancy.content_sha256)
+        if not discovery_only and not self._vacancy_bound(task, vacancy, vacancy_body):
+            raise ValueError("direct vacancy response is stale, mismatched, empty, or ambiguous")
         routes = self._published_routes(vacancy.url, vacancy_body)
         seen = {vacancy.capture_identity, vacancy.content_sha256}
         for index, route in enumerate(routes[:self.maximum_routes]):
             if route == vacancy.url:
                 continue
             try:
-                item = self._retrieve(f"source:{task.job_key}:discovered:{index}",
-                                      route, "official_company")
+                route_host = (urlparse(route).hostname or "").casefold()
+                if route_host in AGGREGATOR_HOSTS:
+                    continue
+                route_path = (urlparse(route).path or "/").casefold()
+                route_kind = ("official_vacancy" if re.search(r"/(?:job|jobs|vacanc|position|posting)", route_path)
+                              else "official_company")
+                item = self._retrieve(f"source:{task.job_key}:discovered:{index}", route, route_kind)
             except (RuntimeError, ValueError, UnicodeError):
                 continue
             if item.capture_identity in seen or item.content_sha256 in seen:
                 continue
             seen.update((item.capture_identity, item.content_sha256))
+            if not self._employer_bound(str(task.company),
+                                        self.cache.resolve(item.raw_response_ref, item.content_sha256)):
+                continue
+            if item.source_kind == "official_vacancy" and not self._vacancy_bound(
+                    task, item, self.cache.resolve(item.raw_response_ref, item.content_sha256)):
+                continue
             citations.append(item)
-
+        if discovery_only:
+            official = next((item for item in citations if item.source_kind == "official_vacancy"), None)
+            if official is None:
+                raise ValueError("aggregator discovery did not publish a validated official vacancy route")
+            vacancy = official
         return self._plan_from_citations(task, citations, vacancy)
 
     def _plan_from_citations(self, task: Any, citations: list[Citation],

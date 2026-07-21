@@ -10,14 +10,37 @@ Run acquisition with:
 
 ```sh
 python3 scripts/rebuild_jaa04_corpus.py \
-  --queue-snapshot career_automation/fixtures/jaa04_admitted_queue.json
+  --queue-snapshot career_automation/fixtures/jaa04_admitted_queue.json \
+  --workspace /external/jaa04/in-flight \
+  --corpus /external/jaa04/certified
 ```
 
 Collection is deterministic and model-independent. Operators may bound route
 discovery and transport latency with `--maximum-routes` and
 `--timeout-seconds`; neither option weakens admission or freshness policy.
 
-The command creates a production queue and lets `EmployerResearchWorker` and
+The workspace is stable and resumable. It owns the persistent SQLite queue,
+leases, completed dossiers and content-addressed raw response bytes. Repeating
+the same command after interruption expires only abandoned leases, reuses
+validated completed rows and immutable response bytes, and cannot complete a
+dossier twice. A workspace is cryptographically bound to one admitted queue
+snapshot and refuses reuse for a different cohort.
+
+Greenhouse, Workable, Ashby, Lever and SmartRecruiters use source-controlled
+family adapters. Each adapter derives its route from the admitted
+family/tenant/vacancy identity and validates the allowed host and path,
+redirect chain, live status, non-empty captured bytes, employer and vacancy
+identity. Adapter configuration may be supplied by a caller, but no response
+can relax those validations.
+
+Himalayas, Remote First Jobs, Jobicy and all other aggregators are discovery
+inputs only. Their responses are never emitted as `official_vacancy` evidence.
+They must publish a public employer or ATS vacancy route whose returned bytes
+pass authority and identity validation; otherwise acquisition abstains
+fail-closed. Direct employer and public-sector pages remain purpose-typed and
+must pass the same public-route, response-byte and employer-binding gates.
+
+The command resumes or creates a production queue and lets `EmployerResearchWorker` and
 `Opportunity1Coordinator` complete every selected vacancy. Discovery begins at
 the admitted vacancy and follows only routes published in captured canonical,
 organisation, sameAs, application or anchor links. It never guesses an
@@ -41,11 +64,16 @@ dossiers, raw corpus, Git commit, and tracked source-content revision. Certify
 the result with:
 
 ```sh
-python3 scripts/accept_jaa_04.py
+python3 scripts/accept_jaa_04.py \
+  --capture /external/jaa04/certified \
+  --receipt /external/jaa04/receipts
 ```
 
 Certification rehashes every artifact and raw response and writes one
 revision-bound receipt. It refuses stale, conflicting, or tampered evidence.
+Neither live corpus bytes, in-flight state nor full-corpus receipts are stored
+in Git. A clean source clone contains the acquisition software and admitted
+queue projection only; it never fabricates a live corpus.
 
 ## Operator correction for the next implementation cycle
 
