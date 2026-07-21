@@ -120,8 +120,10 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
             # makes it claimable without waiting while completed rows remain
             # immutable and are never processed twice.
             connection.execute(
-                "UPDATE employer_research_queue SET lease_until='1970-01-01T00:00:00+00:00' "
-                "WHERE status='leased'"
+                """UPDATE employer_research_queue
+                   SET status='queued',available_at=datetime('now','-1 second'),
+                       lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP
+                   WHERE status='leased'"""
             )
         cache = RawResponseCache(workspace / "raw")
         # Increment A keeps exact canaries as its default contract. Production
@@ -135,8 +137,16 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         worker = EmployerResearchWorker(database, "jaa04-corpus-acquisition", cache,
                                         retriever=retriever)
         coordinator = Opportunity1Coordinator(database, worker)
-        while (result := coordinator.run_once()) is not None:
-            pass
+        # Each selected non-completed row is attempted at most once per
+        # invocation. A retrieval failure remains visibly leased with its
+        # error, allowing lower-priority rows to drain; the next invocation
+        # deterministically requeues every such interrupted lease above.
+        for _ in range(CORPUS_SIZE):
+            try:
+                if coordinator.run_once() is None:
+                    break
+            except Exception:
+                continue
         with sqlite3.connect(work_db) as connection:
             connection.row_factory = sqlite3.Row
             placeholders = ",".join("?" for _ in selected)
