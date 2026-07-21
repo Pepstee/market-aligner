@@ -212,9 +212,36 @@ def test_configurer_rejects_symlink_overlap_and_repository_evidence_before_writi
     assert "must not overlap the product repository" in contained.stderr
 
 
-def test_acceptance_declaration_commands_are_independent_and_direct_execution_fails_closed() -> None:
+def test_acceptance_declaration_commands_are_independent_and_direct_execution_is_portable(
+    tmp_path: Path,
+) -> None:
     lines = [line.strip() for line in (ROOT / "acceptance").read_text(encoding="utf-8").splitlines()]
     commands = [line for line in lines if line and not line.startswith("#")]
     assert commands == [
         'python3 "${BASH_SOURCE[0]:+${BASH_SOURCE[0]%/*}/}scripts/run_acceptance_declaration.py"',
     ]
+    assert all("-c" not in command and "$0" not in command for command in commands)
+
+    # Run every extracted record independently.  A tiny isolated runner keeps
+    # this test about declaration execution and path resolution, rather than
+    # requiring private commercial runtime credentials.
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    scripts.mkdir(parents=True)
+    declaration = project / "acceptance"
+    declaration.write_text((ROOT / "acceptance").read_text(encoding="utf-8"), encoding="utf-8")
+    declaration.chmod(0o755)
+    (scripts / "run_acceptance_declaration.py").write_text(
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    for command in commands:
+        extracted = subprocess.run(
+            ["bash", "-c", command], cwd=project, text=True, capture_output=True, check=False,
+        )
+        assert extracted.returncode == 0, extracted.stdout + extracted.stderr
+
+    direct = subprocess.run(
+        [str(declaration)], cwd=tmp_path, text=True, capture_output=True, check=False,
+    )
+    assert direct.returncode == 0, direct.stdout + direct.stderr
