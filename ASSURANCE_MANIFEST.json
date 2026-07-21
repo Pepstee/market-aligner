@@ -96,8 +96,8 @@
       "tests": [
         {
           "id": "JAA-02-claim-graph",
-          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_jaa03_receipt_tamper_controls.py::test_jaa02_rehashed_command_omission_and_reordering_fail_closed"],
-          "files": ["test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_jaa03_receipt_tamper_controls.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_receipt_command_tamper.py"],
+          "files": ["test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_receipt_command_tamper.py"]
         },
         {
           "id": "JAA-02-runtime-negative-controls",
@@ -132,8 +132,8 @@
         },
         {
           "id": "JAA-03-negative-controls",
-          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_jaa03_receipt_tamper_controls.py"],
-          "files": ["test_jaa02_jaa03_receipt_tamper_controls.py"],
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa03_receipt_tamper_controls.py"],
+          "files": ["test_jaa03_receipt_tamper_controls.py"],
           "negative_control": true
         }
       ],
@@ -345,7 +345,7 @@
       "interfaces": [],
       "environment": [],
       "tests": [
-        {"id": "JAA-16-release", "argv": ["{python}", "-m", "pytest", "-q"], "files": ["test_jaa16_release_certification.py"], "timeout_seconds": 3600},
+        {"id": "JAA-16-release", "argv": ["{python}", "-m", "pytest", "-q"], "files": ["test_jaa16_release_certification.py", "test_acceptance_declaration_contract.py"], "timeout_seconds": 3600},
         {"id": "JAA-16-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa16_negative_controls.py"], "files": ["test_jaa16_negative_controls.py"], "negative_control": true}
       ],
       "evidence": []
