@@ -137,6 +137,33 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         coordinator = Opportunity1Coordinator(database, worker)
         while (result := coordinator.run_once()) is not None:
             pass
+        with sqlite3.connect(work_db) as connection:
+            connection.row_factory = sqlite3.Row
+            placeholders = ",".join("?" for _ in selected)
+            queue_rows = connection.execute(
+                f"""SELECT job_key,status,attempts,last_error,lease_owner,lease_until
+                    FROM employer_research_queue WHERE job_key IN ({placeholders})
+                    ORDER BY job_key""",
+                tuple(sorted(selected)),
+            ).fetchall()
+        states = {str(row["job_key"]): str(row["status"]) for row in queue_rows}
+        incomplete = {key: states.get(key, "missing") for key in sorted(selected)
+                      if states.get(key) != "completed"}
+        if incomplete:
+            details = []
+            by_key = {str(row["job_key"]): row for row in queue_rows}
+            for key, status in incomplete.items():
+                row = by_key.get(key)
+                suffix = ""
+                if row is not None:
+                    suffix = (f" attempts={row['attempts']}"
+                              f" lease_owner={row['lease_owner'] or '-'}"
+                              f" lease_until={row['lease_until'] or '-'}"
+                              f" error={row['last_error'] or '-'}")
+                details.append(f"{key}:{status}{suffix}")
+            raise RuntimeError(
+                "research queue did not drain; retry with the same workspace: " + "; ".join(details)
+            )
         completed = {key for key in selected if database.completed_research(key) is not None}
         if completed != selected or len(completed) != CORPUS_SIZE:
             raise RuntimeError("production worker did not complete the selected admitted cohort")
