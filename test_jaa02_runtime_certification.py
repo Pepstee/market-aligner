@@ -154,15 +154,21 @@ def test_validator_rejects_tampered_receipt_bytes(repository: Path) -> None:
     assert "receipt file hash mismatch" in rejected.stderr
 
 
-def test_validator_rejects_stale_source_revision(repository: Path) -> None:
+def test_validator_preserves_receipt_as_historical_evidence_after_source_changes(
+    repository: Path,
+) -> None:
     receipt, _document = _certify(repository)
     _track_receipt(repository, receipt)
-    readme = repository / "README.md"
-    readme.write_bytes(readme.read_bytes() + b"\ntracked source changed\n")
-    _commit(repository, "README.md", message="change source after certification")
-    rejected = _run(repository, str(VALIDATOR))
-    assert rejected.returncode == 2
-    assert "stale JAA-02 source revision" in rejected.stderr
+    source = repository / "career_automation" / "candidate_graph.py"
+    source.write_bytes(source.read_bytes() + b"\n# later source revision\n")
+    _commit(
+        repository,
+        source.relative_to(repository).as_posix(),
+        message="change source after certification",
+    )
+    accepted = _run(repository, str(VALIDATOR))
+    assert accepted.returncode == 0, accepted.stderr
+    assert json.loads(accepted.stdout)["status"] == "accepted"
 
 
 def test_validator_rejects_rehashed_wrong_test_totals(repository: Path) -> None:
