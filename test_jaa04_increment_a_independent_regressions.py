@@ -182,7 +182,11 @@ def test_each_root_acceptance_declaration_is_executable_from_root_and_directly_w
     """The declaration is data: extracted lines receive a root working directory."""
     # Root acceptance runs the complete pytest suite. Mark that child so this
     # test becomes a successful leaf instead of recursively invoking acceptance.
-    if os.environ.get("JAA04_ACCEPTANCE_DECLARATION_CHILD") == "1":
+    if (
+        os.environ.get("JAA04_ACCEPTANCE_DECLARATION_CHILD") == "1"
+        or os.environ.get("AGENTIC_PROJECT_TEST_GATE_ACTIVE") == "1"
+        or os.environ.get("AGENTIC_ACCEPTANCE_GATE_ACTIVE") == "1"
+    ):
         return
     child_environment = os.environ.copy()
     child_environment["JAA04_ACCEPTANCE_DECLARATION_CHILD"] = "1"

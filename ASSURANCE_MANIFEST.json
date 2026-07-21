@@ -1,0 +1,353 @@
+{
+  "schema_version": "1.0",
+  "programme_file": "IMPLEMENTATION_SLICES.yaml",
+  "integration_boundaries": ["JAA-04", "JAA-08", "JAA-11", "JAA-16"],
+  "release_boundary": "JAA-16",
+  "shared": [
+    "pyproject.toml",
+    "requirements-test.lock",
+    "career_automation/__init__.py",
+    "career_automation/models.py"
+  ],
+  "ignored": [
+    ".gitignore",
+    "AGENTS.md",
+    "Architecture.md",
+    "BUILD_PLAN.md",
+    "FACTORY_BRIEF.md",
+    "PRODUCT.md",
+    "README.md",
+    "docs/**",
+    "runtime_evidence/jaa04/**"
+  ],
+  "components": {
+    "JAA-00": {
+      "claim": "The canonical baseline and source adoption are reproducible and recoverable.",
+      "increment": "complete",
+      "depends_on": [],
+      "owns": [
+        "baseline_adoption/**",
+        "canonical-repository.json",
+        "SOURCE_BASELINE.md",
+        "runtime_evidence/JAA-00-online-snapshot.yaml"
+      ],
+      "inputs": [],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {
+          "id": "JAA-00-baseline-positive",
+          "argv": ["{python}", "-m", "pytest", "-q", "baseline_adoption/test_core.py", "baseline_adoption/test_live_recertification_semantics.py", "baseline_adoption/test_live_sqlite_online_snapshot.py", "baseline_adoption/test_runtime_evidence_contract.py", "baseline_adoption/test_wal_source_preservation.py"],
+          "files": ["baseline_adoption/test_core.py", "baseline_adoption/test_live_recertification_semantics.py", "baseline_adoption/test_live_sqlite_online_snapshot.py", "baseline_adoption/test_runtime_evidence_contract.py", "baseline_adoption/test_wal_source_preservation.py"]
+        },
+        {
+          "id": "JAA-00-baseline-negative-controls",
+          "argv": ["{python}", "-m", "pytest", "-q", "baseline_adoption/test_cli_negative_controls.py"],
+          "files": ["baseline_adoption/test_cli_negative_controls.py"],
+          "negative_control": true
+        }
+      ],
+      "evidence": []
+    },
+    "JAA-01": {
+      "claim": "Lifecycle migrations, deterministic transitions, replay and idempotency satisfy JAA-01.",
+      "increment": "complete",
+      "depends_on": ["JAA-00"],
+      "owns": [
+        "career_automation/database.py",
+        "career_automation/lifecycle.py",
+        "career_automation/migrations.py",
+        "scripts/accept_jaa_01c.py",
+        "scripts/certify_jaa01_runtime.py",
+        "runtime_evidence/jaa01/*.json"
+      ],
+      "inputs": ["tracked_source_revision.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {
+          "id": "JAA-01-state-machine",
+          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_migrations.py", "career_automation/test_jaa_01d_independent.py", "career_automation/test_jaa_01e_lifecycle_no_bypass.py", "test_jaa01_runtime_certification.py", "test_jaa01_source_revision_binding.py"],
+          "files": ["career_automation/test_migrations.py", "career_automation/test_jaa_01d_independent.py", "career_automation/test_jaa_01e_lifecycle_no_bypass.py", "test_jaa01_runtime_certification.py", "test_jaa01_source_revision_binding.py"]
+        },
+        {
+          "id": "JAA-01-adversarial-runtime",
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa01_adversarial_runtime.py", "test_durable_live_evidence_separation.py::test_recertification_records_two_live_originals_with_utc_and_read_only_semantics", "test_durable_live_evidence_separation.py::test_recertification_fails_closed_when_a_main_or_wal_read_drifts"],
+          "files": ["test_jaa01_adversarial_runtime.py", "test_durable_live_evidence_separation.py"],
+          "negative_control": true
+        }
+      ],
+      "evidence": []
+    },
+    "JAA-02": {
+      "claim": "Candidate facts, evidence, claim lineage, privacy projection and quarantine satisfy JAA-02.",
+      "increment": "complete",
+      "depends_on": ["JAA-01"],
+      "owns": [
+        "career_automation/candidate_graph.py",
+        "scripts/accept_jaa_02.py",
+        "scripts/accept_jaa02_receipt.py",
+        "scripts/certify_jaa02_runtime.py",
+        "runtime_evidence/jaa02/*.json"
+      ],
+      "inputs": ["career_automation/database.py", "career_automation/security.py", "tracked_source_revision.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {
+          "id": "JAA-02-claim-graph",
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_jaa03_receipt_tamper_controls.py"],
+          "files": ["test_jaa02_independent_acceptance.py", "test_jaa02_runtime_certification.py", "test_jaa02_jaa03_receipt_tamper_controls.py"]
+        },
+        {
+          "id": "JAA-02-runtime-negative-controls",
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa02_runtime_identity_tamper.py"],
+          "files": ["test_jaa02_runtime_identity_tamper.py"],
+          "negative_control": true
+        }
+      ],
+      "evidence": []
+    },
+    "JAA-03": {
+      "claim": "Vacancy extraction and Opportunity-0 admission are calibrated on locked evidence without fit leakage.",
+      "increment": "complete",
+      "depends_on": ["JAA-02"],
+      "owns": [
+        "career_automation/opportunity_calibration.py",
+        "career_automation/fixtures/jaa03_locked_metrics.json",
+        "career_automation/fixtures/jaa03_vacancies.json",
+        "scripts/accept_jaa_03.py",
+        "scripts/build_jaa03_locked_set.py",
+        "runtime_evidence/jaa03/*.json"
+      ],
+      "inputs": ["career_automation/database.py", "tracked_source_revision.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {
+          "id": "JAA-03-opportunity-zero",
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py"],
+          "files": ["test_jaa03_independent_acceptance.py", "test_jaa02_jaa03_receipt_tamper_controls.py"]
+        },
+        {
+          "id": "JAA-03-negative-controls",
+          "argv": ["{python}", "scripts/accept_jaa_03.py"],
+          "files": ["scripts/accept_jaa_03.py"],
+          "negative_control": true
+        }
+      ],
+      "evidence": []
+    },
+    "JAA-04": {
+      "claim": "Employer reconnaissance produces cited, freshness-aware dossiers and Opportunity-1 decisions.",
+      "increment": "B",
+      "depends_on": ["JAA-03"],
+      "owns": [
+        "career_automation/employer_research.py",
+        "career_automation/fetching.py",
+        "career_automation/opportunity1.py",
+        "career_automation/retrieval.py",
+        "career_automation/fixtures/jaa04_admitted_queue.json",
+        "career_automation/fixtures/jaa04_authority_canaries/**",
+        "scripts/accept_jaa04_coordination.py",
+        "scripts/accept_jaa_04.py",
+        "scripts/capture_jaa04_authority_canaries.py",
+        "scripts/capture_jaa_04.py",
+        "scripts/certify_jaa04_increment_a.py",
+        "scripts/rebuild_jaa04_corpus.py",
+        "scripts/repair_jaa_04_capture.py"
+      ],
+      "inputs": ["career_automation/database.py", "career_automation/opportunity_calibration.py", "tracked_source_revision.py"],
+      "interfaces": ["scripts/jaa04_increment_a_test_inventory.json", "scripts/jaa04_pytest_inventory_plugin.py"],
+      "environment": ["requirements-scrapling-full.txt"],
+      "tests": [
+        {
+          "id": "JAA-04-software-contract",
+          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py"],
+          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py"]
+        },
+        {
+          "id": "JAA-04-negative-controls",
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa04_increment_a_certifier_fail_closed.py", "test_jaa04_increment_a_independent_regressions.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_runtime_recertification.py", "test_split_repair_contract.py"],
+          "files": ["test_jaa04_increment_a_certifier_fail_closed.py", "test_jaa04_increment_a_independent_regressions.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_runtime_recertification.py", "test_split_repair_contract.py"],
+          "negative_control": true,
+          "timeout_seconds": 1800
+        }
+      ],
+      "evidence": [
+        {"kind": "corpus", "scope": "JAA-04-corpus"},
+        {"kind": "live_canary", "scope": "JAA-04-live-canary", "max_age_seconds": 86400}
+      ]
+    },
+    "JAA-05": {
+      "claim": "Evidence matching and gap optimisation are calibrated, abstaining and evidence-gated.",
+      "increment": "complete",
+      "depends_on": ["JAA-04"],
+      "owns": ["career_automation/evidence_matching.py", "career_automation/gap_optimizer.py"],
+      "inputs": ["career_automation/candidate_graph.py", "career_automation/employer_research.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-05-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa05_independent_acceptance.py"], "files": ["test_jaa05_independent_acceptance.py"]},
+        {"id": "JAA-05-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa05_negative_controls.py"], "files": ["test_jaa05_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-06": {
+      "claim": "The application strategy compiler emits reproducible, evidence-linked positioning plans.",
+      "increment": "complete",
+      "depends_on": ["JAA-05"],
+      "owns": ["career_automation/application_strategy.py"],
+      "inputs": ["career_automation/evidence_matching.py", "career_automation/gap_optimizer.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-06-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa06_independent_acceptance.py"], "files": ["test_jaa06_independent_acceptance.py"]},
+        {"id": "JAA-06-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa06_negative_controls.py"], "files": ["test_jaa06_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-07": {
+      "claim": "ATS-safe documents and answers compile only from approved claims and retain provenance.",
+      "increment": "complete",
+      "depends_on": ["JAA-06"],
+      "owns": ["career_automation/application_compiler.py", "career_automation/rendering.py"],
+      "inputs": ["career_automation/application_strategy.py", "career_automation/documents.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-07-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa07_independent_acceptance.py"], "files": ["test_jaa07_independent_acceptance.py"]},
+        {"id": "JAA-07-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa07_negative_controls.py"], "files": ["test_jaa07_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-08": {
+      "claim": "The deterministic release gate binds every consequential input and cannot be bypassed probabilistically.",
+      "increment": "complete",
+      "depends_on": ["JAA-07"],
+      "owns": ["career_automation/release_gate.py"],
+      "inputs": ["career_automation/application_compiler.py", "career_automation/security.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-08-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa08_independent_acceptance.py"], "files": ["test_jaa08_independent_acceptance.py"]},
+        {"id": "JAA-08-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa08_negative_controls.py"], "files": ["test_jaa08_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-09": {
+      "claim": "The simulated ATS walking skeleton proves browser checkpoints, leases and receipt integrity.",
+      "increment": "complete",
+      "depends_on": ["JAA-08"],
+      "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
+      "inputs": ["career_automation/browser_workflows.py", "career_automation/release_gate.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-09-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa09_independent_acceptance.py"], "files": ["test_jaa09_independent_acceptance.py"]},
+        {"id": "JAA-09-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa09_negative_controls.py"], "files": ["test_jaa09_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-10": {
+      "claim": "Walking-skeleton and shadow-cohort certification retain locked evidence and negative twins.",
+      "increment": "complete",
+      "depends_on": ["JAA-09"],
+      "owns": ["career_automation/shadow_certification.py"],
+      "inputs": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-10-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_independent_acceptance.py"], "files": ["test_jaa10_independent_acceptance.py"]},
+        {"id": "JAA-10-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_negative_controls.py"], "files": ["test_jaa10_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-11": {
+      "claim": "One official ATS adapter and bounded live canary preserve release and receipt invariants.",
+      "increment": "complete",
+      "depends_on": ["JAA-10"],
+      "owns": ["career_automation/official_ats_adapter.py"],
+      "inputs": ["career_automation/browser_executor.py", "career_automation/release_gate.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-11-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_independent_acceptance.py"], "files": ["test_jaa11_independent_acceptance.py"]},
+        {"id": "JAA-11-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_negative_controls.py"], "files": ["test_jaa11_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": [
+        {"kind": "live_canary", "scope": "JAA-11-live-canary", "max_age_seconds": 86400}
+      ]
+    },
+    "JAA-12": {
+      "claim": "Post-submission statuses and follow-ups are evidence-backed, deduplicated and replayable.",
+      "increment": "complete",
+      "depends_on": ["JAA-11"],
+      "owns": ["career_automation/status_ingestion.py"],
+      "inputs": ["career_automation/official_ats_adapter.py", "career_automation/database.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-12-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_independent_acceptance.py"], "files": ["test_jaa12_independent_acceptance.py"]},
+        {"id": "JAA-12-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_negative_controls.py"], "files": ["test_jaa12_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-13": {
+      "claim": "Outcome feedback updates calibration without contaminating locked evaluation evidence.",
+      "increment": "complete",
+      "depends_on": ["JAA-12"],
+      "owns": ["career_automation/outcome_feedback.py"],
+      "inputs": ["career_automation/status_ingestion.py", "career_automation/opportunity_calibration.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-13-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa13_independent_acceptance.py"], "files": ["test_jaa13_independent_acceptance.py"]},
+        {"id": "JAA-13-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa13_negative_controls.py"], "files": ["test_jaa13_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-14": {
+      "claim": "Source expansion remains policy-bounded, deduplicated and quality-measured.",
+      "increment": "complete",
+      "depends_on": ["JAA-13"],
+      "owns": ["career_automation/source_expansion.py"],
+      "inputs": ["scraper/**", "career_automation/outcome_feedback.py"],
+      "interfaces": [],
+      "environment": ["requirements-scrapling-full.txt"],
+      "tests": [
+        {"id": "JAA-14-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa14_independent_acceptance.py"], "files": ["test_jaa14_independent_acceptance.py"]},
+        {"id": "JAA-14-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa14_negative_controls.py"], "files": ["test_jaa14_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-15": {
+      "claim": "Operational scheduling, budgets, observability and circuit breakers support unattended running.",
+      "increment": "complete",
+      "depends_on": ["JAA-14"],
+      "owns": ["career_automation/operations.py"],
+      "inputs": ["career_automation/observability.py", "career_automation/source_expansion.py"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-15-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa15_independent_acceptance.py"], "files": ["test_jaa15_independent_acceptance.py"]},
+        {"id": "JAA-15-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa15_negative_controls.py"], "files": ["test_jaa15_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    },
+    "JAA-16": {
+      "claim": "The complete product passes release, authenticity, security and end-to-end certification.",
+      "increment": "complete",
+      "depends_on": ["JAA-15"],
+      "owns": ["career_automation/release_certification.py"],
+      "inputs": ["career_automation/operations.py", "acceptance"],
+      "interfaces": [],
+      "environment": [],
+      "tests": [
+        {"id": "JAA-16-release", "argv": ["{python}", "-m", "pytest", "-q"], "files": ["test_jaa16_release_certification.py"], "timeout_seconds": 3600},
+        {"id": "JAA-16-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa16_negative_controls.py"], "files": ["test_jaa16_negative_controls.py"], "negative_control": true}
+      ],
+      "evidence": []
+    }
+  }
+}
