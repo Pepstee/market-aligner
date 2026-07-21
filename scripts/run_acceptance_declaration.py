@@ -15,6 +15,7 @@ SOURCE_COMMANDS = (
     (sys.executable, "scripts/accept_jaa_02.py"),
     (sys.executable, "scripts/accept_jaa02_receipt.py"),
     (sys.executable, "scripts/accept_jaa03_receipt.py"),
+    (sys.executable, "scripts/accept_jaa04_policy_serialization.py"),
     (sys.executable, "scripts/accept_jaa04_coordination.py"),
 )
 

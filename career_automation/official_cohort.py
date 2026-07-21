@@ -23,7 +23,7 @@ import yaml
 
 from career_automation.opportunity_calibration import (
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
-    decide_opportunity0,
+    calibration_policy_json, decide_opportunity0,
 )
 from scraper.adapters.base import load_adapter
 from scraper.viability import Vacancy, canonical_key, local_decision
@@ -238,7 +238,7 @@ def build(config_path: Path, output: Path, raw_root: Path) -> dict[str, Any]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "selection": "highest Opportunity-0 score then vacancy identity; exact 30",
         "policy": {"identity": DECISION_RULE_VERSION, "hash": policy.policy_hash,
-                   "parameters": asdict(policy)},
+                   "parameters": calibration_policy_json(policy)},
         "raw_store": {"layout": "sha256-prefix/content-sha256.response",
                       "root": str(raw_root)},
         "records": records,
