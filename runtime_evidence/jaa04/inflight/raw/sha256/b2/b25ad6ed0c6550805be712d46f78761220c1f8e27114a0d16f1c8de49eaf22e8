@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    
+            <!-- Loading the fontawesome to resolve slow icon rendering issues -->
+    <link rel="preload" 
+          href="/fonts/fontawesome-webfont.woff2?v=4.7.0" 
+          as="font" 
+          type="font/woff2" 
+          crossorigin="anonymous">
+
+    <script>
+        // Include the following lines to define the gtag() function when
+        // calling this code prior to your gtag.js or Tag Manager snippet
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+
+        let ad_storage = 'denied'
+        let analytics_storage = 'denied'
+
+        cookies = document.cookie.split(';')
+
+        for (let i = 0; i < cookies.length; i++) {
+            if (cookies[i].includes('CookieControl')) {
+                let cookie = cookies[i]
+                cookie = JSON.parse(cookie.split('=')[1])
+                ad_storage = cookie['optionalCookies']['advertising'] === 'accepted' ? 'granted' : 'denied'
+                analytics_storage = cookie['optionalCookies']['analytics']  === 'accepted' ? 'granted' : 'denied'
+            }
+        }
+
+        // Call the default command before gtag.js or Tag Manager runs to
+        // adjust how the tags operate when they run. Modify the defaults
+        // per your business requirements and prior consent granted/denied, e.g.:
+        gtag('consent', 'default', {
+            'ad_storage': ad_storage,
+            'analytics_storage': analytics_storage
+        });
+    </script>
+    <!-- Google Tag Manager -->
+    <script>
+        (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({
+            'gtm.start': new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+            j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+            'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+        })(window,document,'script','dataLayer','GTM-MVCS9TR');
+    </script>
+
+    <!-- End Google Tag Manager -->
+
+    
+<script src="https://cc.cdn.civiccomputing.com/9/cookieControl-9.x.min.js" type="text/javascript"></script>
+<script type="text/javascript">
+    gtag('js', new Date());
+    gtag('config', 'GA_MEASUREMENT_ID');
+    gtag('config', 'AW-CONVERSION_ID');
+
+    const config = {
+        apiKey: '8072dab28e3b67338e80046f35e1b9f6e59e984e',
+        product: 'PRO_MULTISITE',
+        setInnerHTML: true,
+        text: {
+            intro: 'Some of these cookies are essential, while others help us to improve your experience by providing insights into how the site is being used. For more detailed information about the cookies we use, please see our <a href="/legal/cookie-policy" target="_blank">Cookie policy</a>'
+        },
+        necessaryCookies: [
+            'JOBS_SESSID',
+            'searchCriteria',
+            'searchUri',
+            'lastSavedJob',
+            'savedJobOriginPage',
+            'savedJobAdvertIDs',
+            'CookieControl',
+            'iePopUp',
+            'cookiesession1',
+            'RESTJOBS_SESSID'
+        ],
+        necessaryDescription: 'Necessary cookies enable core functionality such as page navigation and access to secure areas. The website cannot function properly without these cookies, and can only be disabled by changing your browser preferences.',
+        optionalCookies: [
+            {
+                name: 'functional',
+                label: 'Functional Cookies',
+                description: 'These help us to personalise the website to you by remembering your preferences and settings.',
+                cookies: [
+                    'SOCS',
+                    'VISITOR_PRIVACY_METADATA',
+                    '_UserReference'
+                ],
+                onAccept: () => {
+                },
+                onRevoke: () => {
+                }
+            }, {
+                name: 'marketing',
+                label: 'Marketing Cookies',
+                description: 'Marketing cookies help us provide personalised and relevant services or advertising to our website visitors, and to assess the effectiveness of our marketing campaigns.',
+                cookies: [
+                    'sa-user-id',
+                    'sa-user-id-v2',
+                    'sa-user-id-v3',
+                    '_rdt_uuid',
+                    'wd / dpr',
+                    '_sfid_ae94',
+                    '_biz_flagsA',
+                    '_biz_nA',
+                    '_biz_pendingA',
+                    '_biz_uid',
+                    'ar_debug',
+                    '_gcl_au',
+                    '_evga_497c',
+                    'VISITOR_INFO1_LIVE',
+                    'YSC',
+                    '_fbp',
+                    'datr',
+                    'usida',
+                    'li_gc',
+                    'lang',
+                    'lidc',
+                    'bcookie',
+                    'UserMatchHistory',
+                    'AnalyticsSyncHistory',
+                    'muc_ads',
+                    'personalization_id',
+                    'NID',
+                    'MUID',
+                    '_clck',
+                    '_clsk',
+                    'ad-id',
+                    'ad-privacy',
+                    'MSPTC',
+                    'CLID',
+                    'jobseeker-survey_tRaiETqnLgj758hTBazgd08QHVw1Udpw8NOSW9kW3362MrZs1JI3hul2_2BfPNWjLK',
+                    'smcx_0_last_shown_at',
+                    'smcx_460923730_last_shown_at',
+                    '_ttp',
+                    'ttclid',
+                    'ttcsid',
+                    '_qca',
+                    '__spdt'
+                ],
+                onAccept: () => {
+                    gtag('consent', 'update', {ad_storage: 'granted'});
+                                        (() => {
+                        if (document.cookie.indexOf("jobseeker-survey_tRaiETqnLgj758hTBazgd08QHVw1Udpw8NOSW9kW3362MrZs1JI3hul2_2BfPNWjLK") === -1) {
+                            (function(t,e,s,o){var n,a,c;t.SMCX=t.SMCX||[],e.getElementById(o)||(n=e.getElementsByTagName(s),a=n[n.length-1],c=e.createElement(s),c.type="text/javascript",c.async=!0,c.id=o,c.src="https://widget.surveymonkey.com/collect/website/js/tRaiETqnLgj758hTBazgd08QHVw1Udpw8NOSW9kW3362MrZs1JI3hul2_2BfPNWjLK.js",a.parentNode.insertBefore(c,a))})(window,document,"script","smcx-sdk");
+                            document.cookie =  "jobseeker-survey_tRaiETqnLgj758hTBazgd08QHVw1Udpw8NOSW9kW3362MrZs1JI3hul2_2BfPNWjLK=jobseeker-survey_tRaiETqnLgj758hTBazgd08QHVw1Udpw8NOSW9kW3362MrZs1JI3hul2_2BfPNWjLK; max-age=1209600; path=/; domain=" + window.location.hostname.replace('www.', '').replace('account.', '') + ";";
+                        }
+                    })();
+                                    },
+                onRevoke: () => {
+                    gtag('consent', 'update', {ad_storage: 'denied'});
+                    if (document.getElementsByClassName("smcx-widget")) {
+                        for (const i of document.getElementsByClassName("smcx-widget")) {i.remove()};
+                    }
+                    if (document.cookie.indexOf("jobseeker-survey_tRaiETqnLgj758hTBazgd08QHVw1Udpw8NOSW9kW3362MrZs1JI3hul2_2BfPNWjLK") !== -1) {
+                        document.cookie =  "jobseeker-survey_tRaiETqnLgj758hTBazgd08QHVw1Udpw8NOSW9kW3362MrZs1JI3hul2_2BfPNWjLK=; max-age=-1; path=/; domain=" + window.location.hostname.replace('www.', '').replace('account.', '') + ";";
+                    }
+                }
+            }, {
+                name: 'analytics',
+                label: 'Analytics Cookies',
+                description: 'Analytical cookies help us to improve our website by collecting and reporting information on its usage.',
+                cookies: [
+                    'SEARCH_SAMESITE',
+                    '_fs',
+                    '_ga',
+                    '_gid',
+                    '_gat',
+                    '__utma',
+                    '__utmt',
+                    '__utmb',
+                    '__utmc',
+                    '__utmz',
+                    '__utmv',
+                    'mf_user',
+                    'mf_[website-id]'
+                ],
+                onAccept: () => {
+                    gtag('consent', 'update', {analytics_storage: 'granted'});
+                },
+                onRevoke: () => {
+                    gtag('consent', 'update', {analytics_storage: 'denied'});
+                }
+            }
+        ],
+    }
+
+    CookieControl.load(config)
+</script>
+
+    <meta http-equiv="content-type" content="text/html; charset=utf-8" />
+    <meta http-equiv="imagetoolbar" content="no" />
+    <meta name="keywords" content="jobs, jobs.ac.uk, appointments, vacancies, positions, studentships, graduate, fe jobs, further education, he jobs, school teacher, school jobs, teaching, school, uk, careers, research, postgraduate, faculty, recruitment, professor, lecturer, researcher, postdoctoral, phd, academic, education, science, university, college, chemistry, physics, computing, it, job, biological sciences, medical, contract, employer, employment, full-time jobs, part-time jobs, hr, human resources, manager, accountancy, employer, employers, situation, vacant, website, permanent, business, sales, jobs in the uk, united kingdom, international jobs, global jobs, overseas jobs, international employment opportunities, international work, jobs overseas, jobs abroad, overseas job vacancies, overseas employment, worldwide jobs" />
+    <meta name="copyright" content="jobs.ac.uk" />
+    <meta name="company" content="jobs.ac.uk" />
+    <meta name="google-site-verification" content="pmetKk3sujaIMIXFiO-9zRRPjprw_qq7kNSmT0KqXlc" />
+    <meta name="msvalidate.01" content="D09FE1934F8854A6B3CE0995F35E5000" />
+    <meta name="ahrefs-site-verification" content="c70efaec5b71651c1c7b86a6af0be9a6e10786f3db1830f5340c44ea5b658eab" />
+    <meta name="facebook-domain-verification" content="ydzx1qpax727987mku7r9vio8fddlg" />
+
+        <title>Data Scientist Assistant at University of Oxford</title>
+    <meta itemprop="name" content="Data Scientist Assistant at University of Oxford" />
+    <meta property="og:title" content="Data Scientist Assistant at University of Oxford" />
+    <meta name="twitter:title" content="Data Scientist Assistant at University of Oxford" />
+    
+    
+
+    
+        <link rel="canonical" href="https://www.jobs.ac.uk/job/DSH038/data-scientist-assistant" />
+    <meta property="og:url" content="https://www.jobs.ac.uk/job/DSH038/data-scientist-assistant" />
+    
+    
+    
+    <!-- Page Image -->
+    <meta name="image" content="https://www.jobs.ac.uk/images/global/jobsacuk-og-logo.png" />
+    <meta property="og:image" content="https://www.jobs.ac.uk/images/global/jobsacuk-og-logo.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:image:src" content="https://www.jobs.ac.uk/images/global/jobsacuk-og-logo.png" />
+
+    <!-- Facebook -->
+    <meta property="og:site_name" content="Jobs.ac.uk" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@jobsacuk" />
+
+    <!-- navigation aids -->
+    <link rev="start" href="/" title="Home Page" />
+
+    <!-- Tile icon for Win8 (144x144 + tile color) -->
+    <meta name="msapplication-TileImage" content="/jobs-win8-tile-144x144.png" />
+    <meta name="application-name" content="jobs.ac.uk" />
+    <meta name="msapplication-TileColor" content="#ffffff" />
+
+    <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/jobs-touch-icon-144x144.png" />
+    <link rel="apple-touch-icon-precomposed" sizes="114x114" href="/jobs-touch-icon-114x114.png" />
+    <link rel="apple-touch-icon-precomposed" sizes="72x72" href="/jobs-touch-icon-72x72.png" />
+    <link rel="apple-touch-icon-precomposed" href="/jobs-touch-icon-57x57.png" />
+
+    <link rel="shortcut icon" href="/images/favicon.png" />
+
+    <!-- styles -->
+    <link rel="stylesheet" type="text/css" href="/css/responsive.css?1783433007" media="screen" />
+    <link rel="stylesheet" type="text/css" href="/css/print-job-details.css?1783432980" media="print" />
+
+    <!-- scripts -->
+                
+    <script type="text/javascript" src="//platform-api.sharethis.com/js/sharethis.js#property=65b0e1fc92c73d001906c93a&product=custom-share-buttons&source=platform" async="async"></script>
+    <script src="https://hcaptcha.com/1/api.js&amp;render=explicit" async defer></script>
+    <script type="text/javascript" src="/js/vendor.min.js?1783433011"></script>
+    <script async type="text/javascript" src="/js/bundle.min.js?1783433013"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+    <meta name="description" content="Apply for the Data Scientist Assistant role on jobs.ac.uk, the top job board for academic positions in higher education. View details and apply now.">
+</head>
+<body>
+<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-MVCS9TR"
+                  height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
+
+    <script type="text/javascript" >
+        var jobAlertToggle = true;
+        var saveJobToggle = '.j-sidebar__save-job';
+        var user = {
+            userID: null,
+            loggedIn: false,
+            emailAddress: null        };
+        var searchUri = '&academicDisciplineFacet[0]=biological-sciences&subDisciplineFacet[0]=biology&academicDisciplineFacet[1]=mathematics-and-statistics&subDisciplineFacet[1]=mathematics&subDisciplineFacet[2]=statistics&academicDisciplineFacet[2]=computer-sciences&subDisciplineFacet[3]=computer-science&salaryBandFacet[0]=30000-39999&salaryBandFacet[1]=40000-49999&salaryBandFacet[2]=25000-29999&salaryBandFacet[3]=50000-59999&locality[]=Oxford&location=Oxford&locationDisplayName=Oxford&locationCoords[]=51.7520209%2C-1.2577263&distance=30';
+        var searchCriteria = 'a:8:{s:23:&quot;academicDisciplineFacet&quot;;a:3:{i:0;s:19:&quot;biological-sciences&quot;;i:1;s:26:&quot;mathematics-and-statistics&quot;;i:2;s:17:&quot;computer-sciences&quot;;}s:18:&quot;subDisciplineFacet&quot;;a:4:{i:0;s:7:&quot;biology&quot;;i:1;s:11:&quot;mathematics&quot;;i:2;s:10:&quot;statistics&quot;;i:3;s:16:&quot;computer-science&quot;;}s:15:&quot;salaryBandFacet&quot;;a:4:{i:0;s:11:&quot;30000-39999&quot;;i:1;s:11:&quot;40000-49999&quot;;i:2;s:11:&quot;25000-29999&quot;;i:3;s:11:&quot;50000-59999&quot;;}s:8:&quot;locality&quot;;a:1:{i:0;s:6:&quot;Oxford&quot;;}s:8:&quot;location&quot;;s:6:&quot;Oxford&quot;;s:19:&quot;locationDisplayName&quot;;s:6:&quot;Oxford&quot;;s:14:&quot;locationCoords&quot;;a:1:{i:0;s:21:&quot;51.7520209,-1.2577263&quot;;}s:8:&quot;distance&quot;;s:2:&quot;30&quot;;}';
+        var job = {"job":{"advert_id":1082024,"reference":"DSH038","status":"live","keywords":"","title":"Data Scientist Assistant","department":"Oxford Vaccine Group, Centre for Clinical Vaccinology and Tropical Medicine \/ Institute of Developmental and Regenerative Medicine","department_banner_id":0,"salary_min":"35,681","salary_max":"41,636","salary_time_unit":"YEAR","salary_comment":"per annum (with a discretionary range to \u00a345,212 per annum): Grade 6","advert_text":"<p><strong>About the role<\/strong><strong><\/strong><\/p>\n<p>We have an exciting opportunity for a highly motivated Data Scientist Assistant to join the Oxford Vaccine Group (OVG) as part of the Correlates of Immunity \u2013 Artificial Intelligence (CoI-AI) Programme, a pioneering initiative that integrates controlled human infection models, advanced immunology, and AI-driven analytics to accelerate vaccine discovery.<\/p>\n<p>The postholder will contribute to the data science and computational workstream of the programme, supporting the analysis and integration of complex datasets generated from vaccination studies, natural infection studies, and controlled human infection models. The role will focus on the processing, management, statistical analysis, and visualisation of immunological, clinical, and microbiological data to enable robust downstream interpretation and AI-driven discovery.<\/p>\n<p>Working within a multidisciplinary team of data scientists, computational biologists, immunologists, and microbiologists, the postholder will develop, maintain, and optimise reproducible data analysis pipelines and databases. The role includes contributing to study planning, data interpretation, and reporting, ensuring analytical outputs are robust, harmonised, and suitable for publication and dissemination.<\/p>\n<p>The Data Scientist Assistant will support day-to-day computational activities within OVG, including workflow development using systems such as Snakemake and Nextflow, bioinformatic and statistical analyses, and the maintenance of clinical trial databases. The postholder will be expected to use version control and collaborative code management platforms (e.g. Git\/GitHub) as standard practice for developing reproducible and maintainable analytical workflows. The role requires a self-motivated and well organised individual who can communicate effectively with the line manager and wider team to support programme objectives.<\/p>\n<p>You will be working in a growing department within the Medical Sciences Division. The Department of Paediatrics is a world leader in child health research and hosts internationally renowned research programmes in drug development, gastroenterology, haematology, HIV, immunology, neuroimaging, neuromuscular diseases and vaccinology. The Oxford Vaccine Group is a world-leading academic research group conducting clinical and translational studies to advance vaccine development working with a diverse portfolio funded by industry, government and charitable organisations.<\/p>\n<p>This position is offered full-time on a fixed-term contract initially for 2 years with the possibility to extend provided further external funding is available.<\/p>\n<p><strong>About the department<\/strong>\u00a0<\/p>\n<p>Please visit our\u00a0website\u00a0to find out more about the Department.<\/p>\n<p><strong>About you<\/strong><\/p>\n<p>You will hold a degree (or be near completion of a higher degree) in Data Science, Statistics, Computing, Bioinformatics, Life Sciences, or a closely related discipline, with sufficient technical knowledge to contribute effectively to an established research programme. You will have demonstrable experience working with complex biological, clinical, or health-related datasets and applying statistical or computational methods to support research questions.<\/p>\n<p>You will be able to manage your own analytical tasks, deliver high-quality outputs to agreed deadlines, and communicate results clearly through written reports, figures, presentations, and contributions to publications. You will have a collaborative approach, with the ability to work effectively within multidisciplinary teams spanning data science, immunology, microbiology, and computational research, and the willingness to develop new skills as required by the programme.<\/p>\n<p><strong>Only online applications received before 12.00 midday on 31 July 2026 will be considered. Interviews will be held as soon as possible thereafter.<\/strong><\/p>","apply_url":"https:\/\/my.corehr.com\/pls\/uoxrecruit\/erq_jobspec_version_4.display_form?p_company=10&p_internal_external=E&p_display_in_irish=N&p_process_type=&p_applicant_no=&p_form_profile_detail=&p_display_apply_ind=Y&p_refresh_search=Y&p_recruitment_id=187623","employer_id":102,"employer_name":"University of Oxford","date_publish":1784160000,"date_expire":1785456000,"date_closing":1785456000,"date_removed":null,"default_logo_id":0,"go_live_date":"16th July 2026","closing_date":"31st July 2026","expiring_date":"31st July 2026","cust_advert_ref":"187623","salary_min_sterling":"35,681","salary_max_sterling":"41,636","currency_id":1,"salary_currency_symbol":"\u00a3","salary_currency_code":"GBP","hours":null,"contract":null,"further_particulars":"","home_based":0,"field_based":0,"online":0,"salary_rate_id":5,"value":"YEAR","display_text":"Per Annum","title_uri_path":"data-scientist-assistant","subject_areas":{"23":{"category_id":23,"category_name":"Biological Sciences","uri_path":"biological-sciences","parent_category_id":0,"legacy_id":"0400","grouping_id":2,"subcategories":[{"category_id":24,"category_name":"Biology","uri_path":"biology","parent_category_id":23,"legacy_id":"0401","grouping_id":2}]},"43":{"category_id":43,"category_name":"Mathematics & Statistics","uri_path":"mathematics-and-statistics","parent_category_id":0,"legacy_id":"0600","grouping_id":2,"subcategories":[{"category_id":44,"category_name":"Mathematics","uri_path":"mathematics","parent_category_id":43,"legacy_id":"0601","grouping_id":2},{"category_id":45,"category_name":"Statistics","uri_path":"statistics","parent_category_id":43,"legacy_id":"0602","grouping_id":2}]},"47":{"category_id":47,"category_name":"Computer Sciences","uri_path":"computer-sciences","parent_category_id":0,"legacy_id":"0700","grouping_id":2,"subcategories":[{"category_id":48,"category_name":"Computer Science","uri_path":"computer-science","parent_category_id":47,"legacy_id":"0701","grouping_id":2}]}},"job_types":[{"category_name":"Academic or Research","uri_path":"academic-or-research","parent_category_id":0,"legacy_id":"01"}],"location":"South East England","location_code":"","logos":false,"salary_bands":[{"salary_band_id":6,"salary_band":"\u00a330,000 - \u00a339,999","uri_path":"30000-39999"},{"salary_band_id":7,"salary_band":"\u00a340,000 - \u00a349,999","uri_path":"40000-49999"}],"salary_bands_additional":[{"salary_band_id":5,"salary_band":"\u00a325,000 - \u00a329,999","uri_path":"25000-29999"},{"salary_band_id":8,"salary_band":"\u00a350,000 - \u00a359,999","uri_path":"50000-59999"}],"workplaces":[{"workplace_id":3,"workplace_display_name":"On Site"}],"url":"\/job\/DSH038\/data-scientist-assistant"},"employer":{"employer_id":102,"employer_name":"University of Oxford","employer_uri_path":"university-of-oxford","is_featured":0,"composite_logo_required":0,"parent_employer_uri_path":null,"logo_width":320,"logo_height":98,"video_id":null,"video_title":null,"video_transcript":null},"fundings":[],"qualifications":[],"contracts":[{"display_text":"Fixed-Term\/Contract"}],"hours":[{"display_text":"Full Time"}],"locations":"Oxford","locationsArray":{},"workplaces":[{"workplace_id":3,"workplace_display_name":"On Site"}],"subjectAreas":[{"category_id":23,"category_name":"Biological Sciences","uri_path":"biological-sciences","parent_category_id":0,"legacy_id":"0400","grouping_id":2,"discipline_facet":"academicDisciplineFacet"},{"category_id":24,"category_name":"Biology","uri_path":"biology","parent_category_id":23,"legacy_id":"0401","grouping_id":2,"discipline_facet":"academicDisciplineFacet"},{"category_id":43,"category_name":"Mathematics & Statistics","uri_path":"mathematics-and-statistics","parent_category_id":0,"legacy_id":"0600","grouping_id":2,"discipline_facet":"academicDisciplineFacet"},{"category_id":44,"category_name":"Mathematics","uri_path":"mathematics","parent_category_id":43,"legacy_id":"0601","grouping_id":2,"discipline_facet":"academicDisciplineFacet"},{"category_id":45,"category_name":"Statistics","uri_path":"statistics","parent_category_id":43,"legacy_id":"0602","grouping_id":2,"discipline_facet":"academicDisciplineFacet"},{"category_id":47,"category_name":"Computer Sciences","uri_path":"computer-sciences","parent_category_id":0,"legacy_id":"0700","grouping_id":2,"discipline_facet":"academicDisciplineFacet"},{"category_id":48,"category_name":"Computer Science","uri_path":"computer-science","parent_category_id":47,"legacy_id":"0701","grouping_id":2,"discipline_facet":"academicDisciplineFacet"}],"searchCriteria":{"academicDisciplineFacet":["biological-sciences","mathematics-and-statistics","computer-sciences"],"subDisciplineFacet":["biology","mathematics","statistics","computer-science"],"salaryBandFacet":["30000-39999","40000-49999","25000-29999","50000-59999"],"locality":["Oxford"],"location":"Oxford","locationDisplayName":"Oxford","locationCoords":["51.7520209,-1.2577263"],"distance":"30"}};
+    </script>
+    <a id="skip-link" href="#main-content" style="opacity: 0;" tabindex="0">Skip to main content</a>
+    <nav class="j-header">
+    <div id="mobile-nav-expander" tabindex="0" class="j-header__mobile-menu-expander" data-target-menu="#mobile-main-nav">
+        <i class="fa fa-bars"></i>
+    </div>
+    <div class="j-header__logo">
+        <a href="https://www.jobs.ac.uk/" title="home page">
+            <img class="j-image__header" src="/images/global/jobsacuk-logo-new.png" alt="jobs.ac.uk" title="jobs.ac.uk" />
+        </a>
+    </div>
+    <div class="j-header__mobile-menu-expander" data-target-menu="#mobile-account-nav">
+                    <a href="https://account.jobs.ac.uk/user/login"><i class="fa fa-user-circle-o"></i></a>
+            </div>
+    <div class="j-header__mobile-menu" id="mobile-main-nav">
+        <ul>
+            <li class="active">
+                <a href="https://www.jobs.ac.uk/">Find a Job</a>
+            </li>
+            <li >
+                <a href="https://www.jobs.ac.uk/phd">Find PhDs</a>
+            </li>
+            <li >
+                <a href="https://career-advice.jobs.ac.uk">Career Advice</a>
+            </li>
+                            <li >
+                    <a href="https://account.jobs.ac.uk/user/login">Jobs by Email</a>
+                </li>
+                        <li><a href="https://www.jobs.ac.uk/recruiters/">Advertise a Job</a></li>
+            <li class="recruiters"><a href="https://www.jobs.ac.uk/recruiters/">Recruiters</a></li>
+        </ul>
+    </div>
+                <div class="j-header__banner-ad">
+            <script>
+            
+        </script>
+    </div>
+
+        <div class="j-header__menu">
+        <ul>
+            <li class="active">
+                <a href="https://www.jobs.ac.uk/">Find a Job</a>
+            </li>
+            <li >
+                <a href="https://www.jobs.ac.uk/phd">Find PhDs</a>
+            </li>
+            <li >
+                <a href="https://career-advice.jobs.ac.uk">Career Advice</a>
+            </li>
+                            <li >
+                    <a href="https://account.jobs.ac.uk/user/login">Jobs by Email</a>
+                </li>
+                        <li><a href="https://www.jobs.ac.uk/recruiters/">Advertise a Job</a></li>
+        </ul>
+    </div>
+    <div class="j-header__menu j-header__menu--right">
+                    <ul class="j-header__menu">
+                <li >
+                    <a href="https://account.jobs.ac.uk/">Your Account</a>
+                </li>
+                <li class="recruiters"><a href="https://www.jobs.ac.uk/recruiters/">Recruiters</a></li>
+            </ul>
+            </div>
+</nav>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"JobPosting","title":"Data Scientist Assistant","description":"<p><strong>About the role</strong><strong></strong></p>\n<p>We have an exciting opportunity for a highly motivated Data Scientist Assistant to join the Oxford Vaccine Group (OVG) as part of the Correlates of Immunity – Artificial Intelligence (CoI-AI) Programme, a pioneering initiative that integrates controlled human infection models, advanced immunology, and AI-driven analytics to accelerate vaccine discovery.</p>\n<p>The postholder will contribute to the data science and computational workstream of the programme, supporting the analysis and integration of complex datasets generated from vaccination studies, natural infection studies, and controlled human infection models. The role will focus on the processing, management, statistical analysis, and visualisation of immunological, clinical, and microbiological data to enable robust downstream interpretation and AI-driven discovery.</p>\n<p>Working within a multidisciplinary team of data scientists, computational biologists, immunologists, and microbiologists, the postholder will develop, maintain, and optimise reproducible data analysis pipelines and databases. The role includes contributing to study planning, data interpretation, and reporting, ensuring analytical outputs are robust, harmonised, and suitable for publication and dissemination.</p>\n<p>The Data Scientist Assistant will support day-to-day computational activities within OVG, including workflow development using systems such as Snakemake and Nextflow, bioinformatic and statistical analyses, and the maintenance of clinical trial databases. The postholder will be expected to use version control and collaborative code management platforms (e.g. Git/GitHub) as standard practice for developing reproducible and maintainable analytical workflows. The role requires a self-motivated and well organised individual who can communicate effectively with the line manager and wider team to support programme objectives.</p>\n<p>You will be working in a growing department within the Medical Sciences Division. The Department of Paediatrics is a world leader in child health research and hosts internationally renowned research programmes in drug development, gastroenterology, haematology, HIV, immunology, neuroimaging, neuromuscular diseases and vaccinology. The Oxford Vaccine Group is a world-leading academic research group conducting clinical and translational studies to advance vaccine development working with a diverse portfolio funded by industry, government and charitable organisations.</p>\n<p>This position is offered full-time on a fixed-term contract initially for 2 years with the possibility to extend provided further external funding is available.</p>\n<p><strong>About the department</strong> </p>\n<p>Please visit our website to find out more about the Department.</p>\n<p><strong>About you</strong></p>\n<p>You will hold a degree (or be near completion of a higher degree) in Data Science, Statistics, Computing, Bioinformatics, Life Sciences, or a closely related discipline, with sufficient technical knowledge to contribute effectively to an established research programme. You will have demonstrable experience working with complex biological, clinical, or health-related datasets and applying statistical or computational methods to support research questions.</p>\n<p>You will be able to manage your own analytical tasks, deliver high-quality outputs to agreed deadlines, and communicate results clearly through written reports, figures, presentations, and contributions to publications. You will have a collaborative approach, with the ability to work effectively within multidisciplinary teams spanning data science, immunology, microbiology, and computational research, and the willingness to develop new skills as required by the programme.</p>\n<p><strong>Only online applications received before 12.00 midday on 31 July 2026 will be considered. Interviews will be held as soon as possible thereafter.</strong></p><p>£35,681 to £41,636 per annum (with a discretionary range to £45,212 per annum): Grade 6</p>","datePosted":"2026-07-16T00:00:00+00:00","validThrough":"2026-07-31T00:00:00+00:00","employmentType":"Full Time,Fixed-Term/Contract","hiringOrganization":{"@type":"Organization","name":"University of Oxford","logo":"https://www.jobs.ac.uk/images/employer-logos/medium/102.gif","sameAs":"http://www.ox.ac.uk/","department":{"@type":"Organization","name":"Oxford Vaccine Group, Centre for Clinical Vaccinology and Tropical Medicine / Institute of Developmental and Regenerative Medicine"}},"jobLocation":[{"@type":"Place","address":{"@type":"PostalAddress","addressLocality":"Oxford","addressRegion":"England","addressCountry":"United Kingdom"}}],"baseSalary":{"@type":"MonetaryAmount","currency":"GBP","value":{"@type":"StructuredValue","unitText":"YEAR","minValue":"35681.00","maxValue":"41636.00"}}}</script>
+<div class="grid grid__2-col grid__2-col--left grid__2-col--large-right ie11-min-width" style="display: -ms-grid; -ms-grid-columns: 8fr 3fr;">
+    <div class="sub-grid column-1 edge-span-2-mobile" style="display: -ms-grid">
+        <a style=" display:none;" id="returntosearch" class="row-1" href="https://www.google.com/">
+            <i class="fa fa-chevron-left">&nbsp;</i>Back to search results        </a>
+        <div class="sub-grid sub-grid--centered row-2">
+                    <a href="/search/employer/university-of-oxford">
+            <img
+                    id="main-content"
+                    class="j-image j-image--responsive j-default-logo"
+                    src="/images/employer-logos/medium/102.gif?1532708453"
+                    alt="University of Oxford"
+                    title="University of Oxford"
+            />
+        </a>
+    </div>
+        <h1 class="j-advert__title row-3">Data Scientist Assistant</h1>
+
+        <h3 class="j-advert__employer row-4">
+            <b>
+                <span>University of Oxford</span>
+            </b>
+            - Oxford Vaccine Group, Centre for Clinical Vaccinology and Tropical Medicine / Institute of Developmental and Regenerative Medicine        </h3>
+
+        <div class="j-advert-details__container row-5">
+    <div class="sub-grid sub-grid__2-col ie-flex--column j-advert-details__ie-display" style="grid-row-gap: 0;">
+        <div class="j-advert-details__first-col">
+            <table>
+                                <tr>
+                    <th class="j-advert-details__table-header">Location:</th>
+                    <td>
+                        Oxford
+                    </td>
+                </tr>
+                                <tr>
+                    <th class="j-advert-details__table-header">Salary:</th>
+                    <td>
+                                                    £35,681 to £41,636
+                                                                                        per annum (with a discretionary range to £45,212 per annum): Grade 6
+                            
+                                            </td>
+                </tr>
+                                <tr>
+                    <th class="j-advert-details__table-header">Hours:</th>
+                    <td>Full Time</td>
+                </tr>
+                                                <tr>
+                    <th class="j-advert-details__table-header">Contract Type:</th>
+                    <td>Fixed-Term/Contract</td>
+                </tr>
+                            </table>
+        </div>
+        <div class="j-advert-details__second-col">
+            <table>
+                <tr>
+                    <th class="j-advert-details__table-header">Placed On:</th>
+                    <td>16th July 2026</td>
+                </tr>
+                                <tr>
+                    <th class="j-advert-details__table-header">Closes:</th>
+                    <td>31st July 2026</td>
+                </tr>
+                                                <tr>
+                    <th class="j-advert-details__table-header">Job Ref:</th>
+                    <td>187623</td>
+                </tr>
+                            </table>
+        </div>
+            </div>
+</div>
+
+        
+                <div class="row-7">
+
+                            <a href="https://my.corehr.com/pls/uoxrecruit/erq_jobspec_version_4.display_form?p_company=10&amp;p_internal_external=E&amp;p_display_in_irish=N&amp;p_process_type=&amp;p_applicant_no=&amp;p_form_profile_detail=&amp;p_display_apply_ind=Y&amp;p_refresh_search=Y&amp;p_recruitment_id=187623" target="_blank">
+                                <div id="job-apply-button" class="j-form-input">
+                        <input class="default" type="submit" value="Apply">
+                    </div>
+                  </a>
+                </a>
+        </div>
+                
+        <div id="job-description" class="row-8">
+             <p><strong>About the role</strong><strong></strong></p>
+<p>We have an exciting opportunity for a highly motivated Data Scientist Assistant to join the Oxford Vaccine Group (OVG) as part of the Correlates of Immunity – Artificial Intelligence (CoI-AI) Programme, a pioneering initiative that integrates controlled human infection models, advanced immunology, and AI-driven analytics to accelerate vaccine discovery.</p>
+<p>The postholder will contribute to the data science and computational workstream of the programme, supporting the analysis and integration of complex datasets generated from vaccination studies, natural infection studies, and controlled human infection models. The role will focus on the processing, management, statistical analysis, and visualisation of immunological, clinical, and microbiological data to enable robust downstream interpretation and AI-driven discovery.</p>
+<p>Working within a multidisciplinary team of data scientists, computational biologists, immunologists, and microbiologists, the postholder will develop, maintain, and optimise reproducible data analysis pipelines and databases. The role includes contributing to study planning, data interpretation, and reporting, ensuring analytical outputs are robust, harmonised, and suitable for publication and dissemination.</p>
+<p>The Data Scientist Assistant will support day-to-day computational activities within OVG, including workflow development using systems such as Snakemake and Nextflow, bioinformatic and statistical analyses, and the maintenance of clinical trial databases. The postholder will be expected to use version control and collaborative code management platforms (e.g. Git/GitHub) as standard practice for developing reproducible and maintainable analytical workflows. The role requires a self-motivated and well organised individual who can communicate effectively with the line manager and wider team to support programme objectives.</p>
+<p>You will be working in a growing department within the Medical Sciences Division. The Department of Paediatrics is a world leader in child health research and hosts internationally renowned research programmes in drug development, gastroenterology, haematology, HIV, immunology, neuroimaging, neuromuscular diseases and vaccinology. The Oxford Vaccine Group is a world-leading academic research group conducting clinical and translational studies to advance vaccine development working with a diverse portfolio funded by industry, government and charitable organisations.</p>
+<p>This position is offered full-time on a fixed-term contract initially for 2 years with the possibility to extend provided further external funding is available.</p>
+<p><strong>About the department</strong> </p>
+<p>Please visit our website to find out more about the Department.</p>
+<p><strong>About you</strong></p>
+<p>You will hold a degree (or be near completion of a higher degree) in Data Science, Statistics, Computing, Bioinformatics, Life Sciences, or a closely related discipline, with sufficient technical knowledge to contribute effectively to an established research programme. You will have demonstrable experience working with complex biological, clinical, or health-related datasets and applying statistical or computational methods to support research questions.</p>
+<p>You will be able to manage your own analytical tasks, deliver high-quality outputs to agreed deadlines, and communicate results clearly through written reports, figures, presentations, and contributions to publications. You will have a collaborative approach, with the ability to work effectively within multidisciplinary teams spanning data science, immunology, microbiology, and computational research, and the willingness to develop new skills as required by the programme.</p>
+<p><strong>Only online applications received before 12.00 midday on 31 July 2026 will be considered. Interviews will be held as soon as possible thereafter.</strong></p> 
+            
+            <div class="row-10 sub-grid sub-grid--centered ">
+    </div>
+        </div>
+
+        <div class="border-bottom row-9">
+        </div>
+
+        <div id="feedback" class="border-bottom row-12">
+            <section class="j-social-media__share">
+    <p><strong>Share on social media</strong></p>
+    <div class="j-social-media__share-buttons">
+        <div class="j-social-media__share-button st-custom-button" tabindex="0" data-network="twitter">
+            <img src="/images/global/sharing/x.png" alt="Share on X">
+        </div>
+        <div class="j-social-media__share-button st-custom-button" tabindex="0" data-network="facebook">
+            <img src="/images/global/sharing/facebook.png" alt="Share on Facebook">
+        </div>
+        <div class="j-social-media__share-button st-custom-button" tabindex="0" data-network="linkedin">
+            <img src="/images/global/sharing/linkedin.png" alt="Share on LinkedIn">
+        </div>
+    </div>
+</section>
+            We value your feedback on the quality of our adverts.
+            If you have a comment to make about the overall quality of this advert,
+            or its categorisation then please
+            <a class="underlined" href="/job/feedback/advert/DSH038/">send us your feedback</a>
+        </div>
+
+        <div class="row-13">
+    <h5>Advert information</h5>
+    <div>
+        <p><b>Type / Role:</b></p>
+        <div>
+            
+            <form method="GET" action="/search/academic-or-research">
+                <div class="j-form-input ie-11-width">
+                                                                 <input class="j-form-input__disabled-cat" type="button" value="Academic or Research">
+                                    </div>
+            </form>
+                    </div>
+    </div>
+    <div>
+        <p><b>Subject Area(s):</b></p>
+
+        
+            <form method="GET" action="/search/">
+                                                    
+                    <div class="j-form-input ie-11-width">
+                        <input name="academicDisciplineFacet[0]" value="biological-sciences" type="hidden">
+                        <input class="parent-category" type="submit" value="Biological Sciences">
+                    </div>
+                            </form>
+        
+            <form method="GET" action="/search/">
+                
+                    <div class="j-form-input ie-11-width">
+                                                <input name="academicDisciplineFacet[0]" value="biological-sciences" type="hidden">
+                        <input name="subDisciplineFacet[0]" value="biology" type="hidden">
+                        <input class="" type="submit" value="Biology">
+                    </div>
+
+                            </form>
+        
+            <form method="GET" action="/search/">
+                                                    
+                    <div class="j-form-input ie-11-width">
+                        <input name="academicDisciplineFacet[0]" value="mathematics-and-statistics" type="hidden">
+                        <input class="parent-category" type="submit" value="Mathematics &amp; Statistics">
+                    </div>
+                            </form>
+        
+            <form method="GET" action="/search/">
+                
+                    <div class="j-form-input ie-11-width">
+                                                <input name="academicDisciplineFacet[0]" value="mathematics-and-statistics" type="hidden">
+                        <input name="subDisciplineFacet[0]" value="mathematics" type="hidden">
+                        <input class="" type="submit" value="Mathematics">
+                    </div>
+
+                            </form>
+        
+            <form method="GET" action="/search/">
+                
+                    <div class="j-form-input ie-11-width">
+                                                <input name="academicDisciplineFacet[0]" value="mathematics-and-statistics" type="hidden">
+                        <input name="subDisciplineFacet[0]" value="statistics" type="hidden">
+                        <input class="" type="submit" value="Statistics">
+                    </div>
+
+                            </form>
+        
+            <form method="GET" action="/search/">
+                                                    
+                    <div class="j-form-input ie-11-width">
+                        <input name="academicDisciplineFacet[0]" value="computer-sciences" type="hidden">
+                        <input class="parent-category" type="submit" value="Computer Sciences">
+                    </div>
+                            </form>
+        
+            <form method="GET" action="/search/">
+                
+                    <div class="j-form-input ie-11-width">
+                                                <input name="academicDisciplineFacet[0]" value="computer-sciences" type="hidden">
+                        <input name="subDisciplineFacet[0]" value="computer-science" type="hidden">
+                        <input class="" type="submit" value="Computer Science">
+                    </div>
+
+                            </form>
+            </div>
+    <div>
+        <p><b>Location(s):</b></p>
+        <div class="j-form-input ie-11-width">
+            <input class="j-form-input__disabled-cat" type="button" value="South East England">
+        </div>
+    </div>
+    </div>
+    </div>
+
+    <div class="j-sidebar j-sidebar--left j-sidebar--always-show j-sidebar--light-blue column-2 ie-border-left ie-sidebar" style="align-content: flex-start;">
+        <div>
+    <h5>Job tools</h5>
+    <!-- template for the modal component -->
+<script type="text/x-template" id="modal-template">
+<transition name="modal">
+    <div class="modal-mask">
+        <div class="modal-wrapper">
+            <div class="modal-container">
+                <div>
+                    <a id="job-alert-modal-close-button" class="j-job-alert-modal__close-button" @click="$emit('close')">&times;</a>
+                    <div id="modal-header">
+                    </div>
+                </div>
+                <div class="modal-body">
+                    <form id="saveSearchAsJobAlertCTA" novalidate>
+                        <slot name="body">
+                        </slot>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                </div>
+            </div>
+        </div>
+    </div>
+</transition>
+</script>    <!-- app -->
+    <div id="job-alert-cta">
+        <div id="job-alert-button" class="j-form-input ie-11-width">
+            <i class="j-form-input__button-icon fa fa-envelope">&nbsp;</i>
+            <input class="with-icon" type="submit" value="Email me jobs like this" v-on:click="verifyUser(user.emailAddress)">
+        </div>
+        <!-- Job alert modal form -->
+        <div v-cloak>
+                        <!-- use the modal component, pass in the prop -->
+            <modal v-if="showModal" @close="showModal=false;$root.transitionModalState()">
+            
+                <div v-if="jobAlertCreated == true && !user.loggedIn" slot="body" class="j-job-alert-modal__created-body">
+                    <h4 v-if="searchContext" class="j-job-alert-modal__created-title">PhD Alert Created</h4>
+                    <h4 v-else class="j-job-alert-modal__created-title">Job Alert Created</h4>
+                    <p v-if="searchContext" class="j-job-alert-modal__create-action-description">Your PhD alert has been successfully created for this search.</p>
+                    <p v-else class="j-job-alert-modal__create-action-description">Your job alert has been successfully created for this search.</p>
+                    <a v-if="searchContext" id="job-alert-created_return-to-search-results_skeleton" href="#" class="j-job-alert-modal__create-action-button phd-branding" @click="showModal = false; $root.transitionModalState()">Ok</a>
+                    <a v-else id="job-alert-created_return-to-search-results_skeleton" href="#" class="j-job-alert-modal__create-action-button" @click="showModal = false; $root.transitionModalState()">Ok</a>
+                </div>
+
+                <div v-else-if="jobAlertCreated == true && user.loggedIn" slot="body" class="j-job-alert-modal__created-body">
+                    <h4 v-if="searchContext" class="j-job-alert-modal__created-title">PhD Alert Created</h4>
+                    <h4 v-else class="j-job-alert-modal__created-title">Job Alert Created</h4>
+                    <p v-if="searchContext" class="j-job-alert-modal__create-action-description">Your PhD alert has been successfully created for this search.</p>
+                    <p v-else class="j-job-alert-modal__create-action-description">Your job alert has been successfully created for this search.</p>
+                    <a v-if="searchContext" id="job-alert-created_manage-your-job-alerts" href="https://account.jobs.ac.uk/job-alerts" target="_blank" class="j-job-alert-modal__create-action-button phd-branding" @click="showModal = false; $root.transitionModalState()">Manage your job alerts</a>
+                    <a v-else id="job-alert-created_manage-your-job-alerts" href="https://account.jobs.ac.uk/job-alerts" target="_blank" class="j-job-alert-modal__create-action-button" @click="showModal = false; $root.transitionModalState()">Manage your job alerts</a>
+                </div>
+
+                <!-- user not logged in but has pending account -->
+                <div v-else-if="resetSaveSteps == false && (user.accountStatus == 'pending' || user.accountStatus == 'skeleton-pending')" slot="body">
+                    <h4 class="j-job-alert-modal__create-title">Account Verification Missing</h4>
+                    <p class="j-job-alert-modal__create-action-description">In order to create multiple job alerts, you must first verify your email address to complete your account creation</p>
+                    <a v-if="searchContext" id="account-verification-required_request-verification-email" target="_blank" v-bind:href="'https://account.jobs.ac.uk/user/request-verification-email?email=' + emailInput" class="j-job-alert-modal__create-action-button phd-branding" @click="$root.transitionModalState()">Request verification email</a>
+                    <a v-else id="account-verification-required_request-verification-email" target="_blank" v-bind:href="'https://account.jobs.ac.uk/user/request-verification-email?email=' + emailInput" class="j-job-alert-modal__create-action-button" @click="$root.transitionModalState()">Request verification email</a>
+                </div>  
+
+                <!-- user not logged in but has skeleton account -->
+                <div v-else-if="resetSaveSteps == false && user.accountStatus == 'skeleton'" slot="body">
+                    <h4 class="j-job-alert-modal__create-title">jobs.ac.uk Account Required</h4>
+                    <p class="j-job-alert-modal__create-action-description">In order to create multiple alerts, you must create a jobs.ac.uk jobseeker account</p>
+                    <a v-if="searchContext" id="jbe-account-required_create-account_skeleton" v-bind:href="'https://account.jobs.ac.uk/auth/login?populate-email=' + emailInput + '#register'" target="_blank" class="j-job-alert-modal__create-action-button phd-branding" @click="$root.transitionModalState()">Create Account</a>
+                    <a v-else id="jbe-account-required_create-account_skeleton" v-bind:href="'https://account.jobs.ac.uk/auth/login?populate-email=' + emailInput + '#register'" target="_blank" class="j-job-alert-modal__create-action-button" @click="$root.transitionModalState()">Create Account</a>
+                </div>
+
+                <!-- user not logged in and has blocked status -->
+                <div v-else-if="resetSaveSteps == false && user.accountStatus == 'blocked' && !user.loggedIn" slot="body">
+                    <h4 class="j-job-alert-modal__create-title">Alert Creation Failed</h4>
+                    <p class="j-job-alert-modal__create-action-description">Unfortunately, your account is currently blocked. Please login to unblock your account.</p>
+                    <div v-if="searchContext">
+                        <a id="blocked-account_login" v-bind:href="'https://account.jobs.ac.uk/auth/login?populate-email=' + emailInput" target="_blank" class="j-job-alert-modal__create-action-button phd-branding" @click="$root.transitionModalState()">Login</a>
+                    </div>
+                    <div v-else>
+                        <a id="blocked-account_login" v-bind:href="'https://account.jobs.ac.uk/auth/login?populate-email=' + emailInput" target="_blank" class="j-job-alert-modal__create-action-button" @click="$root.transitionModalState()">Login</a>
+                    </div>
+                </div>
+
+                <!-- user logged in and has blocked status -->
+                <div v-else-if="resetSaveSteps == false && user.accountStatus == 'blocked' && user.loggedIn" slot="body">
+                    <h4 class="j-job-alert-modal__create-title">Email Address Blocked</h4>
+                    <p class="j-job-alert-modal__create-action-description">We received a delivery failure message when attempting to send you an email and therefore your email address has been blocked. You will not receive job alerts until your email address is unblocked. To do so, please choose from one of the two options below.</p>
+                    <div v-if="searchContext">
+                        <a id="blocked-account_update-email_reverify" href="https://account.jobs.ac.uk/user/re-verify-email" target="_blank" class="j-job-alert-modal__create-action-button phd-branding" @click="!user.loggedIn ? resetSaveSteps = true : showModal = false; ">Re-verify your email</a>
+                        <a id="blocked-account_update-email_reverify" href="https://account.jobs.ac.uk/your-account/edit-email" target="_blank" class="j-job-alert-modal__create-action-button phd-branding" @click="!user.loggedIn ? resetSaveSteps = true : showModal = false; ">Update your email</a>
+                    </div>
+                    <div v-else>
+                        <a id="blocked-account_update-email_reverify" href="https://account.jobs.ac.uk/user/re-verify-email" target="_blank" class="j-job-alert-modal__create-action-button" @click="!user.loggedIn ? resetSaveSteps = true : showModal = false; ">Re-verify your email</a>
+                        <a id="blocked-account_update-email_reverify" href="https://account.jobs.ac.uk/your-account/edit-email" target="_blank" class="j-job-alert-modal__create-action-button" @click="!user.loggedIn ? resetSaveSteps = true : showModal = false; ">Update your email</a>
+                    </div>
+                </div>
+
+                <!-- user has max number of Job Alerts -->
+                <div v-else-if="resetSaveSteps == false && user.accountStatus == 'active' && !user.canCreateJobAlerts" slot="body">
+                    <h4 class="j-job-alert-modal__create-title">Max Alerts Reached</h4>
+                    <p class="j-job-alert-modal__create-action-description">A maximum of 5 Job Alerts can be created against your account. Please remove an existing alert in order to create this new Job Alert</p>
+                    <a v-if="searchContext" id="max-alerts-reached_manage-your-job-alerts" href="https://account.jobs.ac.uk/job-alerts" target="_blank" class="j-job-alert-modal__create-action-button phd-branding" @click="$root.transitionModalState() ">Manage your job alerts</a>
+                    <a v-else id="max-alerts-reached_manage-your-job-alerts" href="https://account.jobs.ac.uk/job-alerts" target="_blank" class="j-job-alert-modal__create-action-button" @click="$root.transitionModalState()">Manage your job alerts</a>
+                </div>
+
+                <!-- failed to create an alert -->
+                <div v-else-if="jobAlertCreationFailed" slot="body">
+                    <h4 class="j-job-alert-modal__create-title">Creation Failed</h4>
+                    <p class="j-job-alert-modal__create-action-description">Unfortunately, your alert was not created at this time. Please try again.</p>
+                    <a v-if="searchContext" id="creation-of-alerts-failed_manage-your-job-alerts" target="_blank" class="j-job-alert-modal__create-action-button phd-branding" @click="showModal=false; $root.transitionModalState()">Ok</a>
+                    <a v-else id="creation-of-alerts-failed_manage-your-job-alerts" target="_blank" class="j-job-alert-modal__create-action-button" @click="showModal=false; $root.transitionModalState()">Ok</a>
+                </div>
+
+                <!-- user has less than max number of Job Alerts -->
+                <div v-else-if="user.loggedIn && user.canCreateJobAlerts" slot="body" class="j-job-alert-modal__create-body">
+                    <h4 v-if="searchContext" class="j-job-alert-modal__create-title">Create PhD Alert</h4>
+                    <h4 v-else class="j-job-alert-modal__create-title">Create Job Alert</h4>
+                    <p class="j-job-alert-modal__create-action-description"><span v-if="searchContext">When you create this PhD alert we will email you a selection of PhDs matching your criteria.</span><span v-else>When you create this job alert we will email you a selection of jobs matching your criteria.</span> Our <a href="https://www.jobs.ac.uk/legal/terms-and-conditions" target="_blank">Terms and Conditions</a> and <a href="https://www.jobs.ac.uk/legal/privacy-policy" target="_blank">Privacy Policy</a> apply to this service. Any personal data you provide in setting up this alert is processed in accordance with our <a href="https://www.jobs.ac.uk/legal/privacy-notice" target="_blank">Privacy Notice</a></p>
+                    <input type="hidden" name="emailInput" value="">
+                    <input type="hidden" name="searchCriteria" value="a:8:{s:23:&quot;academicDisciplineFacet&quot;;a:3:{i:0;s:19:&quot;biological-sciences&quot;;i:1;s:26:&quot;mathematics-and-statistics&quot;;i:2;s:17:&quot;computer-sciences&quot;;}s:18:&quot;subDisciplineFacet&quot;;a:4:{i:0;s:7:&quot;biology&quot;;i:1;s:11:&quot;mathematics&quot;;i:2;s:10:&quot;statistics&quot;;i:3;s:16:&quot;computer-science&quot;;}s:15:&quot;salaryBandFacet&quot;;a:4:{i:0;s:11:&quot;30000-39999&quot;;i:1;s:11:&quot;40000-49999&quot;;i:2;s:11:&quot;25000-29999&quot;;i:3;s:11:&quot;50000-59999&quot;;}s:8:&quot;locality&quot;;a:1:{i:0;s:6:&quot;Oxford&quot;;}s:8:&quot;location&quot;;s:6:&quot;Oxford&quot;;s:19:&quot;locationDisplayName&quot;;s:6:&quot;Oxford&quot;;s:14:&quot;locationCoords&quot;;a:1:{i:0;s:21:&quot;51.7520209,-1.2577263&quot;;}s:8:&quot;distance&quot;;s:2:&quot;30&quot;;}" v-model="searchCriteria">
+                    <input type="hidden" name="searchUri" value="&amp;academicDisciplineFacet[0]=biological-sciences&amp;subDisciplineFacet[0]=biology&amp;academicDisciplineFacet[1]=mathematics-and-statistics&amp;subDisciplineFacet[1]=mathematics&amp;subDisciplineFacet[2]=statistics&amp;academicDisciplineFacet[2]=computer-sciences&amp;subDisciplineFacet[3]=computer-science&amp;salaryBandFacet[0]=30000-39999&amp;salaryBandFacet[1]=40000-49999&amp;salaryBandFacet[2]=25000-29999&amp;salaryBandFacet[3]=50000-59999&amp;locality[]=Oxford&amp;location=Oxford&amp;locationDisplayName=Oxford&amp;locationCoords[]=51.7520209%2C-1.2577263&amp;distance=30" v-model="searchUri">
+
+                    <div id="processingUserData" class="lds-css" v-if="processingUserData">
+                        <div class="sml-rolling">
+                            <div></div>
+                        </div>
+                    </div>
+                    <div v-else>
+                        <input v-if="searchContext" id="create-job-alert_create-job-alert" type="submit" value="Create PhD Alert" class="j-job-alert-modal__create-action-button--full-width phd-branding" v-on:click="saveSearchAsJobAlert($event); addUniqueIdToXButton(1); resetSaveSteps = false; processingUserData = true;" >
+                        <input v-else id="create-job-alert_create-job-alert" type="submit" value="Create Job Alert" class="j-job-alert-modal__create-action-button--full-width" v-on:click="saveSearchAsJobAlert($event);addUniqueIdToXButton(1); resetSaveSteps = false; processingUserData = true;">
+                    </div>
+                </div>
+
+
+                <!-- user not logged in-->
+                <div v-else-if="user.loggedIn!=true" slot="body" class="j-job-alert-modal__create-body">
+                    <h4 v-if="searchContext" class="j-job-alert-modal__create-title">Create PhD Alert</h4>
+                    <h4 v-else class="j-job-alert-modal__create-title">Create Job Alert</h4>
+                    <div class="j-form-input j-form-input--border">
+                        <input id="email" type="email" name="email" placeholder="Email" class="j-job-alert-modal__email-input" v-model="emailInput">
+                    </div>
+                    <div id="email-error" class="j-form-input__error grid__1-col--span-2-col row-2"></div>
+                    <p class="j-job-alert-modal__create-action-description"><span v-if="searchContext" >When you create this PhD alert we will email you a selection of PhDs matching your criteria.</span><span v-else>When you create this job alert we will email you a selection of jobs matching your criteria.</span> Our <a href="https://www.jobs.ac.uk/legal/terms-and-conditions" target="_blank">Terms and Conditions</a> and <a href="https://www.jobs.ac.uk/legal/privacy-policy" target="_blank">Privacy Policy</a> apply to this service. Any personal data you provide in setting up this alert is processed in accordance with our <a href="https://www.jobs.ac.uk/legal/privacy-notice" target="_blank">Privacy Notice</a></p>
+                    <label for="newsOptIn" class="j-job-alert-modal__opt-in">
+                        <input id="newsOptIn" name="newsOptIn" class="j-job-alert-modal__opt-in-tick-area" type="checkbox" value="1" v-model="newsOptIn">I would like to receive email communication from jobs.ac.uk relating to Company News
+                    </label>
+                    <label for="eventsOptIn" class="j-job-alert-modal__opt-in">
+                        <input id="eventsOptIn" name="eventsOptIn" class="j-job-alert-modal__opt-in-tick-area" type="checkbox" value="1"  v-model="eventsOptIn">I would like to receive email communication from jobs.ac.uk relating to Conferences, Meetings and Events
+                    </label>
+                    <input type="hidden" name="searchCriteria" value="a:8:{s:23:&quot;academicDisciplineFacet&quot;;a:3:{i:0;s:19:&quot;biological-sciences&quot;;i:1;s:26:&quot;mathematics-and-statistics&quot;;i:2;s:17:&quot;computer-sciences&quot;;}s:18:&quot;subDisciplineFacet&quot;;a:4:{i:0;s:7:&quot;biology&quot;;i:1;s:11:&quot;mathematics&quot;;i:2;s:10:&quot;statistics&quot;;i:3;s:16:&quot;computer-science&quot;;}s:15:&quot;salaryBandFacet&quot;;a:4:{i:0;s:11:&quot;30000-39999&quot;;i:1;s:11:&quot;40000-49999&quot;;i:2;s:11:&quot;25000-29999&quot;;i:3;s:11:&quot;50000-59999&quot;;}s:8:&quot;locality&quot;;a:1:{i:0;s:6:&quot;Oxford&quot;;}s:8:&quot;location&quot;;s:6:&quot;Oxford&quot;;s:19:&quot;locationDisplayName&quot;;s:6:&quot;Oxford&quot;;s:14:&quot;locationCoords&quot;;a:1:{i:0;s:21:&quot;51.7520209,-1.2577263&quot;;}s:8:&quot;distance&quot;;s:2:&quot;30&quot;;}">
+                    <input type="hidden" name="searchUri" value="&amp;academicDisciplineFacet[0]=biological-sciences&amp;subDisciplineFacet[0]=biology&amp;academicDisciplineFacet[1]=mathematics-and-statistics&amp;subDisciplineFacet[1]=mathematics&amp;subDisciplineFacet[2]=statistics&amp;academicDisciplineFacet[2]=computer-sciences&amp;subDisciplineFacet[3]=computer-science&amp;salaryBandFacet[0]=30000-39999&amp;salaryBandFacet[1]=40000-49999&amp;salaryBandFacet[2]=25000-29999&amp;salaryBandFacet[3]=50000-59999&amp;locality[]=Oxford&amp;location=Oxford&amp;locationDisplayName=Oxford&amp;locationCoords[]=51.7520209%2C-1.2577263&amp;distance=30">
+                    <div id="h-captcha" data-sitekey="255cf980-025a-41cd-9b7a-e13baeba5b66"></div>
+                    <div id="captcha-error" class="j-form-input__error grid__1-col--span-2-col row-2"></div>
+                    <div id="processingUserData" class="lds-css" v-if="processingUserData">
+                        <div class="sml-rolling">
+                            <div></div>
+                        </div>
+                    </div>
+                    <div v-else>
+                        <input v-if="searchContext" id="create-job-alert_create-job-alert_skeleton" type="submit" value="Create PhD Alert" class="j-job-alert-modal__create-action-button--full-width phd-branding"  v-on:click="addUniqueIdToXButton(1); resetSaveSteps = false; saveSearchAsJobAlert($event);" >
+                        <input v-else id="create-job-alert_create-job-alert_skeleton" type="submit" value="Create Job Alert" class="j-job-alert-modal__create-action-button--full-width" v-on:click="addUniqueIdToXButton(1); resetSaveSteps = false; saveSearchAsJobAlert($event);" >
+                    </div>
+
+                </div>
+               
+            </modal>
+        </div>
+    </div>
+    <div class="j-sidebar__save-job j-form-input ie-11-width" data-advert-id="1082024">
+        <a id="save-job-1082024-toggle" class="save-job-toggle" title="Save this job" tabindex="0" data-saved-tooltip="Remove from saved jobs" data-unsaved-tooltip="Save this job">
+            <i class="fa save-job-icon" aria-hidden="true"></i>
+            <span class="save-job-text" data-saved-text="Saved" data-unsaved-text="Save this job">Save this job</span>
+        </a>
+    </div>
+    <form method="GET" action="/job/share/">
+        <input type="hidden" name="job_ref" value="DSH038">
+        <div class="j-form-input ie-11-width">
+            <i class="j-form-input__button-icon fa fa-user">&nbsp;</i>
+            <input class="with-icon" type="submit" value="Send this job to a friend">
+        </div>
+    </form>
+    <form method="GET" action="https://career-advice.jobs.ac.uk">
+        <div class="j-form-input ie-11-width">
+            <i class="j-form-input__button-icon fa fa-comments">&nbsp;</i>
+            <input class="with-icon" type="submit" value="Career advice">
+        </div>
+    </form>
+        <button name="login-to-save-job" type="button" style="display: none;">Login to Save Job</button>
+    <button name="max-saved-jobs" type="button" style="display: none;">Max Saved Jobs Reached</button>
+    <div class="j-modal modal-container" data-trigger='button[name="max-saved-jobs"]'>
+    <a class="j-job-alert-modal__close-button j-modal__close">&times;</a>
+    <div class="j-modal__header">
+        <h4 class="j-job-alert-modal__create-title">Max Saved Jobs Reached</h4>
+    </div>
+    <div class="j-modal__body">
+        <p class="j-job-alert-modal__create-action-description">A maximum of 500 Saved Jobs can be created against your account. Please remove an existing Saved Job in order to add a new Saved Job.</p>
+        <a href="https://account.jobs.ac.uk/saved-jobs" target="_blank" class="j-job-alert-modal__create-action-button">Manage Saved Jobs</a>
+    </div>
+</div>
+
+<div class="j-modal modal-container" data-trigger='button[name="login-to-save-job"]'>
+    <a class="j-job-alert-modal__close-button j-modal__close">&times;</a>
+    <div class="j-modal__header">
+        <h4 class="j-job-alert-modal__create-title">Save Job</h4>
+    </div>
+    <div class="j-modal__body">
+        <p class="j-job-alert-modal__create-action-description">Please sign in or register for an account to save a job.</p>
+        <a href="https://account.jobs.ac.uk/auth/login" class="j-job-alert-modal__create-action-button">Sign In</a>
+        <a href="https://account.jobs.ac.uk/auth/login/#register" class="j-job-alert-modal__create-action-button">Register</a>
+    </div>
+</div>
+</div>
+
+                    <div>
+    <h5>More jobs from University of Oxford</h5>
+            <p class="job-link"><a href="/job/DSF218/nuffield-medical-fellowships">Nuffield Medical Fellowships</a></p>
+            <p class="job-link"><a href="/job/DSH760/postdoctoral-research-assistant-in-impact-engineering-composite-experimenting-and-modelling-for-aerospace-applications">Postdoctoral Research Assistant in Impact Engineering Composite Experimenting and Modelling for Aerospace Applications</a></p>
+            <p class="job-link"><a href="/job/DSH835/access-and-college-office-assistant">Access &amp; College Office Assistant</a></p>
+            <p class="job-link"><a href="/job/DSH893/louise-johnson-associate-professorship-of-molecular-and-cellular-biochemistry">Louise Johnson Associate Professorship of Molecular and Cellular Biochemistry</a></p>
+            <p class="job-link"><a href="/job/DSH905/postdoctoral-research-assistant-for-the-lz-experiment">Postdoctoral Research Assistant for the LZ Experiment</a></p>
+            <p class="job-link"><a href="/job/DSH909/postdoctoral-research-assistant-for-the-lz-experiment">Postdoctoral Research Assistant for the LZ Experiment</a></p>
+        <p><a href="/search/employer/university-of-oxford">Show all jobs for this employer &hellip;</a></p>
+</div>
+                            <div>
+    <h5>More jobs like this</h5>
+        <p class="job-link"><a href="/job/DSH276/">Assistant/Associate/Full Professor in Business Analytics</a></p>
+        <p class="job-link"><a href="/job/DSH870/">Business Applications Specialist - UOD2299</a></p>
+        <p class="job-link"><a href="/job/DSH478/">Machine Learning Scientist (KTP Associate) in Multimodal Data Integration</a></p>
+        <p class="job-link"><a href="/job/DSH424/">Assistant/Associate/Full Professor in Data Science</a></p>
+        <p class="job-link"><a href="/job/DSH888/">Postdoctoral Research Associate</a></p>
+    </div>
+                <div class="j-social-media">
+        <h5 class="j-social-media__header">Join in and follow us</h5>
+        <a class="j-social-media__follow" href="https://www.facebook.com/jobsac" target="_blank" title="jobs.ac.uk facebook">
+        <img class="j-image" src="/images/global/sharing/facebook.png" alt="facebook" /></a>
+    <a class="j-social-media__follow" href="https://twitter.com/jobsacuk" target="_blank" title="jobs.ac.uk x">
+        <img class="j-image" src="/images/global/sharing/x.png" alt="x" /></a>
+    <a class="j-social-media__follow" href="https://uk.linkedin.com/company/jobsacuk" target="_blank" title="jobs.ac.uk linkedin">
+        <img class="j-image" src="/images/global/sharing/linkedin.png" alt="linkedin" /></a>
+    <a class="j-social-media__follow" href="https://www.instagram.com/jobsacuk" target="_blank" title="jobs.ac.uk instagram">
+        <img class="j-image" src="/images/global/sharing/instagram.png" alt="instagram" /></a>
+    <a class="j-social-media__follow" href="https://www.youtube.com/user/jobsac" target="_blank" title="jobs.ac.uk youtube">
+        <img class="j-image" src="/images/global/sharing/youtube.png" alt="youtube" /></a>
+</div>
+    </div>
+</div>
+    <div class="j-footer ie11-min-width">
+    <div class="j-footer__bottom-nav">
+        <a class="j-footer__logo" href="https://www.jobs.ac.uk/" title="home page">
+            <img src="/images/global/jobs_ac_uk-logo-grey.gif" alt="jobs.ac.uk - Great jobs for bright people" title="jobs.ac.uk - Great jobs for bright people" />
+        </a>
+        <p class="j-footer__copyright j-footer__copyright--mobile-display">
+            <small>Copyright &copy; jobs.ac.uk 1998 - 2026</small>
+        </p>
+        <div class="j-footer__top-nav j-footer__top-nav--display">
+            <div class="j-footer__navigation j-footer__navigation-primary column-1">
+                <ul class="row-1">
+                    <li class="first"><a href="https://www.jobs.ac.uk/">Find a Job</a></li>
+                    <li><a href="https://www.jobs.ac.uk/phd">Find PhDs</a></li>
+                    <li><a href="https://career-advice.jobs.ac.uk">Career Advice</a></li>
+                    <li><a href="https://account.jobs.ac.uk/jobs-by-email/">Jobs by Email</a></li>
+                    <li><a href="https://www.jobs.ac.uk/recruiters/">Advertise a Job</a></li>
+                </ul>
+                <ul class="j-footer__navigation-secondary row-2">
+                    <li><a href="https://www.jobs.ac.uk/about/">About Us</a></li>
+                    <li><a href="https://www.jobs.ac.uk/about/contact/">Contact Us</a></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="j-footer__top-nav j-footer__top-nav--mobile-display">
+        <div class="j-footer__navigation j-footer__navigation-primary">
+            <ul>
+                <li class="first"><a href="https://www.jobs.ac.uk/">Find a Job</a></li>
+                <li><a href="https://www.jobs.ac.uk/phd">Find PhDs</a></li>
+                <li><a href="https://career-advice.jobs.ac.uk">Career Advice</a></li>
+                <li><a href="https://account.jobs.ac.uk/jobs-by-email/">Jobs by Email</a></li>
+                <li><a href="https://www.jobs.ac.uk/recruiters/">Advertise a Job</a></li>
+            </ul>
+        </div>
+        <div class="j-footer__navigation j-footer__navigation-secondary">
+            <ul>
+                <li><a href="https://www.jobs.ac.uk/about/">About Us</a></li>
+                <li><a href="https://www.jobs.ac.uk/about/contact/">Contact Us</a></li>
+            </ul>
+        </div>
+        <div class="j-footer__third j-footer__third--mobile-display">
+            <ul>
+                <li><a href="https://www.jobs.ac.uk/legal/terms-and-conditions/">Terms of use</a></li>
+                <li><a href="https://www.jobs.ac.uk/legal/privacy-policy/">Privacy Policy</a></li>
+                <li><a href="https://www.jobs.ac.uk/legal/cookie-policy">Cookie Policy</a></li>
+                <li><a href="https://www.jobs.ac.uk/legal/accessibility">Accessibility Statement</a></li>
+            </ul>
+        </div>
+    </div>
+    <div class="j-footer__third j-footer__third--display column-2">
+        <ul class="row-1">
+            <li><a href="https://www.jobs.ac.uk/legal/terms-and-conditions/">Terms of use</a></li>
+            <li><a href="https://www.jobs.ac.uk/legal/privacy-policy/">Privacy Policy</a></li>
+            <li><a href="https://www.jobs.ac.uk/legal/cookie-policy">Cookie Policy</a></li>
+            <li><a href="https://www.jobs.ac.uk/legal/accessibility">Accessibility Statement</a></li>
+        </ul>
+        <p class="j-footer__copyright j-footer__copyright--display row-2">
+            <small>Copyright &copy; jobs.ac.uk 1998 - 2026</small>
+        </p>
+    </div>
+</div>
+
+<script>
+    if (document.body.contains(document.getElementById('recaptchaV2Form'))) {
+        var siteKey = '';
+        var recaptchaV2ErrorMsg = '';
+    }
+</script>
+
+    <script type="text/javascript">
+        var reference = "DSH038";
+        var institution_name = "University of Oxford";
+        var job_title = "Data Scientist Assistant";
+        var source = "site";
+        var uuid = "undefined";
+    </script>
+
+    <!-- Google Code for Got to a Job 2013 Conversion Page --> <script type="text/javascript">
+    /* <![CDATA[ */
+    var google_conversion_id = 1071910598;
+    var google_conversion_language = "en";
+    var google_conversion_format = "3";
+    var google_conversion_color = "ffffff";
+    var google_conversion_label = "rYzdCKv3lAQQxp2Q_wM";
+    var google_conversion_value = 0;
+    /* ]]> */
+</script>
+    <script type="text/javascript"
+            src="//www.googleadservices.com/pagead/conversion.js">
+    </script>
+    <noscript>
+        <div style="display:inline;">
+            <img height="1" width="1" style="border-style:none;" alt=""
+                 src="//www.googleadservices.com/pagead/conversion/1071910598/?value=0&label=rYzdCKv3lAQQxp2Q_wM&guid=ON&script=0"/>
+        </div>
+    </noscript>
+
+<button name="ie11-trigger" type="button" style="display: none;">IE11 Trigger</button>
+<div class="j-modal" data-trigger='button[name="ie11-trigger"]'>
+    <div class="j-modal__header" style="display: inline-block; width: 100%;">
+        <p class="browser-upgrade-title" style="float: left;">Browser Upgrade Recommended</p>
+        <div class="j-form-input ie-11-width" style="float: right;">
+            <input name="submit" type="submit" value="&#xf00d;" style="font-family: FontAwesome;">
+        </div>
+    </div>
+    <div class="j-modal__body">
+        <p>
+            jobs.ac.uk has been optimised for the latest browsers.
+        <p>
+            For the best user experience, we recommend viewing jobs.ac.uk on one of the following:
+        </p>
+        <div style="text-align: center;">
+            <a href="https://www.google.co.uk/chrome/" target="_blank">
+                <img src="/images/browser-logos/chrome-logo.svg" class="j-image" style="max-height: 5rem;" alt="Google Chrome" title="Google Chrome">
+            </a>
+            <a href="https://www.mozilla.org/en-GB/firefox/new/" target="_blank">
+                <img src="/images/browser-logos/firefox-logo.svg" class="j-image" style="max-height: 5rem;" alt="Firefox" title="Firefox">
+            </a>
+            <a href="https://www.microsoft.com/en-gb/windows/microsoft-edge" target="_blank">
+                <img src="/images/browser-logos/edge-logo.svg" class="j-image" style="max-height: 5rem;" alt="Microsoft Edge" title="Microsoft Edge">
+            </a>
+        </div>
+        <div class="j-form-input ie-11-width">
+            <input name="submit" type="submit" value="OK">
+        </div>
+    </div>
+</div>
+</body>
+</html>

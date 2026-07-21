@@ -1,0 +1,811 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!DOCTYPE html>
+<!--[if lt IE 9]><html class="ie8" lang="en"><![endif]--><!--[if IE 9]><html class="ie9" lang="en"><![endif]--><!--[if gt IE 9]><!--><html lang="en" style=""><!--<![endif]-->
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="description" content="">
+    <meta name="google-site-verification" content="VX5VwE9NfZvosB9oACSjMkSiMhA__j-iYpatqJxzLME" />
+    
+    
+    <title>
+  Job Advert
+</title>
+    
+    <link href="https://www.nhs.uk/" rel="preconnect">
+    <link href="https://assets.nhs.uk/" rel="preconnect" crossorigin>
+    
+    <link type="font/woff2" href="https://assets.nhs.uk/fonts/FrutigerLTW01-55Roman.woff2" rel="preload" as="font" crossorigin>
+    <link type="font/woff2" href="https://assets.nhs.uk/fonts/FrutigerLTW01-65Bold.woff2" rel="preload" as="font" crossorigin>
+    
+    
+  <link href="/candidate/public/hmrc-frontend/hmrc-frontend-6.41-ed71ee092a.0.min.css" rel="stylesheet">
+  <link href="/candidate/public/css/main-b6763d87aa.css" rel="stylesheet">
+
+    
+    <script src="/candidate/public/nhsuk-frontend/nhsuk-d572ca6fda.min.js" defer></script>
+    <script src="/candidate/public/hmrc-frontend/hmrc-frontend-6.41-b7833d0eb7.0.min.js" defer></script>
+
+    
+    <link rel="shortcut icon" href="/candidate/public/nhsuk-frontend/assets/favicons/favicon-68c7f017cf.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="/candidate/public/nhsuk-frontend/assets/favicons/apple-touch-icon-180x180-15a5044def.png">
+    <link rel="mask-icon" href="/candidate/public/nhsuk-frontend/assets/favicons/favicon-ec22bc2cbc.svg" color="#005eb8">
+    <link rel="icon" sizes="192x192" href="/candidate/public/nhsuk-frontend/assets/favicons/favicon-192x192-43924bfe6c.png">
+    <meta name="msapplication-TileImage" content="/candidate/public/nhsuk-frontend/assets/favicons/mediumtile-144x144-cf49858724.png">
+    <meta name="msapplication-TileColor" content="#005eb8">
+    <meta name="msapplication-square70x70logo" content="/candidate/public/nhsuk-frontend/assets/favicons/smalltile-70x70-29f75b06cf.png">
+    <meta name="msapplication-square150x150logo" content="/candidate/public/nhsuk-frontend/assets/favicons/mediumtile-150x150-89688d93af.png">
+    <meta name="msapplication-wide310x150logo" content="/candidate/public/nhsuk-frontend/assets/favicons/widetile-310x150-535c399663.png">
+    <meta name="msapplication-square310x310logo" content="/candidate/public/nhsuk-frontend/assets/favicons/largetile-310x310-294742e00f.png">
+    
+    
+    
+  <meta property="og:image" content="" />
+
+    
+  </head>
+  <body class=" govuk-frontend-supported" id="main-body">
+    
+      <a class="nhsuk-skip-link" href="#maincontent">Skip to main content</a>
+
+    
+    <div id="heading-body">
+      
+      <script>document.body.className = ((document.body.className) ? document.body.className + ' js-enabled' : 'js-enabled');</script>
+      
+
+        
+  <header class="nhsuk-header" role="banner" id="heading-body">
+
+  
+  <div class="top-banner" id="cookie-banner">
+    <div class="nhsuk-width-container">
+      <h2>Cookies on NHS Jobs</h2>
+      <p>We&#39;ve put some small files called cookies on your device to help us make improvements to our site.</p>
+      <p>To improve our site we&#39;d also like to use cookies which will send information to Google Analytics. You can <a href="/candidate/cookies" id="cookies-info-link">read more about our cookies</a> before you choose.</p>
+      <form class="form" method="POST" action="/candidate/save-seen-cookie">
+        <input type="hidden" name="_csrf" value="qxn2o7LI-MBqfcIpzmRFQ6vA_t22edFBVtqs">
+        <button class="nhsuk-button" type="submit" id="accept-cookies" name="accept-cookies" value="true">Accept analytics cookies</button>
+        <button class="nhsuk-button" type="submit" id="reject-cookies" name="accept-cookies" value="false">Do not accept analytics cookies</button>
+      </form>
+    </div>
+  </div>
+
+
+
+
+  <div class="nhsuk-width-container nhsuk-header__container ">
+    <div class=" nhsuk-header__logo">
+      <a class="nhsuk-header__link nhsuk-header__link--service nhsuk-header__link--service-short-name" href="/candidate" aria-label="NHS jobs homepage" data-test="nhs-logo-home-link">
+        <svg class="nhsuk-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 16" height="40" width="100">
+          <path class="nhsuk-logo__background" fill="#005eb8" d="M0 0h40v16H0z" />
+          <path class="nhsuk-logo__text" fill="#fff"
+                d="M3.9 1.5h4.4l2.6 9h.1l1.8-9h3.3l-2.8 13H9l-2.7-9h-.1l-1.8 9H1.1M17.3 1.5h3.6l-1 4.9h4L25 1.5h3.5l-2.7 13h-3.5l1.1-5.6h-4.1l-1.2 5.6h-3.4M37.7 4.4c-.7-.3-1.6-.6-2.9-.6-1.4 0-2.5.2-2.5 1.3 0 1.8 5.1 1.2 5.1 5.1 0 3.6-3.3 4.5-6.4 4.5-1.3 0-2.9-.3-4-.7l.8-2.7c.7.4 2.1.7 3.2.7s2.8-.2 2.8-1.5c0-2.1-5.1-1.3-5.1-5 0-3.4 2.9-4.4 5.8-4.4 1.6 0 3.1.2 4 .6" />
+        </svg>
+        <div class="nhsuk-header__service-name">Jobs</div>
+      </a>
+    </div>
+    <div class="nhsuk-header__content" id="content-header">
+      <div class="nhsuk-header__menu show-mobile show-tablet">
+        <button class="nhsuk-header__menu-toggle" id="toggle-menu" aria-controls="header-navigation" aria-label="Open menu">
+           Menu
+        </button>
+      </div>
+      <nav class="gem-c-translation-nav hide-mobile nhsuk-u-margin-0 nhsuk-u-padding-left-7"
+     aria-label="Translations">
+  <ul class="nhsuk-header__navigation-list-right">
+    
+      
+        <li class="gem-c-translation-nav__list-item">
+          <a class="sign-in-link"
+             id="candidate_sign_in"
+             href="/candidate/auth/login">
+            Sign in
+          </a>
+        </li>
+        <li class="gem-c-translation-nav__list-item-none-border">
+          <a href="/candidate/auth/register/first-last-name"
+             id="create-account-link-header"
+             class="sign-in-link"
+             data-test="header-create-account"> Create an account</a>
+        </li>
+      
+    
+  </ul>
+  <ul class="nhsuk-header__navigation-list-right">
+    <li class="gem-c-translation-nav__list-item">
+      <a lang="en" href="/candidate/locale/en"
+         class="language-toggle-selected"
+         id="english-language-link"
+         data-test="english-language-link">English</a>
+    </li>
+    <li class="gem-c-translation-nav__list-item-none-border">
+      <a lang="cy" href="/candidate/locale/cy"
+         class="language-toggle"
+         id="welsh-language-link"
+         data-test="welsh-language-link">Cymraeg</a>
+    </li>
+  </ul>
+</nav>
+
+    </div>
+  </div>
+
+    <nav class="nhsuk-header__navigation" id="header-navigation" role="navigation" aria-label="Primary navigation" aria-labelledby="label-navigation">
+      <div class="nhsuk-width-container">
+        <p class="nhsuk-header__navigation-title">
+          <span id="label-navigation" style="color: white">Menu</span>
+          <button class="nhsuk-header__navigation-close" id="close-menu">
+            <svg class="nhsuk-icon nhsuk-icon__close" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false" width="27" height="27">
+              <path d="M13.41 12l5.3-5.29a1 1 0 1 0-1.42-1.42L12 10.59l-5.29-5.3a1 1 0 0 0-1.42 1.42l5.3 5.29-5.3 5.29a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l5.29-5.3 5.29 5.3a1 1 0 0 0 1.42 0 1 1 0 0 0 0-1.42z" />
+            </svg>
+            <span class="nhsuk-u-visually-hidden" style="color: white">Close menu</span>
+          </button>
+        </p>
+      </div>
+      
+        <ul class="nhsuk-header__navigation-list" id="signedOutMenu">
+  
+    <li class="nhsuk-header__navigation-item">
+    <a class="nhsuk-header__navigation-link" href="/candidate/search">
+      Search
+      <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+        <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+      </svg>
+    </a>
+  </li>
+    <li class="nhsuk-header__navigation-item nhsuk-header__navigation-item--for-mobile">
+      <a class="nhsuk-header__navigation-link" href="/candidate/auth/login" id="candidate_sign_in_mobile">
+        Sign in
+        <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+          <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+        </svg>
+      </a>
+    </li>
+    <li class="nhsuk-header__navigation-item nhsuk-header__navigation-item--for-mobile">
+      <a class="nhsuk-header__navigation-link" href="/candidate/auth/register/first-last-name" data-test="header-create-account">
+        Create an account
+        <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+          <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+        </svg>
+      </a>
+    </li>
+  
+  
+    <li class="nhsuk-header__navigation-item nhsuk-header__navigation-item--for-mobile">
+      <a class="nhsuk-header__navigation-link" href="/candidate/locale/cy">
+        Display in Welsh (Cymraeg)
+        <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+          <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+        </svg>
+      </a>
+    </li>
+  
+</ul>
+
+      
+    </nav>
+
+    <noscript>
+      <nav class="header-mobile-menu-no-javascript" id="header-navigation" role="navigation" aria-label="Primary navigation" aria-labelledby="label-navigation">
+        
+          <ul class="nhsuk-header__navigation-list" id="signedOutMenu">
+  
+    <li class="nhsuk-header__navigation-item">
+    <a class="nhsuk-header__navigation-link" href="/candidate/search">
+      Search
+      <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+        <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+      </svg>
+    </a>
+  </li>
+    <li class="nhsuk-header__navigation-item nhsuk-header__navigation-item--for-mobile">
+      <a class="nhsuk-header__navigation-link" href="/candidate/auth/login" id="candidate_sign_in_mobile">
+        Sign in
+        <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+          <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+        </svg>
+      </a>
+    </li>
+    <li class="nhsuk-header__navigation-item nhsuk-header__navigation-item--for-mobile">
+      <a class="nhsuk-header__navigation-link" href="/candidate/auth/register/first-last-name" data-test="header-create-account">
+        Create an account
+        <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+          <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+        </svg>
+      </a>
+    </li>
+  
+  
+    <li class="nhsuk-header__navigation-item nhsuk-header__navigation-item--for-mobile">
+      <a class="nhsuk-header__navigation-link" href="/candidate/locale/cy">
+        Display in Welsh (Cymraeg)
+        <svg class="nhsuk-icon nhsuk-icon__chevron-right" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" width="34" height="34">
+          <path d="M15.5 12a1 1 0 0 1-.29.71l-5 5a1 1 0 0 1-1.42-1.42l4.3-4.29-4.3-4.29a1 1 0 0 1 1.42-1.42l5 5a1 1 0 0 1 .29.71z" />
+        </svg>
+      </a>
+    </li>
+  
+</ul>
+
+        
+      </nav>
+    </noscript>
+
+</header>
+
+
+
+        
+        
+        
+        <div class="beta-banner" role="complementary" aria-label="banner">
+          <div class="nhsuk-width-container ">
+            <strong class="status-box status-box-blue">BETA</strong>
+            <span>Your <a href="mailto:nhsbsa.nhsjobs@nhsbsa.nhs.uk?subject=How could we improve NHS Jobs service?">feedback</a> will help us to improve this service.</span>
+          </div>
+        </div>
+        
+
+        
+    </div>    
+        
+
+
+        
+          <div class="nhsuk-width-container ">
+            <main class="nhsuk-main-wrapper " id="maincontent" role="main">
+              
+
+  <div class="nhsuk-grid-row">
+    <div class="nhsuk-grid-column-two-thirds">
+      
+      <span id="employer_name" class="nhsuk-caption-l">Hull University Teaching Hospitals NHS Trust</span>
+      <h1 class="nhsuk-heading-xl word-wrap" id="heading" style="margin-bottom: -25px;">Junior Systems Developer</h1>
+
+      
+        <div class="nhsuk-inset-text nhsuk-u-margin-bottom-4 nhs-open-job-inset">
+          <p style="margin-left: -2px;" id="closing_date" class="closing-date"><strong>The closing date is 31 July 2026</strong></p>
+        </div>
+      
+    </div>
+
+    <div class="nhsuk-grid-column-one-third nhsuk-u-padding-top-2">
+      
+  <div class="nhsuk-action-link">
+    
+    <a id="apply-ats-direct" class="nhsuk-button" style="width: 100%" href="/candidate/jobadvert/C9356-26-0542/ats-direct-apply">
+      Apply for this job
+    </a>
+    
+  </div>
+
+    </div>
+
+    <div class="nhsuk-grid-column-two-thirds wrap-paragraphs">
+      
+  <h2 class="nhsuk-heading-s">Job summary</h2>
+  <p id="job_overview"><p>As a Junior Systems Developer, you'll play a pivotal role in developing, implementing, and supporting clinical systems and reporting tools across our Trusts. You'll provide specialist knowledge, training, and support to end users, ensuring high-quality information and robust system enhancements for our core hospital systems.</p></p>
+
+
+
+  <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Main duties of the job</h3>
+  <p id="job_description"><p>As a Junior Systems Developer, you'll:</p> <ul>  <li>Log and investigate application and interface issues, providing advice and workarounds.</li>  <li>Advise clients on bespoke in-house applications and interface capabilities.</li>  <li>Analyse customer requirements and provide solutions for complex queries.</li>  <li>Assist in developing bespoke applications using tools like .Net Framework and Visual Studio.</li>  <li>Create and alter design documentation, test scripts, and conduct testing of systems.</li>  <li>Contribute to the design, development, and testing of applications and interfaces.</li> </ul></p>
+
+
+
+  <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">About us</h3>
+  <p id="about_organisation"><p>The Humber Health Partnership is one of the largest acute and community Partnership arrangements in the NHS, seeing well over one million patients every year and managing a budget of over £1.3 billion.</p> <p>Made up of two Trusts - Northern Lincolnshire and Goole NHS Foundation Trust (NLAG) and Hull University Teaching Hospitals NHS Trust (HUTH) - our Partnership has significant ambitions and is committed to delivering world-class hospital and community services for the 1.65 million people we serve.</p> <p>Together we employ nearly 20,000 staff. Our five main hospital sites are Diana, Princess of Wales Hospital, Scunthorpe General Hospital and Goole and District Hospital, for NLAG and Hull Royal Infirmary and Castle Hill Hospital for HUTH.</p> <p>As Teaching Hospitals working with the Hull York Medical School, we both lead and contribute to research in many areas - biomedical research, primary care, palliative medicine, cardiovascular and respiratory medicine, vascular surgery, cancer surgery and oncology.</p> <p>We believe that by developing a diverse, inclusive, innovative, skilled and caring workforce, we can deliver excellent care to our patients and a great future for our employees, our Partnership and our community.</p></p>
+
+
+      <div class="show-mobile">
+        <div class="forms-wrapper-white nhsuk-u-margin-bottom-4">
+  <h2 class="nhsuk-u-visually-hidden">Details</h2>
+  <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2" id="date_posted_heading">Date posted</h3>
+  <p id="date_posted">16 July 2026</p>
+
+  
+    <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Pay scheme</h3>
+    <p id="payscheme-type">Agenda for change</p>
+
+    
+      
+        <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Band</h3>
+      
+      <p id="payscheme-band">Band 5</p>
+  
+  
+
+  
+  
+    <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Salary</h3>
+    <p id="range_salary">
+      £32,073 to £39,043 a year
+      
+        per annum
+      
+    </p>
+  
+  
+
+  <h3 id="contract_type_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Contract</h3>
+  <p id="contract_type">Fixed term</p>
+
+  
+    <h3 id="contract_duration_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Duration</h3>
+    <p id="contract_duration">17 months</p>
+  
+
+  
+    <h3 id="working_pattern_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Working pattern</h3>
+    <p>
+      
+        
+          Full-time
+        
+      
+    </p>
+  
+
+  <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2" id="reference_number_heading">Reference number</h3>
+  
+  <p id="trac-job-reference" style="margin-bottom: 0;">356-26-8132236</p>
+  
+
+  
+    
+      
+        <h3 id="employer_location_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Job locations</h3>
+      
+      
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_address_line_1">Castle Hill Hospital</p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_address_line_2">Castle Road</p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_town">Cottingham</p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_county"></p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_postcode">HU16 5JQ</p>
+      
+        <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_country">United Kingdom</p>
+      
+      <br/>
+      
+        
+       
+    
+  
+</div>
+      </div>
+
+      
+  <div class="hide-mobile">
+    <h2 class="nhsuk-heading-l">Job description</h2>
+    <h3 class="nhsuk-heading-s">Job responsibilities</h3>
+    <p id="job_description_large" style="white-space: pre-line"><p>For more detailed information, please read the job description linked below.</p> <p><strong>Please note that, in line with UKVI regulations, this vacancy does not meet the eligibility criteria for sponsorship under the Skilled Worker Visa route. As a result, we are unable to issue a Certificate of Sponsorship for this position.</strong></p> <p><strong>We remain committed to fair and equal recruitment practices and encourage applications from all suitably qualified candidates who have the right to work in the UK.</strong></p> <p><strong>We reserve the right to close the advert early in the event of high levels of interest. Therefore early applications are encouraged.</strong></p></p>
+  </div>
+
+  <details class="nhsuk-details nhsuk-expander show-mobile">
+    <summary class="nhsuk-details__summary">
+      <span class="nhsuk-details__summary-text">
+        Job description
+      </span>
+    </summary>
+    <div class="nhsuk-details__text">
+      <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Job responsibilities</h3>
+      <p id="job_description_large" style="white-space: pre-line"><p>For more detailed information, please read the job description linked below.</p> <p><strong>Please note that, in line with UKVI regulations, this vacancy does not meet the eligibility criteria for sponsorship under the Skilled Worker Visa route. As a result, we are unable to issue a Certificate of Sponsorship for this position.</strong></p> <p><strong>We remain committed to fair and equal recruitment practices and encourage applications from all suitably qualified candidates who have the right to work in the UK.</strong></p> <p><strong>We reserve the right to close the advert early in the event of high levels of interest. Therefore early applications are encouraged.</strong></p></p>
+    </div>
+  </details>
+
+
+      
+  <div class="hide-mobile">
+    <h2 class="nhsuk-heading-l">Person Specification</h2>
+    
+    
+      <h3 id="skill_category_1" class="nhsuk-heading-m">
+        
+          Qualifications
+        
+      </h3>
+      
+      <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Essential</h4>
+      <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-2">
+        
+        <li id="essential_skill_1_criteria_1">Educated to degree level or equivalent experience in a range of IM&amp;T areas.</li>
+        
+        <li id="essential_skill_1_criteria_2">Degree in a computer science related discipline</li>
+        
+      </ul>
+      
+      
+        <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Desirable</h4>
+        <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-4">
+          
+          <li id="desirable_skill_1_criteria_1">Evidence of ongoing personal development</li>
+          
+          <li id="desirable_skill_1_criteria_2">Evidence of understanding of medical terminology.</li>
+          
+        </ul>
+      
+    
+    
+      <h3 id="skill_category_2" class="nhsuk-heading-m">
+        
+          Experience
+        
+      </h3>
+      
+      <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Essential</h4>
+      <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-2">
+        
+        <li id="essential_skill_2_criteria_1">Knowledge of object oriented programming languages, such as C#.</li>
+        
+      </ul>
+      
+      
+        <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Desirable</h4>
+        <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-4">
+          
+          <li id="desirable_skill_2_criteria_1">One or more years&#39; experience working in a Software development role or environment gathering and analysing user requirements</li>
+          
+          <li id="desirable_skill_2_criteria_2">Experience using hospital systems such as Lorenzo.</li>
+          
+          <li id="desirable_skill_2_criteria_3">Experience of developing healthcare integration solutions.</li>
+          
+          <li id="desirable_skill_2_criteria_4">Experience of developing clinical systems.</li>
+          
+          <li id="desirable_skill_2_criteria_5">Knowledge of Healthcare Interoperability Standards</li>
+          
+          <li id="desirable_skill_2_criteria_6">At least one year&#39;s experience creating design documentation and test scripts for software.</li>
+          
+          <li id="desirable_skill_2_criteria_7">Experience documenting user requirements</li>
+          
+        </ul>
+      
+    
+  </div>
+
+
+  <details class="nhsuk-details nhsuk-expander show-mobile">
+    <summary class="nhsuk-details__summary">
+      <span class="nhsuk-details__summary-text">
+        Person Specification
+      </span>
+    </summary>
+    <div class="nhsuk-details__text">
+      
+      
+        <h3 id="skill_category_1" class="nhsuk-heading-m">
+          
+            Qualifications
+          
+        </h3>
+        
+        <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Essential</h4>
+        <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-2">
+          
+          <li id="essential_skill_1_criteria_1">Educated to degree level or equivalent experience in a range of IM&amp;T areas.</li>
+          
+          <li id="essential_skill_1_criteria_2">Degree in a computer science related discipline</li>
+          
+        </ul>
+        
+        
+          <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Desirable</h4>
+          <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-4">
+            
+            <li id="desirable_skill_1_criteria_1">Evidence of ongoing personal development</li>
+            
+            <li id="desirable_skill_1_criteria_2">Evidence of understanding of medical terminology.</li>
+            
+          </ul>
+        
+      
+      
+        <h3 id="skill_category_2" class="nhsuk-heading-m">
+          
+            Experience
+          
+        </h3>
+        
+        <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Essential</h4>
+        <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-2">
+          
+          <li id="essential_skill_2_criteria_1">Knowledge of object oriented programming languages, such as C#.</li>
+          
+        </ul>
+        
+        
+          <h4 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Desirable</h4>
+          <ul class="nhsuk-list nhsuk-list--bullet nhsuk-u-margin-bottom-4">
+            
+            <li id="desirable_skill_2_criteria_1">One or more years&#39; experience working in a Software development role or environment gathering and analysing user requirements</li>
+            
+            <li id="desirable_skill_2_criteria_2">Experience using hospital systems such as Lorenzo.</li>
+            
+            <li id="desirable_skill_2_criteria_3">Experience of developing healthcare integration solutions.</li>
+            
+            <li id="desirable_skill_2_criteria_4">Experience of developing clinical systems.</li>
+            
+            <li id="desirable_skill_2_criteria_5">Knowledge of Healthcare Interoperability Standards</li>
+            
+            <li id="desirable_skill_2_criteria_6">At least one year&#39;s experience creating design documentation and test scripts for software.</li>
+            
+            <li id="desirable_skill_2_criteria_7">Experience documenting user requirements</li>
+            
+          </ul>
+        
+      
+    </div>
+  </details>
+
+
+
+      <div id="dbs-container" class="hide-mobile">
+  
+    <h3 id="dbs-message" class="nhsuk-heading-m nhsuk-u-margin-bottom-2">Disclosure and Barring Service Check</h3>
+    <p>This post is subject to the Rehabilitation of Offenders Act (Exceptions Order) 1975 and as such it will be necessary for a submission for Disclosure to be made to the Disclosure and Barring Service (formerly known as CRB) to check for any previous criminal convictions.</p>
+  
+
+  
+
+  
+</div>
+
+ 
+
+      <div class="hide-mobile">
+  
+    <h2 class="nhsuk-heading-l">Employer details</h2>
+    <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Employer name</h3>
+    <p id="employer_name_details">Hull University Teaching Hospitals NHS Trust</p>
+    <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Address</h3>
+    
+      
+      <p class="nhsuk-u-margin-bottom-2" id="employer_address_line_1_a">Castle Hill Hospital</p>
+      <p class="nhsuk-u-margin-bottom-2" id="employer_address_line_2_b">Castle Road</p>
+      <p class="nhsuk-u-margin-bottom-2" id="employer_town_c">Cottingham</p>
+      <p class="nhsuk-u-margin-bottom-2" id="employer_county_d"></p>
+      <p class="nhsuk-u-margin-bottom-2" id="employer_postcode_e">HU16 5JQ</p>
+      
+      <p class="nhsuk-u-margin-bottom-2" id="employer_country_f">United Kingdom</p>
+      
+    
+  
+
+  
+    <br/>
+    <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2" id="employer_website_heading">Employer&#39;s website</h3>
+      
+        <p class="nhsuk-u-margin-bottom-2" id="employer_website_url"><a href="https://www.hey.nhs.uk/" target="_blank" id="employer_website_url_link">https://www.hey.nhs.uk/ (Opens in a new tab)</a></p>
+      
+  
+
+  
+</div>
+
+<div class="show-mobile">
+  <div class="forms-wrapper-white nhsuk-u-margin-bottom-4">
+      
+        <h2 class="nhsuk-heading-l nhsuk-u-margin-bottom-2">Employer details</h2>
+        <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Employer name</h3>
+        <p id="employer_name_details">Hull University Teaching Hospitals NHS Trust</p>
+        <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2">Address</h3>
+        
+          
+          <p class="nhsuk-u-margin-bottom-2" id="employer_address_line_1_a">Castle Hill Hospital</p>
+          <p class="nhsuk-u-margin-bottom-2" id="employer_address_line_2_b">Castle Road</p>
+          <p class="nhsuk-u-margin-bottom-2" id="employer_town_c">Cottingham</p>
+          <p class="nhsuk-u-margin-bottom-2" id="employer_county_d"></p>
+          <p class="nhsuk-u-margin-bottom-2" id="employer_postcode_e">HU16 5JQ</p>
+          
+          <p class="nhsuk-u-margin-bottom-2" id="employer_country_f">United Kingdom</p>
+          
+        
+      
+
+      
+        <br/>
+        <h3 class="nhsuk-heading-xs nhsuk-u-margin-bottom-2" id="employer_website_heading">Employer&#39;s website</h3>
+          
+            <p class="nhsuk-u-margin-bottom-2" id="employer_website_url"><a href="https://www.hey.nhs.uk/" target="_blank" id="employer_website_url_link_mobile">https://www.hey.nhs.uk/ (Opens in a new tab)</a></p>
+          
+      
+
+      
+  </div>
+</div>
+    </div>
+
+    <div class="nhsuk-grid-column-one-third">
+      <div class="forms-wrapper-white nhsuk-u-margin-bottom-4" style="overflow-wrap: break-word;">
+  <h2 class="nhsuk-u-visually-hidden">Employer contact details</h2>
+  <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">For questions about the job, contact:</h3>
+  <div id="contact_details">
+    <p class="nhsuk-u-margin-bottom-2" id="contact_details_job_title">Head of Systems and Integration Development</p>
+    <p class="nhsuk-u-margin-bottom-2" id="contact_details_name">David Knowles</p>
+    <p class="nhsuk-u-margin-bottom-2" id="contact_details_email"><a href="mailto:david.knowles5@nhs.net">david.knowles5@nhs.net</a></p>
+    <p class="nhsuk-u-margin-bottom-2" id="contact_details_number">01482468120</p>
+  </div>
+</div>
+
+       
+  <img id="employer_logo" src="data:image/png;base64,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" style="max-width: 100%" class="nhsuk-u-margin-bottom-4 nhsuk-u-margin-top-2" alt="logo of employer">
+
+
+      <div class="hide-mobile">
+        <div class="forms-wrapper-white nhsuk-u-margin-bottom-4">
+  <h2 class="nhsuk-u-visually-hidden">Details</h2>
+  <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2" id="date_posted_heading">Date posted</h3>
+  <p id="date_posted">16 July 2026</p>
+
+  
+    <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Pay scheme</h3>
+    <p id="payscheme-type">Agenda for change</p>
+
+    
+      
+        <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Band</h3>
+      
+      <p id="payscheme-band">Band 5</p>
+  
+  
+
+  
+  
+    <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Salary</h3>
+    <p id="range_salary">
+      £32,073 to £39,043 a year
+      
+        per annum
+      
+    </p>
+  
+  
+
+  <h3 id="contract_type_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Contract</h3>
+  <p id="contract_type">Fixed term</p>
+
+  
+    <h3 id="contract_duration_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Duration</h3>
+    <p id="contract_duration">17 months</p>
+  
+
+  
+    <h3 id="working_pattern_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Working pattern</h3>
+    <p>
+      
+        
+          Full-time
+        
+      
+    </p>
+  
+
+  <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2" id="reference_number_heading">Reference number</h3>
+  
+  <p id="trac-job-reference" style="margin-bottom: 0;">356-26-8132236</p>
+  
+
+  
+    
+      
+        <h3 id="employer_location_heading" class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Job locations</h3>
+      
+      
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_address_line_1">Castle Hill Hospital</p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_address_line_2">Castle Road</p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_town">Cottingham</p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_county"></p>
+      <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_postcode">HU16 5JQ</p>
+      
+        <p class="nhsuk-u-no-margin-bottom grid-row-min-width-columns address-text-wrap" id="employer_country">United Kingdom</p>
+      
+      <br/>
+      
+        
+       
+    
+  
+</div>
+      </div>
+
+      
+  <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2" id="supporting_documents_heading">Supporting documents</h3>
+  
+    <form method="post">
+      <div class="nhsuk-form-group" id="supporting_document-1">
+        <input type="hidden" name="_csrf" value="qxn2o7LI-MBqfcIpzmRFQ6vA_t22edFBVtqs">
+        <input type="hidden" name="document" value="2993245">
+        <input id="getfile-1" class="nhsuk-button--link" style="font-size: 19px" type="submit" value="Junior Systems Developer JD.pdf (PDF, 536 KB)">
+      </div>
+    </form>
+  
+
+
+
+      
+
+
+      
+        <h3 class="nhsuk-heading-s nhsuk-u-margin-bottom-2">Privacy notice</h3>
+        <p id="privacyPolicy"><a href="https://www.hey.nhs.uk/privacy/" target="_blank" rel="noopener noreferrer">Hull University Teaching Hospitals NHS Trust&#39;s privacy notice (opens in a new tab)</a></p>
+      
+
+    </div>
+  </div>
+
+
+              
+  
+
+            </main>
+          </div>
+        
+
+        
+  
+<footer role="contentinfo">
+  <div class="nhsuk-footer" id="nhsuk-footer">
+    <div class="nhsuk-width-container">
+      <h2 class="nhsuk-u-visually-hidden">Support links</h2>
+      <ul class="nhsuk-footer__list adjust-width">
+        <li class="nhsuk-footer__list-item"><a class="nhsuk-footer__list-item-link" target="_blank" id="privacy" href="/candidate/privacy-policy">Privacy policy</a></li>
+        <li class="nhsuk-footer__list-item"><a class="nhsuk-footer__list-item-link" target="_blank" id="acceptableUse" href="/candidate/acceptable-use">Terms and conditions</a></li>
+        <li class="nhsuk-footer__list-item"><a class="nhsuk-footer__list-item-link" target="_blank" id="accessibility" href="https://www.nhsbsa.nhs.uk/our-policies/accessibility/accessibility-statement-nhs-jobs-applicants">Accessibility Statement</a></li>
+        <li class="nhsuk-footer__list-item"><a class="nhsuk-footer__list-item-link" target="_blank" id="cookies" href="/candidate/cookies">Cookies</a></li>
+        <li class="nhsuk-footer__list-item"><a class="nhsuk-footer__list-item-link" target="_blank" id="helpText" href="https://www.nhsbsa.nhs.uk/new-nhs-jobs-service/help-and-support-applicants">Help and guidance</a></li>
+      </ul>
+      <p class="nhsuk-footer__copyright">&copy; Crown copyright</p>
+    </div>
+  </div>
+</footer>
+
+
+      
+  
+    <!-- Custom JavaScript files can be added to this file -->
+    <script src="/candidate/public/js/vendor/jquery-2c872dbe60.min.js" defer></script>
+<script src="/candidate/public/js/main-6d8d2788cc.js" defer></script>
+<script src="/candidate/public/govuk/govuk/all-516c5e1276.js" defer></script>
+
+<!-- Add any custom scripts -->
+
+    <!-- For adding page specific JavaScript -->
+    
+  
+
+  </body>
+</html>
