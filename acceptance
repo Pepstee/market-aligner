@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 # JAA-04 runtime invoked by the declaration runner: scripts/accept_jaa_04.py
-case "${BASH_SOURCE:-}" in */*) acceptance_root=${BASH_SOURCE%/*}/;; *) acceptance_root=;; esac; python3 "${acceptance_root}scripts/run_acceptance_declaration.py"
+case "${BASH_SOURCE[0]:-}" in */*) acceptance_root=${BASH_SOURCE[0]%/*}/;; *) acceptance_root=;; esac; python3 "${acceptance_root}scripts/run_acceptance_declaration.py"

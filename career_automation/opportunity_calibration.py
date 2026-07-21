@@ -77,6 +77,12 @@ class CalibrationPolicy:
     weights: tuple[int, int, int] = (45, 35, 20)
 
     def __post_init__(self) -> None:
+        if (type(self.minimum_confidence_bp) is not int
+                or type(self.minimum_opportunity_bp) is not int
+                or type(self.weights) is not tuple
+                or len(self.weights) != 3
+                or any(type(weight) is not int for weight in self.weights)):
+            raise ValueError("Opportunity-0 policy parameters have invalid types")
         if sum(self.weights) != 100 or any(w < 0 for w in self.weights):
             raise ValueError("Opportunity-0 weights must be non-negative and total 100")
         if not 0 <= self.minimum_confidence_bp <= 10_000:
@@ -87,6 +93,33 @@ class CalibrationPolicy:
     @property
     def policy_hash(self) -> str:
         return content_hash(vars(self))
+
+
+def calibration_policy_json(policy: CalibrationPolicy) -> dict[str, Any]:
+    """Return the one canonical, JSON-native representation of a policy."""
+    return {
+        "minimum_confidence_bp": policy.minimum_confidence_bp,
+        "minimum_opportunity_bp": policy.minimum_opportunity_bp,
+        "weights": list(policy.weights),
+    }
+
+
+def calibration_policy_from_json(value: Any) -> CalibrationPolicy:
+    """Decode canonical JSON policy parameters without accepting coercions."""
+    required = {"minimum_confidence_bp", "minimum_opportunity_bp", "weights"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("Opportunity-0 policy parameters have unknown or missing fields")
+    weights = value["weights"]
+    if (type(value["minimum_confidence_bp"]) is not int
+            or type(value["minimum_opportunity_bp"]) is not int
+            or not isinstance(weights, list) or len(weights) != 3
+            or any(type(weight) is not int for weight in weights)):
+        raise ValueError("Opportunity-0 policy parameters are not canonical JSON types")
+    return CalibrationPolicy(
+        minimum_confidence_bp=value["minimum_confidence_bp"],
+        minimum_opportunity_bp=value["minimum_opportunity_bp"],
+        weights=tuple(weights),
+    )
 
 
 @dataclass(frozen=True)

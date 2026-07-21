@@ -32,7 +32,7 @@ from career_automation.engine import OpportunityGate  # noqa: E402
 from career_automation.models import ScoredJob  # noqa: E402
 from career_automation.opportunity_calibration import (  # noqa: E402
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
-    decide_opportunity0,
+    calibration_policy_from_json, decide_opportunity0,
 )
 from scraper.viability import Vacancy, local_decision  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
@@ -83,9 +83,15 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
     if not isinstance(policy, dict) or not policy.get("identity") or not policy.get("hash"):
         raise RuntimeError("official admitted queue lacks policy identity/hash")
     calibrated = CalibrationPolicy()
-    if (policy.get("identity") != DECISION_RULE_VERSION
+    try:
+        snapshot_policy = calibration_policy_from_json(policy.get("parameters"))
+    except ValueError as exc:
+        raise RuntimeError("official admitted queue policy does not match JAA-03") from exc
+    if (set(policy) != {"identity", "hash", "parameters"}
+            or policy.get("identity") != DECISION_RULE_VERSION
             or policy.get("hash") != calibrated.policy_hash
-            or policy.get("parameters") != vars(calibrated)):
+            or snapshot_policy != calibrated
+            or snapshot_policy.policy_hash != policy.get("hash")):
         raise RuntimeError("official admitted queue policy does not match JAA-03")
     result = {}
     urls: set[str] = set()
@@ -134,7 +140,9 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(f"invalid authentic decision material for {row.get('job_key', '<unknown>')}") from exc
         if (viability.decision != "include" or viability.reason != "viable"
-                or vars(replay) != decision or expected_payload_hash != row["payload_hash"]):
+                or vars(replay) != decision or expected_payload_hash != row["payload_hash"]
+                or row.get("url") != vacancy.url
+                or row.get("content_sha256") != hashlib.sha256(vacancy.body.encode("utf-8")).hexdigest()):
             raise RuntimeError(f"Opportunity-0 replay mismatch for {row.get('job_key', '<unknown>')}")
         url_identity = str(row["url"]).casefold().rstrip("/")
         body_identity = str(row.get("content_sha256") or "")
