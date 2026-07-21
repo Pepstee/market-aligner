@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -104,6 +105,10 @@ def _verify_receipt(root: Path, receipt: Path) -> None:
         "entry_encoding": "uint64be-length-prefixed-path-mode-content",
         "scope": "current-tracked-source-tree", "ordering": "repository-relative-path-byte-order",
         "exclusions": ["runtime_evidence/"],
+    }
+    assert document["runtime"] == {
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
     }
     assert document["runtime_inputs"] == {
         "locked_set_file_sha256": _digest(root / LOCKED_SET),
