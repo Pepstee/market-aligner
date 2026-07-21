@@ -25,6 +25,7 @@ market-aligner = "skeleton.run:main"
 uk-job-matcher = "skeleton.run:main"
 jaa-baseline = "baseline_adoption.cli:main"
 jaa-lifecycle = "career_automation.cli:main"
+jaa-official-cohort = "career_automation.official_cohort:main"
 
 [tool.setuptools]
 packages = [

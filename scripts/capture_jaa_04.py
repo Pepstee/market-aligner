@@ -30,6 +30,11 @@ from career_automation.employer_research import (  # noqa: E402
 )
 from career_automation.engine import OpportunityGate  # noqa: E402
 from career_automation.models import ScoredJob  # noqa: E402
+from career_automation.opportunity_calibration import (  # noqa: E402
+    DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
+    decide_opportunity0,
+)
+from scraper.viability import Vacancy, local_decision  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
 CORPUS_SIZE = 30
@@ -64,13 +69,82 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
             return _admitted(source)
     payload = json.loads(path.read_text(encoding="utf-8"))
     records = payload.get("records")
-    if not isinstance(records, list) or len(records) < CORPUS_SIZE:
-        raise RuntimeError("admitted queue JSON must contain at least 30 records")
+    if payload.get("schema_version") != "jaa04.official-admitted-queue.v2":
+        raise RuntimeError("untrusted admitted queue JSON: authentic v2 decision evidence is required")
+    if not isinstance(records, list) or len(records) != CORPUS_SIZE:
+        raise RuntimeError("official admitted queue JSON must contain exactly 30 records")
     if content_hash(records) != payload.get("records_hash"):
         raise RuntimeError("admitted queue JSON hash mismatch")
-    return {str(row["job_key"]): {"job_key": str(row["job_key"]), "url": str(row["url"]),
-                                  "company": str(row["company"]), "title": str(row["title"]),
-                                  "payload_hash": str(row["payload_hash"])} for row in records}
+    raw_store = payload.get("raw_store")
+    if not isinstance(raw_store, dict) or not raw_store.get("root"):
+        raise RuntimeError("official admitted queue lacks its raw response store")
+    raw_root = Path(str(raw_store["root"])).resolve()
+    policy = payload.get("policy")
+    if not isinstance(policy, dict) or not policy.get("identity") or not policy.get("hash"):
+        raise RuntimeError("official admitted queue lacks policy identity/hash")
+    calibrated = CalibrationPolicy()
+    if (policy.get("identity") != DECISION_RULE_VERSION
+            or policy.get("hash") != calibrated.policy_hash
+            or policy.get("parameters") != vars(calibrated)):
+        raise RuntimeError("official admitted queue policy does not match JAA-03")
+    result = {}
+    urls: set[str] = set()
+    bodies: set[str] = set()
+    for row in records:
+        decision = row.get("opportunity0_decision")
+        source = row.get("source")
+        raw = row.get("raw_response_refs")
+        if (not isinstance(decision, dict) or decision.get("decision") != "pass"
+                or decision.get("reason") != "viable"
+                or not isinstance(decision.get("score_bp"), int)
+                or decision.get("policy_hash") != policy["hash"]
+                or not isinstance(row.get("opportunity0_input"), dict)
+                or not isinstance(row.get("confidence"), dict)
+                or not isinstance(source, dict) or not source.get("identity")
+                or not source.get("authority") or not isinstance(raw, list) or not raw
+                or not row.get("payload_hash") or not row.get("observed_at")):
+            raise RuntimeError(f"untrusted Opportunity-0 evidence for {row.get('job_key', '<unknown>')}")
+        if (source.get("identity") != row.get("job_key")
+                or source.get("adapter") != row.get("board")
+                or source.get("authority") != "official-public-employer-or-ats"):
+            raise RuntimeError(f"official source identity mismatch for {row.get('job_key', '<unknown>')}")
+        try:
+            vacancy = Vacancy(**row["payload"])
+            viability = local_decision(vacancy)
+            inputs = Opportunity0Input.from_mapping(row["opportunity0_input"])
+            confidence = Confidence(**row["confidence"])
+            replay = decide_opportunity0(inputs, confidence,
+                                         viability_reason="viable", policy=calibrated)
+            official_hashes = sorted({str(ref["sha256"]) for ref in raw})
+            for ref in raw:
+                relative = Path(str(ref["raw_response"]))
+                response_path = (raw_root / relative).resolve()
+                if (raw_root not in response_path.parents or not response_path.is_file()
+                        or hashlib.sha256(response_path.read_bytes()).hexdigest() != ref["sha256"]
+                        or not ref.get("requested_url") or not ref.get("final_url")
+                        or not isinstance(ref.get("redirect_chain"), list)
+                        or not ref.get("observed_at")):
+                    raise ValueError("raw response reference or provenance is invalid")
+            expected_payload_hash = hashlib.sha256(json.dumps({
+                "source_identity": source["identity"],
+                "official_response_hashes": official_hashes,
+                "vacancy": row["payload"],
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                allow_nan=False).encode()).hexdigest()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid authentic decision material for {row.get('job_key', '<unknown>')}") from exc
+        if (viability.decision != "include" or viability.reason != "viable"
+                or vars(replay) != decision or expected_payload_hash != row["payload_hash"]):
+            raise RuntimeError(f"Opportunity-0 replay mismatch for {row.get('job_key', '<unknown>')}")
+        url_identity = str(row["url"]).casefold().rstrip("/")
+        body_identity = str(row.get("content_sha256") or "")
+        if not body_identity or url_identity in urls or body_identity in bodies:
+            raise RuntimeError("official admitted queue contains duplicate URL or content body")
+        urls.add(url_identity); bodies.add(body_identity)
+        result[str(row["job_key"])] = dict(row)
+    if len(result) != CORPUS_SIZE:
+        raise RuntimeError("official admitted queue contains duplicate vacancy identities")
+    return result
 
 
 def capture(database_path: Path, destination: Path, *, workspace: Path | None = None,
@@ -100,14 +174,28 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         if database_path.suffix.casefold() != ".json":
             shutil.copyfile(database_path, work_db)
         else:
-            database = CareerDatabase(work_db)
-            OpportunityGate(database).bootstrap([
-                ScoredJob(key=record["job_key"], board="jaa04", job_id=record["job_key"],
+            jobs = [
+                ScoredJob(key=record["job_key"], board=record["board"],
+                          job_id=record["job_key"].split(":", 1)[1],
                           url=record["url"], title=record["title"], company=record["company"],
-                          fit=None, opportunity=.9, final_score=None, extraction_confidence=1.0,
-                          payload={}, payload_hash=record["payload_hash"])
+                          fit=None, opportunity=record["opportunity0_decision"]["score_bp"] / 10_000,
+                          final_score=None,
+                          extraction_confidence=min(record["confidence"].values()) / 10_000,
+                          payload={"official_snapshot_record": record},
+                          payload_hash=record["payload_hash"])
                 for record in records
-            ])
+            ]
+            database = CareerDatabase(work_db)
+            gate = OpportunityGate(database)
+            gate.import_jobs(jobs)
+            for record in records:
+                score = record["opportunity0_decision"]["score_bp"]
+                database.apply_opportunity_result(
+                    job_key=record["job_key"], passed=True,
+                    reason=record["opportunity0_decision"]["reason"],
+                    policy_hash=record["opportunity0_decision"]["policy_hash"],
+                    priority=(2 if score >= 7500 else 1) * 1_000_000 + score * 10,
+                )
     stage: Path | None = None
     try:
         with sqlite3.connect(work_db) as connection:
@@ -202,6 +290,12 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
                 "company": record["company"], "role": record["title"],
                 "dossier_hash": dossier_hash,
                 "admitted_payload_hash": record.get("payload_hash"),
+                "opportunity0_input": record.get("opportunity0_input"),
+                "opportunity0_confidence": record.get("confidence"),
+                "opportunity0_decision": record.get("opportunity0_decision"),
+                "opportunity0_source": record.get("source"),
+                "opportunity0_observed_at": record.get("observed_at"),
+                "opportunity0_raw_response_refs": record.get("raw_response_refs"),
                 "content_sha256": dossier["sources"][0]["content_sha256"],
                 "source_ids": [source["id"] for source in dossier["sources"]],
                 "capture_identities": [

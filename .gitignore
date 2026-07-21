@@ -12,6 +12,8 @@ graphify-out/
 archive/
 transcripts/
 runtime_evidence/jaa04/corpus/
+runtime_evidence/jaa04/inflight/
+runtime_evidence/jaa04/runs/
 career_automation/fixtures/jaa04_capture
 career_automation/fixtures/.jaa04_capture-releases/
 *.jaa04-inflight/
