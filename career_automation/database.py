@@ -311,7 +311,7 @@ class CareerDatabase:
                           q.research_depth,q.attempts
                    FROM employer_research_queue q
                    JOIN pipeline_jobs j ON j.job_key=q.job_key
-                   WHERE q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP
+                   WHERE q.status='queued' AND julianday(q.available_at)<=julianday('now')
                    ORDER BY q.priority DESC,j.opportunity DESC,q.queued_at
                    LIMIT ?""",
                 (limit,),
@@ -329,8 +329,8 @@ class CareerDatabase:
                    FROM employer_research_queue q
                    JOIN pipeline_jobs j ON j.job_key=q.job_key
                    WHERE j.opportunity_decision='pass' AND (
-                         (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
-                      OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP))
+                         (q.status='queued' AND julianday(q.available_at)<=julianday('now'))
+                      OR (q.status='leased' AND julianday(q.lease_until)<julianday('now')))
                    ORDER BY q.priority DESC,j.opportunity DESC,q.queued_at LIMIT 1"""
             ).fetchone()
             if row is None:
@@ -359,6 +359,24 @@ class CareerDatabase:
             task.pop("state")
             task["attempts"] = int(task["attempts"]) + 1
             return ResearchTask(**task)
+
+    def record_research_failure(self, *, job_key: str, worker_id: str, error: str) -> None:
+        """Make a failed lease explicitly retryable without creating a receipt.
+
+        The row remains leased to retain the failed attempt's ownership audit.
+        Stable-workspace resumption explicitly requeues such leases on the next
+        invocation, while this invocation can continue draining other rows.
+        """
+        detail = str(error).strip() or "research retrieval failed"
+        with self.transaction(immediate=True) as conn:
+            changed = conn.execute(
+                """UPDATE employer_research_queue
+                   SET last_error=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE job_key=? AND status='leased' AND lease_owner=?""",
+                (detail, job_key, worker_id),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("research failure is not held by this lease owner")
 
     def complete_research(
         self,

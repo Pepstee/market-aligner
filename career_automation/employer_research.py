@@ -611,6 +611,29 @@ class PortableAuthorityRetriever:
                      and sum(token in text for token in title_tokens) >= min(2, len(title_tokens)))))
 
     @staticmethod
+    def _aggregator_vacancy_bound(task: Any, citation: Citation, body: bytes) -> bool:
+        """Validate one official candidate against its captured representation."""
+        if not PortableAuthorityRetriever._vacancy_bound(task, citation, body):
+            return False
+        try:
+            final = urlparse(_canonical_public_url(citation.url))
+            requested = urlparse(_canonical_public_url(citation.requested_url or citation.url))
+        except ValueError:
+            return False
+        if ((final.hostname or "").casefold() in AGGREGATOR_HOSTS
+                or (requested.hostname or "").casefold() in AGGREGATOR_HOSTS
+                or not final.path or final.path == "/"):
+            return False
+        published, updated, evidence = extract_publisher_timestamps(body)
+        return bool(
+            evidence
+            and (published is not None or updated is not None)
+            and citation.publisher_date_evidence == evidence
+            and citation.published_at == published
+            and citation.updated_at == updated
+        )
+
+    @staticmethod
     def _source_types(item: Citation, vacancy: Citation, body: bytes) -> tuple[str, ...]:
         if item.id == vacancy.id:
             return ("official_vacancy",)
@@ -660,37 +683,58 @@ class PortableAuthorityRetriever:
             raise ValueError("direct vacancy response is stale, mismatched, empty, or ambiguous")
         routes = self._published_routes(vacancy.url, vacancy_body)
         seen = {vacancy.capture_identity, vacancy.content_sha256}
+        official_candidates: list[Citation] = []
+        official_route_identities: set[tuple[str, str]] = set()
+        unresolved_official_routes: set[tuple[str, str]] = set()
         for index, route in enumerate(routes[:self.maximum_routes]):
             if route == vacancy.url:
                 continue
+            route_host = (urlparse(route).hostname or "").casefold()
+            if route_host in AGGREGATOR_HOSTS:
+                continue
+            route_path = (urlparse(route).path or "/").casefold()
+            route_kind = ("official_vacancy" if (route_host in _OFFICIAL_ATS_HOSTS or
+                          re.search(r"/(?:job|jobs|vacanc|position|posting)", route_path))
+                          else "official_company")
+            route_identity = (route_host, route_path)
             try:
-                route_host = (urlparse(route).hostname or "").casefold()
-                if route_host in AGGREGATOR_HOSTS:
-                    continue
-                route_path = (urlparse(route).path or "/").casefold()
-                route_kind = ("official_vacancy" if (route_host in _OFFICIAL_ATS_HOSTS or
-                              re.search(r"/(?:job|jobs|vacanc|position|posting)", route_path))
-                              else "official_company")
                 item = self._retrieve(f"source:{task.job_key}:discovered:{index}", route, route_kind)
             except (RuntimeError, ValueError, UnicodeError):
+                if discovery_only and route_kind == "official_vacancy":
+                    unresolved_official_routes.add(route_identity)
                 continue
+            body = self.cache.resolve(item.raw_response_ref, item.content_sha256)
+            if discovery_only and route_kind == "official_vacancy":
+                # Candidate accounting precedes evidence de-duplication. Two
+                # published official routes are ambiguous even when redirects
+                # or response bytes alias, and the whole bounded route set must
+                # be evaluated before a decision is made.
+                if self._aggregator_vacancy_bound(task, item, body):
+                    official_candidates.append(item)
+                    official_route_identities.add(route_identity)
+                elif self._vacancy_bound(task, item, body):
+                    # Employer/title/response bytes make this a competing
+                    # vacancy, but its route or publisher time cannot be
+                    # conclusively validated. It cannot be silently discarded.
+                    unresolved_official_routes.add(route_identity)
             if item.capture_identity in seen or item.content_sha256 in seen:
                 continue
             seen.update((item.capture_identity, item.content_sha256))
-            if not self._employer_bound(str(task.company),
-                                        self.cache.resolve(item.raw_response_ref, item.content_sha256)):
+            if not self._employer_bound(str(task.company), body):
                 continue
-            if item.source_kind == "official_vacancy" and not self._vacancy_bound(
-                    task, item, self.cache.resolve(item.raw_response_ref, item.content_sha256)):
+            if item.source_kind == "official_vacancy" and not self._vacancy_bound(task, item, body):
                 continue
             citations.append(item)
         if discovery_only:
-            official = [item for item in citations if item.source_kind == "official_vacancy"]
-            if len(official) != 1:
+            if (unresolved_official_routes or len(official_candidates) != 1
+                    or len(official_route_identities) != 1):
                 raise ValueError(
                     "aggregator discovery requires exactly one validated official vacancy route"
                 )
-            vacancy = official[0]
+            vacancy = official_candidates[0]
+            # Only the uniquely admitted official response may enter evidence.
+            citations = [item for item in citations if item.source_kind != "official_vacancy"]
+            citations.insert(0, vacancy)
         return self._plan_from_citations(task, citations, vacancy)
 
     def _plan_from_citations(self, task: Any, citations: list[Citation],
@@ -1503,16 +1547,21 @@ class EmployerResearchWorker:
             return None
         # Any failure deliberately leaves the lease visible. Once it expires,
         # claim_research atomically exposes it to a resuming worker.
-        if not hasattr(self.retriever, "retrieve_plan"):
-            # Compatibility for deterministic test retrievers: their single
-            # admitted-vacancy response is still discovered from the task URL.
-            self.retriever = PortableAuthorityRetriever(self.cache, retriever=self.retriever)
-        citations, source_plan = self.retriever.retrieve_plan(task)
-        dossier = build_reconnaissance_dossier(task, citations, self.cache, source_plan=source_plan)
-        digest = content_hash(dossier)
-        validate_dossier(dossier, self.cache)
-        self.database.complete_research(job_key=task.job_key, worker_id=self.worker_id,
-                                        dossier=dossier, dossier_hash=digest)
+        try:
+            if not hasattr(self.retriever, "retrieve_plan"):
+                # Compatibility for deterministic test retrievers: their single
+                # admitted-vacancy response is still discovered from the task URL.
+                self.retriever = PortableAuthorityRetriever(self.cache, retriever=self.retriever)
+            citations, source_plan = self.retriever.retrieve_plan(task)
+            dossier = build_reconnaissance_dossier(task, citations, self.cache, source_plan=source_plan)
+            digest = content_hash(dossier)
+            validate_dossier(dossier, self.cache)
+            self.database.complete_research(job_key=task.job_key, worker_id=self.worker_id,
+                                            dossier=dossier, dossier_hash=digest)
+        except Exception as exc:
+            self.database.record_research_failure(job_key=task.job_key, worker_id=self.worker_id,
+                                                  error=f"{type(exc).__name__}: {exc}")
+            raise
         return task.job_key
 
 
