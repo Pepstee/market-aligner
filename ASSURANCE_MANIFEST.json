@@ -20,6 +20,9 @@
     "docs/**",
     "runtime_evidence/jaa04/**"
   ],
+  "retired": [
+    "test_jaa02_jaa03_receipt_tamper_controls.py"
+  ],
   "components": {
     "JAA-00": {
       "claim": "The canonical baseline and source adoption are reproducible and recoverable.",
