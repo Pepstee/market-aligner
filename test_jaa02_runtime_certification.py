@@ -94,6 +94,7 @@ def test_clean_certification_executes_real_commands_and_checked_validator_passes
     }
     assert commands[1]["parsed_test_totals"] == EXPECTED_TOTALS
     assert all(item["exit_code"] == 0 for item in commands)
+    assert all(item["argv"][0] == "{python}" for item in commands)
     assert len(document["negative_controls"]) >= 7
 
     _track_receipt(repository, receipt)

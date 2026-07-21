@@ -36,9 +36,9 @@ NEGATIVE_CONTROLS = [
     "acceptance-declaration-fails-closed",
 ]
 COMMANDS = (
-    ("acceptance_demo", ["python3", "scripts/accept_jaa_02.py"]),
+    ("acceptance_demo", ["{python}", "scripts/accept_jaa_02.py"]),
     ("independent_negative_controls", [
-        "python3", "-m", "pytest", "-q", "test_jaa02_independent_acceptance.py",
+        "{python}", "-m", "pytest", "-q", "test_jaa02_independent_acceptance.py",
     ]),
 )
 
@@ -84,8 +84,9 @@ def _totals(role: str, stdout: bytes) -> dict[str, int]:
 
 
 def _run(role: str, argv: list[str]) -> dict[str, Any]:
-    completed = subprocess.run(argv, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               check=False)
+    execution_argv = [sys.executable if value == "{python}" else value for value in argv]
+    completed = subprocess.run(execution_argv, cwd=ROOT, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, check=False)
     require(completed.returncode == 0,
             f"{role} command failed with exit code {completed.returncode}: "
             f"{completed.stderr.decode(errors='replace').strip()}")
