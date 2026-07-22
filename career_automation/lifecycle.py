@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +100,58 @@ def canonical_json(value: Any) -> str:
 
 def canonical_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+_SCORE_SNAPSHOT_STRING_FIELDS = (
+    "job_key", "board", "job_id", "url", "title", "company", "payload_hash",
+)
+_SCORE_SNAPSHOT_NUMERIC_FIELDS = (
+    "fit", "opportunity", "final_score", "extraction_confidence",
+)
+
+
+def _score_number_identity(value: int | float | None, name: str) -> dict[str, str] | None:
+    """Preserve Python numeric type and signed zero across SQLite REAL coercion."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"score snapshot {name} must be a finite number")
+    if not math.isfinite(value):
+        raise ValueError(f"score snapshot {name} must be a finite number")
+    if isinstance(value, int):
+        return {"type": "int", "value": str(value)}
+    return {"type": "float", "value": value.hex()}
+
+
+def score_snapshot_import_binding(
+    *, job_key: str, board: str, job_id: str, url: str, title: str,
+    company: str, fit: int | float | None, opportunity: int | float,
+    final_score: int | float | None, extraction_confidence: int | float | None,
+    payload_hash: str,
+) -> tuple[str, str]:
+    """Return exact event bytes and key for one immutable score import."""
+    snapshot: dict[str, Any] = {
+        "job_key": job_key,
+        "board": board,
+        "job_id": job_id,
+        "url": url,
+        "title": title,
+        "company": company,
+        "fit": _score_number_identity(fit, "fit"),
+        "opportunity": _score_number_identity(opportunity, "opportunity"),
+        "final_score": _score_number_identity(final_score, "final_score"),
+        "extraction_confidence": _score_number_identity(
+            extraction_confidence, "extraction_confidence"
+        ),
+        "payload_hash": payload_hash,
+    }
+    binding = {
+        "format": "score-snapshot-import/v2",
+        "snapshot": snapshot,
+        "snapshot_hash": canonical_hash(snapshot),
+    }
+    payload_json = canonical_json(binding)
+    return payload_json, f"score-import-v2:{job_key}:{canonical_hash(binding)}"
 
 
 # One graph is authoritative. Legacy SCORED is the deployed equivalent of the
@@ -402,11 +455,11 @@ class LifecycleReducer:
         """Reconstruct all job states, rejecting invalid order or receipt tampering."""
         conn = self._connect()
         try:
-            job_rows = conn.execute(
-                "SELECT job_key,state,payload_hash,policy_hash FROM pipeline_jobs"
-            ).fetchall()
+            job_rows = conn.execute("SELECT * FROM pipeline_jobs").fetchall()
+            for row in job_rows:
+                self._verify_materialised_payload(row)
+            job_by_key = {row["job_key"]: row for row in job_rows}
             jobs = {row["job_key"]: row["state"] for row in job_rows}
-            payload_hashes = {row["job_key"]: row["payload_hash"] for row in job_rows}
             materialised_policy = {row["job_key"]: row["policy_hash"] for row in job_rows}
             replayed: dict[str, PipelineState] = {}
             replayed_policy: dict[str, str | None] = {}
@@ -430,8 +483,13 @@ class LifecycleReducer:
                     replayed_policy[event["job_key"]] = self._verify_receipt(conn, event)
                     verified_receipt_events.add(int(event["id"]))
                 elif event["event_type"] in _LEGACY_EVENT_TYPES:
+                    job_row = job_by_key.get(event["job_key"])
+                    if job_row is None:
+                        raise LedgerDivergence(
+                            f"event {event['id']} references an unknown job"
+                        )
                     replayed_policy[event["job_key"]] = self._verify_legacy_event(
-                        event, payload_hashes[event["job_key"]],
+                        event, job_row,
                     )
                 else:
                     raise LedgerDivergence(f"event {event['id']} changes state without reducer authority")
@@ -460,11 +518,30 @@ class LifecycleReducer:
             conn.close()
 
     @staticmethod
+    def _verify_materialised_payload(job: sqlite3.Row) -> None:
+        """Bind stored job content to its digest under an explicit legacy seam."""
+        rejected = f"job {job['job_key']} payload content diverges from payload_hash"
+        try:
+            payload = json.loads(job["payload_json"])
+            if not isinstance(payload, dict):
+                raise ValueError("score payload is not an object")
+            canonical = canonical_json(payload)
+            legacy = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            payload_hash = job["payload_hash"]
+            if (job["payload_json"] not in {canonical, legacy}
+                    or not isinstance(payload_hash, str)
+                    or canonical_hash(payload) != payload_hash):
+                raise ValueError("score payload identity mismatch")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LedgerDivergence(rejected) from exc
+
+    @staticmethod
     def _verify_legacy_event(
-        event: sqlite3.Row, job_payload_hash: str,
+        event: sqlite3.Row, job: sqlite3.Row,
     ) -> str | None:
         """Authenticate the only two receiptless shapes in the frozen JAA-00 ledger."""
         rejected = f"event {event['id']} is not an exact deterministic historical event"
+        job_payload_hash = job["payload_hash"]
         if (event["actor_kind"] != ActorKind.DETERMINISTIC.value
                 or not isinstance(job_payload_hash, str)
                 or len(job_payload_hash) != 64
@@ -475,12 +552,19 @@ class LifecycleReducer:
         if event_type == "score_snapshot_imported":
             policy_hash = None
             expected_payload = {"payload_hash": job_payload_hash}
-            expected = (
+            legacy_expected = (
                 None,
                 PipelineState.SCORED.value,
                 json.dumps(expected_payload, sort_keys=True),
                 f"score-import:{event['job_key']}:{job_payload_hash}",
             )
+            actual = (
+                event["from_state"], event["to_state"],
+                event["payload_json"], event["idempotency_key"],
+            )
+            if actual != legacy_expected:
+                LifecycleReducer._verify_current_score_import(event, job, rejected)
+            return policy_hash
         elif event_type == "opportunity_gate_decided":
             policy_hash = _LEGACY_OPPORTUNITY_POLICY_SUFFIX
             try:
@@ -507,23 +591,96 @@ class LifecycleReducer:
         return policy_hash
 
     @staticmethod
+    def _verify_current_score_import(
+        event: sqlite3.Row, job: sqlite3.Row, rejected: str,
+    ) -> None:
+        """Verify the exact v2 score-import binding used by current writers."""
+        try:
+            binding = json.loads(event["payload_json"])
+            if (not isinstance(binding, dict)
+                    or set(binding) != {"format", "snapshot", "snapshot_hash"}
+                    or binding["format"] != "score-snapshot-import/v2"):
+                raise ValueError("invalid score binding shape")
+            snapshot = binding["snapshot"]
+            expected_fields = set(_SCORE_SNAPSHOT_STRING_FIELDS) | set(
+                _SCORE_SNAPSHOT_NUMERIC_FIELDS
+            )
+            if not isinstance(snapshot, dict) or set(snapshot) != expected_fields:
+                raise ValueError("invalid score snapshot shape")
+            if (event["payload_json"] != canonical_json(binding)
+                    or binding["snapshot_hash"] != canonical_hash(snapshot)
+                    or event["idempotency_key"] != (
+                        f"score-import-v2:{event['job_key']}:{canonical_hash(binding)}"
+                    )):
+                raise ValueError("score binding identity mismatch")
+            for field in _SCORE_SNAPSHOT_STRING_FIELDS:
+                actual = event["job_key"] if field == "job_key" else job[field]
+                if snapshot[field] != actual:
+                    raise ValueError("score snapshot metadata mismatch")
+            for field in _SCORE_SNAPSHOT_NUMERIC_FIELDS:
+                if not LifecycleReducer._score_number_matches(snapshot[field], job[field]):
+                    raise ValueError("score snapshot numeric metadata mismatch")
+            if (event["from_state"] is not None
+                    or event["to_state"] != PipelineState.SCORED.value):
+                raise ValueError("invalid score root transition")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LedgerDivergence(rejected) from exc
+
+    @staticmethod
+    def _score_number_matches(identity: Any, stored: Any) -> bool:
+        if stored is None:
+            return identity is None
+        if not isinstance(identity, dict) or set(identity) != {"type", "value"}:
+            return False
+        kind, encoded = identity["type"], identity["value"]
+        if not isinstance(encoded, str):
+            return False
+        try:
+            if kind == "int":
+                decoded = int(encoded)
+                if str(decoded) != encoded:
+                    return False
+            elif kind == "float":
+                decoded = float.fromhex(encoded)
+                if not math.isfinite(decoded) or decoded.hex() != encoded:
+                    return False
+            else:
+                return False
+        except ValueError:
+            return False
+        return decoded == stored
+
+    @staticmethod
     def _verify_receipt(conn: sqlite3.Connection, event: sqlite3.Row) -> str:
         receipt = conn.execute("SELECT * FROM lifecycle_transition_receipts WHERE event_id=?", (event["id"],)).fetchone()
         if receipt is None:
             raise LedgerDivergence(f"event {event['id']} has no transition receipt")
         try:
             payload = json.loads(event["payload_json"])
-        except (TypeError, json.JSONDecodeError) as exc:
+            if (not isinstance(payload, dict)
+                    or set(payload) != {"policy", "model", "input_hash", "output_hash"}):
+                raise ValueError("invalid transition binding shape")
+            policy = payload["policy"]
+            if (not isinstance(policy, dict)
+                    or set(policy) != {"id", "version", "sha256"}):
+                raise ValueError("invalid policy binding shape")
+            model = payload["model"]
+            if (model is not None
+                    and (not isinstance(model, dict)
+                         or set(model) != {"provider", "id", "version"})):
+                raise ValueError("invalid model binding shape")
+            if event["payload_json"] != canonical_json(payload):
+                raise ValueError("transition binding is not canonical")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise LedgerDivergence(f"event {event['id']} has malformed binding data") from exc
-        model = payload.get("model")
         expected = (event["job_key"], event["from_state"], event["to_state"], event["idempotency_key"],
-                    payload.get("policy", {}).get("id"), payload.get("policy", {}).get("version"), payload.get("policy", {}).get("sha256"),
-                    payload.get("input_hash"), payload.get("output_hash"),
-                    None if model is None else model.get("provider"), None if model is None else model.get("id"), None if model is None else model.get("version"))
+                    policy["id"], policy["version"], policy["sha256"],
+                    payload["input_hash"], payload["output_hash"],
+                    None if model is None else model["provider"], None if model is None else model["id"], None if model is None else model["version"])
         actual = (receipt["job_key"], receipt["from_state"], receipt["to_state"], receipt["idempotency_key"],
                   receipt["policy_id"], receipt["policy_version"], receipt["policy_hash"], receipt["input_hash"], receipt["output_hash"],
                   receipt["model_provider"], receipt["model_id"], receipt["model_version"])
-        if actual != expected or event["actor_kind"] != ActorKind.DETERMINISTIC.value or event["payload_json"] != canonical_json(payload):
+        if actual != expected or event["actor_kind"] != ActorKind.DETERMINISTIC.value:
             raise LedgerDivergence(f"event {event['id']} has a tampered receipt identity")
         return str(receipt["policy_hash"])
 

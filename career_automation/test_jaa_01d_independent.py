@@ -303,15 +303,90 @@ def test_score_snapshot_persists_canonical_payload_and_rejects_non_finite_metada
         assert conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == before_jobs
         assert conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == before_events
 
+    for field in ("fit", "opportunity", "final_score", "extraction_confidence"):
+        integer = replace(_job(f"integer-{field}"), **{field: 1})
+        assert database.upsert_scored_job(integer) is True
+        assert database.upsert_scored_job(integer) is False
+        with database.connection() as conn:
+            stable = (
+                conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0],
+            )
+        with pytest.raises(IdempotencyConflict, match="score snapshot|immutable import event"):
+            database.upsert_scored_job(replace(integer, **{field: 1.0}))
+        with database.connection() as conn:
+            assert (
+                conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0],
+            ) == stable
+
+        negative_zero = replace(_job(f"negative-zero-{field}"), **{field: -0.0})
+        assert database.upsert_scored_job(negative_zero) is True
+        assert database.upsert_scored_job(negative_zero) is False
+        with pytest.raises(IdempotencyConflict, match="score snapshot|immutable import event"):
+            database.upsert_scored_job(replace(negative_zero, **{field: 0.0}))
+
+    assert set(LifecycleReducer(path).replay()) == {
+        "canonical-finite",
+        *(f"integer-{field}" for field in (
+            "fit", "opportunity", "final_score", "extraction_confidence"
+        )),
+        *(f"negative-zero-{field}" for field in (
+            "fit", "opportunity", "final_score", "extraction_confidence"
+        )),
+    }
+
 
 def test_replay_reconstructs_states_and_detects_divergence_order_and_receipt_identity_tampering(tmp_path: Path) -> None:
     path = tmp_path / "replay.sqlite3"
     database = CareerDatabase(path)
     database.upsert_scored_job(_job("replay"))
     reducer = LifecycleReducer(path)
-    first = reducer.commit(job_key="replay", to_state=PipelineState.EMPLOYER_RESEARCH_QUEUED, policy=POLICY, inputs={"n": 1}, outputs={}, idempotency_key="replay:1")
+    first = reducer.commit(
+        job_key="replay", to_state=PipelineState.EMPLOYER_RESEARCH_QUEUED,
+        policy=POLICY, inputs={"n": 1}, outputs={}, idempotency_key="replay:1",
+        model=ModelIdentity("provider", "model", "1"),
+    )
     reducer.commit(job_key="replay", to_state=PipelineState.EMPLOYER_RESEARCHING, policy=POLICY, inputs={"n": 2}, outputs={}, idempotency_key="replay:2")
     assert reducer.replay() == {"replay": PipelineState.EMPLOYER_RESEARCHING}
+
+    with sqlite3.connect(path) as conn:
+        stored_job_payload = conn.execute(
+            "SELECT payload_json FROM pipeline_jobs WHERE job_key='replay'"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE pipeline_jobs SET payload_json=? WHERE job_key='replay'",
+            (canonical_json({"key": "tampered"}),),
+        )
+    with pytest.raises(LedgerDivergence, match="payload content diverges"):
+        reducer.verify()
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE pipeline_jobs SET payload_json=? WHERE job_key='replay'",
+            (stored_job_payload,),
+        )
+        original_binding = conn.execute(
+            "SELECT payload_json FROM pipeline_events WHERE id=?", (first.event_id,),
+        ).fetchone()[0]
+
+    for addition in ("top", "policy", "model"):
+        changed_binding = json.loads(original_binding)
+        if addition == "top":
+            changed_binding["extra"] = True
+        else:
+            changed_binding[addition]["extra"] = True
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE pipeline_events SET payload_json=? WHERE id=?",
+                (canonical_json(changed_binding), first.event_id),
+            )
+        with pytest.raises(LedgerDivergence, match="malformed binding data"):
+            reducer.verify()
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE pipeline_events SET payload_json=? WHERE id=?",
+                (original_binding, first.event_id),
+            )
 
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE pipeline_jobs SET state='employer_researched' WHERE job_key='replay'")

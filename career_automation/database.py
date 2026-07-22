@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -19,6 +18,7 @@ from .lifecycle import (
     PolicyIdentity,
     canonical_hash,
     canonical_json,
+    score_snapshot_import_binding,
 )
 from .models import ActorKind, PipelineState, ResearchTask, ScoredJob
 
@@ -212,25 +212,21 @@ class CareerDatabase:
 
     def upsert_scored_job(self, job: ScoredJob) -> bool:
         """Store one immutable score snapshot, making identical retries idempotent."""
-        numeric_fields = {
-            "fit": job.fit,
-            "opportunity": job.opportunity,
-            "final_score": job.final_score,
-            "extraction_confidence": job.extraction_confidence,
-        }
-        for name, value in numeric_fields.items():
-            if value is None:
-                continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"score snapshot {name} must be a finite number")
-            if not math.isfinite(value):
-                raise ValueError(f"score snapshot {name} must be a finite number")
+        if not isinstance(job.payload, dict):
+            raise ValueError("score snapshot payload must be a JSON object")
         if (len(job.payload_hash) != 64
                 or any(char not in "0123456789abcdef" for char in job.payload_hash)):
             raise ValueError("score snapshot payload_hash must be a lowercase SHA-256 digest")
         if canonical_hash(job.payload) != job.payload_hash:
             raise ValueError("score snapshot payload_hash does not match canonical payload")
         payload_json = canonical_json(job.payload)
+        event_payload_json, event_key = score_snapshot_import_binding(
+            job_key=job.key, board=job.board, job_id=job.job_id, url=job.url,
+            title=job.title, company=job.company, fit=job.fit,
+            opportunity=job.opportunity, final_score=job.final_score,
+            extraction_confidence=job.extraction_confidence,
+            payload_hash=job.payload_hash,
+        )
         snapshot = (
             job.board, job.job_id, job.url, job.title, job.company, job.fit,
             job.opportunity, job.final_score, job.extraction_confidence,
@@ -253,13 +249,12 @@ class CareerDatabase:
                     """SELECT job_key,event_type,from_state,to_state,actor_kind,
                               payload_json,idempotency_key
                        FROM pipeline_events WHERE idempotency_key=?""",
-                    (f"score-import:{job.key}:{job.payload_hash}",),
+                    (event_key,),
                 ).fetchone()
                 expected_event = (
                     job.key, "score_snapshot_imported", None,
                     PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
-                    json.dumps({"payload_hash": job.payload_hash}, sort_keys=True),
-                    f"score-import:{job.key}:{job.payload_hash}",
+                    event_payload_json, event_key,
                 )
                 if event is None or tuple(event) != expected_event:
                     raise IdempotencyConflict(
@@ -284,9 +279,7 @@ class CareerDatabase:
                    ) VALUES(?,?,?,?,?,?,?)""",
                 (
                     job.key, "score_snapshot_imported", None, PipelineState.SCORED.value,
-                    ActorKind.DETERMINISTIC.value,
-                    json.dumps({"payload_hash": job.payload_hash}, sort_keys=True),
-                    f"score-import:{job.key}:{job.payload_hash}",
+                    ActorKind.DETERMINISTIC.value, event_payload_json, event_key,
                 ),
             )
         return True
