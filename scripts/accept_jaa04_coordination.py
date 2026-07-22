@@ -13,6 +13,7 @@ from career_automation.database import CareerDatabase
 from career_automation.employer_research import (Opportunity1Coordinator, RawResponseCache,
                                                   content_hash, load_frozen_dossiers)
 from career_automation.engine import OpportunityGate
+from career_automation.lifecycle import canonical_hash
 from career_automation.models import ScoredJob
 
 
@@ -40,7 +41,8 @@ def exercise(capture: Path) -> None:
             key=row["job_key"], board="jaa04", job_id=row["job_key"],
             url=row["sources"][0]["url"], title="certified vacancy", company="certified employer",
             fit=None, opportunity=.9, final_score=None, extraction_confidence=1.0,
-            payload={}, payload_hash=content_hash({"job_key": row["job_key"]}),
+            payload={"job_key": row["job_key"]},
+            payload_hash=canonical_hash({"job_key": row["job_key"]}),
         ) for row in dossiers]
         summary = OpportunityGate(database).bootstrap(jobs)
         if summary.queued != len(dossiers):

@@ -213,37 +213,58 @@ class CareerDatabase:
         if (len(job.payload_hash) != 64
                 or any(char not in "0123456789abcdef" for char in job.payload_hash)):
             raise ValueError("score snapshot payload_hash must be a lowercase SHA-256 digest")
+        if canonical_hash(job.payload) != job.payload_hash:
+            raise ValueError("score snapshot payload_hash does not match canonical payload")
+        payload_json = json.dumps(job.payload, ensure_ascii=False, sort_keys=True)
+        snapshot = (
+            job.board, job.job_id, job.url, job.title, job.company, job.fit,
+            job.opportunity, job.final_score, job.extraction_confidence,
+            payload_json, job.payload_hash,
+        )
         with self.transaction(immediate=True) as conn:
             existing = conn.execute(
-                "SELECT payload_hash FROM pipeline_jobs WHERE job_key=?", (job.key,)
+                """SELECT board,job_id,url,title,company,fit,opportunity,final_score,
+                          extraction_confidence,payload_json,payload_hash
+                   FROM pipeline_jobs WHERE job_key=?""",
+                (job.key,),
             ).fetchone()
-            existed = existing is not None
-            if existed and existing["payload_hash"] != job.payload_hash:
-                raise IdempotencyConflict(
-                    "job key was reused with a changed score snapshot; "
-                    "versioned score updates require an explicit ledger event"
+            if existing is not None:
+                if tuple(existing) != snapshot:
+                    raise IdempotencyConflict(
+                        "job key was reused with a changed score snapshot; "
+                        "versioned score updates require an explicit ledger event"
+                    )
+                event = conn.execute(
+                    """SELECT job_key,event_type,from_state,to_state,actor_kind,
+                              payload_json,idempotency_key
+                       FROM pipeline_events WHERE idempotency_key=?""",
+                    (f"score-import:{job.key}:{job.payload_hash}",),
+                ).fetchone()
+                expected_event = (
+                    job.key, "score_snapshot_imported", None,
+                    PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
+                    json.dumps({"payload_hash": job.payload_hash}, sort_keys=True),
+                    f"score-import:{job.key}:{job.payload_hash}",
                 )
+                if event is None or tuple(event) != expected_event:
+                    raise IdempotencyConflict(
+                        "existing score snapshot has no matching immutable import event"
+                    )
+                return False
             conn.execute(
                 """INSERT INTO pipeline_jobs(
                      job_key,board,job_id,url,title,company,fit,opportunity,final_score,
                      extraction_confidence,payload_json,payload_hash,state
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(job_key) DO UPDATE SET
-                     board=excluded.board,job_id=excluded.job_id,url=excluded.url,
-                     title=excluded.title,company=excluded.company,fit=excluded.fit,
-                     opportunity=excluded.opportunity,final_score=excluded.final_score,
-                     extraction_confidence=excluded.extraction_confidence,
-                     payload_json=excluded.payload_json,payload_hash=excluded.payload_hash,
-                     updated_at=CURRENT_TIMESTAMP""",
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     job.key, job.board, job.job_id, job.url, job.title, job.company,
                     job.fit, job.opportunity, job.final_score, job.extraction_confidence,
-                    json.dumps(job.payload, ensure_ascii=False, sort_keys=True),
+                    payload_json,
                     job.payload_hash, PipelineState.SCORED.value,
                 ),
             )
             conn.execute(
-                """INSERT OR IGNORE INTO pipeline_events(
+                """INSERT INTO pipeline_events(
                      job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
                    ) VALUES(?,?,?,?,?,?,?)""",
                 (
@@ -253,7 +274,7 @@ class CareerDatabase:
                     f"score-import:{job.key}:{job.payload_hash}",
                 ),
             )
-        return not existed
+        return True
 
     def scored_jobs(self) -> list[sqlite3.Row]:
         with self.connection() as conn:

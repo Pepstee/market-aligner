@@ -29,6 +29,7 @@ from career_automation.employer_research import (  # noqa: E402
     ScraplingPublicRetriever, content_hash, load_frozen_dossiers,
 )
 from career_automation.engine import OpportunityGate  # noqa: E402
+from career_automation.lifecycle import canonical_hash  # noqa: E402
 from career_automation.models import ScoredJob  # noqa: E402
 from career_automation.opportunity_calibration import (  # noqa: E402
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
@@ -223,7 +224,7 @@ def _bootstrap_json_database(work_db: Path, records: list[dict[str, object]],
                   final_score=None,
                   extraction_confidence=min(record["confidence"].values()) / 10_000,
                   payload={"official_snapshot_record": record},
-                  payload_hash=str(record["payload_hash"]))
+                  payload_hash=canonical_hash({"official_snapshot_record": record}))
         for record in records
     ]
     try:

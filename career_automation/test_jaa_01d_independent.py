@@ -230,6 +230,18 @@ def test_changed_score_snapshot_is_rejected_without_corrupting_replay(tmp_path: 
     with pytest.raises(IdempotencyConflict, match="changed score snapshot"):
         database.upsert_scored_job(changed)
 
+    aliased = replace(
+        original,
+        payload={"key": original.key, "silently_changed": True},
+        title="Aliased title",
+    )
+    with pytest.raises(ValueError, match="does not match canonical payload"):
+        database.upsert_scored_job(aliased)
+
+    metadata_only = replace(original, title="Changed outside the hashed payload")
+    with pytest.raises(IdempotencyConflict, match="changed score snapshot"):
+        database.upsert_scored_job(metadata_only)
+
     with database.connection() as conn:
         after_job = tuple(conn.execute(
             "SELECT title,payload_json,payload_hash,state FROM pipeline_jobs WHERE job_key=?",

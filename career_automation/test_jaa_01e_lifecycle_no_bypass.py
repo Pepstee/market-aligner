@@ -188,8 +188,16 @@ def test_career_database_source_cannot_directly_change_state_or_emit_non_root_st
     assert direct_updates
     assert all(not re.search(r"\bstate\s*=", statement, flags=re.IGNORECASE) for statement in direct_updates)
 
-    assert len(re.findall(r"INSERT(?:\s+OR\s+IGNORE)?\s+INTO\s+pipeline_events", source, flags=re.IGNORECASE)) == 1
-    start = source.index("INSERT OR IGNORE INTO pipeline_events")
+    event_insert = re.search(
+        r"INSERT(?:\s+OR\s+IGNORE)?\s+INTO\s+pipeline_events", source,
+        flags=re.IGNORECASE,
+    )
+    assert event_insert is not None
+    assert len(re.findall(
+        r"INSERT(?:\s+OR\s+IGNORE)?\s+INTO\s+pipeline_events", source,
+        flags=re.IGNORECASE,
+    )) == 1
+    start = event_insert.start()
     root_insert = source[start:start + 1_500]
     assert "score_snapshot_imported" in root_insert
     assert "PipelineState.SCORED.value" in root_insert
