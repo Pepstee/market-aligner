@@ -30,6 +30,8 @@ from tracked_source_revision import (
     TrackedSourceRevisionError,
     source_content_revision as tracked_source_content_revision,
     source_content_revision_contract,
+    source_git_revision as tracked_source_git_revision,
+    source_git_revision_contract,
 )
 
 EXPECTED_COUNTS = {"pipeline_jobs": 462, "pipeline_events": 924}
@@ -62,6 +64,14 @@ def source_content_revision() -> str:
     """Return the shared tracked-source revision using this certifier's error type."""
     try:
         return tracked_source_content_revision(ROOT)
+    except TrackedSourceRevisionError as exc:
+        raise CertificationError(str(exc)) from exc
+
+
+def source_git_revision() -> str:
+    """Return exact HEAD using this certifier's fail-closed error type."""
+    try:
+        return tracked_source_git_revision(ROOT)
     except TrackedSourceRevisionError as exc:
         raise CertificationError(str(exc)) from exc
 
@@ -220,12 +230,18 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--baseline-database", required=True)
     result.add_argument("--migration-receipt", required=True)
+    result.add_argument("--expected-source-commit", required=True)
     result.add_argument("--evidence-directory", default="runtime_evidence/jaa01")
     return result
 
 
 def certify(args: argparse.Namespace) -> Path:
     revision = source_content_revision()
+    git_revision = source_git_revision()
+    require(
+        args.expected_source_commit == git_revision,
+        "source Git revision does not match the expected component revision",
+    )
     baseline = Path(args.baseline_database)
     migration_receipt = Path(args.migration_receipt)
     evidence_directory = Path(args.evidence_directory)
@@ -302,6 +318,8 @@ def certify(args: argparse.Namespace) -> Path:
 
     require(source_content_revision() == revision,
             "tracked source content changed during certification")
+    require(source_git_revision() == git_revision,
+            "source Git revision changed during certification")
 
     evidence: dict[str, Any] = {
         "format": FORMAT,
@@ -315,6 +333,8 @@ def certify(args: argparse.Namespace) -> Path:
         },
         "source_content_revision": revision,
         "source_content_revision_contract": source_content_revision_contract(),
+        "source_git_revision": git_revision,
+        "source_git_revision_contract": source_git_revision_contract(),
         "labels": {
             "baseline": "frozen-baseline:career-pipeline",
             "migration_receipt": "jaa00:migration-receipt",
@@ -326,6 +346,7 @@ def certify(args: argparse.Namespace) -> Path:
                 "python3", "scripts/certify_jaa01_runtime.py",
                 "--baseline-database", "<frozen-baseline-database>",
                 "--migration-receipt", "<migration-receipt>",
+                "--expected-source-commit", "<exact-source-commit>",
             ],
             "migration_target": "temporary-copy-only",
             "inputs_opened_read_only": True,

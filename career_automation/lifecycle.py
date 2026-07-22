@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .migrations import apply_jaa_01_migrations
+from .migrations import (
+    JAA00_LEGACY_BOUNDARY_JOB_COUNT,
+    JAA00_LEGACY_BOUNDARY_SHA256,
+    apply_jaa_01_migrations,
+    legacy_cohort_boundary_digest,
+    verify_jaa01_installed_schema,
+)
 from .models import ActorKind, PipelineState
 
 
@@ -482,6 +488,10 @@ class LifecycleReducer:
         """Reconstruct all job states, rejecting invalid order or receipt tampering."""
         conn = self._connect()
         try:
+            try:
+                verify_jaa01_installed_schema(conn)
+            except RuntimeError as exc:
+                raise LedgerDivergence(str(exc)) from exc
             job_rows = conn.execute(
                 """SELECT *,
                           typeof(fit) AS _fit_storage_class,
@@ -587,6 +597,7 @@ class LifecycleReducer:
                 raise LedgerDivergence(
                     "legacy opportunity gate cohort contains an unowned admission"
                 )
+            self._verify_legacy_boundary_cohorts(conn)
             if set(replayed) != set(jobs):
                 missing = sorted(set(jobs) - set(replayed))
                 raise LedgerDivergence(f"jobs have no replayable state history: {missing}")
@@ -600,6 +611,26 @@ class LifecycleReducer:
             return replayed
         finally:
             conn.close()
+
+    @staticmethod
+    def _verify_legacy_boundary_cohorts(conn: sqlite3.Connection) -> None:
+        """Re-authenticate the frozen JAA-00 authority on every replay."""
+        score_count = int(conn.execute(
+            "SELECT COUNT(*) FROM legacy_score_snapshot_cohort"
+        ).fetchone()[0])
+        gate_count = int(conn.execute(
+            "SELECT COUNT(*) FROM legacy_opportunity_gate_cohort"
+        ).fetchone()[0])
+        if score_count == 0 and gate_count == 0:
+            return
+        if (
+            score_count != JAA00_LEGACY_BOUNDARY_JOB_COUNT
+            or gate_count != JAA00_LEGACY_BOUNDARY_JOB_COUNT
+            or legacy_cohort_boundary_digest(conn) != JAA00_LEGACY_BOUNDARY_SHA256
+        ):
+            raise LedgerDivergence(
+                "legacy cohorts do not reconstruct the certified JAA-00 boundary"
+            )
 
     @staticmethod
     def _verify_proposal_event(

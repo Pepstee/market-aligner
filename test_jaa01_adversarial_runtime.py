@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from career_automation.database import CareerDatabase
 from career_automation.lifecycle import ModelIdentity, canonical_hash
 from career_automation.migrations import JAA_02_MIGRATIONS
@@ -62,6 +64,143 @@ def _transition(key: str, target: str, idempotency_key: str) -> tuple[str, ...]:
         "--outputs", '{"decision":"deterministic"}',
         "--idempotency-key", idempotency_key,
     )
+
+
+def _forge_miniature_legacy_cohorts(path: Path) -> None:
+    """Preseed valid public migration checksums and forged receiptless cohorts."""
+    CareerDatabase(path)
+    payload = {"key": "forged-miniature-boundary"}
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    payload_hash = canonical_hash(payload)
+    score_binding = json.dumps({"payload_hash": payload_hash}, sort_keys=True)
+    gate_binding = json.dumps({
+        "decision": "pass",
+        "reason": "opportunity_warrants_employer_reconnaissance",
+    }, sort_keys=True)
+    score_key = f"score-import:forged-miniature-boundary:{payload_hash}"
+    gate_key = (
+        "opportunity-gate:forged-miniature-boundary:"
+        f"{payload_hash}:b38a8ff32e7d74ce"
+    )
+    immutable_triggers = (
+        "legacy_score_snapshot_cohort_immutable_insert",
+        "legacy_score_snapshot_cohort_immutable_update",
+        "legacy_score_snapshot_cohort_immutable_delete",
+        "legacy_opportunity_gate_cohort_immutable_insert",
+        "legacy_opportunity_gate_cohort_immutable_update",
+        "legacy_opportunity_gate_cohort_immutable_delete",
+    )
+    with sqlite3.connect(path) as connection:
+        trigger_sql = {
+            name: connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?", (name,),
+            ).fetchone()[0]
+            for name in immutable_triggers
+        }
+        for name in immutable_triggers:
+            connection.execute(f'DROP TRIGGER "{name}"')
+        connection.execute(
+            """INSERT INTO pipeline_jobs(
+                 job_key,board,job_id,url,title,company,fit,opportunity,final_score,
+                 extraction_confidence,payload_json,payload_hash,state,
+                 opportunity_decision,opportunity_reason,policy_hash
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "forged-miniature-boundary", "forged", "1",
+                "https://example.test/forged-miniature-boundary", "Engineer", "Example",
+                0.8, 0.8, 80.0, 0.9, payload_json, payload_hash,
+                PipelineState.EMPLOYER_RESEARCH_QUEUED.value, "pass",
+                "opportunity_warrants_employer_reconnaissance", "b38a8ff32e7d74ce",
+            ),
+        )
+        score_id = connection.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "forged-miniature-boundary", "score_snapshot_imported", None,
+                PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
+                score_binding, score_key,
+            ),
+        ).lastrowid
+        gate_id = connection.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "forged-miniature-boundary", "opportunity_gate_decided",
+                PipelineState.SCORED.value,
+                PipelineState.EMPLOYER_RESEARCH_QUEUED.value,
+                ActorKind.DETERMINISTIC.value, gate_binding, gate_key,
+            ),
+        ).lastrowid
+        connection.execute(
+            """INSERT INTO legacy_score_snapshot_cohort(
+                 event_id,job_key,board,job_id,url,title,company,
+                 fit_value,fit_storage_class,opportunity_value,
+                 opportunity_storage_class,final_score_value,
+                 final_score_storage_class,extraction_confidence_value,
+                 extraction_confidence_storage_class,payload_json,payload_hash,
+                 binding_json,idempotency_key
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                score_id, "forged-miniature-boundary", "forged", "1",
+                "https://example.test/forged-miniature-boundary", "Engineer", "Example",
+                0.8, "real", 0.8, "real", 80.0, "real", 0.9, "real",
+                payload_json, payload_hash, score_binding, score_key,
+            ),
+        )
+        connection.execute(
+            """INSERT INTO legacy_opportunity_gate_cohort(
+                 event_id,job_key,payload_hash,from_state,to_state,actor_kind,
+                 binding_json,idempotency_key
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                gate_id, "forged-miniature-boundary", payload_hash,
+                PipelineState.SCORED.value,
+                PipelineState.EMPLOYER_RESEARCH_QUEUED.value,
+                ActorKind.DETERMINISTIC.value, gate_binding, gate_key,
+            ),
+        )
+        for name in immutable_triggers:
+            connection.execute(trigger_sql[name])
+
+
+def test_preseeded_public_migrations_cannot_authorise_miniature_legacy_cohorts(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "forged-miniature-cohort.sqlite3"
+    _forge_miniature_legacy_cohorts(database)
+
+    rejected = _cli(database, "replay")
+
+    assert rejected.returncode != 0
+    assert "certified JAA-00 boundary" in rejected.stderr
+
+
+@pytest.mark.parametrize("attack", ["missing-trigger", "altered-table"])
+def test_public_migration_checksums_do_not_replace_installed_schema_verification(
+    tmp_path: Path, attack: str,
+) -> None:
+    database = tmp_path / f"forged-installed-schema-{attack}.sqlite3"
+    _current_ledger(database, f"current:{attack}")
+    with sqlite3.connect(database) as connection:
+        if attack == "missing-trigger":
+            connection.execute(
+                "DROP TRIGGER legacy_score_snapshot_cohort_immutable_insert"
+            )
+        else:
+            connection.execute("DROP TABLE legacy_opportunity_gate_cohort")
+            connection.execute(
+                "CREATE TABLE legacy_opportunity_gate_cohort(event_id INTEGER PRIMARY KEY)"
+            )
+
+    rejected = _cli(database, "verify")
+
+    assert rejected.returncode != 0
+    assert "installed JAA-01 schema" in rejected.stderr
 
 
 def test_cli_migrates_462_jobs_and_924_events_without_reinterpretation_or_duplicate_apply(

@@ -30,6 +30,15 @@ def source_content_revision_contract() -> dict[str, Any]:
     }
 
 
+def source_git_revision_contract() -> dict[str, str]:
+    """Return the exact immutable Git identity recorded beside source bytes."""
+    return {
+        "algorithm": "git-commit-sha1",
+        "reference": "HEAD^{commit}",
+        "scope": "exact-source-commit",
+    }
+
+
 def _git(repository: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
     completed = subprocess.run(
         ("git", *arguments),
@@ -57,6 +66,24 @@ def _safe_relative_path(path: bytes) -> bool:
     return bool(decoded) and not pure.is_absolute() and all(
         component not in {"", ".", ".."} for component in pure.parts
     )
+
+
+def source_git_revision(repository: str | Path) -> str:
+    """Resolve the checkout's exact HEAD commit, refusing malformed identities."""
+    repository_path = Path(repository)
+    try:
+        root = repository_path.resolve(strict=True)
+    except OSError as exc:
+        raise TrackedSourceRevisionError("source repository is missing") from exc
+    if not root.is_dir():
+        raise TrackedSourceRevisionError("source repository is not a directory")
+    revision = _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    if (
+        len(revision) != 40
+        or any(byte not in b"0123456789abcdef" for byte in revision)
+    ):
+        raise TrackedSourceRevisionError("source Git revision is not a SHA-1 commit")
+    return revision.decode("ascii")
 
 
 def source_content_revision(repository: str | Path) -> str:

@@ -19,6 +19,32 @@ JAA00_LEGACY_BOUNDARY_EVENT_COUNT = 924
 JAA00_LEGACY_BOUNDARY_SHA256 = (
     "83c7b9f7531d3cae083db0781fb2a134b62b0a900d560112bcfce8f886dcbc47"
 )
+JAA01_INSTALLED_SCHEMA_SHA256 = frozenset({
+    # A new JAA database created directly by migration 1 + migration 3.
+    "ffa6c27b41d3fbeedfba02beb135da6ad70d75349569f5b73e76f282d38a4695",
+    # The independently certified JAA-00 database after migration 1 + migration 3.
+    # Its core table DDL is semantically identical but retains the original formatting.
+    "a4404b143438e91926265aecfbaddb525254c3bec851cf142911a32a67473926",
+})
+_JAA01_SCHEMA_TABLES = (
+    "pipeline_jobs",
+    "pipeline_events",
+    "lifecycle_transition_receipts",
+    "score_snapshot_receipts",
+    "legacy_score_snapshot_cohort",
+    "legacy_opportunity_gate_cohort",
+)
+
+
+def _boundary_digest(jobs: list[sqlite3.Row], events: list[sqlite3.Row]) -> str:
+    document = json.dumps(
+        {
+            "jobs": [list(row) for row in jobs],
+            "events": [list(row) for row in events],
+        },
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"jaa00-legacy-boundary-v1\0" + document).hexdigest()
 
 
 def legacy_boundary_digest(conn: sqlite3.Connection) -> str:
@@ -36,14 +62,63 @@ def legacy_boundary_digest(conn: sqlite3.Connection) -> str:
                   payload_json,idempotency_key
            FROM pipeline_events ORDER BY id"""
     ).fetchall()
+    return _boundary_digest(jobs, events)
+
+
+def legacy_cohort_boundary_digest(conn: sqlite3.Connection) -> str:
+    """Reconstruct JAA-00 from immutable cohort membership, excluding later rows."""
+    jobs = conn.execute(
+        """SELECT job.job_key,job.board,job.job_id,job.url,job.title,job.company,
+                  job.fit,typeof(job.fit),job.opportunity,typeof(job.opportunity),
+                  job.final_score,typeof(job.final_score),
+                  job.extraction_confidence,typeof(job.extraction_confidence),
+                  job.payload_json,job.payload_hash,job.state,
+                  job.opportunity_decision,job.opportunity_reason,job.policy_hash
+           FROM pipeline_jobs AS job
+           JOIN legacy_score_snapshot_cohort AS cohort
+             ON cohort.job_key=job.job_key
+           ORDER BY job.job_key"""
+    ).fetchall()
+    events = conn.execute(
+        """SELECT event.id,event.job_key,event.event_type,event.from_state,
+                  event.to_state,event.actor_kind,event.payload_json,event.idempotency_key
+           FROM pipeline_events AS event
+           WHERE event.id IN (
+             SELECT event_id FROM legacy_score_snapshot_cohort
+             UNION
+             SELECT event_id FROM legacy_opportunity_gate_cohort
+           )
+           ORDER BY event.id"""
+    ).fetchall()
+    return _boundary_digest(jobs, events)
+
+
+def jaa01_installed_schema_digest(conn: sqlite3.Connection) -> str:
+    """Hash every installed schema object capable of affecting JAA-01 tables."""
+    placeholders = ",".join("?" for _ in _JAA01_SCHEMA_TABLES)
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql
+            FROM sqlite_schema
+            WHERE sql IS NOT NULL
+              AND (name='career_schema_migrations' OR tbl_name IN ({placeholders}))
+            ORDER BY type,name""",
+        _JAA01_SCHEMA_TABLES,
+    ).fetchall()
     document = json.dumps(
-        {
-            "jobs": [list(row) for row in jobs],
-            "events": [list(row) for row in events],
-        },
+        [list(row) for row in rows],
         ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(b"jaa00-legacy-boundary-v1\0" + document).hexdigest()
+    return hashlib.sha256(b"jaa01-installed-schema-v1\0" + document).hexdigest()
+
+
+def verify_jaa01_installed_schema(conn: sqlite3.Connection) -> str:
+    """Refuse missing, altered, or extra DDL despite plausible migration-ledger rows."""
+    digest = jaa01_installed_schema_digest(conn)
+    if digest not in JAA01_INSTALLED_SCHEMA_SHA256:
+        raise RuntimeError(
+            "installed JAA-01 schema or trigger set does not match the certified contract"
+        )
+    return digest
 
 
 def _verify_jaa00_legacy_boundary(conn: sqlite3.Connection) -> None:
@@ -601,9 +676,15 @@ JAA_02_MIGRATIONS: tuple[Migration, ...] = (
 
 def apply_jaa_01_migrations(path: str | Path) -> tuple[int, ...]:
     """Apply the canonical JAA-01 schema to a configured SQLite database."""
-    return MigrationRunner(path).apply(JAA_01_MIGRATIONS)
+    applied = MigrationRunner(path).apply(JAA_01_MIGRATIONS)
+    with sqlite3.connect(path) as conn:
+        verify_jaa01_installed_schema(conn)
+    return applied
 
 
 def apply_jaa_02_migrations(path: str | Path) -> tuple[int, ...]:
     """Apply JAA-01 and the forward-only canonical candidate graph schema."""
-    return MigrationRunner(path).apply(JAA_02_MIGRATIONS)
+    applied = MigrationRunner(path).apply(JAA_02_MIGRATIONS)
+    with sqlite3.connect(path) as conn:
+        verify_jaa01_installed_schema(conn)
+    return applied

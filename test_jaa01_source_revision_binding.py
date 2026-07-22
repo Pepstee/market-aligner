@@ -34,6 +34,10 @@ def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
     return completed.stdout
 
 
+def _head(root: Path) -> str:
+    return _git(root, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+
+
 def _independent_source_revision(root: Path) -> str:
     """Calculate the published revision without importing certifier code."""
     entries: list[tuple[bytes, bytes]] = []
@@ -85,13 +89,18 @@ def isolated_repository(tmp_path: Path) -> Path:
     assert completed.returncode == 0, completed.stderr
     _git(clone, "config", "user.email", "jaa01-test@example.test")
     _git(clone, "config", "user.name", "JAA-01 test")
-    certifier = Path("scripts/certify_jaa01_runtime.py")
-    shutil.copyfile(ROOT / certifier, clone / certifier)
+    current_sources = (
+        Path("scripts/certify_jaa01_runtime.py"),
+        Path("tracked_source_revision.py"),
+    )
+    for source in current_sources:
+        shutil.copyfile(ROOT / source, clone / source)
     changed = subprocess.run(
-        ("git", "diff", "--quiet", "--", certifier.as_posix()), cwd=clone, check=False,
+        ("git", "diff", "--quiet", "--", *(source.as_posix() for source in current_sources)),
+        cwd=clone, check=False,
     )
     if changed.returncode == 1:
-        _git(clone, "add", certifier.as_posix())
+        _git(clone, "add", *(source.as_posix() for source in current_sources))
         _git(clone, "commit", "-m", "test current JAA-01 certifier")
     else:
         assert changed.returncode == 0
@@ -104,7 +113,9 @@ def _certify(root: Path, evidence_name: str = "evidence") -> tuple[Path, dict[st
     receipt = runtime / "receipts" / f"migration-{MIGRATION_CONTENT_HASH}.json"
     completed = subprocess.run(
         (sys.executable, "scripts/certify_jaa01_runtime.py", "--baseline-database", str(database),
-         "--migration-receipt", str(receipt), "--evidence-directory", evidence_name),
+         "--migration-receipt", str(receipt),
+         "--expected-source-commit", _head(root),
+         "--evidence-directory", evidence_name),
         cwd=root, text=True, capture_output=True, check=False,
     )
     assert completed.returncode == 0, completed.stderr
@@ -121,6 +132,12 @@ def _assert_source_binding(root: Path, receipt: Path, document: dict[str, object
         "entry_encoding": "uint64be-length-prefixed-path-mode-content",
         "scope": "current-tracked-source-tree", "ordering": "repository-relative-path-byte-order",
         "exclusions": ["runtime_evidence/"],
+    }
+    assert document["source_git_revision"] == _head(root)
+    assert document["source_git_revision_contract"] == {
+        "algorithm": "git-commit-sha1",
+        "reference": "HEAD^{commit}",
+        "scope": "exact-source-commit",
     }
     assert str(root) not in rendered
     assert not any(value.startswith("/") for value in _strings(document))
@@ -141,6 +158,31 @@ def test_fresh_receipt_matches_independent_current_tree_revision(isolated_reposi
     _assert_source_binding(isolated_repository, receipt, document)
 
 
+def test_certifier_rejects_a_clean_but_unexpected_git_revision(
+    isolated_repository: Path,
+) -> None:
+    runtime = _runtime()
+    database = runtime / "databases" / "career_pipeline.sqlite3"
+    receipt = runtime / "receipts" / f"migration-{MIGRATION_CONTENT_HASH}.json"
+
+    completed = subprocess.run(
+        (
+            sys.executable, "scripts/certify_jaa01_runtime.py",
+            "--baseline-database", str(database),
+            "--migration-receipt", str(receipt),
+            "--expected-source-commit", "0" * 40,
+            "--evidence-directory", "unexpected-revision-evidence",
+        ),
+        cwd=isolated_repository, text=True, capture_output=True, check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "does not match the expected component revision" in completed.stderr
+    assert not list(
+        (isolated_repository / "unexpected-revision-evidence").glob("*.json")
+    )
+
+
 def test_certifier_rejects_dirty_tracked_jaa00_trust_evidence(
     isolated_repository: Path,
 ) -> None:
@@ -152,7 +194,9 @@ def test_certifier_rejects_dirty_tracked_jaa00_trust_evidence(
 
     completed = subprocess.run(
         (sys.executable, "scripts/certify_jaa01_runtime.py", "--baseline-database", str(database),
-         "--migration-receipt", str(receipt), "--evidence-directory", "evidence"),
+         "--migration-receipt", str(receipt),
+         "--expected-source-commit", _head(isolated_repository),
+         "--evidence-directory", "evidence"),
         cwd=isolated_repository, text=True, capture_output=True, check=False,
     )
 
@@ -232,7 +276,9 @@ def test_certifier_rejects_unsafe_tracked_source_trees(
 
     completed = subprocess.run(
         (sys.executable, "scripts/certify_jaa01_runtime.py", "--baseline-database", "absent.sqlite3",
-         "--migration-receipt", "absent.json", "--evidence-directory", "evidence"),
+         "--migration-receipt", "absent.json",
+         "--expected-source-commit", _head(isolated_repository),
+         "--evidence-directory", "evidence"),
         cwd=isolated_repository, text=True, capture_output=True, check=False,
     )
     assert completed.returncode == 2
@@ -253,7 +299,9 @@ def test_certifier_fails_closed_for_tracked_mode_and_type_drift(
 
     completed = subprocess.run(
         (sys.executable, "scripts/certify_jaa01_runtime.py", "--baseline-database", "absent.sqlite3",
-         "--migration-receipt", "absent.json", "--evidence-directory", "evidence"),
+         "--migration-receipt", "absent.json",
+         "--expected-source-commit", _head(isolated_repository),
+         "--evidence-directory", "evidence"),
         cwd=isolated_repository, text=True, capture_output=True, check=False,
     )
     assert completed.returncode == 2

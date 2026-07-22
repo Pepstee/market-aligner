@@ -30,6 +30,15 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _head(root: Path) -> str:
+    completed = subprocess.run(
+        ("git", "rev-parse", "--verify", "HEAD^{commit}"), cwd=root,
+        text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.strip()
+
+
 def _jaa01_receipt() -> Path:
     receipts = sorted((ROOT / "runtime_evidence" / "jaa01").glob("sha256-*.json"))
     assert len(receipts) == 1, f"expected exactly one checked-in JAA-01 receipt, found {receipts}"
@@ -112,15 +121,19 @@ def clean_certifier_root(tmp_path: Path) -> Path:
         text=True, capture_output=True, check=False,
     )
     assert cloned.returncode == 0, cloned.stderr
-    cloned_certifier = clone / CERTIFIER.relative_to(ROOT)
-    shutil.copyfile(CERTIFIER, cloned_certifier)
+    current_sources = (
+        CERTIFIER.relative_to(ROOT),
+        Path("tracked_source_revision.py"),
+    )
+    for source in current_sources:
+        shutil.copyfile(ROOT / source, clone / source)
     changed = subprocess.run(
-        ["git", "diff", "--quiet", "--", str(CERTIFIER.relative_to(ROOT))], cwd=clone,
+        ["git", "diff", "--quiet", "--", *(str(source) for source in current_sources)], cwd=clone,
         check=False,
     )
     if changed.returncode == 1:
         for command in (
-            ["git", "add", str(CERTIFIER.relative_to(ROOT))],
+            ["git", "add", *(str(source) for source in current_sources)],
             ["git", "-c", "user.name=JAA-01 test", "-c", "user.email=jaa01@example.test",
              "commit", "-m", "test current JAA-01 certifier"],
         ):
@@ -136,7 +149,9 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(certifier_root / CERTIFIER.relative_to(ROOT)), "--baseline-database", str(database),
-         "--migration-receipt", str(receipt), "--evidence-directory", str(evidence)],
+         "--migration-receipt", str(receipt),
+         "--expected-source-commit", _head(certifier_root),
+         "--evidence-directory", str(evidence)],
         cwd=certifier_root, text=True, capture_output=True, check=False,
     )
 
@@ -200,11 +215,18 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
         "certified_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
     }
     assert document["scenario"]["replay_equal"] is True
+    assert document["source_git_revision"] == _head(clean_certifier_root)
+    assert document["source_git_revision_contract"] == {
+        "algorithm": "git-commit-sha1",
+        "reference": "HEAD^{commit}",
+        "scope": "exact-source-commit",
+    }
     assert "live_sources" not in document
     assert document["command_semantics"]["argv"] == [
         "python3", "scripts/certify_jaa01_runtime.py",
         "--baseline-database", "<frozen-baseline-database>",
         "--migration-receipt", "<migration-receipt>",
+        "--expected-source-commit", "<exact-source-commit>",
     ]
     assert str(tmp_path) not in payload
     assert not any(value.startswith("/") for value in _strings(document))
@@ -300,7 +322,9 @@ def test_runtime_certifier_rejects_symlinked_evidence_directory_without_writing_
 def test_runtime_certifier_command_contract_rejects_mutable_live_source_input() -> None:
     completed = subprocess.run(
         [sys.executable, str(CERTIFIER), "--baseline-database", "frozen.sqlite3",
-         "--migration-receipt", "migration.json", "--live-source", "raw-jobs=live.sqlite3"],
+         "--migration-receipt", "migration.json",
+         "--expected-source-commit", _head(ROOT),
+         "--live-source", "raw-jobs=live.sqlite3"],
         cwd=ROOT, text=True, capture_output=True, check=False,
     )
     assert completed.returncode == 2
