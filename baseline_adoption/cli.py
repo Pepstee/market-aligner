@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+from tracked_source_revision import TrackedSourceRevisionError
+
 from .core import (
     AdoptionError,
     adopt,
@@ -83,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except AdoptionError as exc:
+    except (AdoptionError, TrackedSourceRevisionError) as exc:
         print(f"jaa-baseline: ERROR: {exc}", file=sys.stderr)
         return 2
 

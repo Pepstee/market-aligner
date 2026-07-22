@@ -7,6 +7,7 @@ new snapshot rather than silently teaching the importer to accept the changed fi
 from __future__ import annotations
 
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import os
@@ -779,6 +780,63 @@ def _historical_observation(spec: BaselineSpec) -> dict[str, Any]:
     }
 
 
+def _validate_online_measurement(measured: Mapping[str, Any], spec: BaselineSpec) -> None:
+    """Require the live/frozen database to preserve schema and historical row floors."""
+    if (
+        measured["schema_sha256"] != spec.schema_sha256
+        or measured["schema_objects"] != spec.schema_objects
+        or set(measured["table_counts"]) != set(spec.table_counts)
+    ):
+        raise AdoptionError(
+            f"{spec.name}: live source schema does not match the historical baseline"
+        )
+    regressed = {
+        table: {"historical_floor": floor, "measured": measured["table_counts"][table]}
+        for table, floor in sorted(spec.table_counts.items())
+        if measured["table_counts"][table] < floor
+    }
+    if regressed:
+        raise AdoptionError(
+            f"{spec.name}: row counts regressed below historical floors: {regressed}"
+        )
+
+
+def _preflight_online_source(source: Path, spec: BaselineSpec) -> None:
+    """Reject an invalid live source before creating any destination directories."""
+    if not source.is_file() or source.is_symlink():
+        raise AdoptionError(f"{spec.name}: live source must be a regular, non-symlink file")
+    wal = Path(str(source) + "-wal")
+    shm = Path(str(source) + "-shm")
+    if wal.exists() and not shm.exists():
+        raise AdoptionError(
+            f"{spec.name}: WAL exists without SHM; refusing a read that could initialise source state"
+        )
+    try:
+        with closing(_readonly_connection(source)) as connection:
+            integrity = [
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check").fetchall()
+            ]
+            if integrity != ["ok"]:
+                raise AdoptionError(f"{spec.name}: integrity_check failed: {integrity}")
+            schema = _schema_rows(connection)
+            tables = sorted(row[1] for row in schema if row[0] == "table")
+            measured = {
+                "schema_sha256": hashlib.sha256(_canonical_bytes(schema)).hexdigest(),
+                "schema_objects": len(schema),
+                "table_counts": {
+                    table: int(
+                        connection.execute(
+                            'SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"'
+                        ).fetchone()[0]
+                    )
+                    for table in tables
+                },
+            }
+    except sqlite3.Error as exc:
+        raise AdoptionError(f"{spec.name}: live source preflight failed: {exc}") from exc
+    _validate_online_measurement(measured, spec)
+
+
 def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -> dict[str, Any]:
     """Freeze a live source with sqlite3_backup and publish it create-if-absent."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -822,20 +880,8 @@ def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -
         end = _source_identities(source, source_label)
         measured = _inspect_database(temporary)
 
-        # A live baseline may gain rows, but it must still be the expected database family.
-        if (measured["schema_sha256"] != spec.schema_sha256 or
-                measured["schema_objects"] != spec.schema_objects or
-                set(measured["table_counts"]) != set(spec.table_counts)):
-            raise AdoptionError(f"{spec.name}: live source schema does not match the historical baseline")
-        regressed = {
-            table: {"historical_floor": floor, "measured": measured["table_counts"][table]}
-            for table, floor in sorted(spec.table_counts.items())
-            if measured["table_counts"][table] < floor
-        }
-        if regressed:
-            raise AdoptionError(
-                f"{spec.name}: row counts regressed below historical floors: {regressed}"
-            )
+        # Recheck the frozen bytes: the source may have changed since the no-output preflight.
+        _validate_online_measurement(measured, spec)
 
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
@@ -981,15 +1027,20 @@ def adopt_online(source_root: str | Path, data_root: str | Path, *, repository: 
     if invalid_refs:
         raise AdoptionError("secret references must be names only, never values or paths")
 
+    # Validate every source before _atomic_online_backup creates a destination directory. The
+    # frozen copy is checked again immediately before publication to close the race with writers.
+    for spec in BASELINES:
+        _preflight_online_source(source_root / spec.source_relative, spec)
+
     destinations = [data_root / spec.destination_relative for spec in BASELINES]
-    for spec, destination in zip(BASELINES, destinations):
+    for spec, destination in zip(BASELINES, destinations, strict=True):
         if destination.exists() or destination.is_symlink():
             raise AdoptionError(f"refusing to overwrite destination: {spec.destination_relative}")
 
     captures: dict[str, dict[str, Any]] = {}
     created: list[Path] = []
     try:
-        for spec, destination in zip(BASELINES, destinations):
+        for spec, destination in zip(BASELINES, destinations, strict=True):
             captures[spec.name] = _atomic_online_backup(
                 source_root / spec.source_relative, destination, spec
             )
@@ -1360,35 +1411,6 @@ def independent_review(receipt_path: str | Path, data_root: str | Path,
 _SAFE_EVIDENCE_TEXT = re.compile(r"^[A-Za-z0-9_./:>=+-]+$")
 
 
-def _evidence_scalar(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return "null"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, list):
-        if any(isinstance(item, (dict, list)) for item in value):
-            raise AdoptionError("evidence lists must contain scalar values")
-        return "[" + ", ".join(_evidence_scalar(item) for item in value) + "]"
-    text = str(value)
-    if text and _SAFE_EVIDENCE_TEXT.fullmatch(text) and text.lower() not in {"null", "true", "false"}:
-        return text
-    return json.dumps(text, ensure_ascii=False)
-
-
-def _render_evidence(value: Mapping[str, Any], indent: int = 0) -> str:
-    lines: list[str] = []
-    for key, item in value.items():
-        prefix = " " * indent + f"{key}:"
-        if isinstance(item, Mapping):
-            lines.append(prefix)
-            lines.extend(_render_evidence(item, indent + 2).splitlines())
-        else:
-            lines.append(prefix + " " + _evidence_scalar(item))
-    return "\n".join(lines)
-
-
 def publish_runtime_evidence(
     receipt_path: Path, data_root: Path, repository: Path, output_path: Path | None = None
 ) -> Path:
@@ -1406,14 +1428,18 @@ def publish_runtime_evidence(
     if not isinstance(references, list) or any(not isinstance(item, str)
             or not _SAFE_EVIDENCE_TEXT.fullmatch(item) for item in references):
         raise AdoptionError("secret references must be safe symbolic names")
-    locks: dict[str, Any] = {}
+    locks: list[dict[str, Any]] = []
     for relative, role in (("requirements-test.lock", "fully-pinned-lock"),
-            ("requirements-scrapling-full.txt", "pinned-runtime-input"),
-            ("pyproject.toml", "python-project-metadata")):
+            ("requirements-scrapling-full.txt", "pinned-runtime-input")):
         path = repository / relative
         if not path.is_file():
             raise AdoptionError(f"required dependency record is missing: {relative}")
-        locks[relative] = {"sha256": _hash_file(path), "role": role}
+        locks.append({
+            "path": relative,
+            "role": role,
+            "bytes": path.stat().st_size,
+            "sha256": _hash_file(path),
+        })
     db_evidence: dict[str, Any] = {}
     capture_evidence: dict[str, Any] = {}
     for name in baseline_names:
@@ -1501,7 +1527,13 @@ def publish_runtime_evidence(
             "preserved_source_labels": [databases[name]["rollback"]["preserved_source_label"] for name in baseline_names],
             "removable_destination_labels": [databases[name]["rollback"]["remove_destination_label"] for name in baseline_names]},
     }
-    payload = (_render_evidence(evidence) + "\n").encode()
+    yaml = importlib.import_module("yaml")
+    payload = yaml.safe_dump(
+        evidence,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    ).encode("utf-8")
     destination = (output_path or repository / "runtime_evidence" / "JAA-00-online-snapshot.yaml").resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
