@@ -14,6 +14,54 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+JAA00_LEGACY_BOUNDARY_JOB_COUNT = 462
+JAA00_LEGACY_BOUNDARY_EVENT_COUNT = 924
+JAA00_LEGACY_BOUNDARY_SHA256 = (
+    "83c7b9f7531d3cae083db0781fb2a134b62b0a900d560112bcfce8f886dcbc47"
+)
+
+
+def _legacy_boundary_digest(conn: sqlite3.Connection) -> str:
+    jobs = conn.execute(
+        """SELECT job_key,board,job_id,url,title,company,
+                  fit,typeof(fit),opportunity,typeof(opportunity),
+                  final_score,typeof(final_score),
+                  extraction_confidence,typeof(extraction_confidence),
+                  payload_json,payload_hash,state,opportunity_decision,
+                  opportunity_reason,policy_hash
+           FROM pipeline_jobs ORDER BY job_key"""
+    ).fetchall()
+    events = conn.execute(
+        """SELECT id,job_key,event_type,from_state,to_state,actor_kind,
+                  payload_json,idempotency_key
+           FROM pipeline_events ORDER BY id"""
+    ).fetchall()
+    document = json.dumps(
+        {
+            "jobs": [list(row) for row in jobs],
+            "events": [list(row) for row in events],
+        },
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"jaa00-legacy-boundary-v1\0" + document).hexdigest()
+
+
+def _verify_jaa00_legacy_boundary(conn: sqlite3.Connection) -> None:
+    """Admit legacy rows only from the exact independently certified JAA-00 ledger."""
+    job_count = int(conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0])
+    event_count = int(conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0])
+    if job_count == 0 and event_count == 0:
+        return
+    if (
+        job_count != JAA00_LEGACY_BOUNDARY_JOB_COUNT
+        or event_count != JAA00_LEGACY_BOUNDARY_EVENT_COUNT
+        or _legacy_boundary_digest(conn) != JAA00_LEGACY_BOUNDARY_SHA256
+    ):
+        raise RuntimeError(
+            "legacy lifecycle rows do not match the certified JAA-00 boundary"
+        )
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -76,6 +124,11 @@ class MigrationRunner:
                     continue
                 conn.execute("BEGIN IMMEDIATE")
                 try:
+                    if (
+                        migration.version == 3
+                        and migration.name == "jaa_01_immutable_score_snapshot_receipts"
+                    ):
+                        _verify_jaa00_legacy_boundary(conn)
                     for statement in migration.statements:
                         conn.execute(statement)
                     conn.execute(
@@ -488,6 +541,46 @@ _SCORE_SNAPSHOT_RECEIPT_MIGRATION = Migration(
              BEFORE DELETE ON legacy_score_snapshot_cohort
              BEGIN
                SELECT RAISE(ABORT, 'legacy score snapshot cohort is immutable');
+             END""",
+        """CREATE TABLE legacy_opportunity_gate_cohort(
+             event_id INTEGER PRIMARY KEY
+               REFERENCES pipeline_events(id) ON DELETE RESTRICT,
+             job_key TEXT NOT NULL UNIQUE
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             payload_hash TEXT NOT NULL
+               CHECK(length(payload_hash) = 64
+                 AND payload_hash NOT GLOB '*[^0-9a-f]*'),
+             from_state TEXT NOT NULL,
+             to_state TEXT NOT NULL,
+             actor_kind TEXT NOT NULL,
+             binding_json TEXT NOT NULL,
+             idempotency_key TEXT NOT NULL UNIQUE
+               CHECK(length(trim(idempotency_key)) > 0),
+             admitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """INSERT INTO legacy_opportunity_gate_cohort(
+             event_id,job_key,payload_hash,from_state,to_state,actor_kind,
+             binding_json,idempotency_key
+           )
+           SELECT event.id,event.job_key,job.payload_hash,event.from_state,
+                  event.to_state,event.actor_kind,event.payload_json,event.idempotency_key
+           FROM pipeline_events AS event
+           JOIN pipeline_jobs AS job ON job.job_key=event.job_key
+           WHERE event.event_type='opportunity_gate_decided'""",
+        """CREATE TRIGGER legacy_opportunity_gate_cohort_immutable_insert
+             BEFORE INSERT ON legacy_opportunity_gate_cohort
+             BEGIN
+               SELECT RAISE(ABORT, 'legacy opportunity gate cohort is immutable');
+             END""",
+        """CREATE TRIGGER legacy_opportunity_gate_cohort_immutable_update
+             BEFORE UPDATE ON legacy_opportunity_gate_cohort
+             BEGIN
+               SELECT RAISE(ABORT, 'legacy opportunity gate cohort is immutable');
+             END""",
+        """CREATE TRIGGER legacy_opportunity_gate_cohort_immutable_delete
+             BEFORE DELETE ON legacy_opportunity_gate_cohort
+             BEGIN
+               SELECT RAISE(ABORT, 'legacy opportunity gate cohort is immutable');
              END""",
     ),
 )

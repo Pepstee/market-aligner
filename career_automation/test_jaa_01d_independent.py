@@ -8,6 +8,7 @@ tests so ledger corruption and ordering checks remain meaningful.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import tempfile
 from dataclasses import replace
@@ -37,6 +38,19 @@ from career_automation.models import ActorKind, PipelineState, ScoredJob
 
 
 POLICY = PolicyIdentity("independent-contract", "1", canonical_hash({"revision": 1}))
+MIGRATION_CONTENT_HASH = "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
+
+
+def _frozen_jaa00_database() -> Path:
+    root = Path(__file__).resolve()
+    for parent in root.parents:
+        runtime = parent / "state" / "runtime"
+        matches = sorted(runtime.glob(
+            f"jaa00-v2-*/receipts/migration-{MIGRATION_CONTENT_HASH}.json"
+        )) if runtime.is_dir() else []
+        if len(matches) == 1:
+            return matches[0].parents[1] / "databases" / "career_pipeline.sqlite3"
+    pytest.fail("frozen JAA-00 runtime is unavailable")
 
 
 def _job(key: str) -> ScoredJob:
@@ -99,40 +113,7 @@ def test_migrations_cover_clean_and_large_legacy_ledgers_without_rewriting_them(
         ]
 
     legacy = tmp_path / "legacy.sqlite3"
-    with sqlite3.connect(legacy) as conn:
-        conn.executescript(SCHEMA)
-        payloads = [
-            (json.dumps({"number": number}, sort_keys=True),
-             canonical_hash({"number": number}))
-            for number in range(462)
-        ]
-        jobs = [
-            (f"legacy:{number}", "legacy", str(number), f"https://example.test/{number}",
-             "Engineer", "Example", 0.7, payloads[number][0], payloads[number][1],
-             "opportunity_rejected")
-            for number in range(462)
-        ]
-        conn.executemany(
-            """INSERT INTO pipeline_jobs(job_key,board,job_id,url,title,company,opportunity,
-               payload_json,payload_hash,state) VALUES(?,?,?,?,?,?,?,?,?,?)""", jobs,
-        )
-        events = []
-        for number in range(462):
-            payload_hash = payloads[number][1]
-            events.extend((
-                (f"legacy:{number}", "score_snapshot_imported", None, "scored",
-                 "deterministic", json.dumps({"payload_hash": payload_hash}, sort_keys=True),
-                 f"score-import:legacy:{number}:{payload_hash}"),
-                (f"legacy:{number}", "opportunity_gate_decided", "scored",
-                 "opportunity_rejected", "deterministic",
-                 json.dumps({"decision": "reject", "reason": "below_opportunity_threshold"},
-                            sort_keys=True),
-                 f"opportunity-gate:legacy:{number}:{payload_hash}:b38a8ff32e7d74ce"),
-            ))
-        conn.executemany(
-            """INSERT INTO pipeline_events(job_key,event_type,from_state,to_state,actor_kind,
-               payload_json,idempotency_key) VALUES(?,?,?,?,?,?,?)""", events,
-        )
+    shutil.copyfile(_frozen_jaa00_database(), legacy)
     assert CareerDatabase(legacy).path == legacy
     with sqlite3.connect(legacy) as conn:
         assert conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == 462
@@ -140,7 +121,48 @@ def test_migrations_cover_clean_and_large_legacy_ledgers_without_rewriting_them(
         assert conn.execute(
             "SELECT COUNT(*) FROM legacy_score_snapshot_cohort"
         ).fetchone()[0] == 462
+        assert conn.execute(
+            "SELECT COUNT(*) FROM legacy_opportunity_gate_cohort"
+        ).fetchone()[0] == 462
         assert conn.execute("SELECT checksum FROM career_schema_migrations WHERE version=1").fetchone()[0] == JAA_01_MIGRATIONS[0].checksum
+
+    fabricated = tmp_path / "fabricated-legacy.sqlite3"
+    with sqlite3.connect(fabricated) as conn:
+        conn.executescript(SCHEMA)
+        payload = {"fabricated": True}
+        payload_hash = canonical_hash(payload)
+        conn.execute(
+            """INSERT INTO pipeline_jobs(
+                 job_key,board,job_id,url,title,company,opportunity,payload_json,
+                 payload_hash,state
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "fabricated", "board", "1", "https://example.test/fabricated",
+                "Fabricated", "Example", 0.5, canonical_json(payload), payload_hash,
+                PipelineState.SCORED.value,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "fabricated", "score_snapshot_imported", None,
+                PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
+                json.dumps({"payload_hash": payload_hash}, sort_keys=True),
+                f"score-import:fabricated:{payload_hash}",
+            ),
+        )
+    with pytest.raises(RuntimeError, match="certified JAA-00 boundary"):
+        apply_jaa_01_migrations(fabricated)
+    with sqlite3.connect(fabricated) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM career_schema_migrations WHERE version=3"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='legacy_score_snapshot_cohort'"
+        ).fetchone() is None
 
 
 def test_migration_rejects_modified_applied_version_and_rolls_back_failed_version(tmp_path: Path) -> None:
@@ -156,6 +178,43 @@ def test_migration_rejects_modified_applied_version_and_rolls_back_failed_versio
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT version,checksum FROM career_schema_migrations ORDER BY version").fetchall() == [(1, original.checksum)]
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='should_rollback'").fetchone() is None
+
+
+@pytest.mark.parametrize("attack", ["missing", "additional", "divergent"])
+def test_migration_rejects_every_non_exact_jaa00_legacy_boundary(
+    tmp_path: Path, attack: str,
+) -> None:
+    path = tmp_path / f"non-exact-boundary-{attack}.sqlite3"
+    shutil.copyfile(_frozen_jaa00_database(), path)
+    with sqlite3.connect(path) as conn:
+        if attack == "missing":
+            conn.execute("DELETE FROM pipeline_events WHERE id=(SELECT MAX(id) FROM pipeline_events)")
+        elif attack == "additional":
+            job_key = conn.execute(
+                "SELECT job_key FROM pipeline_jobs ORDER BY job_key LIMIT 1"
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO pipeline_events(
+                     job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                     idempotency_key
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    job_key, "unknown_event", "scored", None,
+                    ActorKind.DETERMINISTIC.value, "{}", "additional-boundary-event",
+                ),
+            )
+        else:
+            conn.execute(
+                """UPDATE pipeline_jobs SET title='Divergent title'
+                   WHERE job_key=(SELECT job_key FROM pipeline_jobs ORDER BY job_key LIMIT 1)"""
+            )
+
+    with pytest.raises(RuntimeError, match="certified JAA-00 boundary"):
+        apply_jaa_01_migrations(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM career_schema_migrations WHERE version=3"
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
@@ -176,42 +235,18 @@ def test_frozen_legacy_cohort_binds_complete_materialised_score_snapshot(
     tmp_path: Path, column: str, changed: object,
 ) -> None:
     path = tmp_path / f"legacy-{column}.sqlite3"
-    payload = {"legacy": "snapshot"}
-    payload_json = json.dumps(payload, sort_keys=True)
-    payload_hash = canonical_hash(payload)
-    with sqlite3.connect(path) as conn:
-        conn.executescript(SCHEMA)
-        conn.execute(
-            """INSERT INTO pipeline_jobs(
-                 job_key,board,job_id,url,title,company,fit,opportunity,final_score,
-                 extraction_confidence,payload_json,payload_hash,state
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                "legacy-snapshot", "legacy", "legacy-id",
-                "https://example.test/legacy", "Legacy title", "Legacy company",
-                0.8, 0.7, 70.0, 0.9, payload_json, payload_hash,
-                PipelineState.SCORED.value,
-            ),
-        )
-        conn.execute(
-            """INSERT INTO pipeline_events(
-                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
-                 idempotency_key
-               ) VALUES(?,?,?,?,?,?,?)""",
-            (
-                "legacy-snapshot", "score_snapshot_imported", None,
-                PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
-                json.dumps({"payload_hash": payload_hash}, sort_keys=True),
-                f"score-import:legacy-snapshot:{payload_hash}",
-            ),
-        )
+    shutil.copyfile(_frozen_jaa00_database(), path)
     reducer = LifecycleReducer(path)
-    assert reducer.replay() == {"legacy-snapshot": PipelineState.SCORED}
+    with sqlite3.connect(path) as conn:
+        job_key = conn.execute(
+            "SELECT job_key FROM pipeline_jobs ORDER BY job_key LIMIT 1"
+        ).fetchone()[0]
+    assert job_key in reducer.replay()
 
     with sqlite3.connect(path) as conn:
         conn.execute(
-            f"UPDATE pipeline_jobs SET {column}=? WHERE job_key='legacy-snapshot'",
-            (changed,),
+            f"UPDATE pipeline_jobs SET {column}=? WHERE job_key=?",
+            (changed, job_key),
         )
     with pytest.raises(LedgerDivergence, match="materialised score snapshot diverges"):
         reducer.replay()
@@ -219,40 +254,17 @@ def test_frozen_legacy_cohort_binds_complete_materialised_score_snapshot(
 
 def test_replay_rejects_semantically_equal_payload_byte_reformatting(tmp_path: Path) -> None:
     legacy = tmp_path / "legacy-payload-bytes.sqlite3"
-    payload = {"legacy": "payload"}
-    legacy_bytes = json.dumps(payload, sort_keys=True)
-    payload_hash = canonical_hash(payload)
-    with sqlite3.connect(legacy) as conn:
-        conn.executescript(SCHEMA)
-        conn.execute(
-            """INSERT INTO pipeline_jobs(
-                 job_key,board,job_id,url,title,company,opportunity,payload_json,
-                 payload_hash,state
-               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (
-                "legacy-payload", "legacy", "1", "https://example.test/legacy",
-                "Legacy", "Example", 0.5, legacy_bytes, payload_hash,
-                PipelineState.SCORED.value,
-            ),
-        )
-        conn.execute(
-            """INSERT INTO pipeline_events(
-                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
-                 idempotency_key
-               ) VALUES(?,?,?,?,?,?,?)""",
-            (
-                "legacy-payload", "score_snapshot_imported", None,
-                PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
-                json.dumps({"payload_hash": payload_hash}, sort_keys=True),
-                f"score-import:legacy-payload:{payload_hash}",
-            ),
-        )
+    shutil.copyfile(_frozen_jaa00_database(), legacy)
     legacy_reducer = LifecycleReducer(legacy)
-    assert legacy_reducer.replay() == {"legacy-payload": PipelineState.SCORED}
     with sqlite3.connect(legacy) as conn:
+        job_key, payload_json = conn.execute(
+            "SELECT job_key,payload_json FROM pipeline_jobs ORDER BY job_key LIMIT 1"
+        ).fetchone()
+        canonical_payload = canonical_json(json.loads(payload_json))
+        assert canonical_payload != payload_json
         conn.execute(
-            "UPDATE pipeline_jobs SET payload_json=? WHERE job_key='legacy-payload'",
-            (canonical_json(payload),),
+            "UPDATE pipeline_jobs SET payload_json=? WHERE job_key=?",
+            (canonical_payload, job_key),
         )
     with pytest.raises(LedgerDivergence, match="materialised score snapshot diverges"):
         legacy_reducer.replay()
@@ -790,23 +802,7 @@ def test_receiptless_legacy_replay_accepts_only_exact_historical_deterministic_s
                WHERE job_key=?""",
             (authentic_job.key,),
         )
-    assert LifecycleReducer(authentic).replay() == {
-        authentic_job.key: PipelineState.EMPLOYER_RESEARCH_QUEUED,
-    }
-    with authentic_database.transaction(immediate=True) as conn:
-        event_id = conn.execute(
-            "SELECT id FROM pipeline_events WHERE idempotency_key=?", (gate_key,),
-        ).fetchone()[0]
-        conn.execute(
-            """INSERT INTO lifecycle_transition_receipts(
-                 event_id,job_key,from_state,to_state,policy_id,policy_version,policy_hash,
-                 input_hash,output_hash,idempotency_key
-               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (event_id, authentic_job.key, "scored", "employer_research_queued",
-             "forged-legacy-receipt", "1", "1" * 64, "2" * 64, "3" * 64,
-             gate_key),
-        )
-    with pytest.raises(LedgerDivergence, match="unowned transition receipt"):
+    with pytest.raises(LedgerDivergence, match="outside the frozen cohort"):
         LifecycleReducer(authentic).replay()
 
     for attack in ("actor", "payload", "idempotency"):

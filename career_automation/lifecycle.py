@@ -501,6 +501,7 @@ class LifecycleReducer:
             verified_receipt_events: set[int] = set()
             verified_score_receipt_events: set[int] = set()
             verified_legacy_cohort_events: set[int] = set()
+            verified_legacy_gate_events: set[int] = set()
             events = conn.execute("SELECT * FROM pipeline_events ORDER BY id").fetchall()
             for event in events:
                 prior = replayed.get(event["job_key"])
@@ -530,7 +531,9 @@ class LifecycleReducer:
                         raise LedgerDivergence(
                             f"event {event['id']} references an unknown job"
                         )
-                    policy_hash, score_receipt, legacy_cohort = self._verify_legacy_event(
+                    (
+                        policy_hash, score_receipt, legacy_cohort, legacy_gate,
+                    ) = self._verify_legacy_event(
                         conn, event, job_row,
                     )
                     replayed_policy[event["job_key"]] = policy_hash
@@ -538,6 +541,8 @@ class LifecycleReducer:
                         verified_score_receipt_events.add(int(event["id"]))
                     if legacy_cohort:
                         verified_legacy_cohort_events.add(int(event["id"]))
+                    if legacy_gate:
+                        verified_legacy_gate_events.add(int(event["id"]))
                 else:
                     raise LedgerDivergence(f"event {event['id']} changes state without reducer authority")
                 replayed[event["job_key"]] = target
@@ -567,6 +572,15 @@ class LifecycleReducer:
             if legacy_cohort_events != verified_legacy_cohort_events:
                 raise LedgerDivergence(
                     "legacy score snapshot cohort contains an unowned admission"
+                )
+            legacy_gate_events = {
+                int(row[0]) for row in conn.execute(
+                    "SELECT event_id FROM legacy_opportunity_gate_cohort"
+                )
+            }
+            if legacy_gate_events != verified_legacy_gate_events:
+                raise LedgerDivergence(
+                    "legacy opportunity gate cohort contains an unowned admission"
                 )
             if set(replayed) != set(jobs):
                 missing = sorted(set(jobs) - set(replayed))
@@ -644,7 +658,7 @@ class LifecycleReducer:
     @staticmethod
     def _verify_legacy_event(
         conn: sqlite3.Connection, event: sqlite3.Row, job: sqlite3.Row,
-    ) -> tuple[str | None, bool, bool]:
+    ) -> tuple[str | None, bool, bool, bool]:
         """Authenticate the only two receiptless shapes in the frozen JAA-00 ledger."""
         rejected = f"event {event['id']} is not an exact deterministic historical event"
         job_payload_hash = job["payload_hash"]
@@ -672,11 +686,11 @@ class LifecycleReducer:
                 LifecycleReducer._verify_current_score_import(
                     conn, event, job, rejected
                 )
-                return policy_hash, True, False
+                return policy_hash, True, False, False
             LifecycleReducer._verify_legacy_score_cohort(
                 conn, event, job, rejected
             )
-            return policy_hash, False, True
+            return policy_hash, False, True, False
         elif event_type == "opportunity_gate_decided":
             policy_hash = _LEGACY_OPPORTUNITY_POLICY_SUFFIX
             try:
@@ -700,7 +714,30 @@ class LifecycleReducer:
         )
         if actual != expected:
             raise LedgerDivergence(rejected)
-        return policy_hash, False, False
+        LifecycleReducer._verify_legacy_gate_cohort(conn, event, job, rejected)
+        return policy_hash, False, False, True
+
+    @staticmethod
+    def _verify_legacy_gate_cohort(
+        conn: sqlite3.Connection, event: sqlite3.Row, job: sqlite3.Row,
+        rejected: str,
+    ) -> None:
+        """Admit receiptless gates only when migration 3 froze the exact event."""
+        cohort = conn.execute(
+            """SELECT event_id,job_key,payload_hash,from_state,to_state,actor_kind,
+                      binding_json,idempotency_key
+               FROM legacy_opportunity_gate_cohort WHERE event_id=?""",
+            (event["id"],),
+        ).fetchone()
+        expected = (
+            int(event["id"]), event["job_key"], job["payload_hash"],
+            event["from_state"], event["to_state"], event["actor_kind"],
+            event["payload_json"], event["idempotency_key"],
+        )
+        if cohort is None or tuple(cohort) != expected:
+            raise LedgerDivergence(
+                f"{rejected}: receiptless opportunity gate is outside the frozen cohort"
+            )
 
     @staticmethod
     def _verify_legacy_score_cohort(

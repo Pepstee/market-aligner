@@ -9,19 +9,21 @@ points.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
-from career_automation.database import SCHEMA
-from career_automation.lifecycle import ModelIdentity, PolicyIdentity, canonical_hash
+from career_automation.database import CareerDatabase
+from career_automation.lifecycle import ModelIdentity, canonical_hash
 from career_automation.migrations import JAA_02_MIGRATIONS
-from career_automation.models import ActorKind, PipelineState
+from career_automation.models import ActorKind, PipelineState, ScoredJob
 
 
 ROOT = Path(__file__).resolve().parent
 POLICY_HASH = canonical_hash({"policy": "independent-runtime-test"})
+MIGRATION_CONTENT_HASH = "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
 
 
 def _cli(database: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -31,50 +33,25 @@ def _cli(database: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _legacy_ledger(path: Path, *, jobs: int = 1, events: int = 1) -> None:
-    """Create a genuine pre-migration five-state ledger, not a reducer fixture."""
-    assert jobs <= events <= 2 * jobs
-    gated_jobs = events - jobs
-    payloads = [
-        (
-            json.dumps({"legacy_number": number}, sort_keys=True),
-            canonical_hash({"legacy_number": number}),
-        )
-        for number in range(jobs)
-    ]
-    with sqlite3.connect(path) as connection:
-        connection.executescript(SCHEMA)
-        connection.executemany(
-            """INSERT INTO pipeline_jobs(
-                 job_key,board,job_id,url,title,company,opportunity,payload_json,payload_hash,state
-               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            [
-                (f"legacy:{number}", "legacy", str(number), f"https://example.test/{number}",
-                 "Engineer", "Example", 0.5, payloads[number][0], payloads[number][1],
-                 "opportunity_rejected" if number < gated_jobs else "scored")
-                for number in range(jobs)
-            ],
-        )
-        score_events = [
-            (f"legacy:{number}", "score_snapshot_imported", None, "scored",
-             "deterministic", json.dumps({"payload_hash": payloads[number][1]}, sort_keys=True),
-             f"score-import:legacy:{number}:{payloads[number][1]}")
-            for number in range(jobs)
-        ]
-        gate_events = [
-            (f"legacy:{number}", "opportunity_gate_decided", "scored",
-             "opportunity_rejected", "deterministic",
-             json.dumps({"decision": "reject", "reason": "below_opportunity_threshold"},
-                        sort_keys=True),
-             f"opportunity-gate:legacy:{number}:{payloads[number][1]}:b38a8ff32e7d74ce")
-            for number in range(gated_jobs)
-        ]
-        connection.executemany(
-            """INSERT INTO pipeline_events(
-                 job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
-               ) VALUES(?,?,?,?,?,?,?)""",
-            [*score_events, *gate_events],
-        )
+def _frozen_jaa00_database() -> Path:
+    for parent in ROOT.parents:
+        runtime = parent / "state" / "runtime"
+        matches = sorted(runtime.glob(
+            f"jaa00-v2-*/receipts/migration-{MIGRATION_CONTENT_HASH}.json"
+        )) if runtime.is_dir() else []
+        if len(matches) == 1:
+            return matches[0].parents[1] / "databases" / "career_pipeline.sqlite3"
+    raise AssertionError("frozen JAA-00 runtime is unavailable")
+
+
+def _current_ledger(path: Path, key: str) -> None:
+    payload = {"key": key}
+    CareerDatabase(path).upsert_scored_job(ScoredJob(
+        key=key, board="test", job_id=key, url=f"https://example.test/{key}",
+        title="Engineer", company="Example", fit=0.8, opportunity=0.8,
+        final_score=80.0, extraction_confidence=0.9, payload=payload,
+        payload_hash=canonical_hash(payload),
+    ))
 
 
 def _transition(key: str, target: str, idempotency_key: str) -> tuple[str, ...]:
@@ -91,7 +68,7 @@ def test_cli_migrates_462_jobs_and_924_events_without_reinterpretation_or_duplic
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "legacy.sqlite3"
-    _legacy_ledger(database, jobs=462, events=924)
+    shutil.copyfile(_frozen_jaa00_database(), database)
     with sqlite3.connect(database) as connection:
         before = connection.execute(
             "SELECT job_key,payload_hash,state FROM pipeline_jobs ORDER BY job_key"
@@ -124,15 +101,15 @@ def test_cli_migrates_462_jobs_and_924_events_without_reinterpretation_or_duplic
 
 def test_cli_rejects_out_of_order_research_release_submit_and_preserves_ledger(tmp_path: Path) -> None:
     database = tmp_path / "negative.sqlite3"
-    _legacy_ledger(database)
-    assert _cli(database, "migrate").returncode == 0
+    key = "current:negative"
+    _current_ledger(database, key)
     attempts = {
         "research": PipelineState.EMPLOYER_RESEARCHING.value,
         "release": PipelineState.RELEASED.value,
         "submit": PipelineState.SUBMITTED.value,
     }
     for name, target in attempts.items():
-        result = _cli(database, *_transition("legacy:0", target, f"out-of-order-{name}"))
+        result = _cli(database, *_transition(key, target, f"out-of-order-{name}"))
         assert result.returncode != 0
         assert "illegal or out-of-order transition" in result.stderr
     with sqlite3.connect(database) as connection:
@@ -145,8 +122,8 @@ def test_model_proposal_never_advances_state_but_deterministic_cli_transition_is
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "model-boundary.sqlite3"
-    _legacy_ledger(database)
-    assert _cli(database, "migrate").returncode == 0
+    key = "current:model-boundary"
+    _current_ledger(database, key)
 
     # This public worker entry point accepts a model's requested consequential
     # state.  Its only durable effect must be an observation/proposal event.
@@ -154,7 +131,7 @@ def test_model_proposal_never_advances_state_but_deterministic_cli_transition_is
 
     reducer = LifecycleReducer(database)
     event_id = reducer.record_proposal(
-        job_key="legacy:0", proposed_state=PipelineState.SUBMITTED,
+        job_key=key, proposed_state=PipelineState.SUBMITTED,
         actor=ActorKind.PROBABILISTIC, observation={"model says": "submit now"},
         idempotency_key="untrusted-model-output",
         model=ModelIdentity("test", "untrusted", "1"),
@@ -162,17 +139,17 @@ def test_model_proposal_never_advances_state_but_deterministic_cli_transition_is
     assert event_id > 0
     restarted_replay = _cli(database, "replay")
     assert restarted_replay.returncode == 0, restarted_replay.stderr
-    assert json.loads(restarted_replay.stdout) == {"legacy:0": "scored"}
+    assert json.loads(restarted_replay.stdout) == {key: "scored"}
 
     command = _transition(
-        "legacy:0", PipelineState.EMPLOYER_RESEARCH_QUEUED.value,
+        key, PipelineState.EMPLOYER_RESEARCH_QUEUED.value,
         "deterministic-opportunity-pass",
     )
     first, retry = _cli(database, *command), _cli(database, *command)
     assert first.returncode == retry.returncode == 0, (first.stderr, retry.stderr)
     assert json.loads(first.stdout)["receipt_id"] == json.loads(retry.stdout)["receipt_id"]
     assert json.loads(_cli(database, "replay").stdout) == {
-        "legacy:0": "employer_research_queued",
+        key: "employer_research_queued",
     }
     assert _cli(database, "verify").returncode == 0
     with sqlite3.connect(database) as connection:
@@ -185,8 +162,7 @@ def test_model_proposal_never_advances_state_but_deterministic_cli_transition_is
 
 def test_applied_migration_checksum_and_missing_runtime_prerequisites_fail_closed(tmp_path: Path) -> None:
     database = tmp_path / "tampered.sqlite3"
-    _legacy_ledger(database)
-    assert _cli(database, "migrate").returncode == 0
+    _current_ledger(database, "current:tampered")
     with sqlite3.connect(database) as connection:
         connection.execute("UPDATE career_schema_migrations SET checksum=? WHERE version=1", ("0" * 64,))
     rejected = _cli(database, "verify")
