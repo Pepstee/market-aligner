@@ -461,7 +461,15 @@ class LifecycleReducer:
         """Reconstruct all job states, rejecting invalid order or receipt tampering."""
         conn = self._connect()
         try:
-            job_rows = conn.execute("SELECT * FROM pipeline_jobs").fetchall()
+            job_rows = conn.execute(
+                """SELECT *,
+                          typeof(fit) AS _fit_storage_class,
+                          typeof(opportunity) AS _opportunity_storage_class,
+                          typeof(final_score) AS _final_score_storage_class,
+                          typeof(extraction_confidence)
+                            AS _extraction_confidence_storage_class
+                   FROM pipeline_jobs"""
+            ).fetchall()
             for row in job_rows:
                 self._verify_materialised_payload(row)
             job_by_key = {row["job_key"]: row for row in job_rows}
@@ -634,17 +642,34 @@ class LifecycleReducer:
     ) -> None:
         """Admit v1 imports only when migration 3 froze them at its boundary."""
         cohort = conn.execute(
-            """SELECT event_id,job_key,payload_hash,binding_json,idempotency_key
+            """SELECT event_id,job_key,board,job_id,url,title,company,
+                      fit_value,fit_storage_class,
+                      opportunity_value,opportunity_storage_class,
+                      final_score_value,final_score_storage_class,
+                      extraction_confidence_value,
+                      extraction_confidence_storage_class,
+                      payload_json,payload_hash,binding_json,idempotency_key
                FROM legacy_score_snapshot_cohort WHERE event_id=?""",
             (event["id"],),
         ).fetchone()
         expected = (
-            int(event["id"]), event["job_key"], job["payload_hash"],
-            event["payload_json"], event["idempotency_key"],
+            int(event["id"]), event["job_key"], job["board"], job["job_id"],
+            job["url"], job["title"], job["company"],
+            job["fit"], job["_fit_storage_class"],
+            job["opportunity"], job["_opportunity_storage_class"],
+            job["final_score"], job["_final_score_storage_class"],
+            job["extraction_confidence"],
+            job["_extraction_confidence_storage_class"],
+            job["payload_json"], job["payload_hash"], event["payload_json"],
+            event["idempotency_key"],
         )
-        if cohort is None or tuple(cohort) != expected:
+        if cohort is None:
             raise LedgerDivergence(
                 f"{rejected}: receiptless score import is outside the frozen cohort"
+            )
+        if tuple(cohort) != expected:
+            raise LedgerDivergence(
+                f"{rejected}: materialised score snapshot diverges from frozen cohort"
             )
 
     @staticmethod
@@ -654,6 +679,11 @@ class LifecycleReducer:
     ) -> None:
         """Verify the exact v2 score-import binding used by current writers."""
         try:
+            materialised_payload = json.loads(job["payload_json"])
+            if job["payload_json"] != canonical_json(materialised_payload):
+                raise ValueError(
+                    "current score import requires canonical payload bytes"
+                )
             binding = json.loads(event["payload_json"])
             if (not isinstance(binding, dict)
                     or set(binding) != {"format", "snapshot", "snapshot_hash"}

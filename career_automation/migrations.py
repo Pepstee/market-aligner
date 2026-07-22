@@ -433,6 +433,20 @@ _SCORE_SNAPSHOT_RECEIPT_MIGRATION = Migration(
                REFERENCES pipeline_events(id) ON DELETE RESTRICT,
              job_key TEXT NOT NULL UNIQUE
                REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             board TEXT NOT NULL,
+             job_id TEXT NOT NULL,
+             url TEXT NOT NULL,
+             title TEXT NOT NULL,
+             company TEXT NOT NULL,
+             fit_value,
+             fit_storage_class TEXT NOT NULL,
+             opportunity_value,
+             opportunity_storage_class TEXT NOT NULL,
+             final_score_value,
+             final_score_storage_class TEXT NOT NULL,
+             extraction_confidence_value,
+             extraction_confidence_storage_class TEXT NOT NULL,
+             payload_json TEXT NOT NULL,
              payload_hash TEXT NOT NULL
                CHECK(length(payload_hash) = 64
                  AND payload_hash NOT GLOB '*[^0-9a-f]*'),
@@ -442,10 +456,18 @@ _SCORE_SNAPSHOT_RECEIPT_MIGRATION = Migration(
              admitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
            )""",
         """INSERT INTO legacy_score_snapshot_cohort(
-             event_id,job_key,payload_hash,binding_json,idempotency_key
+             event_id,job_key,board,job_id,url,title,company,
+             fit_value,fit_storage_class,
+             opportunity_value,opportunity_storage_class,
+             final_score_value,final_score_storage_class,
+             extraction_confidence_value,extraction_confidence_storage_class,
+             payload_json,payload_hash,binding_json,idempotency_key
            )
-           SELECT event.id,event.job_key,job.payload_hash,event.payload_json,
-                  event.idempotency_key
+           SELECT event.id,event.job_key,job.board,job.job_id,job.url,job.title,
+                  job.company,job.fit,typeof(job.fit),job.opportunity,
+                  typeof(job.opportunity),job.final_score,typeof(job.final_score),
+                  job.extraction_confidence,typeof(job.extraction_confidence),
+                  job.payload_json,job.payload_hash,event.payload_json,event.idempotency_key
            FROM pipeline_events AS event
            JOIN pipeline_jobs AS job ON job.job_key=event.job_key
            WHERE event.event_type='score_snapshot_imported'

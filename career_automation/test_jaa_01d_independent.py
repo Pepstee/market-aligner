@@ -158,6 +158,118 @@ def test_migration_rejects_modified_applied_version_and_rolls_back_failed_versio
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='should_rollback'").fetchone() is None
 
 
+@pytest.mark.parametrize(
+    ("column", "changed"),
+    [
+        ("board", "changed-board"),
+        ("job_id", "changed-id"),
+        ("url", "https://example.test/changed"),
+        ("title", "Changed title"),
+        ("company", "Changed company"),
+        ("fit", 0.1),
+        ("opportunity", 0.1),
+        ("final_score", 1.0),
+        ("extraction_confidence", 0.1),
+    ],
+)
+def test_frozen_legacy_cohort_binds_complete_materialised_score_snapshot(
+    tmp_path: Path, column: str, changed: object,
+) -> None:
+    path = tmp_path / f"legacy-{column}.sqlite3"
+    payload = {"legacy": "snapshot"}
+    payload_json = json.dumps(payload, sort_keys=True)
+    payload_hash = canonical_hash(payload)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA)
+        conn.execute(
+            """INSERT INTO pipeline_jobs(
+                 job_key,board,job_id,url,title,company,fit,opportunity,final_score,
+                 extraction_confidence,payload_json,payload_hash,state
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "legacy-snapshot", "legacy", "legacy-id",
+                "https://example.test/legacy", "Legacy title", "Legacy company",
+                0.8, 0.7, 70.0, 0.9, payload_json, payload_hash,
+                PipelineState.SCORED.value,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "legacy-snapshot", "score_snapshot_imported", None,
+                PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
+                json.dumps({"payload_hash": payload_hash}, sort_keys=True),
+                f"score-import:legacy-snapshot:{payload_hash}",
+            ),
+        )
+    reducer = LifecycleReducer(path)
+    assert reducer.replay() == {"legacy-snapshot": PipelineState.SCORED}
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            f"UPDATE pipeline_jobs SET {column}=? WHERE job_key='legacy-snapshot'",
+            (changed,),
+        )
+    with pytest.raises(LedgerDivergence, match="materialised score snapshot diverges"):
+        reducer.replay()
+
+
+def test_replay_rejects_semantically_equal_payload_byte_reformatting(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy-payload-bytes.sqlite3"
+    payload = {"legacy": "payload"}
+    legacy_bytes = json.dumps(payload, sort_keys=True)
+    payload_hash = canonical_hash(payload)
+    with sqlite3.connect(legacy) as conn:
+        conn.executescript(SCHEMA)
+        conn.execute(
+            """INSERT INTO pipeline_jobs(
+                 job_key,board,job_id,url,title,company,opportunity,payload_json,
+                 payload_hash,state
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "legacy-payload", "legacy", "1", "https://example.test/legacy",
+                "Legacy", "Example", 0.5, legacy_bytes, payload_hash,
+                PipelineState.SCORED.value,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                "legacy-payload", "score_snapshot_imported", None,
+                PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
+                json.dumps({"payload_hash": payload_hash}, sort_keys=True),
+                f"score-import:legacy-payload:{payload_hash}",
+            ),
+        )
+    legacy_reducer = LifecycleReducer(legacy)
+    assert legacy_reducer.replay() == {"legacy-payload": PipelineState.SCORED}
+    with sqlite3.connect(legacy) as conn:
+        conn.execute(
+            "UPDATE pipeline_jobs SET payload_json=? WHERE job_key='legacy-payload'",
+            (canonical_json(payload),),
+        )
+    with pytest.raises(LedgerDivergence, match="materialised score snapshot diverges"):
+        legacy_reducer.replay()
+
+    current = tmp_path / "current-payload-bytes.sqlite3"
+    current_database = CareerDatabase(current)
+    current_job = _job("current-payload")
+    current_database.upsert_scored_job(current_job)
+    with sqlite3.connect(current) as conn:
+        conn.execute(
+            "UPDATE pipeline_jobs SET payload_json=? WHERE job_key=?",
+            (json.dumps(current_job.payload, ensure_ascii=False, sort_keys=True), current_job.key),
+        )
+    with pytest.raises(LedgerDivergence, match="canonical payload bytes"):
+        LifecycleReducer(current).replay()
+
+
 def test_reducer_accepts_every_declared_edge_and_rejects_research_release_submit_shortcuts(tmp_path: Path) -> None:
     path = tmp_path / "edges.sqlite3"
     database = CareerDatabase(path)
