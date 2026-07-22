@@ -62,8 +62,32 @@ class TransitionReceipt:
     created_at: str
 
 
+def _require_unambiguous_json_keys(value: Any, active: set[int] | None = None) -> None:
+    """Reject object-key coercion and circular containers before serialisation."""
+    if not isinstance(value, (dict, list, tuple)):
+        return
+    if active is None:
+        active = set()
+    identity = id(value)
+    if identity in active:
+        raise ValueError("lifecycle content must not contain circular data")
+    active.add(identity)
+    try:
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise ValueError("lifecycle JSON object keys must be strings")
+            children = value.values()
+        else:
+            children = value
+        for child in children:
+            _require_unambiguous_json_keys(child, active)
+    finally:
+        active.remove(identity)
+
+
 def canonical_json(value: Any) -> str:
     """Return the one accepted JSON representation for hashed lifecycle data."""
+    _require_unambiguous_json_keys(value)
     try:
         return json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),

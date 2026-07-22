@@ -243,6 +243,20 @@ def test_changed_score_snapshot_is_rejected_without_corrupting_replay(tmp_path: 
     with pytest.raises(IdempotencyConflict, match="changed score snapshot"):
         database.upsert_scored_job(metadata_only)
 
+    string_key_payload = {"1": "value"}
+    key_aliases = (
+        {1: "value"},
+        {"nested": [{2: "value"}]},
+    )
+    for key_alias in key_aliases:
+        ambiguous = replace(
+            original,
+            payload=key_alias,
+            payload_hash=canonical_hash(string_key_payload),
+        )
+        with pytest.raises(ValueError, match="JSON object keys must be strings"):
+            database.upsert_scored_job(ambiguous)
+
     with database.connection() as conn:
         after_job = tuple(conn.execute(
             "SELECT title,payload_json,payload_hash,state FROM pipeline_jobs WHERE job_key=?",
