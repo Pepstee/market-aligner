@@ -210,3 +210,44 @@ def test_recertification_rejects_checkpoint_between_end_main_and_wal_observation
         assert checkpoint_observation["wal_after"] == checkpoint_observation["wal_before"]
     finally:
         writer.close()
+
+
+def test_recertification_rejects_checkpoint_during_final_wal_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final whole-source scan must itself remain inside the mutation boundary."""
+    source_root = tmp_path / "source"
+    source = source_root / "inputs" / "jobs.sqlite3"
+    writer = _make_live_wal(source)
+    wal = Path(str(source) + "-wal")
+    try:
+        spec = _spec("jobs", source_root, source)
+        original_hash = core._hash_file
+        wal_hashes = 0
+        checkpoint_observation: dict[str, bytes] = {}
+
+        def checkpoint_before_third_wal_hash(candidate: Path) -> str:
+            nonlocal wal_hashes
+            if candidate == wal:
+                wal_hashes += 1
+                if wal_hashes == 3:
+                    checkpoint_observation["main_before"] = source.read_bytes()
+                    checkpoint_observation["wal_before"] = wal.read_bytes()
+                    with sqlite3.connect(source, isolation_level=None, timeout=10) as connection:
+                        busy, _log_frames, _checkpointed = connection.execute(
+                            "PRAGMA wal_checkpoint(PASSIVE)"
+                        ).fetchone()
+                    assert busy == 0
+                    checkpoint_observation["main_after"] = source.read_bytes()
+                    checkpoint_observation["wal_after"] = wal.read_bytes()
+            return original_hash(candidate)
+
+        monkeypatch.setattr(core, "_hash_file", checkpoint_before_third_wal_hash)
+
+        with pytest.raises(core.AdoptionError, match="mutation boundary"):
+            core._recertify_source(source, spec)
+
+        assert checkpoint_observation["main_after"] != checkpoint_observation["main_before"]
+        assert checkpoint_observation["wal_after"] == checkpoint_observation["wal_before"]
+    finally:
+        writer.close()

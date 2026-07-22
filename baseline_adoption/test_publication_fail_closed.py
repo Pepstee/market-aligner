@@ -151,6 +151,57 @@ raise SystemExit(cli.main(sys.argv[3:]))
     )
 
 
+def _cli_with_replace_boundary_race(
+    repository: Path,
+    contract: list[dict[str, object]],
+    mutation: str,
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    """Mutate a bound input inside the final os.replace call boundary."""
+    bootstrap = r'''
+import json, os, sqlite3, sys
+from pathlib import Path
+from baseline_adoption import cli, core
+
+core.BASELINES = tuple(core.BaselineSpec(**item) for item in json.loads(sys.argv[1]))
+mutation = sys.argv[2]
+arguments = sys.argv[3:]
+repository = Path(arguments[arguments.index("--repository") + 1])
+data_root = Path(arguments[arguments.index("--data-root") + 1])
+original_replace = os.replace
+race_injected = False
+
+def racing_replace(source, destination):
+    global race_injected
+    if not race_injected:
+        race_injected = True
+        if mutation == "source":
+            target = repository / "baseline_adoption" / "cli.py"
+            target.write_bytes(target.read_bytes() + b"\n# replace-boundary race\n")
+        elif mutation == "database":
+            snapshot = data_root / core.BASELINES[0].destination_relative
+            with sqlite3.connect(snapshot) as connection:
+                connection.execute("UPDATE ledger SET value = value || '-replace-raced' WHERE id = 1")
+    return original_replace(source, destination)
+
+core.os.replace = racing_replace
+raise SystemExit(cli.main(arguments))
+'''
+    dependency_root = repository.parent / "test-distributions"
+    for distribution in ("PyYAML", "requests", "openpyxl", "pypdf"):
+        metadata = dependency_root / f"{distribution}-1.0.dist-info"
+        metadata.mkdir(parents=True, exist_ok=True)
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 1.0\n", encoding="utf-8"
+        )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(dependency_root)
+    return subprocess.run(
+        [sys.executable, "-c", bootstrap, json.dumps(contract), mutation, *arguments],
+        cwd=repository, env=environment, text=True, capture_output=True, check=False,
+    )
+
+
 @pytest.fixture
 def publication_case(tmp_path: Path) -> tuple[Path, Path, Path, list[dict[str, object]], Path]:
     repository = _git_repository(tmp_path / "repository")
@@ -247,6 +298,29 @@ def test_publication_without_a_post_review_race_still_replaces_atomically(
     assert output.read_bytes() != prior_evidence
     assert yaml.safe_load(output.read_bytes())["evidence"] == \
         "JAA-00:first-adopted-frozen-baseline"
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+@pytest.mark.parametrize("mutation", ["source", "database"])
+def test_publication_rejects_input_race_inside_atomic_replace_boundary(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path],
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    output = tmp_path / "published.yaml"
+    prior_evidence = b"prior-certified-evidence\nreplace-boundary"
+    output.write_bytes(prior_evidence)
+
+    result = _cli_with_replace_boundary_race(
+        repository, contract, mutation, "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository), "--output", str(output),
+    )
+
+    assert result.returncode == 2
+    assert "atomic replacement boundary" in result.stderr.lower()
+    assert "published" not in result.stdout.lower()
+    assert output.read_bytes() == prior_evidence
     assert not list(output.parent.glob(f".{output.name}.*"))
 
 
