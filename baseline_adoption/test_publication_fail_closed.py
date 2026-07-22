@@ -98,6 +98,59 @@ raise SystemExit(cli.main(sys.argv[2:]))
     )
 
 
+def _cli_with_publication_race(
+    repository: Path,
+    contract: list[dict[str, object]],
+    mutation: str,
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    """Mutate a reviewed binding after its first capture, before replacement."""
+    bootstrap = r'''
+import json, sqlite3, sys
+from pathlib import Path
+from baseline_adoption import cli, core
+
+core.BASELINES = tuple(core.BaselineSpec(**item) for item in json.loads(sys.argv[1]))
+mutation = sys.argv[2]
+original_bindings = core._publication_input_bindings
+binding_calls = 0
+
+def racing_bindings(receipt_path, data_root, repository, databases):
+    global binding_calls
+    result = original_bindings(receipt_path, data_root, repository, databases)
+    binding_calls += 1
+    if binding_calls == 1:
+        if mutation == "source":
+            target = Path(repository) / "baseline_adoption" / "cli.py"
+        elif mutation == "database":
+            target = None
+            snapshot = Path(data_root) / databases["jobs"]["destination"]["relative_location"]
+            with sqlite3.connect(snapshot) as connection:
+                connection.execute("UPDATE ledger SET value = value || '-raced' WHERE id = 1")
+        else:
+            target = None
+        if target is not None:
+            target.write_bytes(target.read_bytes() + b"\n# publication race\n")
+    return result
+
+core._publication_input_bindings = racing_bindings
+raise SystemExit(cli.main(sys.argv[3:]))
+'''
+    dependency_root = repository.parent / "test-distributions"
+    for distribution in ("PyYAML", "requests", "openpyxl", "pypdf"):
+        metadata = dependency_root / f"{distribution}-1.0.dist-info"
+        metadata.mkdir(parents=True, exist_ok=True)
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 1.0\n", encoding="utf-8"
+        )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(dependency_root)
+    return subprocess.run(
+        [sys.executable, "-c", bootstrap, json.dumps(contract), mutation, *arguments],
+        cwd=repository, env=environment, text=True, capture_output=True, check=False,
+    )
+
+
 @pytest.fixture
 def publication_case(tmp_path: Path) -> tuple[Path, Path, Path, list[dict[str, object]], Path]:
     repository = _git_repository(tmp_path / "repository")
@@ -146,6 +199,55 @@ def test_public_cli_publishes_v2_receipt_with_bound_hashes_and_dependencies(
     for relative, record in dependencies.items():
         assert record["sha256"] == _sha(repository / relative)
         assert record["bytes"] == (repository / relative).stat().st_size
+
+
+@pytest.mark.parametrize("mutation", ["source", "database"])
+def test_publication_rejects_inputs_raced_after_review_before_replace(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path],
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    output = tmp_path / "published.yaml"
+    prior_evidence = b"prior-certified-evidence\n\x00byte-stable"
+    output.write_bytes(prior_evidence)
+
+    result = _cli_with_publication_race(
+        repository, contract, mutation, "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository), "--output", str(output),
+    )
+
+    assert result.returncode == 2
+    if mutation == "source":
+        # The second binding pass reuses the ordinary source-integrity guard, which names the
+        # dirty checkout before the outer binding comparison can emit its generic drift message.
+        assert "dirty tracked source tree" in result.stderr.lower()
+    else:
+        assert "drifted before atomic replacement" in result.stderr.lower()
+    assert "published" not in result.stdout.lower()
+    assert output.read_bytes() == prior_evidence
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_publication_without_a_post_review_race_still_replaces_atomically(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path],
+    tmp_path: Path,
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    output = tmp_path / "published.yaml"
+    prior_evidence = b"prior-certified-evidence"
+    output.write_bytes(prior_evidence)
+
+    result = _cli_with_publication_race(
+        repository, contract, "none", "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository), "--output", str(output),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() != prior_evidence
+    assert yaml.safe_load(output.read_bytes())["evidence"] == \
+        "JAA-00:first-adopted-frozen-baseline"
+    assert not list(output.parent.glob(f".{output.name}.*"))
 
 
 def test_tracked_publication_is_stable_after_its_own_evidence_commit(
