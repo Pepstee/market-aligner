@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,46 @@ def test_transition_idempotency_is_exact_and_conflicts_leave_no_mutation(tmp_pat
         with pytest.raises(IdempotencyConflict):
             reducer.commit(**{**base, **changed})
         assert _counts(path) == before
+
+
+def test_changed_score_snapshot_is_rejected_without_corrupting_replay(tmp_path: Path) -> None:
+    path = tmp_path / "changed-score-snapshot.sqlite3"
+    database = CareerDatabase(path)
+    original = _job("changed-score-snapshot")
+    assert database.upsert_scored_job(original) is True
+    assert database.upsert_scored_job(original) is False
+    changed_payload = {"key": original.key, "revision": 2}
+    changed = replace(
+        original,
+        payload=changed_payload,
+        payload_hash=canonical_hash(changed_payload),
+        title="Changed title",
+    )
+    with database.connection() as conn:
+        before_job = tuple(conn.execute(
+            "SELECT title,payload_json,payload_hash,state FROM pipeline_jobs WHERE job_key=?",
+            (original.key,),
+        ).fetchone())
+        before_events = conn.execute(
+            "SELECT COUNT(*) FROM pipeline_events WHERE job_key=?", (original.key,),
+        ).fetchone()[0]
+
+    with pytest.raises(IdempotencyConflict, match="changed score snapshot"):
+        database.upsert_scored_job(changed)
+
+    with database.connection() as conn:
+        after_job = tuple(conn.execute(
+            "SELECT title,payload_json,payload_hash,state FROM pipeline_jobs WHERE job_key=?",
+            (original.key,),
+        ).fetchone())
+        after_events = conn.execute(
+            "SELECT COUNT(*) FROM pipeline_events WHERE job_key=?", (original.key,),
+        ).fetchone()[0]
+    assert after_job == before_job
+    assert after_events == before_events == 1
+    assert LifecycleReducer(path).replay() == {
+        original.key: PipelineState.SCORED,
+    }
 
 
 def test_replay_reconstructs_states_and_detects_divergence_order_and_receipt_identity_tampering(tmp_path: Path) -> None:

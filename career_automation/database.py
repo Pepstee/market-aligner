@@ -12,6 +12,7 @@ from typing import Any, Iterator
 from .migrations import apply_jaa_02_migrations
 from .lifecycle import (
     LEGAL_TRANSITIONS,
+    IdempotencyConflict,
     LifecycleReducer,
     ModelIdentity,
     PolicyIdentity,
@@ -208,11 +209,20 @@ class CareerDatabase:
             conn.close()
 
     def upsert_scored_job(self, job: ScoredJob) -> bool:
-        """Store one score snapshot and emit one import event per content hash."""
+        """Store one immutable score snapshot, making identical retries idempotent."""
+        if (len(job.payload_hash) != 64
+                or any(char not in "0123456789abcdef" for char in job.payload_hash)):
+            raise ValueError("score snapshot payload_hash must be a lowercase SHA-256 digest")
         with self.transaction(immediate=True) as conn:
-            existed = conn.execute(
-                "SELECT 1 FROM pipeline_jobs WHERE job_key=?", (job.key,)
-            ).fetchone() is not None
+            existing = conn.execute(
+                "SELECT payload_hash FROM pipeline_jobs WHERE job_key=?", (job.key,)
+            ).fetchone()
+            existed = existing is not None
+            if existed and existing["payload_hash"] != job.payload_hash:
+                raise IdempotencyConflict(
+                    "job key was reused with a changed score snapshot; "
+                    "versioned score updates require an explicit ledger event"
+                )
             conn.execute(
                 """INSERT INTO pipeline_jobs(
                      job_key,board,job_id,url,title,company,fit,opportunity,final_score,
