@@ -353,26 +353,29 @@ def test_score_snapshot_persists_canonical_payload_and_rejects_non_finite_metada
             )
 
         negative_zero = replace(_job(f"negative-zero-{field}"), **{field: -0.0})
-        assert database.upsert_scored_job(negative_zero) is True
-        assert database.upsert_scored_job(negative_zero) is False
-        with pytest.raises(IdempotencyConflict, match="score snapshot|immutable import event"):
-            database.upsert_scored_job(replace(negative_zero, **{field: 0.0}))
+        with pytest.raises(ValueError, match="must not use negative zero"):
+            database.upsert_scored_job(negative_zero)
+        canonical_zero = replace(_job(f"canonical-zero-{field}"), **{field: 0.0})
+        assert database.upsert_scored_job(canonical_zero) is True
+        assert database.upsert_scored_job(canonical_zero) is False
+        with pytest.raises(ValueError, match="must not use negative zero"):
+            database.upsert_scored_job(replace(canonical_zero, **{field: -0.0}))
 
         # The same independent receipt prevents a signed-zero alias even after
         # an attacker recomputes every identity stored in the root event.
         with sqlite3.connect(path) as conn:
             original_event = conn.execute(
                 "SELECT id,payload_json,idempotency_key FROM pipeline_events WHERE job_key=?",
-                (negative_zero.key,),
+                (canonical_zero.key,),
             ).fetchone()
             forged_binding = json.loads(original_event[1])
             forged_binding["snapshot"][field] = {
-                "type": "float", "value": float(0).hex(),
+                "type": "float", "value": (-0.0).hex(),
             }
             forged_binding["snapshot_hash"] = canonical_hash(forged_binding["snapshot"])
             forged_payload = canonical_json(forged_binding)
             forged_key = (
-                f"score-import-v2:{negative_zero.key}:{canonical_hash(forged_binding)}"
+                f"score-import-v2:{canonical_zero.key}:{canonical_hash(forged_binding)}"
             )
             conn.execute(
                 "UPDATE pipeline_events SET payload_json=?,idempotency_key=? WHERE id=?",
@@ -391,7 +394,7 @@ def test_score_snapshot_persists_canonical_payload_and_rejects_non_finite_metada
         *(f"integer-{field}" for field in (
             "fit", "opportunity", "final_score", "extraction_confidence"
         )),
-        *(f"negative-zero-{field}" for field in (
+        *(f"canonical-zero-{field}" for field in (
             "fit", "opportunity", "final_score", "extraction_confidence"
         )),
     }

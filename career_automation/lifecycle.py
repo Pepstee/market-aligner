@@ -120,6 +120,11 @@ def _score_number_identity(value: int | float | None, name: str) -> dict[str, st
         raise ValueError(f"score snapshot {name} must be a finite number")
     if isinstance(value, int):
         return {"type": "int", "value": str(value)}
+    if value == 0.0 and math.copysign(1.0, value) < 0:
+        raise ValueError(
+            f"score snapshot {name} must not use negative zero; SQLite REAL "
+            "cannot preserve its sign"
+        )
     return {"type": "float", "value": value.hex()}
 
 
@@ -659,6 +664,9 @@ class LifecycleReducer:
     def _score_number_matches(identity: Any, stored: Any) -> bool:
         if stored is None:
             return identity is None
+        if (isinstance(stored, bool) or not isinstance(stored, (int, float))
+                or not math.isfinite(stored)):
+            return False
         if not isinstance(identity, dict) or set(identity) != {"type", "value"}:
             return False
         kind, encoded = identity["type"], identity["value"]
@@ -673,6 +681,7 @@ class LifecycleReducer:
                 decoded = float.fromhex(encoded)
                 if not math.isfinite(decoded) or decoded.hex() != encoded:
                     return False
+                return isinstance(stored, float) and stored.hex() == encoded
             else:
                 return False
         except ValueError:
