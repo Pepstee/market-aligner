@@ -1268,8 +1268,9 @@ def publish_runtime_evidence(
     receipt = _load_receipt(receipt_path)
     content = receipt["content"]
     databases = content.get("databases")
+    baseline_names = tuple(spec.name for spec in BASELINES)
     if content.get("format") != "jaa-00-online-snapshot-receipt/v2" or not isinstance(databases, dict) \
-            or set(databases) != set(BASELINES):
+            or set(databases) != set(baseline_names):
         raise AdoptionError("evidence publication requires a valid online adoption v2 receipt")
     references = content.get("secret_references", [])
     if not isinstance(references, list) or any(not isinstance(item, str)
@@ -1285,7 +1286,7 @@ def publish_runtime_evidence(
         locks[relative] = {"sha256": _sha256(path), "role": role}
     db_evidence: dict[str, Any] = {}
     capture_evidence: dict[str, Any] = {}
-    for name in BASELINES:
+    for name in baseline_names:
         record = databases[name]
         snapshot = record["frozen_snapshot"]
         db_evidence[name] = {
@@ -1357,11 +1358,11 @@ def publish_runtime_evidence(
             "source_access": "read-only-files-and-git-object-database"},
         "preservation": {"original_project": {"canonical": False, "recoverable": True, "mutated": False},
             "historical_market_aligner_copies": {"canonical": False, "count": 2},
-            "adopted_sources": [databases[name]["source"]["label"] for name in BASELINES]},
+            "adopted_sources": [databases[name]["source"]["label"] for name in baseline_names]},
         "secret_references": {"names": references, "values_persisted": False},
         "rollback": {"precondition": "reconcile-must-pass-immediately-before-removal",
-            "preserved_source_labels": [databases[name]["rollback"]["preserved_source_label"] for name in BASELINES],
-            "removable_destination_labels": [databases[name]["rollback"]["remove_destination_label"] for name in BASELINES]},
+            "preserved_source_labels": [databases[name]["rollback"]["preserved_source_label"] for name in baseline_names],
+            "removable_destination_labels": [databases[name]["rollback"]["remove_destination_label"] for name in baseline_names]},
     }
     payload = (_render_evidence(evidence) + "\n").encode()
     destination = (output_path or repository / "runtime_evidence" / "JAA-00-online-snapshot.yaml").resolve()
