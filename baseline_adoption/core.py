@@ -1832,7 +1832,8 @@ def publish_runtime_evidence(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     previous: Path | None = None
-    replaced = False
+    installed = False
+    rollback_failed = False
     try:
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as handle:
             temporary = Path(handle.name)
@@ -1857,37 +1858,68 @@ def publish_runtime_evidence(
         watch_files, watch_directories = _publication_mutation_paths(
             Path(receipt_path), Path(data_root), repository, databases
         )
-        with _MutationBoundary(watch_files, directories=watch_directories) as boundary:
-            if _publication_input_bindings(
-                Path(receipt_path), Path(data_root), repository, databases
-            ) != bound_inputs:
-                raise AdoptionError("certified publication inputs drifted before atomic replacement")
-            os.replace(temporary, destination)
-            temporary = None
-            replaced = True
-            _fsync_directory(destination.parent)
-            try:
+        try:
+            with _MutationBoundary(watch_files, directories=watch_directories) as boundary:
+                if _publication_input_bindings(
+                    Path(receipt_path), Path(data_root), repository, databases
+                ) != bound_inputs:
+                    raise AdoptionError("certified publication inputs drifted before atomic replacement")
+                os.replace(temporary, destination)
+                temporary = None
+                installed = True
+                # Replacement, its durability barrier, and every post-replace
+                # binding check, including watcher teardown, form one
+                # recoverable publication transaction.
+                _fsync_directory(destination.parent)
                 if _publication_input_bindings(
                     Path(receipt_path), Path(data_root), repository, databases
                 ) != bound_inputs:
                     raise AdoptionError("certified publication inputs changed through replacement")
                 boundary.assert_clean("evidence publication atomic replacement boundary")
-            except (AdoptionError, TrackedSourceRevisionError) as exc:
-                if previous is not None:
-                    os.replace(previous, destination)
-                    previous = None
-                else:
-                    destination.unlink(missing_ok=True)
-                replaced = False
-                _fsync_directory(destination.parent)
+        except Exception as exc:
+            if installed:
+                try:
+                    if previous is not None:
+                        os.replace(previous, destination)
+                        previous = None
+                    else:
+                        destination.unlink(missing_ok=True)
+                    _fsync_directory(destination.parent)
+                    installed = False
+                except Exception as rollback_exc:
+                    # If replacement of the saved file itself failed, retain
+                    # that durable backup for operator recovery.
+                    rollback_failed = True
+                    raise AdoptionError(
+                        "evidence publication rollback could not be completed durably"
+                    ) from rollback_exc
+                if isinstance(exc, (AdoptionError, TrackedSourceRevisionError)):
+                    raise AdoptionError(
+                        "certified publication inputs drifted through atomic replacement boundary"
+                    ) from exc
                 raise AdoptionError(
-                    "certified publication inputs drifted through atomic replacement boundary"
+                    "evidence publication failed after atomic replacement; prior evidence restored"
                 ) from exc
+            raise
+        if previous is not None:
+            # Cleanup is not part of the certification state transition.  A
+            # correct, durable publication must not be reported as failed only
+            # because removal of its hidden rollback copy was refused.
+            try:
+                previous.unlink(missing_ok=True)
+            except OSError:
+                pass
+            else:
+                previous = None
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
-        if previous is not None:
-            previous.unlink(missing_ok=True)
-        if replaced:
-            _fsync_directory(destination.parent)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if previous is not None and not rollback_failed:
+            try:
+                previous.unlink(missing_ok=True)
+            except OSError:
+                pass
     return destination
