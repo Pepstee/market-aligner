@@ -379,11 +379,14 @@ class LifecycleReducer:
         conn = self._connect()
         try:
             job_rows = conn.execute(
-                "SELECT job_key,state,payload_hash FROM pipeline_jobs"
+                "SELECT job_key,state,payload_hash,policy_hash FROM pipeline_jobs"
             ).fetchall()
             jobs = {row["job_key"]: row["state"] for row in job_rows}
             payload_hashes = {row["job_key"]: row["payload_hash"] for row in job_rows}
+            materialised_policy = {row["job_key"]: row["policy_hash"] for row in job_rows}
             replayed: dict[str, PipelineState] = {}
+            replayed_policy: dict[str, str | None] = {}
+            verified_receipt_events: set[int] = set()
             events = conn.execute("SELECT * FROM pipeline_events ORDER BY id").fetchall()
             for event in events:
                 if event["to_state"] is None:
@@ -400,24 +403,42 @@ class LifecycleReducer:
                 elif prior != source or target not in LEGAL_TRANSITIONS[source]:
                     raise LedgerDivergence(f"event {event['id']} is out of order or illegal")
                 if event["event_type"] == "lifecycle_transition_committed":
-                    self._verify_receipt(conn, event)
+                    replayed_policy[event["job_key"]] = self._verify_receipt(conn, event)
+                    verified_receipt_events.add(int(event["id"]))
                 elif event["event_type"] in _LEGACY_EVENT_TYPES:
-                    self._verify_legacy_event(event, payload_hashes[event["job_key"]])
+                    replayed_policy[event["job_key"]] = self._verify_legacy_event(
+                        event, payload_hashes[event["job_key"]],
+                    )
                 else:
                     raise LedgerDivergence(f"event {event['id']} changes state without reducer authority")
                 replayed[event["job_key"]] = target
+            receipt_events = {
+                int(row[0]) for row in conn.execute(
+                    "SELECT event_id FROM lifecycle_transition_receipts"
+                )
+            }
+            if receipt_events != verified_receipt_events:
+                raise LedgerDivergence(
+                    "transition receipt ledger contains an unowned transition receipt"
+                )
             if set(replayed) != set(jobs):
                 missing = sorted(set(jobs) - set(replayed))
                 raise LedgerDivergence(f"jobs have no replayable state history: {missing}")
             for key, state in jobs.items():
                 if replayed[key].value != state:
                     raise LedgerDivergence(f"materialised state diverges for {key}")
+                if replayed_policy.get(key) != materialised_policy[key]:
+                    raise LedgerDivergence(
+                        f"materialised policy identity diverges for {key}"
+                    )
             return replayed
         finally:
             conn.close()
 
     @staticmethod
-    def _verify_legacy_event(event: sqlite3.Row, job_payload_hash: str) -> None:
+    def _verify_legacy_event(
+        event: sqlite3.Row, job_payload_hash: str,
+    ) -> str | None:
         """Authenticate the only two receiptless shapes in the frozen JAA-00 ledger."""
         rejected = f"event {event['id']} is not an exact deterministic historical event"
         if (event["actor_kind"] != ActorKind.DETERMINISTIC.value
@@ -428,6 +449,7 @@ class LifecycleReducer:
 
         event_type = event["event_type"]
         if event_type == "score_snapshot_imported":
+            policy_hash = None
             expected_payload = {"payload_hash": job_payload_hash}
             expected = (
                 None,
@@ -436,6 +458,7 @@ class LifecycleReducer:
                 f"score-import:{event['job_key']}:{job_payload_hash}",
             )
         elif event_type == "opportunity_gate_decided":
+            policy_hash = _LEGACY_OPPORTUNITY_POLICY_SUFFIX
             try:
                 target = PipelineState(event["to_state"])
                 expected_payload = _LEGACY_GATE_PAYLOADS[target]
@@ -457,9 +480,10 @@ class LifecycleReducer:
         )
         if actual != expected:
             raise LedgerDivergence(rejected)
+        return policy_hash
 
     @staticmethod
-    def _verify_receipt(conn: sqlite3.Connection, event: sqlite3.Row) -> None:
+    def _verify_receipt(conn: sqlite3.Connection, event: sqlite3.Row) -> str:
         receipt = conn.execute("SELECT * FROM lifecycle_transition_receipts WHERE event_id=?", (event["id"],)).fetchone()
         if receipt is None:
             raise LedgerDivergence(f"event {event['id']} has no transition receipt")
@@ -477,6 +501,7 @@ class LifecycleReducer:
                   receipt["model_provider"], receipt["model_id"], receipt["model_version"])
         if actual != expected or event["actor_kind"] != ActorKind.DETERMINISTIC.value or event["payload_json"] != canonical_json(payload):
             raise LedgerDivergence(f"event {event['id']} has a tampered receipt identity")
+        return str(receipt["policy_hash"])
 
     def verify(self) -> None:
         self.replay()

@@ -219,6 +219,11 @@ def test_replay_reconstructs_states_and_detects_divergence_order_and_receipt_ide
         reducer.verify()
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE pipeline_jobs SET state='employer_researching' WHERE job_key='replay'")
+        conn.execute("UPDATE pipeline_jobs SET policy_hash=? WHERE job_key='replay'", ("0" * 64,))
+    with pytest.raises(LedgerDivergence, match="materialised policy identity diverges"):
+        reducer.verify()
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE pipeline_jobs SET policy_hash=? WHERE job_key='replay'", (POLICY.sha256,))
         conn.execute("UPDATE pipeline_events SET idempotency_key='tampered-event-key' WHERE id=?", (first.event_id,))
     with pytest.raises(LedgerDivergence, match="tampered receipt identity"):
         reducer.verify()
@@ -264,12 +269,29 @@ def test_receiptless_legacy_replay_accepts_only_exact_historical_deterministic_s
              json.dumps(gate_payload, sort_keys=True), gate_key),
         )
         conn.execute(
-            "UPDATE pipeline_jobs SET state='employer_research_queued' WHERE job_key=?",
+            """UPDATE pipeline_jobs
+               SET state='employer_research_queued',policy_hash='b38a8ff32e7d74ce'
+               WHERE job_key=?""",
             (authentic_job.key,),
         )
     assert LifecycleReducer(authentic).replay() == {
         authentic_job.key: PipelineState.EMPLOYER_RESEARCH_QUEUED,
     }
+    with authentic_database.transaction(immediate=True) as conn:
+        event_id = conn.execute(
+            "SELECT id FROM pipeline_events WHERE idempotency_key=?", (gate_key,),
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO lifecycle_transition_receipts(
+                 event_id,job_key,from_state,to_state,policy_id,policy_version,policy_hash,
+                 input_hash,output_hash,idempotency_key
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (event_id, authentic_job.key, "scored", "employer_research_queued",
+             "forged-legacy-receipt", "1", "1" * 64, "2" * 64, "3" * 64,
+             gate_key),
+        )
+    with pytest.raises(LedgerDivergence, match="unowned transition receipt"):
+        LifecycleReducer(authentic).replay()
 
     for attack in ("actor", "payload", "idempotency"):
         path = tmp_path / f"forged-legacy-{attack}.sqlite3"
