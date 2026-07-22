@@ -1432,6 +1432,65 @@ def independent_review(receipt_path: str | Path, data_root: str | Path,
 _SAFE_EVIDENCE_TEXT = re.compile(r"^[A-Za-z0-9_./:>=+-]+$")
 
 
+def _publication_file_binding(path: Path, label: str) -> dict[str, Any]:
+    """Bind regular-file content to a stable filesystem identity."""
+    before = _file_identity(path, label)
+    if not before["exists"]:
+        raise AdoptionError(f"{label}: required publication input is missing")
+    digest = _hash_file(path)
+    after = _file_identity(path, label)
+    if before != after:
+        raise AdoptionError(f"{label}: publication input drifted while it was read")
+    return {"identity": after, "sha256": digest}
+
+
+def _publication_input_bindings(
+    receipt_path: Path,
+    data_root: Path,
+    repository: Path,
+    databases: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Capture every mutable input on which published evidence depends."""
+    receipt_binding = _publication_file_binding(receipt_path, "certification-receipt")
+    receipt_binding["content_sha256"] = _load_receipt(receipt_path)["content_sha256"]
+
+    dependencies = {}
+    for relative in ("requirements-test.lock", "requirements-scrapling-full.txt"):
+        dependencies[relative] = _publication_file_binding(
+            repository / relative, f"dependency:{relative}"
+        )
+
+    snapshots = {}
+    for name in (spec.name for spec in BASELINES):
+        record = databases[name]
+        destination = data_root / record["destination"]["relative_location"]
+        before = _file_identity(destination, f"adopted-snapshot:{name}")
+        measured = _inspect_database(destination)
+        after = _file_identity(destination, f"adopted-snapshot:{name}")
+        if before != after:
+            raise AdoptionError(f"{name}: adopted snapshot drifted while it was read")
+        snapshots[name] = {
+            "identity": after,
+            "measurement": measured,
+            "sidecars": {
+                suffix: _file_identity(
+                    Path(str(destination) + suffix), f"adopted-snapshot:{name}{suffix}"
+                )
+                for suffix in ("-journal", "-wal", "-shm")
+            },
+        }
+
+    return {
+        "repository_revision": _repository_revision(repository),
+        "source_revision": _source_revision_binding(repository),
+        "repository_inventory": _tracked_inventory(repository),
+        "runtime": _runtime_versions(),
+        "dependencies": dependencies,
+        "receipt": receipt_binding,
+        "adopted_snapshots": snapshots,
+    }
+
+
 def publish_runtime_evidence(
     receipt_path: Path, data_root: Path, repository: Path, output_path: Path | None = None
 ) -> Path:
@@ -1498,6 +1557,27 @@ def publish_runtime_evidence(
             capture_record["shm_comparison"] = shm_observation["scope"]
         capture_evidence[name] = capture_record
     reconciled = review["database_reconciliation"]
+    bound_inputs = _publication_input_bindings(
+        Path(receipt_path), Path(data_root), repository, databases
+    )
+    if (
+        bound_inputs["repository_revision"] != review["current_review"]["revision"]
+        or bound_inputs["source_revision"] != review["current_review"]["source_revision"]
+        or bound_inputs["repository_inventory"] != review["current_review"]["content_inventory"]
+        or bound_inputs["runtime"] != review["current_review"]["runtime"]
+        or bound_inputs["receipt"]["content_sha256"] != receipt["content_sha256"]
+        or any(
+            bound_inputs["adopted_snapshots"][name]["measurement"]
+            != reconciled["databases"][name]
+            for name in baseline_names
+        )
+        or any(
+            bound_inputs["dependencies"][record["path"]]["sha256"] != record["sha256"]
+            or bound_inputs["dependencies"][record["path"]]["identity"]["bytes"] != record["bytes"]
+            for record in locks
+        )
+    ):
+        raise AdoptionError("certified publication inputs drifted during evidence construction")
     # The generated evidence is committed after publication, so embedding the checkout's current
     # HEAD would make the tracked file self-invalidating.  Bind the receipt's capture commit here;
     # independent_review separately proves that commit is an ancestor and that every tracked,
@@ -1570,6 +1650,10 @@ def publish_runtime_evidence(
             os.fsync(handle.fileno())
         if temporary.read_bytes() != payload:
             raise AdoptionError("evidence staging validation failed")
+        if _publication_input_bindings(
+            Path(receipt_path), Path(data_root), repository, databases
+        ) != bound_inputs:
+            raise AdoptionError("certified publication inputs drifted before atomic replacement")
         os.replace(temporary, destination)
         temporary = None
     finally:
