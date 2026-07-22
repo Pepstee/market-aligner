@@ -158,12 +158,34 @@ class _MutationBoundary:
             raise AdoptionError(f"{label}: mutation boundary observed input drift")
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        verification_error: Exception | None = None
+        cleanup_error: Exception | None = None
+        if _value is None and self._queue is not None:
+            try:
+                # The final event drain is part of watcher disarm.  A clean
+                # assertion in the body is not sufficient because a write can
+                # land between that assertion and context-manager teardown.
+                self.assert_clean("kernel mutation boundary final disarm")
+            except Exception as exc:
+                verification_error = exc
         if self._queue is not None:
-            self._queue.close()
+            try:
+                self._queue.close()
+            except Exception as exc:
+                cleanup_error = exc
             self._queue = None
         for descriptor in self._descriptors:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
         self._descriptors.clear()
+        if verification_error is not None:
+            raise verification_error
+        if cleanup_error is not None and _value is None:
+            raise AdoptionError("kernel mutation-boundary observation could not be disarmed") \
+                from cleanup_error
 
 
 def _hash_file(path: Path) -> str:
