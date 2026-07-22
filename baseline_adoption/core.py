@@ -84,6 +84,12 @@ PRE_ADOPTION_TEST_OBSERVATION = {
     "passed": 65,
     "classification": "historical-observation-not-current-suite-total",
 }
+
+LEGACY_JAA00_CONTENT_SHA256 = (
+    "4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66"
+)
+LEGACY_JAA00_ADOPTION_REVISION = "d74c77cac3c121cd6c09f0f8b8f64cd46014e4ec"
+LEGACY_JAA00_EVIDENCE = Path("runtime_evidence/JAA-00-online-snapshot.yaml")
 _FORBIDDEN_TRACKED_DATA_PREFIXES = (
     "outputs/", "profiler/data/", "scraper/data/", "state/",
 )
@@ -1172,6 +1178,119 @@ def rollback_manifest(receipt_path: str | Path, data_root: str | Path) -> dict[s
             "actions": entries}
 
 
+def _verify_legacy_jaa00_compatibility(
+    receipt_path: Path,
+    receipt: dict[str, Any],
+    repository: Path,
+    current_revision: str,
+) -> dict[str, Any]:
+    """Authenticate the one immutable pre-certification JAA-00 receipt."""
+    content = receipt["content"]
+    if receipt["content_sha256"] != LEGACY_JAA00_CONTENT_SHA256:
+        raise AdoptionError("unsealed legacy receipts are not certifiable")
+    if receipt_path.read_bytes() != _canonical_bytes(receipt) + b"\n":
+        raise AdoptionError("legacy JAA-00 receipt bytes are not canonical")
+    repository_record = content.get("repository")
+    if not isinstance(repository_record, dict):
+        raise AdoptionError("legacy JAA-00 repository identity is missing")
+    identity = repository_record.get("label", repository_record.get("identity"))
+    adoption_revision = repository_record.get("revision")
+    if identity != "canonical-repository" or adoption_revision != LEGACY_JAA00_ADOPTION_REVISION:
+        raise AdoptionError("legacy JAA-00 repository provenance is invalid")
+
+    historical_runtime = content.get("runtime")
+    dependencies = historical_runtime.get("dependencies") if isinstance(historical_runtime, dict) else None
+    if (
+        not isinstance(historical_runtime, dict)
+        or not isinstance(historical_runtime.get("python"), str)
+        or not isinstance(dependencies, dict)
+        or any(not isinstance(dependencies.get(name), str) for name in REQUIRED_DISTRIBUTIONS)
+    ):
+        raise AdoptionError("legacy JAA-00 historical runtime evidence is invalid")
+
+    evidence_path = repository / LEGACY_JAA00_EVIDENCE
+    try:
+        evidence_stat = evidence_path.lstat()
+    except OSError as exc:
+        raise AdoptionError("tracked JAA-00 evidence is unavailable") from exc
+    if stat.S_ISLNK(evidence_stat.st_mode) or not stat.S_ISREG(evidence_stat.st_mode):
+        raise AdoptionError("tracked JAA-00 evidence is not a regular file")
+    relative_evidence = LEGACY_JAA00_EVIDENCE.as_posix()
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative_evidence],
+        cwd=repository, capture_output=True, text=True,
+    )
+    unchanged = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", relative_evidence],
+        cwd=repository, capture_output=True, text=True,
+    )
+    if tracked.returncode != 0 or unchanged.returncode != 0:
+        raise AdoptionError("JAA-00 evidence must be tracked and unchanged")
+
+    import yaml
+    try:
+        evidence = yaml.safe_load(evidence_path.read_bytes())
+    except (OSError, yaml.YAMLError) as exc:
+        raise AdoptionError("tracked JAA-00 evidence is invalid") from exc
+    evidence_receipt = evidence.get("receipt") if isinstance(evidence, dict) else None
+    evidence_repository = evidence.get("repository") if isinstance(evidence, dict) else None
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("evidence") != "JAA-00:first-adopted-frozen-baseline"
+        or not isinstance(evidence_receipt, dict)
+        or evidence_receipt.get("content_sha256") != LEGACY_JAA00_CONTENT_SHA256
+        or not isinstance(evidence_repository, dict)
+        or evidence_repository.get("label") != "canonical-repository"
+        or evidence_repository.get("revision") != adoption_revision
+    ):
+        raise AdoptionError("tracked JAA-00 evidence does not bind the legacy receipt")
+
+    evidence_strings: set[str] = set()
+    def collect_strings(value: Any) -> None:
+        if isinstance(value, str):
+            evidence_strings.add(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                collect_strings(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_strings(nested)
+    collect_strings(evidence)
+    required_strings = {LEGACY_JAA00_CONTENT_SHA256, adoption_revision}
+    databases = content.get("databases")
+    if not isinstance(databases, dict):
+        raise AdoptionError("legacy JAA-00 database evidence is invalid")
+    for database in databases.values():
+        frozen = database.get("frozen_snapshot") if isinstance(database, dict) else None
+        if not isinstance(database, dict) or not isinstance(frozen, dict):
+            raise AdoptionError("legacy JAA-00 frozen database evidence is invalid")
+        required_strings.update(
+            value for value in (
+                database.get("source_label"), database.get("destination_label"),
+                frozen.get("sha256"), frozen.get("schema_sha256"),
+            ) if isinstance(value, str)
+        )
+    if not required_strings.issubset(evidence_strings):
+        raise AdoptionError("tracked JAA-00 evidence is incomplete")
+
+    ancestry = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", adoption_revision, current_revision],
+        cwd=repository, capture_output=True, text=True,
+    )
+    if ancestry.returncode == 1:
+        raise AdoptionError("legacy JAA-00 adoption revision is not an ancestor")
+    if ancestry.returncode != 0:
+        raise AdoptionError("legacy JAA-00 ancestry proof is unavailable")
+    return {
+        "contract": "jaa-00-legacy-content-addressed-review/v1",
+        "content_sha256": LEGACY_JAA00_CONTENT_SHA256,
+        "adoption_revision": adoption_revision,
+        "adoption_revision_is_ancestor": True,
+        "tracked_evidence": relative_evidence,
+        "historical_runtime": historical_runtime,
+    }
+
+
 def independent_review(receipt_path: str | Path, data_root: str | Path,
                        repository: str | Path) -> dict[str, Any]:
     """Compose the JAA-00 evidence into one deterministic, fail-closed review."""
@@ -1180,7 +1299,18 @@ def independent_review(receipt_path: str | Path, data_root: str | Path,
     runtime = _runtime_versions()
     receipt = _load_receipt(Path(receipt_path))
     content = receipt["content"]
-    _verify_certification_binding(content, repository_path)
+    if receipt["content_sha256"] == LEGACY_JAA00_CONTENT_SHA256:
+        receipt_provenance = _verify_legacy_jaa00_compatibility(
+            Path(receipt_path), receipt, repository_path, current_revision
+        )
+    else:
+        _verify_certification_binding(content, repository_path)
+        receipt_provenance = {
+            "contract": content["certification"]["contract"],
+            "content_sha256": receipt["content_sha256"],
+            "adoption_revision": content["repository"]["revision"],
+            "adoption_revision_is_ancestor": True,
+        }
     repository_record = content.get("repository")
     if not isinstance(repository_record, dict):
         raise AdoptionError("receipt canonical repository identity is missing")
@@ -1199,7 +1329,17 @@ def independent_review(receipt_path: str | Path, data_root: str | Path,
             or any(not isinstance(item, str) or not item or "=" in item or os.sep in item
                    for item in secret_references)):
         raise AdoptionError("receipt secret inventory is not reference-name-only")
+    current_source_revision = _source_revision_binding(repository_path)
+    current_inventory = _tracked_inventory(repository_path)
+
     return {
+        "receipt_provenance": receipt_provenance,
+        "current_review": {
+            "revision": current_revision,
+            "source_revision": current_source_revision,
+            "content_inventory": current_inventory,
+            "runtime": runtime,
+        },
         "format": "jaa-00-independent-review/v1",
         "status": "certified",
         "canonical_repository": {
@@ -1212,7 +1352,7 @@ def independent_review(receipt_path: str | Path, data_root: str | Path,
         },
         "preserved_originals_and_rollback": rollback,
         "secret_free_inventory": {
-            **_tracked_inventory(repository_path),
+            **current_inventory,
             "receipt_secret_reference_names": sorted(set(secret_references)),
             "receipt_secret_values_persisted": False,
         },
