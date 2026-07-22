@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from .lifecycle import (
     ModelIdentity,
     PolicyIdentity,
     canonical_hash,
+    canonical_json,
 )
 from .models import ActorKind, PipelineState, ResearchTask, ScoredJob
 
@@ -210,12 +212,25 @@ class CareerDatabase:
 
     def upsert_scored_job(self, job: ScoredJob) -> bool:
         """Store one immutable score snapshot, making identical retries idempotent."""
+        numeric_fields = {
+            "fit": job.fit,
+            "opportunity": job.opportunity,
+            "final_score": job.final_score,
+            "extraction_confidence": job.extraction_confidence,
+        }
+        for name, value in numeric_fields.items():
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"score snapshot {name} must be a finite number")
+            if not math.isfinite(value):
+                raise ValueError(f"score snapshot {name} must be a finite number")
         if (len(job.payload_hash) != 64
                 or any(char not in "0123456789abcdef" for char in job.payload_hash)):
             raise ValueError("score snapshot payload_hash must be a lowercase SHA-256 digest")
         if canonical_hash(job.payload) != job.payload_hash:
             raise ValueError("score snapshot payload_hash does not match canonical payload")
-        payload_json = json.dumps(job.payload, ensure_ascii=False, sort_keys=True)
+        payload_json = canonical_json(job.payload)
         snapshot = (
             job.board, job.job_id, job.url, job.title, job.company, job.fit,
             job.opportunity, job.final_score, job.extraction_confidence,

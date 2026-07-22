@@ -25,6 +25,7 @@ from career_automation.lifecycle import (
     ModelIdentity,
     PolicyIdentity,
     canonical_hash,
+    canonical_json,
 )
 from career_automation.migrations import (
     JAA_01_MIGRATIONS,
@@ -255,6 +256,38 @@ def test_changed_score_snapshot_is_rejected_without_corrupting_replay(tmp_path: 
     assert LifecycleReducer(path).replay() == {
         original.key: PipelineState.SCORED,
     }
+
+
+def test_score_snapshot_persists_canonical_payload_and_rejects_non_finite_metadata_atomically(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "canonical-finite-score-snapshot.sqlite3"
+    database = CareerDatabase(path)
+    original = replace(
+        _job("canonical-finite"),
+        payload={"unicode": "Moldova → UK", "nested": {"b": 2, "a": 1}},
+    )
+    original = replace(original, payload_hash=canonical_hash(original.payload))
+    assert database.upsert_scored_job(original) is True
+
+    with database.connection() as conn:
+        stored_payload = conn.execute(
+            "SELECT payload_json FROM pipeline_jobs WHERE job_key=?", (original.key,),
+        ).fetchone()[0]
+        before_jobs = conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0]
+        before_events = conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0]
+    assert stored_payload == canonical_json(original.payload)
+    assert canonical_hash(json.loads(stored_payload)) == original.payload_hash
+
+    for field in ("fit", "opportunity", "final_score", "extraction_confidence"):
+        for invalid in (float("nan"), float("inf"), float("-inf")):
+            rejected = replace(_job(f"non-finite-{field}-{invalid}"), **{field: invalid})
+            with pytest.raises(ValueError, match=rf"{field} must be a finite number"):
+                database.upsert_scored_job(rejected)
+
+    with database.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == before_jobs
+        assert conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == before_events
 
 
 def test_replay_reconstructs_states_and_detects_divergence_order_and_receipt_identity_tampering(tmp_path: Path) -> None:
