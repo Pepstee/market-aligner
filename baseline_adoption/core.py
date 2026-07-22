@@ -585,6 +585,67 @@ def _repository_revision(repository: Path) -> str:
     return revision
 
 
+def _source_revision_binding(repository: Path) -> dict[str, Any]:
+    """Return the canonical, path-free source revision contract."""
+    try:
+        revision = source_content_revision(repository)
+        contract = source_content_revision_contract(repository)
+        binding = {"revision": revision, "contract": contract}
+        _canonical_bytes(binding)
+    except (TrackedSourceRevisionError, OSError, TypeError, ValueError) as exc:
+        raise AdoptionError(f"canonical source revision is unavailable: {exc}") from exc
+    return binding
+
+
+def _certification_inputs(content: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return {
+            "repository": content["repository"],
+            "source_revision": content["source_revision"],
+            "inventory": content["inventory"],
+            "runtime": content["runtime"],
+            "secret_references": content["secret_references"],
+            "databases": content["databases"],
+        }
+    except KeyError as exc:
+        raise AdoptionError(f"certification binding is missing {exc.args[0]}") from exc
+
+
+def _seal_certification(content: dict[str, Any]) -> None:
+    content["certification"] = {
+        "contract": "jaa-00-source-revision-binding/v1",
+        "inputs_sha256": hashlib.sha256(
+            _canonical_bytes(_certification_inputs(content))
+        ).hexdigest(),
+    }
+
+
+def _verify_certification_binding(content: Mapping[str, Any]) -> None:
+    try:
+        certification = content["certification"]
+        expected = certification["inputs_sha256"]
+        if certification["contract"] != "jaa-00-source-revision-binding/v1":
+            raise AdoptionError("unsupported certification binding contract")
+    except (KeyError, TypeError) as exc:
+        raise AdoptionError("certification binding is missing or malformed") from exc
+    actual = hashlib.sha256(_canonical_bytes(_certification_inputs(content))).hexdigest()
+    if not isinstance(expected, str) or actual != expected:
+        raise AdoptionError("certification input binding digest mismatch")
+
+    repository = Path(__file__).resolve().parent.parent
+    recorded_repository = content["repository"]
+    if recorded_repository.get("revision") != _repository_revision(repository):
+        raise AdoptionError("receipt repository revision is stale or mismatched")
+    if recorded_repository.get("identity", recorded_repository.get("label")) != "canonical-repository":
+        raise AdoptionError("receipt repository identity is mismatched")
+    if content["source_revision"] != _source_revision_binding(repository):
+        raise AdoptionError("receipt canonical source revision is stale or mismatched")
+    if content["inventory"] != _tracked_inventory(repository):
+        raise AdoptionError("receipt tracked-source inventory is stale or mismatched")
+    if content["runtime"] != _runtime_versions():
+        raise AdoptionError("receipt runtime identity is stale or mismatched")
+
+
 def _validate_canonical_marker(repository: Path) -> None:
     """Refuse imports through a similarly named checkout without the canonical contract."""
     try:
@@ -772,6 +833,8 @@ def adopt(source_root: str | Path, data_root: str | Path, *, repository: str | P
     _validate_roots(source_root, data_root, repository)
     runtime = _runtime_versions()
     revision = _repository_revision(repository.resolve())
+    source_revision = _source_revision_binding(repository.resolve())
+    inventory = _tracked_inventory(repository.resolve())
     invalid_refs = [name for name in secret_references if not name or "=" in name or os.sep in name]
     if invalid_refs:
         raise AdoptionError("secret references must be names only, never values or paths")
@@ -792,6 +855,8 @@ def adopt(source_root: str | Path, data_root: str | Path, *, repository: str | P
             "format": "jaa-00-migration-receipt/v1",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "repository": {"identity": "canonical-repository", "revision": revision},
+            "source_revision": source_revision,
+            "inventory": inventory,
             "runtime": runtime,
             "secret_references": sorted(set(secret_references)),
             "databases": {
@@ -803,6 +868,7 @@ def adopt(source_root: str | Path, data_root: str | Path, *, repository: str | P
                 } for spec in BASELINES
             },
         }
+        _seal_certification(content)
         content_hash = hashlib.sha256(_canonical_bytes(content)).hexdigest()
         receipt = {"content_sha256": content_hash, "content": content}
         receipt_dir = data_root / "receipts"
@@ -838,6 +904,8 @@ def adopt_online(source_root: str | Path, data_root: str | Path, *, repository: 
     _validate_roots(source_root, data_root, repository)
     runtime = _runtime_versions()
     revision = _repository_revision(repository.resolve())
+    source_revision = _source_revision_binding(repository.resolve())
+    inventory = _tracked_inventory(repository.resolve())
     invalid_refs = [name for name in secret_references if not name or "=" in name or os.sep in name]
     if invalid_refs:
         raise AdoptionError("secret references must be names only, never values or paths")
@@ -859,6 +927,8 @@ def adopt_online(source_root: str | Path, data_root: str | Path, *, repository: 
             "format": "jaa-00-online-snapshot-receipt/v2",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "repository": {"label": "canonical-repository", "revision": revision},
+            "source_revision": source_revision,
+            "inventory": inventory,
             "runtime": runtime,
             "secret_references": sorted(set(secret_references)),
             "databases": {
@@ -881,6 +951,7 @@ def adopt_online(source_root: str | Path, data_root: str | Path, *, repository: 
                 for spec in BASELINES
             },
         }
+        _seal_certification(content)
         content_hash = hashlib.sha256(_canonical_bytes(content)).hexdigest()
         receipt = {"content_sha256": content_hash, "content": content}
         receipt_dir = data_root / "receipts"
@@ -923,6 +994,7 @@ def _load_receipt(path: Path) -> dict[str, Any]:
         "jaa-00-migration-receipt/v1", "jaa-00-online-snapshot-receipt/v2"
     }:
         raise AdoptionError("unsupported receipt format")
+    _verify_certification_binding(content)
     return receipt
 
 
