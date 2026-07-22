@@ -284,6 +284,10 @@ class LifecycleReducer:
         self._required(idempotency_key, "idempotency_key")
         if model is not None and not isinstance(model, ModelIdentity):
             raise ValueError("model must be a ModelIdentity or None")
+        if model is not None:
+            self._required(model.provider, "model_provider")
+            self._required(model.model_id, "model_id")
+            self._required(model.version, "model_version")
         payload = {
             "proposed_state": proposed_state.value,
             "observation": observation,
@@ -482,14 +486,19 @@ class LifecycleReducer:
             verified_legacy_cohort_events: set[int] = set()
             events = conn.execute("SELECT * FROM pipeline_events ORDER BY id").fetchall()
             for event in events:
-                if event["to_state"] is None:
+                prior = replayed.get(event["job_key"])
+                if event["event_type"] == "lifecycle_transition_proposed":
+                    self._verify_proposal_event(event, prior)
                     continue
+                if event["to_state"] is None:
+                    raise LedgerDivergence(
+                        f"event {event['id']} is an invalid non-transition event"
+                    )
                 try:
                     target = PipelineState(event["to_state"])
                     source = None if event["from_state"] is None else PipelineState(event["from_state"])
                 except ValueError as exc:
                     raise LedgerDivergence(f"event {event['id']} contains an unknown state") from exc
-                prior = replayed.get(event["job_key"])
                 if source is None:
                     if prior is not None or target not in {PipelineState.DISCOVERED, PipelineState.SCORED}:
                         raise LedgerDivergence(f"event {event['id']} is an impossible root transition")
@@ -555,6 +564,47 @@ class LifecycleReducer:
             return replayed
         finally:
             conn.close()
+
+    @staticmethod
+    def _verify_proposal_event(
+        event: sqlite3.Row, prior: PipelineState | None,
+    ) -> None:
+        """Authenticate the sole event shape allowed to leave state unchanged."""
+        rejected = f"event {event['id']} is not an exact lifecycle proposal"
+        try:
+            if event["to_state"] is not None:
+                raise ValueError("proposal must not change state")
+            if prior is None or event["from_state"] != prior.value:
+                raise ValueError("proposal source does not match replayed state")
+            if event["actor_kind"] not in {
+                ActorKind.PROBABILISTIC.value, ActorKind.EXTERNAL.value,
+            }:
+                raise ValueError("proposal actor is not observational")
+            if (not isinstance(event["idempotency_key"], str)
+                    or not event["idempotency_key"].strip()):
+                raise ValueError("proposal idempotency key is empty")
+            payload = json.loads(event["payload_json"])
+            if (not isinstance(payload, dict)
+                    or set(payload) != {
+                        "proposed_state", "observation", "observation_hash", "model",
+                    }
+                    or event["payload_json"] != canonical_json(payload)):
+                raise ValueError("proposal payload is not canonical")
+            PipelineState(payload["proposed_state"])
+            if payload["observation_hash"] != canonical_hash(payload["observation"]):
+                raise ValueError("proposal observation hash diverges")
+            model = payload["model"]
+            if model is not None and (
+                not isinstance(model, dict)
+                or set(model) != {"provider", "model_id", "version"}
+                or any(
+                    not isinstance(model[field], str) or not model[field].strip()
+                    for field in ("provider", "model_id", "version")
+                )
+            ):
+                raise ValueError("proposal model identity is incomplete")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LedgerDivergence(f"{rejected}: {exc}") from exc
 
     @staticmethod
     def _verify_materialised_payload(job: sqlite3.Row) -> None:

@@ -270,6 +270,85 @@ def test_replay_rejects_semantically_equal_payload_byte_reformatting(tmp_path: P
         LifecycleReducer(current).replay()
 
 
+@pytest.mark.parametrize("event_type", ["score_snapshot_imported", "unknown_event"])
+def test_replay_rejects_non_proposal_events_with_null_target(
+    tmp_path: Path, event_type: str,
+) -> None:
+    path = tmp_path / f"null-target-{event_type}.sqlite3"
+    database = CareerDatabase(path)
+    job = _job(f"null-target-{event_type}")
+    database.upsert_scored_job(job)
+    with database.transaction(immediate=True) as conn:
+        conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                job.key, event_type, PipelineState.SCORED.value, None,
+                ActorKind.DETERMINISTIC.value, "{}", f"null-target:{event_type}",
+            ),
+        )
+    with pytest.raises(LedgerDivergence, match="invalid non-transition event"):
+        LifecycleReducer(path).replay()
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["target", "source", "actor", "payload", "key", "proposed_state", "model"],
+)
+def test_replay_authenticates_every_non_mutating_proposal_field(
+    tmp_path: Path, attack: str,
+) -> None:
+    path = tmp_path / f"proposal-{attack}.sqlite3"
+    database = CareerDatabase(path)
+    job = _job(f"proposal-{attack}")
+    database.upsert_scored_job(job)
+    reducer = LifecycleReducer(path)
+    reducer.record_proposal(
+        job_key=job.key, proposed_state=PipelineState.SUBMITTED,
+        actor=ActorKind.PROBABILISTIC, observation={"source": "test"},
+        idempotency_key=f"proposal:{attack}",
+        model=ModelIdentity("test", "model", "1"),
+    )
+    with database.transaction(immediate=True) as conn:
+        event = conn.execute(
+            "SELECT id,payload_json FROM pipeline_events WHERE idempotency_key=?",
+            (f"proposal:{attack}",),
+        ).fetchone()
+        if attack == "target":
+            conn.execute(
+                "UPDATE pipeline_events SET to_state='submitted' WHERE id=?", (event["id"],),
+            )
+        elif attack == "source":
+            conn.execute(
+                "UPDATE pipeline_events SET from_state='discovered' WHERE id=?", (event["id"],),
+            )
+        elif attack == "actor":
+            conn.execute(
+                "UPDATE pipeline_events SET actor_kind='deterministic' WHERE id=?",
+                (event["id"],),
+            )
+        elif attack == "key":
+            conn.execute(
+                "UPDATE pipeline_events SET idempotency_key='' WHERE id=?", (event["id"],),
+            )
+        else:
+            payload_document = json.loads(event["payload_json"])
+            if attack == "payload":
+                payload_document["observation_hash"] = "0" * 64
+            elif attack == "proposed_state":
+                payload_document["proposed_state"] = "imaginary"
+            else:
+                payload_document["model"] = {"provider": "test"}
+            conn.execute(
+                "UPDATE pipeline_events SET payload_json=? WHERE id=?",
+                (canonical_json(payload_document), event["id"]),
+            )
+    with pytest.raises(LedgerDivergence, match="not an exact lifecycle proposal"):
+        reducer.replay()
+
+
 def test_reducer_accepts_every_declared_edge_and_rejects_research_release_submit_shortcuts(tmp_path: Path) -> None:
     path = tmp_path / "edges.sqlite3"
     database = CareerDatabase(path)
