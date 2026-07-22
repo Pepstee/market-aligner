@@ -35,6 +35,13 @@ def _legacy_ledger(path: Path, *, jobs: int = 1, events: int = 1) -> None:
     """Create a genuine pre-migration five-state ledger, not a reducer fixture."""
     assert jobs <= events <= 2 * jobs
     gated_jobs = events - jobs
+    payloads = [
+        (
+            json.dumps({"legacy_number": number}, sort_keys=True),
+            canonical_hash({"legacy_number": number}),
+        )
+        for number in range(jobs)
+    ]
     with sqlite3.connect(path) as connection:
         connection.executescript(SCHEMA)
         connection.executemany(
@@ -43,15 +50,15 @@ def _legacy_ledger(path: Path, *, jobs: int = 1, events: int = 1) -> None:
                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             [
                 (f"legacy:{number}", "legacy", str(number), f"https://example.test/{number}",
-                 "Engineer", "Example", 0.5, "{}", f"{number:064x}",
+                 "Engineer", "Example", 0.5, payloads[number][0], payloads[number][1],
                  "opportunity_rejected" if number < gated_jobs else "scored")
                 for number in range(jobs)
             ],
         )
         score_events = [
             (f"legacy:{number}", "score_snapshot_imported", None, "scored",
-             "deterministic", json.dumps({"payload_hash": f"{number:064x}"}, sort_keys=True),
-             f"score-import:legacy:{number}:{number:064x}")
+             "deterministic", json.dumps({"payload_hash": payloads[number][1]}, sort_keys=True),
+             f"score-import:legacy:{number}:{payloads[number][1]}")
             for number in range(jobs)
         ]
         gate_events = [
@@ -59,7 +66,7 @@ def _legacy_ledger(path: Path, *, jobs: int = 1, events: int = 1) -> None:
              "opportunity_rejected", "deterministic",
              json.dumps({"decision": "reject", "reason": "below_opportunity_threshold"},
                         sort_keys=True),
-             f"opportunity-gate:legacy:{number}:{number:064x}:b38a8ff32e7d74ce")
+             f"opportunity-gate:legacy:{number}:{payloads[number][1]}:b38a8ff32e7d74ce")
             for number in range(gated_jobs)
         ]
         connection.executemany(
