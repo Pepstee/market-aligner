@@ -603,52 +603,10 @@ def _source_revision_binding(repository: Path) -> dict[str, Any]:
     """Return the canonical, path-free source revision contract."""
     try:
         contract = source_content_revision_contract()
-        try:
-            revision = source_content_revision(repository)
-        except TrackedSourceRevisionError:
-            # Certification binds the bytes being reviewed, even while component
-            # changes are present in a pre-merge worktree.  Keep the established
-            # revision encoding, but deliberately omit its clean-index precondition.
-            output = subprocess.run(
-                ["git", "ls-files", "--stage", "-z"], cwd=repository,
-                check=True, capture_output=True,
-            ).stdout
-            entries: list[tuple[bytes, bytes, Path]] = []
-            for record in output.split(b"\0"):
-                if not record:
-                    continue
-                metadata, path_bytes = record.split(b"\t", 1)
-                mode, _object_id, stage = metadata.split(b" ", 2)
-                if stage != b"0" or mode not in (b"100644", b"100755", b"120000"):
-                    raise AdoptionError("canonical source revision contains an unsupported entry")
-                if path_bytes.startswith(b"runtime_evidence/"):
-                    continue
-                path_text = path_bytes.decode("utf-8")
-                candidate = repository / path_text
-                if mode == b"120000":
-                    payload = os.fsencode(os.readlink(candidate))
-                    resolved = candidate.resolve(strict=True)
-                    if not resolved.is_relative_to(repository.resolve()):
-                        raise AdoptionError("canonical source revision contains an escaping symlink")
-                else:
-                    info = candidate.stat()
-                    if not stat.S_ISREG(info.st_mode):
-                        raise AdoptionError("canonical source revision contains a non-regular path")
-                    actual_mode = b"100755" if info.st_mode & stat.S_IXUSR else b"100644"
-                    if actual_mode != mode:
-                        raise AdoptionError("canonical source revision mode differs from the index")
-                    payload = candidate.read_bytes()
-                entries.append((path_bytes, mode, payload))
-            digest = hashlib.sha256(b"jaa-source-content-revision-v2\0")
-            for path_bytes, mode, payload in sorted(entries):
-                for value in (path_bytes, mode, payload):
-                    digest.update(len(value).to_bytes(8, "big"))
-                    digest.update(value)
-            revision = "sha256:" + digest.hexdigest()
+        revision = source_content_revision(repository)
         binding = {"revision": revision, "contract": contract}
         _canonical_bytes(binding)
-    except (TrackedSourceRevisionError, OSError, subprocess.CalledProcessError,
-            TypeError, ValueError) as exc:
+    except (OSError, subprocess.CalledProcessError, TypeError, ValueError) as exc:
         raise AdoptionError(f"canonical source revision is unavailable: {exc}") from exc
     return binding
 
@@ -657,7 +615,7 @@ def _repository_content_bindings(repository: Path) -> tuple[dict[str, Any], dict
     """Resolve content evidence, retaining the patched-revision unit seam only."""
     try:
         return _source_revision_binding(repository), _tracked_inventory(repository)
-    except AdoptionError:
+    except (AdoptionError, TrackedSourceRevisionError):
         try:
             is_worktree = subprocess.run(
                 ["git", "rev-parse", "--is-inside-work-tree"], cwd=repository,
@@ -869,6 +827,15 @@ def _atomic_online_backup(source: Path, destination: Path, spec: BaselineSpec) -
                 measured["schema_objects"] != spec.schema_objects or
                 set(measured["table_counts"]) != set(spec.table_counts)):
             raise AdoptionError(f"{spec.name}: live source schema does not match the historical baseline")
+        regressed = {
+            table: {"historical_floor": floor, "measured": measured["table_counts"][table]}
+            for table, floor in sorted(spec.table_counts.items())
+            if measured["table_counts"][table] < floor
+        }
+        if regressed:
+            raise AdoptionError(
+                f"{spec.name}: row counts regressed below historical floors: {regressed}"
+            )
 
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
@@ -1446,7 +1413,7 @@ def publish_runtime_evidence(
         path = repository / relative
         if not path.is_file():
             raise AdoptionError(f"required dependency record is missing: {relative}")
-        locks[relative] = {"sha256": _sha256(path), "role": role}
+        locks[relative] = {"sha256": _hash_file(path), "role": role}
     db_evidence: dict[str, Any] = {}
     capture_evidence: dict[str, Any] = {}
     for name in baseline_names:
@@ -1487,7 +1454,14 @@ def publish_runtime_evidence(
     revision = review["canonical_repository"]["current_revision"]
     evidence = {
         "evidence": "JAA-00:first-adopted-frozen-baseline",
-        "publication": {"format": "jaa-00-deterministic-evidence/v1",
+        "canonical_adoption": {
+            "repository_role": "neutral-versioned-successor",
+            "original_project_canonical": False,
+            "original_project_recoverable": True,
+            "historical_market_aligner_copies_canonical": False,
+        },
+        "secret_policy": {"references_only": True, "values_persisted": False},
+        "publication": {"format": "jaa-00-deterministic-evidence/v2",
             "stability": "byte-stable-for-unchanged-verified-inputs", "volatile_fields": [],
             "verification": "fail-closed-independent-review", "replacement": "atomic-after-successful-verification"},
         "receipt": {"label": f"runtime:{data_root.name}:receipt", "content_sha256": receipt["content_sha256"]},
