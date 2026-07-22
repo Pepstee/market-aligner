@@ -241,6 +241,50 @@ raise SystemExit(cli.main(sys.argv[2:]))
     )
 
 
+def _cli_with_assert_to_close_race(
+    repository: Path,
+    contract: list[dict[str, object]],
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    """Mutate tracked source after the body's clean assertion, before watcher teardown."""
+    bootstrap = r'''
+import json, sys
+from pathlib import Path
+from baseline_adoption import cli, core
+
+core.BASELINES = tuple(core.BaselineSpec(**item) for item in json.loads(sys.argv[1]))
+arguments = sys.argv[2:]
+repository = Path(arguments[arguments.index("--repository") + 1])
+original_assert_clean = core._MutationBoundary.assert_clean
+assertions = 0
+
+def racing_assert_clean(self, label):
+    global assertions
+    result = original_assert_clean(self, label)
+    assertions += 1
+    if assertions == 1:
+        target = repository / "baseline_adoption" / "cli.py"
+        target.write_bytes(target.read_bytes() + b"\n# assert-to-close race\n")
+    return result
+
+core._MutationBoundary.assert_clean = racing_assert_clean
+raise SystemExit(cli.main(arguments))
+'''
+    dependency_root = repository.parent / "test-distributions"
+    for distribution in ("PyYAML", "requests", "openpyxl", "pypdf"):
+        metadata = dependency_root / f"{distribution}-1.0.dist-info"
+        metadata.mkdir(parents=True, exist_ok=True)
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 1.0\n", encoding="utf-8"
+        )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(dependency_root)
+    return subprocess.run(
+        [sys.executable, "-c", bootstrap, json.dumps(contract), *arguments],
+        cwd=repository, env=environment, text=True, capture_output=True, check=False,
+    )
+
+
 @pytest.fixture
 def publication_case(tmp_path: Path) -> tuple[Path, Path, Path, list[dict[str, object]], Path]:
     repository = _git_repository(tmp_path / "repository")
@@ -378,6 +422,27 @@ def test_post_replace_directory_fsync_failure_restores_prior_evidence(
     )
 
     assert result.returncode != 0
+    assert "published" not in result.stdout.lower()
+    assert output.read_bytes() == prior_evidence
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_publication_rejects_mutation_between_clean_assertion_and_watcher_close(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path],
+    tmp_path: Path,
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    output = tmp_path / "published.yaml"
+    prior_evidence = b"prior-certified-evidence\nassert-to-close"
+    output.write_bytes(prior_evidence)
+
+    result = _cli_with_assert_to_close_race(
+        repository, contract, "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository), "--output", str(output),
+    )
+
+    assert result.returncode == 2
+    assert "atomic replacement boundary" in result.stderr.lower()
     assert "published" not in result.stdout.lower()
     assert output.read_bytes() == prior_evidence
     assert not list(output.parent.glob(f".{output.name}.*"))
