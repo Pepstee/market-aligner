@@ -265,6 +265,14 @@ def test_destination_collision_and_idempotent_overwrite_are_rejected_atomically(
     assert rejected.returncode == 2
     assert "byte size mismatch" in rejected.stderr or "SHA-256 mismatch" in rejected.stderr
 
+    uncertified = _run_cli(
+        source, fresh, contract, "certify", "--receipt", str(first_receipt),
+        "--data-root", str(fresh), "--repository", str(ROOT),
+    )
+    assert uncertified.returncode == 2
+    assert "certified" not in uncertified.stdout
+    assert "mismatch" in uncertified.stderr.lower()
+
 
 def test_credential_value_never_reaches_evidence_logs_or_migration_manifest(
     snapshots: tuple[Path, list[dict[str, object]]], tmp_path: Path,

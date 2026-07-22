@@ -115,13 +115,28 @@ def _receipt(runtime_root: Path) -> Path:
     return receipt
 
 
-def _public(*arguments: str) -> subprocess.CompletedProcess[str]:
+def _public(
+    *arguments: str, dependency_root: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    if dependency_root is not None:
+        for distribution in ("PyYAML", "requests", "openpyxl", "pypdf"):
+            metadata = dependency_root / f"{distribution}-0.0-test.dist-info"
+            metadata.mkdir(parents=True, exist_ok=True)
+            (metadata / "METADATA").write_text(
+                f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 0.0-test\n",
+                encoding="utf-8",
+            )
+        environment["PYTHONPATH"] = (
+            str(dependency_root) + os.pathsep + environment.get("PYTHONPATH", "")
+        )
     return subprocess.run(
         [sys.executable, "-m", "baseline_adoption.cli", *arguments],
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
+        env=environment,
     )
 
 
@@ -150,7 +165,6 @@ def test_tracked_online_snapshot_evidence_matches_frozen_receipt_and_public_comm
     receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
     content = receipt_document["content"]
     before = _runtime_files(runtime)
-
     reconciled = _public("reconcile", "--receipt", str(receipt), "--data-root", str(runtime))
     assert reconciled.returncode == 0, reconciled.stderr
     reconciliation = json.loads(reconciled.stdout)
@@ -162,6 +176,41 @@ def test_tracked_online_snapshot_evidence_matches_frozen_receipt_and_public_comm
     )
     assert manifest_result.returncode == 0, manifest_result.stderr
     manifest = json.loads(manifest_result.stdout)
+
+    review_result = _public(
+        "independent-review",
+        "--receipt", str(receipt),
+        "--data-root", str(runtime),
+        "--repository", str(ROOT),
+        dependency_root=tmp_path / "review-runtime-dependencies",
+    )
+    assert review_result.returncode == 0, review_result.stderr
+    review = json.loads(review_result.stdout)
+    assert review["status"] == "certified"
+    assert review["receipt_provenance"]["content_sha256"] == receipt_document["content_sha256"]
+    assert review["receipt_provenance"]["tracked_evidence"] == str(
+        EVIDENCE.relative_to(ROOT)
+    )
+    assert review["canonical_repository"]["adoption_revision"] == content["repository"]["revision"]
+    assert review["database_reconciliation"] == reconciliation
+    assert review["preserved_originals_and_rollback"] == manifest
+
+    inventory = review["current_review"]["content_inventory"]
+    certified_inventory = review["secret_free_inventory"]
+    assert inventory
+    assert all(certified_inventory[key] == value for key, value in inventory.items())
+    runtime_prerequisites = review["runtime_prerequisites"]
+    assert runtime_prerequisites["result"] == "ok"
+    assert runtime_prerequisites["observed"] == review["current_review"]["runtime"]
+    assert set(runtime_prerequisites["observed"]["dependencies"]) == {
+        "PyYAML", "requests", "openpyxl", "pypdf"
+    }
+    assert review["pre_adoption_test_observation"] == {
+        "label": "pre-adoption career-control observation",
+        "observed_on": "2026-07-20",
+        "passed": 65,
+        "classification": "historical-observation-not-current-suite-total",
+    }
 
     assert evidence["evidence"] == "JAA-00:first-adopted-frozen-baseline"
     assert evidence["receipt"] == {
