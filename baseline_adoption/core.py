@@ -407,6 +407,22 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
             f"{spec.name}: main/WAL content changed or was uncertain during recertification"
         )
 
+    # A WAL checkpoint can copy frames into the main database without changing the WAL bytes.
+    # If it lands after the end-main hash but before the end-WAL hash above, both per-file
+    # comparisons can otherwise appear stable even though they describe different boundaries.
+    # Re-observe the complete source set and bind the published end state only when both content
+    # files still match the first end scan.  This is deliberately separate from the broad
+    # start/end check: it closes the checkpoint-only race without weakening ordinary writer-drift
+    # refusal or treating volatile SHM reader-lock metadata as database content.
+    final = _source_identities(path, source_label)
+    final_main_equal = _stable_content_equal(end["main"], final["main"])
+    final_wal_equal = _stable_content_equal(end["wal"], final["wal"])
+    if final_main_equal is not True or final_wal_equal is not True:
+        raise AdoptionError(
+            f"{spec.name}: main/WAL content changed or was uncertain during final whole-source "
+            "revalidation"
+        )
+
     return {
         "source": {"label": f"source:{spec.name}", "relative_location": spec.source_relative},
         "historical_observation": _historical_observation(spec),
@@ -425,13 +441,21 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
         },
         "source_observations_start": start,
         "source_observations_end": end,
+        "source_observations_final": final,
         "content_comparison": {
             "main_unchanged": main_content_equal,
             "wal_unchanged": wal_content_equal,
             "main_wal_complete": True,
+            "final_whole_source_revalidation": {
+                "main_unchanged": final_main_equal,
+                "wal_unchanged": final_wal_equal,
+                "main_wal_complete": True,
+            },
             "shm": {
                 "scope": "identity-metadata-only",
-                "metadata_drift_observed": start["shm"] != end["shm"],
+                "metadata_drift_observed": (
+                    start["shm"] != end["shm"] or end["shm"] != final["shm"]
+                ),
                 "content_compared": False,
             },
         },
