@@ -258,9 +258,13 @@ def certify(args: argparse.Namespace) -> Path:
                 "SELECT version FROM career_schema_migrations ORDER BY version"
             )]
             receipts = int(conn.execute("SELECT COUNT(*) FROM lifecycle_transition_receipts").fetchone()[0])
+            score_receipts = int(conn.execute(
+                "SELECT COUNT(*) FROM score_snapshot_receipts"
+            ).fetchone()[0])
         require(versions == [migration.version for migration in JAA_01_MIGRATIONS],
                 "temporary copy has unexpected migration versions")
         require(receipts == 0, "frozen baseline unexpectedly gained transition receipts")
+        require(score_receipts == 0, "frozen baseline unexpectedly gained score receipts")
 
     scenario = reproduce()
     require(scenario["replay_equal"] and scenario["identical_retry_unchanged"],

@@ -220,7 +220,7 @@ class CareerDatabase:
         if canonical_hash(job.payload) != job.payload_hash:
             raise ValueError("score snapshot payload_hash does not match canonical payload")
         payload_json = canonical_json(job.payload)
-        event_payload_json, event_key = score_snapshot_import_binding(
+        event_payload_json, event_key, event_binding_hash = score_snapshot_import_binding(
             job_key=job.key, board=job.board, job_id=job.job_id, url=job.url,
             title=job.title, company=job.company, fit=job.fit,
             opportunity=job.opportunity, final_score=job.final_score,
@@ -246,7 +246,7 @@ class CareerDatabase:
                         "versioned score updates require an explicit ledger event"
                     )
                 event = conn.execute(
-                    """SELECT job_key,event_type,from_state,to_state,actor_kind,
+                    """SELECT id,job_key,event_type,from_state,to_state,actor_kind,
                               payload_json,idempotency_key
                        FROM pipeline_events WHERE idempotency_key=?""",
                     (event_key,),
@@ -256,9 +256,22 @@ class CareerDatabase:
                     PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
                     event_payload_json, event_key,
                 )
-                if event is None or tuple(event) != expected_event:
+                if event is None or tuple(event)[1:] != expected_event:
                     raise IdempotencyConflict(
                         "existing score snapshot has no matching immutable import event"
+                    )
+                receipt = conn.execute(
+                    """SELECT event_id,job_key,binding_json,binding_hash,idempotency_key
+                       FROM score_snapshot_receipts WHERE job_key=?""",
+                    (job.key,),
+                ).fetchone()
+                expected_receipt = (
+                    int(event["id"]), job.key, event_payload_json,
+                    event_binding_hash, event_key,
+                )
+                if receipt is None or tuple(receipt) != expected_receipt:
+                    raise IdempotencyConflict(
+                        "existing score snapshot has no matching immutable receipt"
                     )
                 return False
             conn.execute(
@@ -273,13 +286,22 @@ class CareerDatabase:
                     job.payload_hash, PipelineState.SCORED.value,
                 ),
             )
-            conn.execute(
+            event = conn.execute(
                 """INSERT INTO pipeline_events(
                      job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
                    ) VALUES(?,?,?,?,?,?,?)""",
                 (
                     job.key, "score_snapshot_imported", None, PipelineState.SCORED.value,
                     ActorKind.DETERMINISTIC.value, event_payload_json, event_key,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO score_snapshot_receipts(
+                     event_id,job_key,binding_json,binding_hash,idempotency_key
+                   ) VALUES(?,?,?,?,?)""",
+                (
+                    event.lastrowid, job.key, event_payload_json,
+                    event_binding_hash, event_key,
                 ),
             )
         return True

@@ -75,7 +75,9 @@ def _counts(path: Path) -> tuple[int, int, str]:
 
 def test_migrations_cover_clean_and_large_legacy_ledgers_without_rewriting_them(tmp_path: Path) -> None:
     clean = tmp_path / "clean.sqlite3"
-    assert apply_jaa_01_migrations(clean) == (1,)
+    assert apply_jaa_01_migrations(clean) == tuple(
+        migration.version for migration in JAA_01_MIGRATIONS
+    )
     assert apply_jaa_01_migrations(clean) == ()
     with sqlite3.connect(clean) as conn:
         ledger = conn.execute(
@@ -320,11 +322,69 @@ def test_score_snapshot_persists_canonical_payload_and_rejects_non_finite_metada
                 conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0],
             ) == stable
 
+        # SQLite REAL erases the distinction between 1 and 1.0.  Rewriting the
+        # mutable root event and recomputing both of its public digests must
+        # still fail because the separately persisted receipt retains the
+        # original typed binding bytes.
+        with sqlite3.connect(path) as conn:
+            original_event = conn.execute(
+                "SELECT id,payload_json,idempotency_key FROM pipeline_events WHERE job_key=?",
+                (integer.key,),
+            ).fetchone()
+            forged_binding = json.loads(original_event[1])
+            forged_binding["snapshot"][field] = {
+                "type": "float", "value": float(1).hex(),
+            }
+            forged_binding["snapshot_hash"] = canonical_hash(forged_binding["snapshot"])
+            forged_payload = canonical_json(forged_binding)
+            forged_key = (
+                f"score-import-v2:{integer.key}:{canonical_hash(forged_binding)}"
+            )
+            conn.execute(
+                "UPDATE pipeline_events SET payload_json=?,idempotency_key=? WHERE id=?",
+                (forged_payload, forged_key, original_event[0]),
+            )
+        with pytest.raises(LedgerDivergence, match="exact deterministic historical event"):
+            LifecycleReducer(path).replay()
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE pipeline_events SET payload_json=?,idempotency_key=? WHERE id=?",
+                (original_event[1], original_event[2], original_event[0]),
+            )
+
         negative_zero = replace(_job(f"negative-zero-{field}"), **{field: -0.0})
         assert database.upsert_scored_job(negative_zero) is True
         assert database.upsert_scored_job(negative_zero) is False
         with pytest.raises(IdempotencyConflict, match="score snapshot|immutable import event"):
             database.upsert_scored_job(replace(negative_zero, **{field: 0.0}))
+
+        # The same independent receipt prevents a signed-zero alias even after
+        # an attacker recomputes every identity stored in the root event.
+        with sqlite3.connect(path) as conn:
+            original_event = conn.execute(
+                "SELECT id,payload_json,idempotency_key FROM pipeline_events WHERE job_key=?",
+                (negative_zero.key,),
+            ).fetchone()
+            forged_binding = json.loads(original_event[1])
+            forged_binding["snapshot"][field] = {
+                "type": "float", "value": float(0).hex(),
+            }
+            forged_binding["snapshot_hash"] = canonical_hash(forged_binding["snapshot"])
+            forged_payload = canonical_json(forged_binding)
+            forged_key = (
+                f"score-import-v2:{negative_zero.key}:{canonical_hash(forged_binding)}"
+            )
+            conn.execute(
+                "UPDATE pipeline_events SET payload_json=?,idempotency_key=? WHERE id=?",
+                (forged_payload, forged_key, original_event[0]),
+            )
+        with pytest.raises(LedgerDivergence, match="exact deterministic historical event"):
+            LifecycleReducer(path).replay()
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE pipeline_events SET payload_json=?,idempotency_key=? WHERE id=?",
+                (original_event[1], original_event[2], original_event[0]),
+            )
 
     assert set(LifecycleReducer(path).replay()) == {
         "canonical-finite",
@@ -335,6 +395,49 @@ def test_score_snapshot_persists_canonical_payload_and_rejects_non_finite_metada
             "fit", "opportunity", "final_score", "extraction_confidence"
         )),
     }
+
+    with database.connection() as conn:
+        event = conn.execute(
+            """SELECT id,job_key,payload_json,idempotency_key
+               FROM pipeline_events WHERE job_key='integer-fit'"""
+        ).fetchone()
+        receipt = conn.execute(
+            """SELECT binding_json,binding_hash,idempotency_key
+               FROM score_snapshot_receipts WHERE job_key='integer-fit'"""
+        ).fetchone()
+    assert event is not None and receipt is not None
+    assert (receipt["binding_json"], receipt["idempotency_key"]) == (
+        event["payload_json"], event["idempotency_key"],
+    )
+    assert receipt["binding_hash"] == canonical_hash(json.loads(event["payload_json"]))
+
+    altered_binding = json.loads(event["payload_json"])
+    altered_binding["snapshot"]["fit"] = {
+        "type": "float", "value": float(1).hex(),
+    }
+    altered_binding["snapshot_hash"] = canonical_hash(altered_binding["snapshot"])
+    altered_payload = canonical_json(altered_binding)
+    altered_key = (
+        f"score-import-v2:{event['job_key']}:{canonical_hash(altered_binding)}"
+    )
+    with database.transaction(immediate=True) as conn:
+        conn.execute(
+            "UPDATE pipeline_events SET payload_json=?,idempotency_key=? WHERE id=?",
+            (altered_payload, altered_key, event["id"]),
+        )
+    with pytest.raises(LedgerDivergence, match="exact deterministic historical event"):
+        LifecycleReducer(path).replay()
+    with database.transaction(immediate=True) as conn:
+        conn.execute(
+            "UPDATE pipeline_events SET payload_json=?,idempotency_key=? WHERE id=?",
+            (event["payload_json"], event["idempotency_key"], event["id"]),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        with database.transaction(immediate=True) as conn:
+            conn.execute(
+                "UPDATE score_snapshot_receipts SET binding_hash=? WHERE job_key=?",
+                ("0" * 64, "integer-fit"),
+            )
 
 
 def test_replay_reconstructs_states_and_detects_divergence_order_and_receipt_identity_tampering(tmp_path: Path) -> None:

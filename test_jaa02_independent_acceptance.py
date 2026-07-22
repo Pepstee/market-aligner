@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from career_automation.candidate_graph import CandidateGraph
-from career_automation.migrations import apply_jaa_02_migrations
+from career_automation.migrations import JAA_02_MIGRATIONS, apply_jaa_02_migrations
 
 
 POLICY_HASH = hashlib.sha256(b"independent-jaa-02-policy-v1").hexdigest()
@@ -50,7 +50,9 @@ def _approved_evidence(graph: CandidateGraph, evidence_id: str = "evidence") -> 
 
 def test_jaa02_migration_is_forward_only_and_schema_enforces_graph_integrity(tmp_path: Path) -> None:
     database = tmp_path / "candidate.sqlite3"
-    assert apply_jaa_02_migrations(database) == (1, 2)
+    assert apply_jaa_02_migrations(database) == tuple(
+        migration.version for migration in JAA_02_MIGRATIONS
+    )
     assert apply_jaa_02_migrations(database) == ()
 
     with sqlite3.connect(database) as connection:
@@ -58,8 +60,7 @@ def test_jaa02_migration_is_forward_only_and_schema_enforces_graph_integrity(tmp
             "SELECT version, name FROM career_schema_migrations ORDER BY version"
         ).fetchall()
         assert migrations == [
-            (1, "jaa_01_lifecycle_transition_receipts"),
-            (2, "jaa_02_candidate_fact_evidence_claim_graph"),
+            (migration.version, migration.name) for migration in JAA_02_MIGRATIONS
         ]
         with pytest.raises(sqlite3.IntegrityError, match="approved claim requires approved evidence"):
             connection.execute(

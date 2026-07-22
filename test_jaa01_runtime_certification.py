@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from career_automation.database import SCHEMA
+from career_automation.migrations import JAA_01_MIGRATIONS
 
 
 ROOT = Path(__file__).resolve().parent
@@ -174,7 +175,9 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert document_path.name == f"sha256-{hashlib.sha256(document_path.read_bytes()).hexdigest()}.json"
     assert document["expected_counts"] == {"pipeline_jobs": 462, "pipeline_events": 924}
     assert document["observed_counts"]["baseline_before"] == {"pipeline_jobs": 462, "pipeline_events": 924}
-    assert document["migration_versions"] == [1]
+    assert document["migration_versions"] == [
+        migration.version for migration in JAA_01_MIGRATIONS
+    ]
     assert document["migration_receipt_trust"] == {
         "contract": "jaa-00-exact-evidence-trust-anchor/v1",
         "content_sha256": MIGRATION_CONTENT_HASH,

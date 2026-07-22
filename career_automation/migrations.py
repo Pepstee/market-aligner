@@ -93,7 +93,7 @@ class MigrationRunner:
         return tuple(applied_now)
 
 
-JAA_01_MIGRATIONS: tuple[Migration, ...] = (
+_JAA_01_BASE_MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         1,
         "jaa_01_lifecycle_transition_receipts",
@@ -208,7 +208,7 @@ JAA_01_MIGRATIONS: tuple[Migration, ...] = (
 )
 
 
-JAA_02_MIGRATIONS: tuple[Migration, ...] = JAA_01_MIGRATIONS + (
+_JAA_02_BASE_MIGRATIONS: tuple[Migration, ...] = _JAA_01_BASE_MIGRATIONS + (
     Migration(
         2,
         "jaa_02_candidate_fact_evidence_claim_graph",
@@ -382,6 +382,66 @@ JAA_02_MIGRATIONS: tuple[Migration, ...] = JAA_01_MIGRATIONS + (
                  BEGIN SELECT RAISE(ABORT,'evidence supports an approved claim'); END""",
         ),
     ),
+)
+
+
+_SCORE_SNAPSHOT_RECEIPT_MIGRATION = Migration(
+    3,
+    "jaa_01_immutable_score_snapshot_receipts",
+    (
+        """CREATE TABLE score_snapshot_receipts(
+             receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+             event_id INTEGER NOT NULL UNIQUE
+               REFERENCES pipeline_events(id) ON DELETE RESTRICT,
+             job_key TEXT NOT NULL UNIQUE
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             binding_json TEXT NOT NULL,
+             binding_hash TEXT NOT NULL
+               CHECK(length(binding_hash) = 64
+                 AND binding_hash NOT GLOB '*[^0-9a-f]*'),
+             idempotency_key TEXT NOT NULL UNIQUE
+               CHECK(length(trim(idempotency_key)) > 0),
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE TRIGGER score_snapshot_receipt_matches_event
+             BEFORE INSERT ON score_snapshot_receipts
+             BEGIN
+               SELECT CASE WHEN NOT EXISTS(
+                 SELECT 1 FROM pipeline_events AS event
+                 WHERE event.id = NEW.event_id
+                   AND event.job_key = NEW.job_key
+                   AND event.event_type = 'score_snapshot_imported'
+                   AND event.from_state IS NULL
+                   AND event.to_state = 'scored'
+                   AND event.actor_kind = 'deterministic'
+                   AND event.payload_json = NEW.binding_json
+                   AND event.idempotency_key = NEW.idempotency_key
+               ) THEN RAISE(ABORT, 'score snapshot receipt does not match event') END;
+             END""",
+        """CREATE TRIGGER score_snapshot_receipt_immutable_update
+             BEFORE UPDATE ON score_snapshot_receipts
+             BEGIN
+               SELECT RAISE(ABORT, 'score snapshot receipts are immutable');
+             END""",
+        """CREATE TRIGGER score_snapshot_receipt_immutable_delete
+             BEFORE DELETE ON score_snapshot_receipts
+             BEGIN
+               SELECT RAISE(ABORT, 'score snapshot receipts are immutable');
+             END""",
+    ),
+)
+
+
+# Migration 2 was already allocated to JAA-02 before the independent JAA-01
+# review required an immutable score-import receipt. Public sets remain ordered
+# and checksummed while each slice applies only the schema it owns.
+JAA_01_MIGRATIONS: tuple[Migration, ...] = (
+    *_JAA_01_BASE_MIGRATIONS,
+    _SCORE_SNAPSHOT_RECEIPT_MIGRATION,
+)
+JAA_02_MIGRATIONS: tuple[Migration, ...] = (
+    *_JAA_02_BASE_MIGRATIONS,
+    _SCORE_SNAPSHOT_RECEIPT_MIGRATION,
 )
 
 

@@ -128,8 +128,8 @@ def score_snapshot_import_binding(
     company: str, fit: int | float | None, opportunity: int | float,
     final_score: int | float | None, extraction_confidence: int | float | None,
     payload_hash: str,
-) -> tuple[str, str]:
-    """Return exact event bytes and key for one immutable score import."""
+) -> tuple[str, str, str]:
+    """Return exact event bytes, key and hash for one immutable score import."""
     snapshot: dict[str, Any] = {
         "job_key": job_key,
         "board": board,
@@ -151,7 +151,8 @@ def score_snapshot_import_binding(
         "snapshot_hash": canonical_hash(snapshot),
     }
     payload_json = canonical_json(binding)
-    return payload_json, f"score-import-v2:{job_key}:{canonical_hash(binding)}"
+    binding_hash = canonical_hash(binding)
+    return payload_json, f"score-import-v2:{job_key}:{binding_hash}", binding_hash
 
 
 # One graph is authoritative. Legacy SCORED is the deployed equivalent of the
@@ -464,6 +465,7 @@ class LifecycleReducer:
             replayed: dict[str, PipelineState] = {}
             replayed_policy: dict[str, str | None] = {}
             verified_receipt_events: set[int] = set()
+            verified_score_receipt_events: set[int] = set()
             events = conn.execute("SELECT * FROM pipeline_events ORDER BY id").fetchall()
             for event in events:
                 if event["to_state"] is None:
@@ -488,9 +490,12 @@ class LifecycleReducer:
                         raise LedgerDivergence(
                             f"event {event['id']} references an unknown job"
                         )
-                    replayed_policy[event["job_key"]] = self._verify_legacy_event(
-                        event, job_row,
+                    policy_hash, score_receipt = self._verify_legacy_event(
+                        conn, event, job_row,
                     )
+                    replayed_policy[event["job_key"]] = policy_hash
+                    if score_receipt:
+                        verified_score_receipt_events.add(int(event["id"]))
                 else:
                     raise LedgerDivergence(f"event {event['id']} changes state without reducer authority")
                 replayed[event["job_key"]] = target
@@ -502,6 +507,15 @@ class LifecycleReducer:
             if receipt_events != verified_receipt_events:
                 raise LedgerDivergence(
                     "transition receipt ledger contains an unowned transition receipt"
+                )
+            score_receipt_events = {
+                int(row[0]) for row in conn.execute(
+                    "SELECT event_id FROM score_snapshot_receipts"
+                )
+            }
+            if score_receipt_events != verified_score_receipt_events:
+                raise LedgerDivergence(
+                    "score snapshot receipt ledger contains an unowned receipt"
                 )
             if set(replayed) != set(jobs):
                 missing = sorted(set(jobs) - set(replayed))
@@ -537,8 +551,8 @@ class LifecycleReducer:
 
     @staticmethod
     def _verify_legacy_event(
-        event: sqlite3.Row, job: sqlite3.Row,
-    ) -> str | None:
+        conn: sqlite3.Connection, event: sqlite3.Row, job: sqlite3.Row,
+    ) -> tuple[str | None, bool]:
         """Authenticate the only two receiptless shapes in the frozen JAA-00 ledger."""
         rejected = f"event {event['id']} is not an exact deterministic historical event"
         job_payload_hash = job["payload_hash"]
@@ -563,8 +577,11 @@ class LifecycleReducer:
                 event["payload_json"], event["idempotency_key"],
             )
             if actual != legacy_expected:
-                LifecycleReducer._verify_current_score_import(event, job, rejected)
-            return policy_hash
+                LifecycleReducer._verify_current_score_import(
+                    conn, event, job, rejected
+                )
+                return policy_hash, True
+            return policy_hash, False
         elif event_type == "opportunity_gate_decided":
             policy_hash = _LEGACY_OPPORTUNITY_POLICY_SUFFIX
             try:
@@ -588,11 +605,12 @@ class LifecycleReducer:
         )
         if actual != expected:
             raise LedgerDivergence(rejected)
-        return policy_hash
+        return policy_hash, False
 
     @staticmethod
     def _verify_current_score_import(
-        event: sqlite3.Row, job: sqlite3.Row, rejected: str,
+        conn: sqlite3.Connection, event: sqlite3.Row, job: sqlite3.Row,
+        rejected: str,
     ) -> None:
         """Verify the exact v2 score-import binding used by current writers."""
         try:
@@ -613,6 +631,17 @@ class LifecycleReducer:
                         f"score-import-v2:{event['job_key']}:{canonical_hash(binding)}"
                     )):
                 raise ValueError("score binding identity mismatch")
+            receipt = conn.execute(
+                """SELECT event_id,job_key,binding_json,binding_hash,idempotency_key
+                   FROM score_snapshot_receipts WHERE event_id=?""",
+                (event["id"],),
+            ).fetchone()
+            expected_receipt = (
+                int(event["id"]), event["job_key"], event["payload_json"],
+                canonical_hash(binding), event["idempotency_key"],
+            )
+            if receipt is None or tuple(receipt) != expected_receipt:
+                raise ValueError("score snapshot receipt identity mismatch")
             for field in _SCORE_SNAPSHOT_STRING_FIELDS:
                 actual = event["job_key"] if field == "job_key" else job[field]
                 if snapshot[field] != actual:
@@ -624,7 +653,7 @@ class LifecycleReducer:
                     or event["to_state"] != PipelineState.SCORED.value):
                 raise ValueError("invalid score root transition")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise LedgerDivergence(rejected) from exc
+            raise LedgerDivergence(f"{rejected}: {exc}") from exc
 
     @staticmethod
     def _score_number_matches(identity: Any, stored: Any) -> bool:
