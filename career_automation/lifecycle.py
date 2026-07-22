@@ -110,6 +110,12 @@ _SCORE_SNAPSHOT_NUMERIC_FIELDS = (
 )
 
 
+def _score_string_identity(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"score snapshot {name} must be a non-empty string")
+    return value
+
+
 def _score_number_identity(value: int | float | None, name: str) -> dict[str, str] | None:
     """Preserve Python numeric type and signed zero across SQLite REAL coercion."""
     if value is None:
@@ -135,6 +141,17 @@ def score_snapshot_import_binding(
     payload_hash: str,
 ) -> tuple[str, str, str]:
     """Return exact event bytes, key and hash for one immutable score import."""
+    strings = {
+        "job_key": job_key, "board": board, "job_id": job_id, "url": url,
+        "title": title, "company": company, "payload_hash": payload_hash,
+    }
+    for name, value in strings.items():
+        _score_string_identity(value, name)
+    if (len(payload_hash) != 64
+            or any(char not in "0123456789abcdef" for char in payload_hash)):
+        raise ValueError(
+            "score snapshot payload_hash must be a lowercase SHA-256 digest"
+        )
     snapshot: dict[str, Any] = {
         "job_key": job_key,
         "board": board,

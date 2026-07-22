@@ -349,6 +349,32 @@ def test_replay_authenticates_every_non_mutating_proposal_field(
         reducer.replay()
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        (field, invalid)
+        for field in (
+            "key", "board", "job_id", "url", "title", "company", "payload_hash",
+        )
+        for invalid in (123, "   ")
+    ],
+)
+def test_score_import_rejects_invalid_string_metadata_without_mutation(
+    tmp_path: Path, field: str, invalid: object,
+) -> None:
+    path = tmp_path / f"invalid-score-string-{field}-{type(invalid).__name__}.sqlite3"
+    database = CareerDatabase(path)
+    job = replace(_job(f"invalid-score-string-{field}"), **{field: invalid})
+
+    with pytest.raises(ValueError, match="score snapshot"):
+        database.upsert_scored_job(job)
+
+    with database.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM score_snapshot_receipts").fetchone()[0] == 0
+
+
 def test_reducer_accepts_every_declared_edge_and_rejects_research_release_submit_shortcuts(tmp_path: Path) -> None:
     path = tmp_path / "edges.sqlite3"
     database = CareerDatabase(path)

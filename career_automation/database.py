@@ -214,7 +214,8 @@ class CareerDatabase:
         """Store one immutable score snapshot, making identical retries idempotent."""
         if not isinstance(job.payload, dict):
             raise ValueError("score snapshot payload must be a JSON object")
-        if (len(job.payload_hash) != 64
+        if (not isinstance(job.payload_hash, str)
+                or len(job.payload_hash) != 64
                 or any(char not in "0123456789abcdef" for char in job.payload_hash)):
             raise ValueError("score snapshot payload_hash must be a lowercase SHA-256 digest")
         if canonical_hash(job.payload) != job.payload_hash:
