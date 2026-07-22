@@ -14,11 +14,11 @@ publication:
   verification: fail-closed-independent-review
   replacement: atomic-after-successful-verification
 receipt:
-  label: runtime:jaa00-v2-20260722-36926ac:receipt
-  content_sha256: 82aba7c135e78001bf83673e95c7d3b6c5ef1f356415af21549e25aa53fd9b1c
+  label: runtime:jaa00-v2-20260722-quiescent-10e9c7e:receipt
+  content_sha256: 31b3ca6bf3f0e1ba81b16eb7c3dc480a151d69ca074e5ab074d2bd35a53f2ebd
 repository:
   label: canonical-repository
-  revision: 36926ace5310655b4ed7c31c2a9c50a2433c23b5
+  revision: 10e9c7eaed1b34f4d4829f79b53380409400a936
 revision_binding:
   source_revision:
     contract:
@@ -37,15 +37,15 @@ revision_binding:
     runtime_or_private_database_files_tracked: false
     secret_policy: receipt-retains-reference-names-only-never-values-or-host-paths
     tracked_files: 256
-  certified_revision: 36926ace5310655b4ed7c31c2a9c50a2433c23b5
+  certified_revision: 10e9c7eaed1b34f4d4829f79b53380409400a936
   certification:
     contract: jaa-00-source-revision-binding/v1
-    inputs_sha256: 40f7dd208fa5586667e5c271615371aeaa5e0eb97529f97968e4cf7a16f9e751
+    inputs_sha256: 84d6dd2796588446902bd02e73cbcb066033e27e60a415880c5ad14ca097a878
 reconciliation:
   command: python -m baseline_adoption.cli reconcile --receipt <receipt> --data-root
     <runtime>
   result: ok
-  receipt_content_sha256: 82aba7c135e78001bf83673e95c7d3b6c5ef1f356415af21549e25aa53fd9b1c
+  receipt_content_sha256: 31b3ca6bf3f0e1ba81b16eb7c3dc480a151d69ca074e5ab074d2bd35a53f2ebd
   receipt_filename_matches_content_sha256: true
   adopted_database_hashes_match: true
   integrity_check: ok
@@ -56,7 +56,7 @@ databases:
   raw_jobs:
     source_label: source:raw_jobs
     destination_label: destination:raw_jobs
-    snapshot_sha256: 964a52f7b54e5a7819d55f45fd5a3feab3ba372cb3659d7c532fd61e53ef45ed
+    snapshot_sha256: d71169d79deac68bc27252650a6af7fdd82fb46f7fb9b8f7a1a7a7a157a67171
     snapshot_bytes: 130260992
     schema_sha256: d40bb9b317ccbbf30cc60fecd6bab4231b663782ccd37226966f353ba064040c
     schema_objects: 6
@@ -146,7 +146,9 @@ capture_and_drift_semantics:
   raw_jobs:
     main_content_unchanged_during_capture: true
     wal_content_unchanged_during_capture: true
-    drift_observed: false
+    drift_observed: true
+    changed_components:
+    - shm
     shm_comparison: identity-metadata-only
   career_pipeline:
     main_content_unchanged_during_capture: true
