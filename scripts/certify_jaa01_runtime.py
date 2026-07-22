@@ -261,10 +261,17 @@ def certify(args: argparse.Namespace) -> Path:
             score_receipts = int(conn.execute(
                 "SELECT COUNT(*) FROM score_snapshot_receipts"
             ).fetchone()[0])
+            legacy_cohort = int(conn.execute(
+                "SELECT COUNT(*) FROM legacy_score_snapshot_cohort"
+            ).fetchone()[0])
         require(versions == [migration.version for migration in JAA_01_MIGRATIONS],
                 "temporary copy has unexpected migration versions")
         require(receipts == 0, "frozen baseline unexpectedly gained transition receipts")
         require(score_receipts == 0, "frozen baseline unexpectedly gained score receipts")
+        require(
+            legacy_cohort == EXPECTED_COUNTS["pipeline_jobs"],
+            "frozen baseline legacy score cohort is incomplete",
+        )
 
     scenario = reproduce()
     require(scenario["replay_equal"] and scenario["identical_retry_unchanged"],

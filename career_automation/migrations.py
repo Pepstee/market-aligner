@@ -428,6 +428,45 @@ _SCORE_SNAPSHOT_RECEIPT_MIGRATION = Migration(
              BEGIN
                SELECT RAISE(ABORT, 'score snapshot receipts are immutable');
              END""",
+        """CREATE TABLE legacy_score_snapshot_cohort(
+             event_id INTEGER PRIMARY KEY
+               REFERENCES pipeline_events(id) ON DELETE RESTRICT,
+             job_key TEXT NOT NULL UNIQUE
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             payload_hash TEXT NOT NULL
+               CHECK(length(payload_hash) = 64
+                 AND payload_hash NOT GLOB '*[^0-9a-f]*'),
+             binding_json TEXT NOT NULL,
+             idempotency_key TEXT NOT NULL UNIQUE
+               CHECK(length(trim(idempotency_key)) > 0),
+             admitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """INSERT INTO legacy_score_snapshot_cohort(
+             event_id,job_key,payload_hash,binding_json,idempotency_key
+           )
+           SELECT event.id,event.job_key,job.payload_hash,event.payload_json,
+                  event.idempotency_key
+           FROM pipeline_events AS event
+           JOIN pipeline_jobs AS job ON job.job_key=event.job_key
+           WHERE event.event_type='score_snapshot_imported'
+             AND event.from_state IS NULL
+             AND event.to_state='scored'
+             AND event.actor_kind='deterministic'""",
+        """CREATE TRIGGER legacy_score_snapshot_cohort_immutable_insert
+             BEFORE INSERT ON legacy_score_snapshot_cohort
+             BEGIN
+               SELECT RAISE(ABORT, 'legacy score snapshot cohort is immutable');
+             END""",
+        """CREATE TRIGGER legacy_score_snapshot_cohort_immutable_update
+             BEFORE UPDATE ON legacy_score_snapshot_cohort
+             BEGIN
+               SELECT RAISE(ABORT, 'legacy score snapshot cohort is immutable');
+             END""",
+        """CREATE TRIGGER legacy_score_snapshot_cohort_immutable_delete
+             BEFORE DELETE ON legacy_score_snapshot_cohort
+             BEGIN
+               SELECT RAISE(ABORT, 'legacy score snapshot cohort is immutable');
+             END""",
     ),
 )
 

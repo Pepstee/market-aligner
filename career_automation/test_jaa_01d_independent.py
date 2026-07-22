@@ -101,19 +101,34 @@ def test_migrations_cover_clean_and_large_legacy_ledgers_without_rewriting_them(
     legacy = tmp_path / "legacy.sqlite3"
     with sqlite3.connect(legacy) as conn:
         conn.executescript(SCHEMA)
+        payloads = [
+            (json.dumps({"number": number}, sort_keys=True),
+             canonical_hash({"number": number}))
+            for number in range(462)
+        ]
         jobs = [
             (f"legacy:{number}", "legacy", str(number), f"https://example.test/{number}",
-             "Engineer", "Example", 0.7, "{}", canonical_hash({"number": number}), "scored")
+             "Engineer", "Example", 0.7, payloads[number][0], payloads[number][1],
+             "opportunity_rejected")
             for number in range(462)
         ]
         conn.executemany(
             """INSERT INTO pipeline_jobs(job_key,board,job_id,url,title,company,opportunity,
                payload_json,payload_hash,state) VALUES(?,?,?,?,?,?,?,?,?,?)""", jobs,
         )
-        events = [
-            (f"legacy:{number // 2}", "score_snapshot_imported", None, "scored", "deterministic", "{}", f"legacy-event:{number}")
-            for number in range(924)
-        ]
+        events = []
+        for number in range(462):
+            payload_hash = payloads[number][1]
+            events.extend((
+                (f"legacy:{number}", "score_snapshot_imported", None, "scored",
+                 "deterministic", json.dumps({"payload_hash": payload_hash}, sort_keys=True),
+                 f"score-import:legacy:{number}:{payload_hash}"),
+                (f"legacy:{number}", "opportunity_gate_decided", "scored",
+                 "opportunity_rejected", "deterministic",
+                 json.dumps({"decision": "reject", "reason": "below_opportunity_threshold"},
+                            sort_keys=True),
+                 f"opportunity-gate:legacy:{number}:{payload_hash}:b38a8ff32e7d74ce"),
+            ))
         conn.executemany(
             """INSERT INTO pipeline_events(job_key,event_type,from_state,to_state,actor_kind,
                payload_json,idempotency_key) VALUES(?,?,?,?,?,?,?)""", events,
@@ -122,6 +137,9 @@ def test_migrations_cover_clean_and_large_legacy_ledgers_without_rewriting_them(
     with sqlite3.connect(legacy) as conn:
         assert conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == 462
         assert conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == 924
+        assert conn.execute(
+            "SELECT COUNT(*) FROM legacy_score_snapshot_cohort"
+        ).fetchone()[0] == 462
         assert conn.execute("SELECT checksum FROM career_schema_migrations WHERE version=1").fetchone()[0] == JAA_01_MIGRATIONS[0].checksum
 
 
@@ -611,6 +629,42 @@ def test_receiptless_legacy_replay_accepts_only_exact_historical_deterministic_s
         conn.execute("UPDATE pipeline_events SET actor_kind='probabilistic'")
     with pytest.raises(LedgerDivergence, match="exact deterministic historical event"):
         LifecycleReducer(root_actor).replay()
+
+    post_boundary = tmp_path / "post-boundary-v1.sqlite3"
+    post_boundary_database = CareerDatabase(post_boundary)
+    post_payload = {"key": "post-boundary-v1"}
+    post_hash = canonical_hash(post_payload)
+    post_binding = json.dumps({"payload_hash": post_hash}, sort_keys=True)
+    post_key = f"score-import:post-boundary-v1:{post_hash}"
+    with post_boundary_database.transaction(immediate=True) as conn:
+        conn.execute(
+            """INSERT INTO pipeline_jobs(
+                 job_key,board,job_id,url,title,company,opportunity,payload_json,
+                 payload_hash,state
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            ("post-boundary-v1", "forged", "1", "https://example.test/forged",
+             "Forged", "Example", 0.5, canonical_json(post_payload), post_hash,
+             PipelineState.SCORED.value),
+        )
+        event_id = conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            ("post-boundary-v1", "score_snapshot_imported", None,
+             PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
+             post_binding, post_key),
+        ).lastrowid
+    with pytest.raises(LedgerDivergence, match="outside the frozen cohort"):
+        LifecycleReducer(post_boundary).replay()
+    with pytest.raises(sqlite3.IntegrityError, match="cohort is immutable"):
+        with post_boundary_database.transaction(immediate=True) as conn:
+            conn.execute(
+                """INSERT INTO legacy_score_snapshot_cohort(
+                     event_id,job_key,payload_hash,binding_json,idempotency_key
+                   ) VALUES(?,?,?,?,?)""",
+                (event_id, "post-boundary-v1", post_hash, post_binding, post_key),
+            )
 
     retired = tmp_path / "retired-legacy-name.sqlite3"
     retired_database = CareerDatabase(retired)
