@@ -321,7 +321,6 @@ class CareerDatabase:
         reason: str,
         policy_hash: str,
         priority: int | None,
-        lifecycle_policy_hash: str | None = None,
     ) -> None:
         """Atomically materialise the gate and its research-queue consequence."""
         decision = "pass" if passed else "reject"
@@ -331,17 +330,16 @@ class CareerDatabase:
         )
         if passed and priority is None:
             raise ValueError("passed opportunity requires research priority")
-        policy = PolicyIdentity(
-            "career.opportunity-gate", "1",
-            policy_hash if lifecycle_policy_hash is None else lifecycle_policy_hash,
-        )
+        policy = PolicyIdentity("career.opportunity-gate", "1", policy_hash)
         with self.transaction(immediate=True) as conn:
             current = conn.execute(
                 "SELECT state,payload_hash FROM pipeline_jobs WHERE job_key=?", (job_key,)
             ).fetchone()
             if current is None:
                 raise KeyError(job_key)
-            event_key = f"opportunity-gate:{job_key}:{current['payload_hash']}:{policy_hash}"
+            event_key = (
+                f"opportunity-gate:{job_key}:{current['payload_hash']}:{policy_hash}"
+            )
             self.lifecycle.commit_in_transaction(
                 conn,
                 job_key=job_key,
@@ -717,7 +715,7 @@ class CareerDatabase:
 
     def apply_opportunity1(self, *, job_key: str, signals: list[dict[str, Any]],
                            expected_dossier_hash: str | None = None) -> dict[str, Any]:
-        """Reassess after a completed dossier while retaining Opportunity-0."""
+        """Reassess after a completed dossier; exact retries return the durable result."""
         from dataclasses import asdict
         from .opportunity1 import reassess_opportunity1
 
@@ -727,7 +725,7 @@ class CareerDatabase:
                    FROM pipeline_jobs j JOIN employer_dossiers d ON d.job_key=j.job_key
                    WHERE j.job_key=?""", (job_key,),
             ).fetchone()
-            if row is None or row["state"] != PipelineState.EMPLOYER_RESEARCHED.value:
+            if row is None:
                 raise RuntimeError("Opportunity-1 requires completed employer research")
             if (expected_dossier_hash is not None
                     and row["dossier_hash"] != expected_dossier_hash):
@@ -735,7 +733,28 @@ class CareerDatabase:
             result = reassess_opportunity1(round(float(row["opportunity"]) * 10_000), signals)
             output = asdict(result)
             ordered_signals = list(output["changes"])
+            output["changes"] = ordered_signals
             key = f"opportunity-1:{job_key}:{row['dossier_hash']}:{result.policy_hash}"
+            target = (PipelineState.FIT_ASSESSED if result.decision == "pass"
+                      else PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH)
+            current_state = PipelineState(row["state"])
+            pending, target_closure = [target], set()
+            while pending:
+                state = pending.pop()
+                if state in target_closure:
+                    continue
+                target_closure.add(state)
+                pending.extend(LEGAL_TRANSITIONS[state])
+            existing = conn.execute(
+                """SELECT job_key,opportunity0_score_bp,opportunity1_score_bp,
+                          decision,changes_json,policy_hash
+                   FROM opportunity_reassessments WHERE job_key=?""",
+                (job_key,),
+            ).fetchone()
+            fresh = current_state is PipelineState.EMPLOYER_RESEARCHED
+            if (fresh and existing is not None) or (
+                    not fresh and (current_state not in target_closure or existing is None)):
+                raise RuntimeError("Opportunity-1 durable state is incomplete or inconsistent")
             self.lifecycle.commit_in_transaction(
                 conn, job_key=job_key, to_state=PipelineState.OPPORTUNITY_1_ASSESSED,
                 policy=PolicyIdentity("career.opportunity-1", "1", result.policy_hash),
@@ -743,15 +762,23 @@ class CareerDatabase:
                         "dossier_hash": row["dossier_hash"], "signals": ordered_signals},
                 outputs=output, idempotency_key=key,
             )
-            conn.execute(
-                """INSERT INTO opportunity_reassessments
-                   (job_key,opportunity0_score_bp,opportunity1_score_bp,decision,changes_json,policy_hash)
-                   VALUES(?,?,?,?,?,?)""",
-                (job_key, result.opportunity0_score_bp, result.score_bp, result.decision,
-                 json.dumps(output["changes"], sort_keys=True), result.policy_hash),
+            expected_reassessment = (
+                job_key, result.opportunity0_score_bp, result.score_bp, result.decision,
+                json.dumps(ordered_signals, sort_keys=True), result.policy_hash,
             )
-            target = (PipelineState.FIT_ASSESSED if result.decision == "pass"
-                      else PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH)
+            if fresh:
+                conn.execute(
+                    """INSERT INTO opportunity_reassessments
+                       (job_key,opportunity0_score_bp,opportunity1_score_bp,decision,
+                        changes_json,policy_hash)
+                       VALUES(?,?,?,?,?,?)""",
+                    expected_reassessment,
+                )
+            else:
+                if tuple(existing) != expected_reassessment:
+                    raise IdempotencyConflict(
+                        "Opportunity-1 retry differs from the durable reassessment"
+                    )
             self.lifecycle.commit_in_transaction(
                 conn, job_key=job_key, to_state=target,
                 policy=PolicyIdentity("career.opportunity-1-routing", "1", result.policy_hash),

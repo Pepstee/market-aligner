@@ -191,7 +191,7 @@ def _bootstrap_is_complete(work_db: Path, records: list[dict[str, object]],
                 or row["opportunity_decision"] != decision["decision"]
                 or row["opportunity_reason"] != decision["reason"]
                 or (row["state"] == "employer_research_queued"
-                    and row["policy_hash"] != decision["policy_hash"])
+                    and row["policy_hash"] != digest)
                 or receipt_by_key[str(row["job_key"])] != digest):
             return False
     return True
@@ -235,12 +235,16 @@ def _bootstrap_json_database(work_db: Path, records: list[dict[str, object]],
             score = decision["score_bp"]
             database.apply_opportunity_result(
                 job_key=str(record["job_key"]), passed=True,
-                reason=str(decision["reason"]), policy_hash=str(decision["policy_hash"]),
-                lifecycle_policy_hash=calibration_policy_digest(
+                reason=str(decision["reason"]), policy_hash=calibration_policy_digest(
                     str(decision["policy_hash"]), policy,
                 ),
                 priority=(2 if score >= 7500 else 1) * 1_000_000 + score * 10,
             )
+        database.lifecycle.verify()
+        with sqlite3.connect(staged) as connection:
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is None or tuple(checkpoint) != (0, 0, 0):
+                raise RuntimeError("JSON cohort bootstrap could not checkpoint its WAL")
         if not _bootstrap_is_complete(staged, records, policy):
             raise RuntimeError("JSON cohort bootstrap did not commit all admitted decisions")
         os.replace(staged, work_db)

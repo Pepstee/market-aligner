@@ -93,7 +93,9 @@ def test_exact_official_snapshot_bootstraps_30_prefixed_records_with_digest_rece
     expected = {str(row["job_key"]) for row in records}
     assert {row[0] for row in jobs} == {row[0] for row in queues} == {row[0] for row in receipts} == expected
     assert len(jobs) == len(queues) == len(receipts) == len(events) == 30
-    assert {row[1] for row in jobs} == {policy.policy_hash}
+    assert {row[1] for row in jobs} == {
+        calibration_policy_digest(policy.policy_hash, policy)
+    }
     assert {(row[0], round(row[2] * 10_000), row[3], row[4]) for row in jobs} == {
         (row["job_key"], row["opportunity0_decision"]["score_bp"],
          row["opportunity0_decision"]["decision"], row["opportunity0_decision"]["reason"])

@@ -181,6 +181,67 @@ def test_retries_conflicts_lease_owner_and_replay_stay_equal_across_sequence(tmp
     database.lifecycle.verify()
 
 
+def test_opportunity1_identical_retry_returns_the_durable_result_without_new_rows(tmp_path: Path) -> None:
+    path = tmp_path / "opportunity1-retry.sqlite3"
+    database = CareerDatabase(path)
+    job = _job("opportunity1-retry")
+    OpportunityGate(database).bootstrap([job])
+    task = database.claim_research("owner", lease_seconds=60)
+    assert task is not None
+    dossier_value = _dossier()
+    database.complete_research(
+        job_key=job.key,
+        worker_id="owner",
+        dossier=dossier_value,
+        dossier_hash=_digest(dossier_value),
+    )
+
+    first = database.apply_opportunity1(job_key=job.key, signals=[])
+    stable_events, stable_receipts = _rows(path, job.key)
+    with sqlite3.connect(path) as conn:
+        stable_reassessments = conn.execute(
+            "SELECT * FROM opportunity_reassessments WHERE job_key=?", (job.key,),
+        ).fetchall()
+
+    assert database.apply_opportunity1(job_key=job.key, signals=[]) == first
+    assert _rows(path, job.key) == (stable_events, stable_receipts)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT * FROM opportunity_reassessments WHERE job_key=?", (job.key,),
+        ).fetchall() == stable_reassessments
+    database.lifecycle.verify()
+
+
+def test_gate_materialises_the_same_policy_identity_as_its_lifecycle_receipt(tmp_path: Path) -> None:
+    path = tmp_path / "gate-policy.sqlite3"
+    database = CareerDatabase(path)
+    job = _job("gate-policy")
+    database.upsert_scored_job(job)
+    lifecycle_digest = "1" * 64
+
+    database.apply_opportunity_result(
+        job_key=job.key,
+        passed=True,
+        reason="verified opportunity",
+        policy_hash=lifecycle_digest,
+        priority=1,
+    )
+
+    with sqlite3.connect(path) as conn:
+        materialised = conn.execute(
+            "SELECT policy_hash FROM pipeline_jobs WHERE job_key=?", (job.key,),
+        ).fetchone()[0]
+        receipt = conn.execute(
+            "SELECT policy_hash FROM lifecycle_transition_receipts WHERE job_key=?",
+            (job.key,),
+        ).fetchone()[0]
+    assert materialised == receipt == lifecycle_digest
+    assert "lifecycle_policy_hash" not in inspect.signature(
+        CareerDatabase.apply_opportunity_result
+    ).parameters
+    database.lifecycle.verify()
+
+
 def test_career_database_source_cannot_directly_change_state_or_emit_non_root_state_event() -> None:
     """A small source guard catches the tempting bypass before runtime review does."""
     source = inspect.getsource(CareerDatabase)
