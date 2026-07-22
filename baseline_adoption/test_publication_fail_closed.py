@@ -202,6 +202,45 @@ raise SystemExit(cli.main(arguments))
     )
 
 
+def _cli_with_first_post_replace_fsync_failure(
+    repository: Path,
+    contract: list[dict[str, object]],
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    """Fail the first publication directory fsync, immediately after replacement."""
+    bootstrap = r'''
+import json, sys
+from baseline_adoption import cli, core
+
+core.BASELINES = tuple(core.BaselineSpec(**item) for item in json.loads(sys.argv[1]))
+original_fsync_directory = core._fsync_directory
+fsync_calls = 0
+
+def failing_fsync_directory(path):
+    global fsync_calls
+    fsync_calls += 1
+    if fsync_calls == 1:
+        raise OSError("injected post-replace directory fsync failure")
+    return original_fsync_directory(path)
+
+core._fsync_directory = failing_fsync_directory
+raise SystemExit(cli.main(sys.argv[2:]))
+'''
+    dependency_root = repository.parent / "test-distributions"
+    for distribution in ("PyYAML", "requests", "openpyxl", "pypdf"):
+        metadata = dependency_root / f"{distribution}-1.0.dist-info"
+        metadata.mkdir(parents=True, exist_ok=True)
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 1.0\n", encoding="utf-8"
+        )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(dependency_root)
+    return subprocess.run(
+        [sys.executable, "-c", bootstrap, json.dumps(contract), *arguments],
+        cwd=repository, env=environment, text=True, capture_output=True, check=False,
+    )
+
+
 @pytest.fixture
 def publication_case(tmp_path: Path) -> tuple[Path, Path, Path, list[dict[str, object]], Path]:
     repository = _git_repository(tmp_path / "repository")
@@ -319,6 +358,26 @@ def test_publication_rejects_input_race_inside_atomic_replace_boundary(
 
     assert result.returncode == 2
     assert "atomic replacement boundary" in result.stderr.lower()
+    assert "published" not in result.stdout.lower()
+    assert output.read_bytes() == prior_evidence
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
+def test_post_replace_directory_fsync_failure_restores_prior_evidence(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path],
+    tmp_path: Path,
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    output = tmp_path / "published.yaml"
+    prior_evidence = b"prior-certified-evidence\nfsync-boundary"
+    output.write_bytes(prior_evidence)
+
+    result = _cli_with_first_post_replace_fsync_failure(
+        repository, contract, "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository), "--output", str(output),
+    )
+
+    assert result.returncode != 0
     assert "published" not in result.stdout.lower()
     assert output.read_bytes() == prior_evidence
     assert not list(output.parent.glob(f".{output.name}.*"))
