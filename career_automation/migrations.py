@@ -21,7 +21,7 @@ JAA00_LEGACY_BOUNDARY_SHA256 = (
 )
 
 
-def _legacy_boundary_digest(conn: sqlite3.Connection) -> str:
+def legacy_boundary_digest(conn: sqlite3.Connection) -> str:
     jobs = conn.execute(
         """SELECT job_key,board,job_id,url,title,company,
                   fit,typeof(fit),opportunity,typeof(opportunity),
@@ -55,7 +55,7 @@ def _verify_jaa00_legacy_boundary(conn: sqlite3.Connection) -> None:
     if (
         job_count != JAA00_LEGACY_BOUNDARY_JOB_COUNT
         or event_count != JAA00_LEGACY_BOUNDARY_EVENT_COUNT
-        or _legacy_boundary_digest(conn) != JAA00_LEGACY_BOUNDARY_SHA256
+        or legacy_boundary_digest(conn) != JAA00_LEGACY_BOUNDARY_SHA256
     ):
         raise RuntimeError(
             "legacy lifecycle rows do not match the certified JAA-00 boundary"

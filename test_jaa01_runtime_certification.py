@@ -178,6 +178,13 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert document["migration_versions"] == [
         migration.version for migration in JAA_01_MIGRATIONS
     ]
+    assert document["legacy_boundary"] == {
+        "manifest_sha256": "83c7b9f7531d3cae083db0781fb2a134b62b0a900d560112bcfce8f886dcbc47",
+        "pipeline_jobs": 462,
+        "pipeline_events": 924,
+        "score_snapshot_cohort": 462,
+        "opportunity_gate_cohort": 462,
+    }
     assert document["migration_receipt_trust"] == {
         "contract": "jaa-00-exact-evidence-trust-anchor/v1",
         "content_sha256": MIGRATION_CONTENT_HASH,
@@ -321,6 +328,13 @@ def test_checked_in_jaa01_evidence_is_historical_content_addressed_and_path_free
     assert document["observed_counts"] == {
         name: {"pipeline_jobs": 462, "pipeline_events": 924}
         for name in ("baseline_before", "temporary_before_migration", "temporary_after_migration")
+    }
+    assert document["legacy_boundary"] == {
+        "manifest_sha256": "83c7b9f7531d3cae083db0781fb2a134b62b0a900d560112bcfce8f886dcbc47",
+        "pipeline_jobs": 462,
+        "pipeline_events": 924,
+        "score_snapshot_cohort": 462,
+        "opportunity_gate_cohort": 462,
     }
     assert document["scenario"]["receipts"] == 3
     assert document["scenario"]["replay_equal"] is True

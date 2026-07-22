@@ -20,7 +20,11 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from career_automation.lifecycle import LifecycleReducer
-from career_automation.migrations import JAA_01_MIGRATIONS
+from career_automation.migrations import (
+    JAA00_LEGACY_BOUNDARY_SHA256,
+    JAA_01_MIGRATIONS,
+    legacy_boundary_digest,
+)
 from scripts.reproduce_jaa01_terra_rejection import reproduce
 from tracked_source_revision import (
     TrackedSourceRevisionError,
@@ -264,6 +268,10 @@ def certify(args: argparse.Namespace) -> Path:
             legacy_cohort = int(conn.execute(
                 "SELECT COUNT(*) FROM legacy_score_snapshot_cohort"
             ).fetchone()[0])
+            legacy_gate_cohort = int(conn.execute(
+                "SELECT COUNT(*) FROM legacy_opportunity_gate_cohort"
+            ).fetchone()[0])
+            boundary_digest = legacy_boundary_digest(conn)
         require(versions == [migration.version for migration in JAA_01_MIGRATIONS],
                 "temporary copy has unexpected migration versions")
         require(receipts == 0, "frozen baseline unexpectedly gained transition receipts")
@@ -271,6 +279,14 @@ def certify(args: argparse.Namespace) -> Path:
         require(
             legacy_cohort == EXPECTED_COUNTS["pipeline_jobs"],
             "frozen baseline legacy score cohort is incomplete",
+        )
+        require(
+            legacy_gate_cohort == EXPECTED_COUNTS["pipeline_jobs"],
+            "frozen baseline legacy opportunity gate cohort is incomplete",
+        )
+        require(
+            boundary_digest == JAA00_LEGACY_BOUNDARY_SHA256,
+            "migrated legacy boundary no longer matches certified JAA-00",
         )
 
     scenario = reproduce()
@@ -334,6 +350,13 @@ def certify(args: argparse.Namespace) -> Path:
             "certified_revision": jaa00_review["certified_revision"],
         },
         "migration_versions": versions,
+        "legacy_boundary": {
+            "manifest_sha256": boundary_digest,
+            "pipeline_jobs": EXPECTED_COUNTS["pipeline_jobs"],
+            "pipeline_events": EXPECTED_COUNTS["pipeline_events"],
+            "score_snapshot_cohort": legacy_cohort,
+            "opportunity_gate_cohort": legacy_gate_cohort,
+        },
         "baseline_integrity_check": baseline_before["integrity_check"],
         "read_only_continuity": True,
         "scenario": scenario,
