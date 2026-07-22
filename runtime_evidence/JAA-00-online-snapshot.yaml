@@ -14,11 +14,11 @@ publication:
   verification: fail-closed-independent-review
   replacement: atomic-after-successful-verification
 receipt:
-  label: runtime:jaa00-v2-20260722-quiescent-444f758:receipt
-  content_sha256: dce69b66032c8c58e736aa67cdf3baef92f42c90487ef2be6014ed88e58ff4cf
+  label: runtime:jaa00-v2-20260722-quiescent-6b3b4f9:receipt
+  content_sha256: 8d448f9a99277aa30da145c647960cb4e9fe24c03632d475dda812da9f6f8251
 repository:
   label: canonical-repository
-  revision: 444f7582b96408e618068204917523e3275a7b82
+  revision: 6b3b4f974427a8ed31c905b385c36f262eb5b259
 revision_binding:
   source_revision:
     contract:
@@ -29,23 +29,23 @@ revision_binding:
       - runtime_evidence/
       ordering: repository-relative-path-byte-order
       scope: current-tracked-source-tree
-    revision: sha256:08c32d0dda130ed4d106c1dab9755656092cc9242c39891ee2395bb4708fc787
+    revision: sha256:91142256fd0ce4d0347b836446cd7d7897bab41df0569428a0fed668593a8d0a
   source_inventory:
     configured_credential_names_checked: []
     configured_credential_values_tracked: false
-    content_inventory_sha256: cb189c6abd14ed1ee802aed573c6c43ba7932991101d6a5253e9699bcac7bd46
+    content_inventory_sha256: fa1067f6154b964eacb2b872b9b66139c0f7e56f409835e96f401362883d107a
     runtime_or_private_database_files_tracked: false
     secret_policy: receipt-retains-reference-names-only-never-values-or-host-paths
     tracked_files: 256
-  certified_revision: 444f7582b96408e618068204917523e3275a7b82
+  certified_revision: 6b3b4f974427a8ed31c905b385c36f262eb5b259
   certification:
     contract: jaa-00-source-revision-binding/v1
-    inputs_sha256: e55cdc55a2840096f71edd53e974f5ae49cac34a8ca2f9493e427005a1289698
+    inputs_sha256: bece7028d4d4f2e987ffbe52052015f7267f036943b7259fbac2900e12ca0cd3
 reconciliation:
   command: python -m baseline_adoption.cli reconcile --receipt <receipt> --data-root
     <runtime>
   result: ok
-  receipt_content_sha256: dce69b66032c8c58e736aa67cdf3baef92f42c90487ef2be6014ed88e58ff4cf
+  receipt_content_sha256: 8d448f9a99277aa30da145c647960cb4e9fe24c03632d475dda812da9f6f8251
   receipt_filename_matches_content_sha256: true
   adopted_database_hashes_match: true
   integrity_check: ok
@@ -159,7 +159,7 @@ capture_and_drift_semantics:
     shm_comparison: identity-metadata-only
 inventory:
   tracked_files: 256
-  content_inventory_sha256: cb189c6abd14ed1ee802aed573c6c43ba7932991101d6a5253e9699bcac7bd46
+  content_inventory_sha256: fa1067f6154b964eacb2b872b9b66139c0f7e56f409835e96f401362883d107a
   runtime_or_private_database_files_tracked: false
   configured_credential_values_tracked: false
   configured_credential_names_checked: []
