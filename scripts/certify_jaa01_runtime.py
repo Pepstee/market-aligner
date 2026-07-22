@@ -17,8 +17,14 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from baseline_adoption.core import (
+    LEGACY_JAA00_ADOPTION_REVISION,
+    LEGACY_JAA00_CONTENT_SHA256,
+    LEGACY_JAA00_RECEIPT_SHA256,
+)
 from career_automation.lifecycle import LifecycleReducer
 from career_automation.migrations import JAA_01_MIGRATIONS
+from baseline_adoption.core import AdoptionError, independent_review
 from scripts.reproduce_jaa01_terra_rejection import reproduce
 from tracked_source_revision import (
     TrackedSourceRevisionError,
@@ -89,12 +95,48 @@ def load_migration_receipt(path: Path) -> tuple[dict[str, Any], str]:
         declared = receipt["content_sha256"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise CertificationError(f"invalid migration receipt: {exc}") from exc
+    require(isinstance(receipt, dict) and isinstance(content, dict) and isinstance(declared, str),
+            "invalid migration receipt structure")
     require(content_hash == declared, "migration receipt content hash mismatch")
     require(path.name == f"migration-{declared}.json", "migration receipt filename is not content-addressed")
-    require(content.get("format") in {
-        "jaa-00-migration-receipt/v1", "jaa-00-online-snapshot-receipt/v2",
-    }, "unsupported migration receipt format")
+    require(declared == LEGACY_JAA00_CONTENT_SHA256,
+            "migration receipt is not the independently trusted JAA-00 receipt")
+    require(digest == LEGACY_JAA00_RECEIPT_SHA256,
+            "migration receipt bytes do not match the independently trusted JAA-00 receipt")
+    require(content.get("format") == "jaa-00-online-snapshot-receipt/v2",
+            "unsupported migration receipt format")
+    repository = content.get("repository")
+    require(isinstance(repository, dict)
+            and repository.get("label") == "canonical-repository"
+            and repository.get("revision") == LEGACY_JAA00_ADOPTION_REVISION,
+            "migration receipt repository provenance is not the independently trusted JAA-00 adoption")
     return receipt, digest
+
+
+def require_trusted_jaa00_receipt(path: Path, baseline: Path) -> dict[str, Any]:
+    """Bind JAA-01 to JAA-00's independently certified preserved snapshot."""
+    try:
+        receipt = path.resolve(strict=True)
+        data_root = receipt.parent.parent.resolve(strict=True)
+    except OSError as exc:
+        raise CertificationError("independently trusted JAA-00 receipt is unavailable") from exc
+    expected_baseline = data_root / "databases" / "career_pipeline.sqlite3"
+    try:
+        baseline_resolved = baseline.resolve(strict=True)
+    except OSError as exc:
+        raise CertificationError("frozen baseline database is unavailable") from exc
+    require(
+        baseline_resolved == expected_baseline,
+        "baseline is not the independently trusted JAA-00 career-pipeline snapshot",
+    )
+    try:
+        review = independent_review(receipt, data_root, ROOT)
+    except (AdoptionError, OSError, ValueError, KeyError) as exc:
+        raise CertificationError(
+            "migration receipt is not independently trusted JAA-00 evidence"
+        ) from exc
+    require(review.get("status") == "certified", "JAA-00 independent review did not certify")
+    return review
 
 
 def require_unlinked_output_path(path: Path) -> None:
@@ -123,6 +165,7 @@ def certify(args: argparse.Namespace) -> Path:
 
     baseline_hash_before = hash_file(baseline)
     receipt, receipt_file_hash_before = load_migration_receipt(migration_receipt)
+    jaa00_review = require_trusted_jaa00_receipt(migration_receipt, baseline)
     frozen = receipt["content"]["databases"]["career_pipeline"]["frozen_snapshot"]
     require(frozen["sha256"] == baseline_hash_before, "baseline hash disagrees with migration receipt")
     require({name: int(frozen["table_counts"][name]) for name in EXPECTED_COUNTS} == EXPECTED_COUNTS,
@@ -171,6 +214,11 @@ def certify(args: argparse.Namespace) -> Path:
 
     evidence: dict[str, Any] = {
         "format": FORMAT,
+        "jaa00_trust": {
+            "status": jaa00_review["status"],
+            "receipt_content_sha256": receipt["content_sha256"],
+            "contract": jaa00_review["receipt_provenance"]["contract"],
+        },
         "source_content_revision": revision,
         "source_content_revision_contract": source_content_revision_contract(),
         "labels": {
@@ -200,6 +248,12 @@ def certify(args: argparse.Namespace) -> Path:
             "migration_receipt_file_sha256_before": receipt_file_hash_before,
             "migration_receipt_file_sha256_after": receipt_file_hash_after,
             "migration_receipt_content_sha256": receipt["content_sha256"],
+        },
+        "migration_receipt_trust": {
+            "contract": "jaa-00-legacy-content-addressed-review/v1",
+            "content_sha256": LEGACY_JAA00_CONTENT_SHA256,
+            "file_sha256": LEGACY_JAA00_RECEIPT_SHA256,
+            "adoption_revision": LEGACY_JAA00_ADOPTION_REVISION,
         },
         "migration_versions": versions,
         "baseline_integrity_check": baseline_before["integrity_check"],

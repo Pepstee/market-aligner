@@ -156,9 +156,11 @@ def test_terra_rejection_script_observes_real_actor_states_receipts_retry_and_re
 def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     tmp_path: Path, clean_certifier_root: Path,
 ) -> None:
-    database = tmp_path / "legacy.sqlite3"
-    _make_legacy_database(database)
-    receipt = _receipt_for(database, tmp_path)
+    runtime = _runtime()
+    database = runtime / "databases" / "career_pipeline.sqlite3"
+    receipt = runtime / "receipts" / f"migration-{MIGRATION_CONTENT_HASH}.json"
+    database_hash_before = _sha256(database)
+    receipt_hash_before = _sha256(receipt)
     evidence = tmp_path / "absolute-evidence"
     certified = _run(database, receipt, evidence, clean_certifier_root)
     assert certified.returncode == 0, certified.stderr
@@ -170,6 +172,12 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert document["expected_counts"] == {"pipeline_jobs": 462, "pipeline_events": 924}
     assert document["observed_counts"]["baseline_before"] == {"pipeline_jobs": 462, "pipeline_events": 924}
     assert document["migration_versions"] == [1]
+    assert document["migration_receipt_trust"] == {
+        "contract": "jaa-00-legacy-content-addressed-review/v1",
+        "content_sha256": MIGRATION_CONTENT_HASH,
+        "file_sha256": receipt_hash_before,
+        "adoption_revision": "d74c77cac3c121cd6c09f0f8b8f64cd46014e4ec",
+    }
     assert document["scenario"]["replay_equal"] is True
     assert "live_sources" not in document
     assert document["command_semantics"]["argv"] == [
@@ -179,6 +187,8 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     ]
     assert str(tmp_path) not in payload
     assert not any(value.startswith("/") for value in _strings(document))
+    assert _sha256(database) == database_hash_before
+    assert _sha256(receipt) == receipt_hash_before
 
     # A conflicting pre-existing content-addressed receipt cannot be overwritten.
     document_path.write_text("{}", encoding="utf-8")
@@ -187,20 +197,24 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert "content-addressed evidence file mismatch" in fabricated.stderr
     assert document_path.read_text(encoding="utf-8") == "{}"
 
-    with sqlite3.connect(database) as connection:
+    changed_database = tmp_path / "changed.sqlite3"
+    shutil.copyfile(database, changed_database)
+    with sqlite3.connect(changed_database) as connection:
         connection.execute("PRAGMA user_version=42")
-    hash_changed = _run(database, receipt, tmp_path / "negative-hash", clean_certifier_root)
+    hash_changed = _run(
+        changed_database, receipt, tmp_path / "negative-hash", clean_certifier_root,
+    )
     assert hash_changed.returncode == 2 and "baseline hash disagrees" in hash_changed.stderr
 
-    for jobs, events in ((461, 924), (462, 923)):
-        wrong = tmp_path / f"wrong-{jobs}-{events}.sqlite3"
-        _make_legacy_database(wrong, jobs, events)
-        wrong_receipt = _receipt_for(wrong, tmp_path / f"wrong-{jobs}-{events}")
-        rejected = _run(
-            wrong, wrong_receipt, tmp_path / f"negative-{jobs}-{events}", clean_certifier_root,
-        )
-        assert rejected.returncode == 2
-        assert ("frozen counts" in rejected.stderr or "baseline counts" in rejected.stderr)
+    fabricated_database = tmp_path / "fabricated.sqlite3"
+    _make_legacy_database(fabricated_database)
+    fabricated_receipt = _receipt_for(fabricated_database, tmp_path / "fabricated-receipt")
+    fabricated = _run(
+        fabricated_database, fabricated_receipt, tmp_path / "negative-fabricated",
+        clean_certifier_root,
+    )
+    assert fabricated.returncode == 2
+    assert "independently trusted JAA-00 receipt" in fabricated.stderr
 
     altered = tmp_path / "altered-receipt.json"
     altered.write_text(receipt.read_text(encoding="utf-8").replace("online", "forged", 1), encoding="utf-8")
@@ -209,10 +223,9 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
 
     corrupt = tmp_path / "corrupt.sqlite3"
     corrupt.write_bytes(b"not a sqlite database")
-    corrupt_receipt = _receipt_for(corrupt, tmp_path / "corrupt-receipt")
-    corrupt_result = _run(corrupt, corrupt_receipt, tmp_path / "negative-corrupt", clean_certifier_root)
+    corrupt_result = _run(corrupt, receipt, tmp_path / "negative-corrupt", clean_certifier_root)
     assert corrupt_result.returncode == 2
-    assert "read-only SQLite inspection failed" in corrupt_result.stderr
+    assert "baseline hash disagrees" in corrupt_result.stderr
 
 
 def test_runtime_certifier_rejects_symlinked_evidence_directory_without_writing_receipt(
@@ -268,6 +281,12 @@ def test_checked_in_jaa01_evidence_is_historical_content_addressed_and_path_free
     assert document["scenario"]["receipts"] == 3
     assert document["scenario"]["replay_equal"] is True
     assert document["scenario"]["identical_retry_unchanged"] is True
+    assert document["migration_receipt_trust"] == {
+        "contract": "jaa-00-legacy-content-addressed-review/v1",
+        "content_sha256": MIGRATION_CONTENT_HASH,
+        "file_sha256": _sha256(receipt),
+        "adoption_revision": "d74c77cac3c121cd6c09f0f8b8f64cd46014e4ec",
+    }
     # A checked-in receipt records what its historical certification observed.
     # Present mutable-source state belongs exclusively to JAA-00 recertification,
     # so this test deliberately neither opens those databases nor compares hashes.

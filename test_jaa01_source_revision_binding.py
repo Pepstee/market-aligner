@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -19,12 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from career_automation.database import SCHEMA
-
-
 ROOT = Path(__file__).resolve().parent
 DOMAIN = b"jaa-source-content-revision-v2\0"
 EXCLUDED_PREFIXES = (b"runtime_evidence/",)
+MIGRATION_CONTENT_HASH = "4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66"
 
 
 def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
@@ -67,40 +64,12 @@ def _independent_source_revision(root: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _make_legacy_database(path: Path) -> None:
-    with sqlite3.connect(path) as connection:
-        connection.executescript(SCHEMA)
-        connection.executemany(
-            "INSERT INTO pipeline_jobs(job_key,board,job_id,url,title,company,opportunity,"
-            "payload_json,payload_hash,state) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            [(f"legacy:{n}", "legacy", str(n), f"https://example.test/{n}", "Engineer",
-              "Example", 0.5, "{}", f"{n:064x}", "opportunity_rejected") for n in range(462)],
-        )
-        connection.executemany(
-            "INSERT INTO pipeline_events(job_key,event_type,from_state,to_state,actor_kind,"
-            "payload_json,idempotency_key) VALUES(?,?,?,?,?,?,?)",
-            [(f"legacy:{n // 2}",
-              "score_snapshot_imported" if n % 2 == 0 else "opportunity_gate_decided",
-              None if n % 2 == 0 else "scored",
-              "scored" if n % 2 == 0 else "opportunity_rejected",
-              "deterministic", "{}", f"source-revision:{n}") for n in range(924)],
-        )
-        connection.commit()
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        connection.execute("PRAGMA journal_mode=DELETE")
-
-
-def _migration_receipt(path: Path, database: Path) -> Path:
-    content = {"format": "jaa-00-online-snapshot-receipt/v2", "databases": {
-        "career_pipeline": {"frozen_snapshot": {"sha256": hashlib.sha256(
-            database.read_bytes()).hexdigest(), "table_counts": {"pipeline_jobs": 462, "pipeline_events": 924}}}
-    }}
-    content_sha256 = hashlib.sha256(json.dumps(
-        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode()).hexdigest()
-    receipt = path / f"migration-{content_sha256}.json"
-    receipt.write_text(json.dumps({"content": content, "content_sha256": content_sha256}), encoding="utf-8")
-    return receipt
+def _runtime() -> Path:
+    for parent in ROOT.parents:
+        candidate = parent / "state" / "runtime" / "job-application-baseline-20260720-v2"
+        if candidate.is_dir():
+            return candidate
+    pytest.fail("frozen JAA-00 runtime is unavailable")
 
 
 @pytest.fixture()
@@ -116,9 +85,9 @@ def isolated_repository(tmp_path: Path) -> Path:
 
 
 def _certify(root: Path, evidence_name: str = "evidence") -> tuple[Path, dict[str, object]]:
-    database = root / "legacy.sqlite3"
-    _make_legacy_database(database)
-    receipt = _migration_receipt(root, database)
+    runtime = _runtime()
+    database = runtime / "databases" / "career_pipeline.sqlite3"
+    receipt = runtime / "receipts" / f"migration-{MIGRATION_CONTENT_HASH}.json"
     completed = subprocess.run(
         (sys.executable, "scripts/certify_jaa01_runtime.py", "--baseline-database", str(database),
          "--migration-receipt", str(receipt), "--evidence-directory", evidence_name),
