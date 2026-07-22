@@ -530,6 +530,13 @@ def _recertify_source_observed(path: Path, spec: BaselineSpec) -> dict[str, Any]
 
 def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
     """Recertify inside one kernel-observed main/WAL mutation boundary."""
+    # Preserve the contract's precise fail-closed diagnostics for invalid inputs.
+    # A missing path cannot itself be watched; the parent-directory watch below
+    # still closes the boundary once a valid source has been admitted.
+    if not path.exists():
+        raise AdoptionError(f"{spec.name}: source does not exist")
+    if not path.is_file() or path.is_symlink():
+        raise AdoptionError(f"{spec.name}: source must be a regular, non-symlink file")
     wal = Path(str(path) + "-wal")
     watched_files = [path]
     if wal.exists():
