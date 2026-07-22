@@ -15,9 +15,16 @@ from .lifecycle import (
     IdempotencyConflict,
     LifecycleReducer,
     ModelIdentity,
+    OPPORTUNITY1_POLICY_ID,
+    OPPORTUNITY1_POLICY_VERSION,
+    OPPORTUNITY1_ROUTING_POLICY_ID,
     POST_RESEARCH_STATES,
     PolicyIdentity,
+    RESEARCH_COMPLETION_OUTPUT,
+    RESEARCH_COMPLETION_POLICY_HASH,
     RESEARCH_COMPLETION_POLICY_ID,
+    RESEARCH_COMPLETION_POLICY_IDENTITIES,
+    RESEARCH_COMPLETION_POLICY_VERSION,
     canonical_hash,
     canonical_json,
     score_snapshot_import_binding,
@@ -30,14 +37,9 @@ RESEARCH_LEASE_POLICY = PolicyIdentity(
     canonical_hash({"rule": "lease queued work; advance only queued jobs"}),
 )
 RESEARCH_COMPLETION_POLICY = PolicyIdentity(
-    RESEARCH_COMPLETION_POLICY_ID, "1",
-    canonical_hash({
-        "rules": [
-            "lease owner must match",
-            "at least one public source is required",
-            "every claim cites known source IDs",
-        ]
-    }),
+    RESEARCH_COMPLETION_POLICY_ID,
+    RESEARCH_COMPLETION_POLICY_VERSION,
+    RESEARCH_COMPLETION_POLICY_HASH,
 )
 
 
@@ -504,6 +506,16 @@ class CareerDatabase:
             )
             if not is_owner:
                 raise RuntimeError("research task is not leased by this worker")
+            if queue["status"] == "completed":
+                completed = self._post_research_dossier_in_transaction(conn, job_key)
+                if completed is None:
+                    raise RuntimeError("completed research state is missing its dossier")
+                stored_dossier, stored_hash = completed
+                if stored_hash != dossier_hash or stored_dossier != dossier:
+                    raise IdempotencyConflict(
+                        "research completion retry differs from durable state"
+                    )
+                return
             self.lifecycle.record_proposal_in_transaction(
                 conn,
                 job_key=job_key,
@@ -519,7 +531,7 @@ class CareerDatabase:
                 to_state=PipelineState.EMPLOYER_RESEARCHED,
                 policy=RESEARCH_COMPLETION_POLICY,
                 inputs=observation,
-                outputs={"validated": True, "queue_status": "completed"},
+                outputs=RESEARCH_COMPLETION_OUTPUT,
                 idempotency_key=transition_key,
                 model=model,
             )
@@ -561,19 +573,12 @@ class CareerDatabase:
         """Return only a durably completed, research-state dossier."""
         with self.connection() as conn:
             row = conn.execute(
-                """SELECT d.dossier_json,d.dossier_hash
-                   FROM employer_dossiers d
-                   JOIN employer_research_queue q ON q.job_key=d.job_key
-                   JOIN pipeline_jobs j ON j.job_key=d.job_key
-                   WHERE d.job_key=? AND q.status='completed' AND j.state=?""",
-                (job_key, PipelineState.EMPLOYER_RESEARCHED.value),
+                "SELECT state FROM pipeline_jobs WHERE job_key=?",
+                (job_key,),
             ).fetchone()
-        if row is None:
-            return None
-        dossier = json.loads(row["dossier_json"])
-        if not isinstance(dossier, dict):
-            raise ValueError("completed dossier is not an object")
-        return dossier, str(row["dossier_hash"])
+            if row is None or row["state"] != PipelineState.EMPLOYER_RESEARCHED.value:
+                return None
+            return self._post_research_dossier_in_transaction(conn, job_key)
 
     def _post_research_dossier_in_transaction(
         self, conn: sqlite3.Connection, job_key: str,
@@ -590,7 +595,9 @@ class CareerDatabase:
             (job_key,),
         ).fetchall()
         research_completion_receipts = conn.execute(
-            """SELECT input_hash FROM lifecycle_transition_receipts
+            """SELECT policy_version,policy_hash,input_hash,output_hash,idempotency_key,
+                      model_provider,model_id,model_version
+               FROM lifecycle_transition_receipts
                WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
             (job_key, PipelineState.EMPLOYER_RESEARCHING.value,
              PipelineState.EMPLOYER_RESEARCHED.value,
@@ -613,15 +620,65 @@ class CareerDatabase:
         if (not isinstance(dossier, dict) or dossier.get("job_key") != job_key
                 or canonical_hash(dossier) != dossier_hash):
             raise RuntimeError("completed dossier identity or hash is invalid")
+        research_proposals = conn.execute(
+            """SELECT from_state,to_state,actor_kind,payload_json,idempotency_key
+               FROM pipeline_events
+               WHERE job_key=? AND event_type='lifecycle_transition_proposed'
+                 AND idempotency_key=?""",
+            (job_key, f"research-observation:{job_key}:{dossier_hash}"),
+        ).fetchall()
+        if len(research_proposals) != 1:
+            raise RuntimeError("completed dossier has no unique research proposal")
         sources = dossier.get("sources")
-        if not isinstance(sources, list):
+        if not isinstance(sources, list) or not sources:
             raise RuntimeError("completed dossier source identity is invalid")
-        source_ids = sorted(str(source.get("id")) for source in sources
-                            if isinstance(source, dict))
+        source_ids = sorted({str(source.get("id")) for source in sources
+                             if isinstance(source, dict)})
         observation = {"dossier": dossier, "dossier_hash": dossier_hash,
                        "source_ids": source_ids, "worker_id": str(row["worker_id"])}
-        if canonical_hash(observation) != str(
-                research_completion_receipts[0]["input_hash"]):
+        receipt = research_completion_receipts[0]
+        model = self._dossier_model(dossier)
+        try:
+            proposal = json.loads(research_proposals[0]["payload_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("completed dossier proposal is invalid") from exc
+        expected_model = None if model is None else {
+            "provider": model.provider,
+            "model_id": model.model_id,
+            "version": model.version,
+        }
+        if ((str(receipt["policy_version"]), str(receipt["policy_hash"]))
+                not in RESEARCH_COMPLETION_POLICY_IDENTITIES
+                or canonical_hash(observation) != str(receipt["input_hash"])
+                or canonical_hash(RESEARCH_COMPLETION_OUTPUT)
+                != str(receipt["output_hash"])
+                or str(receipt["idempotency_key"])
+                != f"research-complete:{job_key}:{dossier_hash}"
+                or (
+                    receipt["model_provider"], receipt["model_id"],
+                    receipt["model_version"],
+                ) != (
+                    None if model is None else model.provider,
+                    None if model is None else model.model_id,
+                    None if model is None else model.version,
+                )
+                or not isinstance(proposal, dict)
+                or set(proposal) != {
+                    "proposed_state", "observation", "observation_hash", "model",
+                }
+                or research_proposals[0]["payload_json"] != canonical_json(proposal)
+                or research_proposals[0]["from_state"]
+                != PipelineState.EMPLOYER_RESEARCHING.value
+                or research_proposals[0]["to_state"] is not None
+                or research_proposals[0]["actor_kind"]
+                != ActorKind.PROBABILISTIC.value
+                or proposal.get("proposed_state")
+                != PipelineState.EMPLOYER_RESEARCHED.value
+                or proposal.get("observation") != observation
+                or proposal.get("observation_hash") != canonical_hash(observation)
+                or proposal.get("model") != expected_model
+                or str(research_proposals[0]["idempotency_key"])
+                != f"research-observation:{job_key}:{dossier_hash}"):
             raise RuntimeError("completed dossier does not match its immutable receipt")
         return dossier, dossier_hash
 
@@ -661,7 +718,7 @@ class CareerDatabase:
                    WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
                 (job_key, PipelineState.EMPLOYER_RESEARCHED.value,
                  PipelineState.OPPORTUNITY_1_ASSESSED.value,
-                 "career.opportunity-1"),
+                 OPPORTUNITY1_POLICY_ID),
             ).fetchall()
         if (len(rows) == 0 and len(opportunity1_receipts) == 0
                 and lifecycle_state is not None
@@ -717,7 +774,7 @@ class CareerDatabase:
             completed = self._post_research_dossier_in_transaction(conn, job_key)
             if completed is None:
                 raise RuntimeError("Opportunity-1 requires completed employer research")
-            _, dossier_hash = completed
+            dossier, dossier_hash = completed
             row = conn.execute(
                 "SELECT opportunity,state FROM pipeline_jobs WHERE job_key=?", (job_key,),
             ).fetchone()
@@ -726,6 +783,18 @@ class CareerDatabase:
             if (expected_dossier_hash is not None
                     and dossier_hash != expected_dossier_hash):
                 raise RuntimeError("completed research changed before Opportunity-1")
+            dossier_claim_ids = {
+                str(claim.get("id")) for claim in dossier.get("claims", [])
+                if isinstance(claim, dict) and claim.get("id") is not None
+            }
+            if any(
+                not isinstance(signal, dict)
+                or str(signal.get("claim_id")) not in dossier_claim_ids
+                for signal in signals
+            ):
+                raise ValueError(
+                    "Opportunity-1 signals must reference the completed dossier"
+                )
             result = reassess_opportunity1(round(float(row["opportunity"]) * 10_000), signals)
             output = asdict(result)
             ordered_signals = list(output["changes"])
@@ -753,7 +822,11 @@ class CareerDatabase:
                 raise RuntimeError("Opportunity-1 durable state is incomplete or inconsistent")
             self.lifecycle.commit_in_transaction(
                 conn, job_key=job_key, to_state=PipelineState.OPPORTUNITY_1_ASSESSED,
-                policy=PolicyIdentity("career.opportunity-1", "1", result.policy_hash),
+                policy=PolicyIdentity(
+                    OPPORTUNITY1_POLICY_ID,
+                    OPPORTUNITY1_POLICY_VERSION,
+                    result.policy_hash,
+                ),
                 inputs={"opportunity0_score_bp": result.opportunity0_score_bp,
                         "dossier_hash": dossier_hash, "signals": ordered_signals},
                 outputs=output, idempotency_key=key,
@@ -777,7 +850,11 @@ class CareerDatabase:
                     )
             self.lifecycle.commit_in_transaction(
                 conn, job_key=job_key, to_state=target,
-                policy=PolicyIdentity("career.opportunity-1-routing", "1", result.policy_hash),
+                policy=PolicyIdentity(
+                    OPPORTUNITY1_ROUTING_POLICY_ID,
+                    OPPORTUNITY1_POLICY_VERSION,
+                    result.policy_hash,
+                ),
                 inputs=output, outputs={"decision": result.decision},
                 idempotency_key=key + ":route",
             )

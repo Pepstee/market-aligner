@@ -224,6 +224,31 @@ LEGAL_TRANSITIONS: Mapping[PipelineState, frozenset[PipelineState]] = {
 }
 
 RESEARCH_COMPLETION_POLICY_ID = "career.research-completion-validation"
+RESEARCH_COMPLETION_POLICY_VERSION = "2"
+_RESEARCH_COMPLETION_POLICY_V1_HASH = canonical_hash({
+    "rules": [
+        "lease owner must match",
+        "at least one public source is required",
+        "every claim cites known source IDs",
+    ]
+})
+RESEARCH_COMPLETION_POLICY_HASH = canonical_hash({
+    "rules": [
+        "lease owner must match",
+        "dossier job identity must match the research task",
+        "dossier hash must match canonical content",
+        "at least one public source is required",
+        "every claim cites known source IDs",
+    ]
+})
+RESEARCH_COMPLETION_POLICY_IDENTITIES = frozenset({
+    ("1", _RESEARCH_COMPLETION_POLICY_V1_HASH),
+    (RESEARCH_COMPLETION_POLICY_VERSION, RESEARCH_COMPLETION_POLICY_HASH),
+})
+RESEARCH_COMPLETION_OUTPUT = {"validated": True, "queue_status": "completed"}
+OPPORTUNITY1_POLICY_ID = "career.opportunity-1"
+OPPORTUNITY1_ROUTING_POLICY_ID = "career.opportunity-1-routing"
+OPPORTUNITY1_POLICY_VERSION = "1"
 
 
 def _post_research_states() -> frozenset[str]:
@@ -239,6 +264,21 @@ def _post_research_states() -> frozenset[str]:
 
 
 POST_RESEARCH_STATES = _post_research_states()
+
+
+def _post_opportunity1_states() -> frozenset[str]:
+    pending = [PipelineState.OPPORTUNITY_1_ASSESSED]
+    reached: set[PipelineState] = set()
+    while pending:
+        state = pending.pop()
+        if state in reached:
+            continue
+        reached.add(state)
+        pending.extend(LEGAL_TRANSITIONS[state])
+    return frozenset(state.value for state in reached)
+
+
+POST_OPPORTUNITY1_STATES = _post_opportunity1_states()
 
 if set(LEGAL_TRANSITIONS) != set(PipelineState):
     raise RuntimeError("lifecycle graph does not cover the complete state vocabulary")
@@ -616,6 +656,7 @@ class LifecycleReducer:
                 )
             self._verify_legacy_boundary_cohorts(conn)
             self._verify_research_side_tables(conn)
+            self._verify_opportunity1_side_tables(conn)
             if set(replayed) != set(jobs):
                 missing = sorted(set(jobs) - set(replayed))
                 raise LedgerDivergence(f"jobs have no replayable state history: {missing}")
@@ -674,7 +715,8 @@ class LifecycleReducer:
                 (job_key,),
             ).fetchall()
             receipts = conn.execute(
-                """SELECT input_hash,idempotency_key
+                """SELECT policy_version,policy_hash,input_hash,output_hash,idempotency_key,
+                          model_provider,model_id,model_version
                    FROM lifecycle_transition_receipts
                    WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
                 (job_key, PipelineState.EMPLOYER_RESEARCHING.value,
@@ -696,9 +738,25 @@ class LifecycleReducer:
                 sources = dossier.get("sources")
                 if not isinstance(sources, list) or not sources:
                     raise ValueError("dossier source identity is invalid")
-                source_ids = sorted(
+                source_ids = sorted({
                     str(source.get("id")) for source in sources
                     if isinstance(source, dict)
+                })
+                model = dossier.get("model")
+                model_id = (
+                    model.get("model_id", model.get("id"))
+                    if isinstance(model, dict) else None
+                )
+                expected_model = (
+                    {
+                        "provider": model["provider"],
+                        "model_id": model_id,
+                        "version": model["version"],
+                    }
+                    if isinstance(model, dict) and all(
+                        isinstance(value, str) and value.strip()
+                        for value in (model.get("provider"), model_id, model.get("version"))
+                    ) else None
                 )
                 observation = {
                     "dossier": dossier,
@@ -708,8 +766,23 @@ class LifecycleReducer:
                 }
                 expected_completion_key = f"research-complete:{job_key}:{dossier_hash}"
                 receipt = receipts[0]
-                if (str(receipt["input_hash"]) != canonical_hash(observation)
-                        or str(receipt["idempotency_key"]) != expected_completion_key):
+                if ((
+                            str(receipt["policy_version"]),
+                            str(receipt["policy_hash"]),
+                        ) not in RESEARCH_COMPLETION_POLICY_IDENTITIES
+                        or str(receipt["input_hash"]) != canonical_hash(observation)
+                        or str(receipt["output_hash"])
+                        != canonical_hash(RESEARCH_COMPLETION_OUTPUT)
+                        or str(receipt["idempotency_key"]) != expected_completion_key
+                        or (
+                            receipt["model_provider"],
+                            receipt["model_id"],
+                            receipt["model_version"],
+                        ) != (
+                            None if expected_model is None else expected_model["provider"],
+                            None if expected_model is None else expected_model["model_id"],
+                            None if expected_model is None else expected_model["version"],
+                        )):
                     raise ValueError("completion receipt does not bind the dossier")
                 proposals = conn.execute(
                     """SELECT payload_json FROM pipeline_events
@@ -723,8 +796,150 @@ class LifecycleReducer:
                 if (not isinstance(proposal, dict)
                         or proposal.get("proposed_state")
                         != PipelineState.EMPLOYER_RESEARCHED.value
-                        or proposal.get("observation") != observation):
+                        or proposal.get("observation") != observation
+                        or proposal.get("model") != expected_model):
                     raise ValueError("research proposal does not bind the dossier")
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise LedgerDivergence(f"{rejected}: {exc}") from exc
+
+    @staticmethod
+    def _verify_opportunity1_side_tables(conn: sqlite3.Connection) -> None:
+        """Bind every Opportunity-1 row to its dossier, decision and two receipts."""
+        from dataclasses import asdict
+        from .opportunity1 import reassess_opportunity1
+
+        table_present = conn.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='opportunity_reassessments'"""
+        ).fetchone() is not None
+        if not table_present:
+            orphaned = int(conn.execute(
+                """SELECT COUNT(*) FROM lifecycle_transition_receipts
+                   WHERE policy_id IN (?,?)""",
+                (OPPORTUNITY1_POLICY_ID, OPPORTUNITY1_ROUTING_POLICY_ID),
+            ).fetchone()[0])
+            if orphaned:
+                raise LedgerDivergence(
+                    "Opportunity-1 receipts exist without their side table"
+                )
+            return
+        keys = {
+            str(row[0]) for row in conn.execute(
+                "SELECT job_key FROM opportunity_reassessments "
+                "UNION SELECT job_key FROM lifecycle_transition_receipts WHERE policy_id=? "
+                "UNION SELECT job_key FROM lifecycle_transition_receipts WHERE policy_id=?",
+                (OPPORTUNITY1_POLICY_ID, OPPORTUNITY1_ROUTING_POLICY_ID),
+            )
+        }
+        for job_key in sorted(keys):
+            rejected = f"Opportunity-1 side tables diverge for {job_key}"
+            job = conn.execute(
+                "SELECT opportunity,state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+            ).fetchone()
+            dossiers = conn.execute(
+                "SELECT dossier_json,dossier_hash FROM employer_dossiers WHERE job_key=?",
+                (job_key,),
+            ).fetchall()
+            rows = conn.execute(
+                """SELECT opportunity0_score_bp,opportunity1_score_bp,decision,
+                          changes_json,policy_hash
+                   FROM opportunity_reassessments WHERE job_key=?""",
+                (job_key,),
+            ).fetchall()
+            receipts = conn.execute(
+                """SELECT from_state,to_state,policy_version,policy_hash,input_hash,
+                          output_hash,idempotency_key,model_provider,model_id,model_version
+                   FROM lifecycle_transition_receipts
+                   WHERE job_key=? AND policy_id=?""",
+                (job_key, OPPORTUNITY1_POLICY_ID),
+            ).fetchall()
+            routing = conn.execute(
+                """SELECT from_state,to_state,policy_version,policy_hash,input_hash,
+                          output_hash,idempotency_key,model_provider,model_id,model_version
+                   FROM lifecycle_transition_receipts
+                   WHERE job_key=? AND policy_id=?""",
+                (job_key, OPPORTUNITY1_ROUTING_POLICY_ID),
+            ).fetchall()
+            if (job is None or str(job["state"]) not in POST_OPPORTUNITY1_STATES
+                    or len(dossiers) != 1 or len(rows) != 1
+                    or len(receipts) != 1 or len(routing) != 1):
+                raise LedgerDivergence(rejected)
+            try:
+                dossier = json.loads(dossiers[0]["dossier_json"])
+                dossier_hash = str(dossiers[0]["dossier_hash"])
+                if (not isinstance(dossier, dict)
+                        or dossier.get("job_key") != job_key
+                        or canonical_hash(dossier) != dossier_hash):
+                    raise ValueError("completed dossier identity is invalid")
+                row = rows[0]
+                changes = json.loads(row["changes_json"])
+                if not isinstance(changes, list):
+                    raise ValueError("changes are not a list")
+                dossier_claim_ids = {
+                    str(claim.get("id")) for claim in dossier.get("claims", [])
+                    if isinstance(claim, dict) and claim.get("id") is not None
+                }
+                if any(
+                    not isinstance(change, dict)
+                    or str(change.get("claim_id")) not in dossier_claim_ids
+                    for change in changes
+                ):
+                    raise ValueError("change does not reference the completed dossier")
+                original = round(float(job["opportunity"]) * 10_000)
+                result = reassess_opportunity1(original, changes)
+                output = asdict(result)
+                output["changes"] = list(output["changes"])
+                expected_inputs = {
+                    "opportunity0_score_bp": original,
+                    "dossier_hash": dossier_hash,
+                    "signals": output["changes"],
+                }
+                key = (
+                    f"opportunity-1:{job_key}:{dossier_hash}:{result.policy_hash}"
+                )
+                receipt = receipts[0]
+                expected_target = (
+                    PipelineState.FIT_ASSESSED
+                    if result.decision == "pass"
+                    else PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH
+                )
+                route = routing[0]
+                if (int(row["opportunity0_score_bp"]) != original
+                        or int(row["opportunity1_score_bp"]) != result.score_bp
+                        or str(row["decision"]) != result.decision
+                        or changes != output["changes"]
+                        or str(row["policy_hash"]) != result.policy_hash
+                        or str(receipt["from_state"])
+                        != PipelineState.EMPLOYER_RESEARCHED.value
+                        or str(receipt["to_state"])
+                        != PipelineState.OPPORTUNITY_1_ASSESSED.value
+                        or str(receipt["policy_version"])
+                        != OPPORTUNITY1_POLICY_VERSION
+                        or str(receipt["policy_hash"]) != result.policy_hash
+                        or str(receipt["input_hash"])
+                        != canonical_hash(expected_inputs)
+                        or str(receipt["output_hash"]) != canonical_hash(output)
+                        or str(receipt["idempotency_key"]) != key
+                        or (
+                            receipt["model_provider"], receipt["model_id"],
+                            receipt["model_version"],
+                        ) != (None, None, None)
+                        or str(route["from_state"])
+                        != PipelineState.OPPORTUNITY_1_ASSESSED.value
+                        or str(route["to_state"]) != expected_target.value
+                        or str(route["policy_version"])
+                        != OPPORTUNITY1_POLICY_VERSION
+                        or str(route["policy_hash"]) != result.policy_hash
+                        or str(route["input_hash"]) != canonical_hash(output)
+                        or str(route["output_hash"])
+                        != canonical_hash({"decision": result.decision})
+                        or str(route["idempotency_key"]) != key + ":route"):
+                    raise ValueError("reassessment or routing receipt is inconsistent")
+                if (
+                    route["model_provider"], route["model_id"],
+                    route["model_version"],
+                ) != (None, None, None):
+                    raise ValueError("reassessment or routing receipt is inconsistent")
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise LedgerDivergence(f"{rejected}: {exc}") from exc
 

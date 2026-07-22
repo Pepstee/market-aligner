@@ -17,6 +17,7 @@ from career_automation.lifecycle import (
     InvalidTransition,
     LedgerDivergence,
     canonical_hash,
+    canonical_json,
 )
 from career_automation.models import PipelineState
 
@@ -226,6 +227,63 @@ def test_all_dossiers_require_canonical_hash_and_replay_rejects_side_table_drift
         database.lifecycle.replay()
 
 
+def test_replay_rejects_coordinated_research_policy_and_output_forgery(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "research-receipt-forgery.sqlite3"
+    database = CareerDatabase(path)
+    job = _job("research-receipt-forgery")
+    OpportunityGate(database).bootstrap([job])
+    assert database.claim_research("owner", lease_seconds=60) is not None
+    dossier = _dossier(job.key)
+    database.complete_research(
+        job_key=job.key,
+        worker_id="owner",
+        dossier=dossier,
+        dossier_hash=_digest(dossier),
+    )
+    forged_policy_hash = "e" * 64
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        receipt = conn.execute(
+            """SELECT * FROM lifecycle_transition_receipts
+               WHERE job_key=? AND policy_id='career.research-completion-validation'""",
+            (job.key,),
+        ).fetchone()
+        assert receipt is not None
+        event = conn.execute(
+            "SELECT payload_json FROM pipeline_events WHERE id=?", (receipt["event_id"],),
+        ).fetchone()
+        binding = json.loads(event["payload_json"])
+        binding["policy"]["version"] = "forged"
+        binding["policy"]["sha256"] = forged_policy_hash
+        forged_output_hash = canonical_hash({"validated": False, "queue_status": "completed"})
+        binding["output_hash"] = forged_output_hash
+        conn.execute("DROP TRIGGER lifecycle_transition_receipt_immutable_update")
+        conn.execute(
+            """UPDATE lifecycle_transition_receipts
+               SET policy_version='forged',policy_hash=?,output_hash=? WHERE receipt_id=?""",
+            (forged_policy_hash, forged_output_hash, receipt["receipt_id"]),
+        )
+        conn.execute(
+            "UPDATE pipeline_events SET payload_json=? WHERE id=?",
+            (canonical_json(binding), receipt["event_id"]),
+        )
+        conn.execute(
+            "UPDATE pipeline_jobs SET policy_hash=? WHERE job_key=?",
+            (forged_policy_hash, job.key),
+        )
+        conn.execute(
+            """CREATE TRIGGER lifecycle_transition_receipt_immutable_update
+                 BEFORE UPDATE ON lifecycle_transition_receipts
+                 BEGIN
+                   SELECT RAISE(ABORT, 'transition receipts are immutable');
+                 END"""
+        )
+    with pytest.raises(LedgerDivergence, match="research side tables diverge"):
+        database.lifecycle.replay()
+
+
 def test_opportunity1_atomically_rejects_a_dossier_that_no_longer_matches_completion(
     tmp_path: Path,
 ) -> None:
@@ -254,6 +312,13 @@ def test_opportunity1_atomically_rejects_a_dossier_that_no_longer_matches_comple
     stable = _rows(path, job.key)
 
     with pytest.raises(RuntimeError, match="identity or hash"):
+        database.complete_research(
+            job_key=job.key,
+            worker_id="owner",
+            dossier=dossier,
+            dossier_hash=_digest(dossier),
+        )
+    with pytest.raises(RuntimeError, match="identity or hash"):
         database.apply_opportunity1(job_key=job.key, signals=[])
     assert _rows(path, job.key) == stable
     assert _state(path, job.key) == PipelineState.EMPLOYER_RESEARCHED.value
@@ -261,6 +326,32 @@ def test_opportunity1_atomically_rejects_a_dossier_that_no_longer_matches_comple
         assert conn.execute(
             "SELECT COUNT(*) FROM opportunity_reassessments WHERE job_key=?", (job.key,),
         ).fetchone()[0] == 0
+
+
+def test_replay_rejects_tampered_opportunity1_reassessment(tmp_path: Path) -> None:
+    path = tmp_path / "opportunity1-replay.sqlite3"
+    database = CareerDatabase(path)
+    job = _job("opportunity1-replay")
+    OpportunityGate(database).bootstrap([job])
+    assert database.claim_research("owner", lease_seconds=60) is not None
+    dossier = _dossier(job.key)
+    database.complete_research(
+        job_key=job.key,
+        worker_id="owner",
+        dossier=dossier,
+        dossier_hash=_digest(dossier),
+    )
+    database.apply_opportunity1(job_key=job.key, signals=[])
+    database.lifecycle.verify()
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """UPDATE opportunity_reassessments
+               SET opportunity1_score_bp=opportunity1_score_bp-1 WHERE job_key=?""",
+            (job.key,),
+        )
+    with pytest.raises(LedgerDivergence, match="Opportunity-1 side tables diverge"):
+        database.lifecycle.replay()
 
 
 def test_opportunity1_identical_retry_returns_the_durable_result_without_new_rows(tmp_path: Path) -> None:
@@ -277,6 +368,15 @@ def test_opportunity1_identical_retry_returns_the_durable_result_without_new_row
         dossier=dossier_value,
         dossier_hash=_digest(dossier_value),
     )
+
+    before_rejected_signal = _rows(path, job.key)
+    with pytest.raises(ValueError, match="completed dossier"):
+        database.apply_opportunity1(job_key=job.key, signals=[{
+            "claim_id": "not-in-the-dossier",
+            "reason": "must not be admitted",
+            "delta_bp": -100,
+        }])
+    assert _rows(path, job.key) == before_rejected_signal
 
     first = database.apply_opportunity1(job_key=job.key, signals=[])
     stable_events, stable_receipts = _rows(path, job.key)
