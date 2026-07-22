@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -180,6 +182,16 @@ def test_migration_rejects_modified_applied_version_and_rolls_back_failed_versio
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='should_rollback'").fetchone() is None
 
 
+def test_shipped_jaa01_acceptance_executable_passes() -> None:
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        (sys.executable, "scripts/accept_jaa_01c.py"), cwd=root,
+        text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "JAA-01C acceptance passed"
+
+
 @pytest.mark.parametrize("attack", ["missing", "additional", "divergent"])
 def test_migration_rejects_every_non_exact_jaa00_legacy_boundary(
     tmp_path: Path, attack: str,
@@ -282,9 +294,15 @@ def test_replay_rejects_semantically_equal_payload_byte_reformatting(tmp_path: P
         LifecycleReducer(current).replay()
 
 
-@pytest.mark.parametrize("event_type", ["score_snapshot_imported", "unknown_event"])
+@pytest.mark.parametrize(
+    ("event_type", "message"),
+    [
+        ("score_snapshot_imported", "invalid non-transition event"),
+        ("unknown_event", "unrecognized event type"),
+    ],
+)
 def test_replay_rejects_non_proposal_events_with_null_target(
-    tmp_path: Path, event_type: str,
+    tmp_path: Path, event_type: str, message: str,
 ) -> None:
     path = tmp_path / f"null-target-{event_type}.sqlite3"
     database = CareerDatabase(path)
@@ -301,7 +319,27 @@ def test_replay_rejects_non_proposal_events_with_null_target(
                 ActorKind.DETERMINISTIC.value, "{}", f"null-target:{event_type}",
             ),
         )
-    with pytest.raises(LedgerDivergence, match="invalid non-transition event"):
+    with pytest.raises(LedgerDivergence, match=message):
+        LifecycleReducer(path).replay()
+
+
+def test_replay_classifies_unknown_event_before_reading_state_fields(tmp_path: Path) -> None:
+    path = tmp_path / "unknown-event-invalid-states.sqlite3"
+    database = CareerDatabase(path)
+    job = _job("unknown-event-invalid-states")
+    database.upsert_scored_job(job)
+    with database.transaction(immediate=True) as conn:
+        conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,
+                 idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                job.key, "unknown_event", "imaginary-source", "imaginary-target",
+                ActorKind.DETERMINISTIC.value, "{}", "unknown-invalid-states",
+            ),
+        )
+    with pytest.raises(LedgerDivergence, match="unrecognized event type"):
         LifecycleReducer(path).replay()
 
 
@@ -906,5 +944,5 @@ def test_receiptless_legacy_replay_accepts_only_exact_historical_deterministic_s
             "UPDATE pipeline_jobs SET state='employer_researched' WHERE job_key=?",
             (retired_job.key,),
         )
-    with pytest.raises(LedgerDivergence, match="without reducer authority"):
+    with pytest.raises(LedgerDivergence, match="unrecognized event type"):
         retired_reducer.replay()

@@ -505,9 +505,16 @@ class LifecycleReducer:
             events = conn.execute("SELECT * FROM pipeline_events ORDER BY id").fetchall()
             for event in events:
                 prior = replayed.get(event["job_key"])
-                if event["event_type"] == "lifecycle_transition_proposed":
+                event_type = event["event_type"]
+                if event_type == "lifecycle_transition_proposed":
                     self._verify_proposal_event(event, prior)
                     continue
+                if event_type not in {
+                    "lifecycle_transition_committed", *_LEGACY_EVENT_TYPES,
+                }:
+                    raise LedgerDivergence(
+                        f"event {event['id']} has an unrecognized event type"
+                    )
                 if event["to_state"] is None:
                     raise LedgerDivergence(
                         f"event {event['id']} is an invalid non-transition event"
@@ -522,10 +529,10 @@ class LifecycleReducer:
                         raise LedgerDivergence(f"event {event['id']} is an impossible root transition")
                 elif prior != source or target not in LEGAL_TRANSITIONS[source]:
                     raise LedgerDivergence(f"event {event['id']} is out of order or illegal")
-                if event["event_type"] == "lifecycle_transition_committed":
+                if event_type == "lifecycle_transition_committed":
                     replayed_policy[event["job_key"]] = self._verify_receipt(conn, event)
                     verified_receipt_events.add(int(event["id"]))
-                elif event["event_type"] in _LEGACY_EVENT_TYPES:
+                elif event_type in _LEGACY_EVENT_TYPES:
                     job_row = job_by_key.get(event["job_key"])
                     if job_row is None:
                         raise LedgerDivergence(
@@ -543,8 +550,6 @@ class LifecycleReducer:
                         verified_legacy_cohort_events.add(int(event["id"]))
                     if legacy_gate:
                         verified_legacy_gate_events.add(int(event["id"]))
-                else:
-                    raise LedgerDivergence(f"event {event['id']} changes state without reducer authority")
                 replayed[event["job_key"]] = target
             receipt_events = {
                 int(row[0]) for row in conn.execute(

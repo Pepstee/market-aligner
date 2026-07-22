@@ -12,7 +12,7 @@ from pathlib import Path
 # that checkout over any separately installed distribution of the package.
 sys.path.insert(0, str(Path.cwd()))
 
-from career_automation.database import CareerDatabase, SCHEMA
+from career_automation.database import CareerDatabase
 from career_automation.lifecycle import (
     InvalidTransition,
     LedgerDivergence,
@@ -20,7 +20,7 @@ from career_automation.lifecycle import (
     PolicyIdentity,
     canonical_hash,
 )
-from career_automation.models import PipelineState
+from career_automation.models import PipelineState, ScoredJob
 from career_automation.migrations import JAA_01_MIGRATIONS
 
 
@@ -31,35 +31,22 @@ def require(condition: bool, message: str) -> None:
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="jaa-01c-") as temporary:
-        database = Path(temporary) / "legacy.sqlite3"
-        conn = sqlite3.connect(database)
-        try:
-            conn.executescript(SCHEMA)
-            conn.execute(
-                """INSERT INTO pipeline_jobs(
-                     job_key,board,job_id,url,title,company,opportunity,payload_json,payload_hash,state
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                ("legacy:1", "legacy", "1", "https://example.invalid/jobs/1", "Engineer",
-                 "Example", 0.75, "{}", canonical_hash({}), PipelineState.DISCOVERED.value),
-            )
-            conn.execute(
-                """INSERT INTO pipeline_events(
-                     job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
-                   ) VALUES(?,?,?,?,?,?,?)""",
-                ("legacy:1", "score_snapshot_imported", None, PipelineState.DISCOVERED.value,
-                 "deterministic", "{}", "legacy-root"),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        CareerDatabase(database)
+        database = Path(temporary) / "current.sqlite3"
+        store = CareerDatabase(database)
+        payload = {"job_key": "current:1"}
+        store.upsert_scored_job(ScoredJob(
+            key="current:1", board="acceptance", job_id="1",
+            url="https://example.invalid/jobs/1", title="Engineer", company="Example",
+            fit=0.8, opportunity=0.75, final_score=75.0,
+            extraction_confidence=0.9, payload=payload,
+            payload_hash=canonical_hash(payload),
+        ))
         conn = sqlite3.connect(database)
         try:
             require(conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == 1,
-                    "migration did not preserve the legacy job")
+                    "current score writer did not persist the job")
             require(conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == 1,
-                    "migration did not preserve the legacy event")
+                    "current score writer did not persist the import event")
             jaa01_ledger = conn.execute(
                 "SELECT version,name,checksum FROM career_schema_migrations "
                 "WHERE version IN ({}) ORDER BY version".format(
@@ -80,21 +67,26 @@ def main() -> int:
         reducer = LifecycleReducer(database)
         policy = PolicyIdentity("acceptance", "1", canonical_hash({"policy": "acceptance"}))
         transition = dict(
-            job_key="legacy:1", to_state=PipelineState.FETCHED, policy=policy,
-            inputs={"job_key": "legacy:1"}, outputs={"accepted": True},
+            job_key="current:1", to_state=PipelineState.EMPLOYER_RESEARCH_QUEUED,
+            policy=policy, inputs={"job_key": "current:1"}, outputs={"accepted": True},
             idempotency_key="acceptance-transition-1",
         )
         first = reducer.commit(**transition)
         second = reducer.commit(**transition)
         require(first.receipt_id == second.receipt_id, "transition was not idempotent")
         try:
-            reducer.commit(**{**transition, "to_state": PipelineState.ELIGIBLE,
+            reducer.commit(**{**transition, "to_state": PipelineState.RELEASED,
                               "idempotency_key": "acceptance-illegal"})
         except InvalidTransition:
             pass
         else:
             raise AssertionError("out-of-order transition was accepted")
-        require(reducer.replay() == {"legacy:1": PipelineState.FETCHED}, "replay was incorrect")
+        require(
+            reducer.replay() == {
+                "current:1": PipelineState.EMPLOYER_RESEARCH_QUEUED,
+            },
+            "replay was incorrect",
+        )
 
         conn = sqlite3.connect(database)
         try:
@@ -116,7 +108,7 @@ def main() -> int:
         try:
             conn.execute("UPDATE career_schema_migrations SET checksum=? WHERE version=1", (checksum,))
             conn.execute("UPDATE pipeline_jobs SET state=? WHERE job_key=?",
-                         (PipelineState.NORMALISED.value, "legacy:1"))
+                         (PipelineState.EMPLOYER_RESEARCHED.value, "current:1"))
             conn.commit()
         finally:
             conn.close()
