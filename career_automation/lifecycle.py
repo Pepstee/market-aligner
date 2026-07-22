@@ -123,7 +123,17 @@ if set(LEGAL_TRANSITIONS) != set(PipelineState):
 
 _LEGACY_EVENT_TYPES = {
     "score_snapshot_imported", "opportunity_gate_decided",
-    "employer_research_leased", "employer_research_completed",
+}
+_LEGACY_OPPORTUNITY_POLICY_SUFFIX = "b38a8ff32e7d74ce"
+_LEGACY_GATE_PAYLOADS = {
+    PipelineState.EMPLOYER_RESEARCH_QUEUED: {
+        "decision": "pass",
+        "reason": "opportunity_warrants_employer_reconnaissance",
+    },
+    PipelineState.OPPORTUNITY_REJECTED: {
+        "decision": "reject",
+        "reason": "below_opportunity_threshold",
+    },
 }
 
 
@@ -368,7 +378,11 @@ class LifecycleReducer:
         """Reconstruct all job states, rejecting invalid order or receipt tampering."""
         conn = self._connect()
         try:
-            jobs = {row["job_key"]: row["state"] for row in conn.execute("SELECT job_key,state FROM pipeline_jobs")}
+            job_rows = conn.execute(
+                "SELECT job_key,state,payload_hash FROM pipeline_jobs"
+            ).fetchall()
+            jobs = {row["job_key"]: row["state"] for row in job_rows}
+            payload_hashes = {row["job_key"]: row["payload_hash"] for row in job_rows}
             replayed: dict[str, PipelineState] = {}
             events = conn.execute("SELECT * FROM pipeline_events ORDER BY id").fetchall()
             for event in events:
@@ -387,7 +401,9 @@ class LifecycleReducer:
                     raise LedgerDivergence(f"event {event['id']} is out of order or illegal")
                 if event["event_type"] == "lifecycle_transition_committed":
                     self._verify_receipt(conn, event)
-                elif event["event_type"] not in _LEGACY_EVENT_TYPES:
+                elif event["event_type"] in _LEGACY_EVENT_TYPES:
+                    self._verify_legacy_event(event, payload_hashes[event["job_key"]])
+                else:
                     raise LedgerDivergence(f"event {event['id']} changes state without reducer authority")
                 replayed[event["job_key"]] = target
             if set(replayed) != set(jobs):
@@ -399,6 +415,48 @@ class LifecycleReducer:
             return replayed
         finally:
             conn.close()
+
+    @staticmethod
+    def _verify_legacy_event(event: sqlite3.Row, job_payload_hash: str) -> None:
+        """Authenticate the only two receiptless shapes in the frozen JAA-00 ledger."""
+        rejected = f"event {event['id']} is not an exact deterministic historical event"
+        if (event["actor_kind"] != ActorKind.DETERMINISTIC.value
+                or not isinstance(job_payload_hash, str)
+                or len(job_payload_hash) != 64
+                or any(char not in "0123456789abcdef" for char in job_payload_hash)):
+            raise LedgerDivergence(rejected)
+
+        event_type = event["event_type"]
+        if event_type == "score_snapshot_imported":
+            expected_payload = {"payload_hash": job_payload_hash}
+            expected = (
+                None,
+                PipelineState.SCORED.value,
+                json.dumps(expected_payload, sort_keys=True),
+                f"score-import:{event['job_key']}:{job_payload_hash}",
+            )
+        elif event_type == "opportunity_gate_decided":
+            try:
+                target = PipelineState(event["to_state"])
+                expected_payload = _LEGACY_GATE_PAYLOADS[target]
+            except (ValueError, KeyError) as exc:
+                raise LedgerDivergence(rejected) from exc
+            expected = (
+                PipelineState.SCORED.value,
+                target.value,
+                json.dumps(expected_payload, sort_keys=True),
+                f"opportunity-gate:{event['job_key']}:{job_payload_hash}:"
+                f"{_LEGACY_OPPORTUNITY_POLICY_SUFFIX}",
+            )
+        else:  # Defensive if the compatibility set changes without this verifier.
+            raise LedgerDivergence(rejected)
+
+        actual = (
+            event["from_state"], event["to_state"],
+            event["payload_json"], event["idempotency_key"],
+        )
+        if actual != expected:
+            raise LedgerDivergence(rejected)
 
     @staticmethod
     def _verify_receipt(conn: sqlite3.Connection, event: sqlite3.Row) -> None:

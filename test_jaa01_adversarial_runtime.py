@@ -33,6 +33,8 @@ def _cli(database: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 
 def _legacy_ledger(path: Path, *, jobs: int = 1, events: int = 1) -> None:
     """Create a genuine pre-migration five-state ledger, not a reducer fixture."""
+    assert jobs <= events <= 2 * jobs
+    gated_jobs = events - jobs
     with sqlite3.connect(path) as connection:
         connection.executescript(SCHEMA)
         connection.executemany(
@@ -41,19 +43,30 @@ def _legacy_ledger(path: Path, *, jobs: int = 1, events: int = 1) -> None:
                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             [
                 (f"legacy:{number}", "legacy", str(number), f"https://example.test/{number}",
-                 "Engineer", "Example", 0.5, "{}", f"{number:064x}", "discovered")
+                 "Engineer", "Example", 0.5, "{}", f"{number:064x}",
+                 "opportunity_rejected" if number < gated_jobs else "scored")
                 for number in range(jobs)
             ],
         )
+        score_events = [
+            (f"legacy:{number}", "score_snapshot_imported", None, "scored",
+             "deterministic", json.dumps({"payload_hash": f"{number:064x}"}, sort_keys=True),
+             f"score-import:legacy:{number}:{number:064x}")
+            for number in range(jobs)
+        ]
+        gate_events = [
+            (f"legacy:{number}", "opportunity_gate_decided", "scored",
+             "opportunity_rejected", "deterministic",
+             json.dumps({"decision": "reject", "reason": "below_opportunity_threshold"},
+                        sort_keys=True),
+             f"opportunity-gate:legacy:{number}:{number:064x}:b38a8ff32e7d74ce")
+            for number in range(gated_jobs)
+        ]
         connection.executemany(
             """INSERT INTO pipeline_events(
                  job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
                ) VALUES(?,?,?,?,?,?,?)""",
-            [
-                (f"legacy:{number % jobs}", "score_snapshot_imported", None, "discovered",
-                 "deterministic", "{}", f"legacy-event:{number}")
-                for number in range(events)
-            ],
+            [*score_events, *gate_events],
         )
 
 
@@ -116,7 +129,7 @@ def test_cli_rejects_out_of_order_research_release_submit_and_preserves_ledger(t
         assert result.returncode != 0
         assert "illegal or out-of-order transition" in result.stderr
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT state FROM pipeline_jobs").fetchone()[0] == "discovered"
+        assert connection.execute("SELECT state FROM pipeline_jobs").fetchone()[0] == "scored"
         assert connection.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM lifecycle_transition_receipts").fetchone()[0] == 0
 
@@ -142,13 +155,18 @@ def test_model_proposal_never_advances_state_but_deterministic_cli_transition_is
     assert event_id > 0
     restarted_replay = _cli(database, "replay")
     assert restarted_replay.returncode == 0, restarted_replay.stderr
-    assert json.loads(restarted_replay.stdout) == {"legacy:0": "discovered"}
+    assert json.loads(restarted_replay.stdout) == {"legacy:0": "scored"}
 
-    command = _transition("legacy:0", PipelineState.FETCHED.value, "deterministic-fetch")
+    command = _transition(
+        "legacy:0", PipelineState.EMPLOYER_RESEARCH_QUEUED.value,
+        "deterministic-opportunity-pass",
+    )
     first, retry = _cli(database, *command), _cli(database, *command)
     assert first.returncode == retry.returncode == 0, (first.stderr, retry.stderr)
     assert json.loads(first.stdout)["receipt_id"] == json.loads(retry.stdout)["receipt_id"]
-    assert json.loads(_cli(database, "replay").stdout) == {"legacy:0": "fetched"}
+    assert json.loads(_cli(database, "replay").stdout) == {
+        "legacy:0": "employer_research_queued",
+    }
     assert _cli(database, "verify").returncode == 0
     with sqlite3.connect(database) as connection:
         proposal = connection.execute(

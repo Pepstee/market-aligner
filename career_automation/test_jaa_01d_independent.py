@@ -7,9 +7,9 @@ tests so ledger corruption and ordering checks remain meaningful.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
-from collections import deque
 from pathlib import Path
 
 import pytest
@@ -46,8 +46,10 @@ def _job(key: str) -> ScoredJob:
     )
 
 
-def _seed_discovered(database: CareerDatabase, key: str) -> None:
-    """Create a real legacy-style root event; no reducer API creates discovered jobs."""
+def _seed_state_without_history(
+    database: CareerDatabase, key: str, state: PipelineState,
+) -> None:
+    """Place a job at one reducer input state without manufacturing replay evidence."""
     payload_hash = canonical_hash({"key": key})
     with database.transaction(immediate=True) as conn:
         conn.execute(
@@ -56,29 +58,8 @@ def _seed_discovered(database: CareerDatabase, key: str) -> None:
                    payload_hash,state
                  ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (key, "independent", key, f"https://example.test/{key}", "Job", "Example",
-             0.8, "{}", payload_hash, PipelineState.DISCOVERED.value),
+             0.8, "{}", payload_hash, state.value),
         )
-        conn.execute(
-            """INSERT INTO pipeline_events(
-                   job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
-                 ) VALUES(?,?,?,?,?,?,?)""",
-            (key, "score_snapshot_imported", None, PipelineState.DISCOVERED.value,
-             ActorKind.DETERMINISTIC.value, "{}", f"root:{key}"),
-        )
-
-
-def _path(start: PipelineState, goal: PipelineState) -> list[PipelineState]:
-    queue: deque[tuple[PipelineState, list[PipelineState]]] = deque([(start, [])])
-    seen = {start}
-    while queue:
-        state, steps = queue.popleft()
-        if state == goal:
-            return steps
-        for next_state in LEGAL_TRANSITIONS[state]:
-            if next_state not in seen:
-                seen.add(next_state)
-                queue.append((next_state, [*steps, next_state]))
-    raise AssertionError(f"{goal.value} is not reachable from {start.value}")
 
 
 def _counts(path: Path) -> tuple[int, int, str]:
@@ -164,21 +145,27 @@ def test_reducer_accepts_every_declared_edge_and_rejects_research_release_submit
         for target in targets:
             key = f"edge:{edge_number}"
             edge_number += 1
-            _seed_discovered(database, key)
-            current = PipelineState.DISCOVERED
-            for step in _path(current, source):
-                reducer.commit(job_key=key, to_state=step, policy=POLICY, inputs={"edge": key, "to": step.value}, outputs={"ok": True}, idempotency_key=f"{key}:{step.value}")
+            _seed_state_without_history(database, key, source)
             receipt = reducer.commit(job_key=key, to_state=target, policy=POLICY, inputs={"edge": key, "to": target.value}, outputs={"ok": True}, idempotency_key=f"{key}:target")
             assert (receipt.from_state, receipt.to_state) == (source, target)
 
     # Each of these is plausible-looking but skips a mandatory ordering gate.
     for name, destination in (("research", PipelineState.EMPLOYER_RESEARCHED), ("release", PipelineState.RELEASED), ("submit", PipelineState.SUBMITTED)):
         key = f"illegal:{name}"
-        _seed_discovered(database, key)
+        _seed_state_without_history(database, key, PipelineState.DISCOVERED)
         with pytest.raises(InvalidTransition, match="illegal or out-of-order"):
             reducer.commit(job_key=key, to_state=destination, policy=POLICY, inputs={}, outputs={}, idempotency_key=key)
 
-    assert reducer.replay()["edge:0"] in PipelineState
+    replay_path = tmp_path / "reachable-replay.sqlite3"
+    replay_database = CareerDatabase(replay_path)
+    replay_database.upsert_scored_job(_job("reachable-replay"))
+    LifecycleReducer(replay_path).commit(
+        job_key="reachable-replay", to_state=PipelineState.EMPLOYER_RESEARCH_QUEUED,
+        policy=POLICY, inputs={}, outputs={}, idempotency_key="reachable-replay:queue",
+    )
+    assert LifecycleReducer(replay_path).replay() == {
+        "reachable-replay": PipelineState.EMPLOYER_RESEARCH_QUEUED,
+    }
 
 
 def test_probabilistic_and_external_actors_only_record_non_mutating_proposals(tmp_path: Path) -> None:
@@ -220,32 +207,134 @@ def test_transition_idempotency_is_exact_and_conflicts_leave_no_mutation(tmp_pat
 def test_replay_reconstructs_states_and_detects_divergence_order_and_receipt_identity_tampering(tmp_path: Path) -> None:
     path = tmp_path / "replay.sqlite3"
     database = CareerDatabase(path)
-    _seed_discovered(database, "replay")
+    database.upsert_scored_job(_job("replay"))
     reducer = LifecycleReducer(path)
-    first = reducer.commit(job_key="replay", to_state=PipelineState.FETCHED, policy=POLICY, inputs={"n": 1}, outputs={}, idempotency_key="replay:1")
-    reducer.commit(job_key="replay", to_state=PipelineState.NORMALISED, policy=POLICY, inputs={"n": 2}, outputs={}, idempotency_key="replay:2")
-    assert reducer.replay() == {"replay": PipelineState.NORMALISED}
+    first = reducer.commit(job_key="replay", to_state=PipelineState.EMPLOYER_RESEARCH_QUEUED, policy=POLICY, inputs={"n": 1}, outputs={}, idempotency_key="replay:1")
+    reducer.commit(job_key="replay", to_state=PipelineState.EMPLOYER_RESEARCHING, policy=POLICY, inputs={"n": 2}, outputs={}, idempotency_key="replay:2")
+    assert reducer.replay() == {"replay": PipelineState.EMPLOYER_RESEARCHING}
 
     with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE pipeline_jobs SET state='eligible' WHERE job_key='replay'")
+        conn.execute("UPDATE pipeline_jobs SET state='employer_researched' WHERE job_key='replay'")
     with pytest.raises(LedgerDivergence, match="materialised state diverges"):
         reducer.verify()
     with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE pipeline_jobs SET state='normalised' WHERE job_key='replay'")
+        conn.execute("UPDATE pipeline_jobs SET state='employer_researching' WHERE job_key='replay'")
         conn.execute("UPDATE pipeline_events SET idempotency_key='tampered-event-key' WHERE id=?", (first.event_id,))
     with pytest.raises(LedgerDivergence, match="tampered receipt identity"):
         reducer.verify()
 
     impossible = tmp_path / "impossible.sqlite3"
     other_database = CareerDatabase(impossible)
-    _seed_discovered(other_database, "impossible")
+    other_database.upsert_scored_job(_job("impossible"))
     with other_database.transaction(immediate=True) as conn:
-        conn.execute("UPDATE pipeline_jobs SET state='eligible' WHERE job_key='impossible'")
+        conn.execute("UPDATE pipeline_jobs SET state='employer_researched' WHERE job_key='impossible'")
         conn.execute(
             """INSERT INTO pipeline_events(job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key)
                VALUES(?,?,?,?,?,?,?)""",
-            ("impossible", "score_snapshot_imported", PipelineState.DISCOVERED.value,
-             PipelineState.ELIGIBLE.value, ActorKind.DETERMINISTIC.value, "{}", "impossible-order"),
+            ("impossible", "opportunity_gate_decided", PipelineState.SCORED.value,
+             PipelineState.EMPLOYER_RESEARCHED.value, ActorKind.DETERMINISTIC.value,
+             "{}", "impossible-order"),
         )
     with pytest.raises(LedgerDivergence, match="out of order or illegal"):
         LifecycleReducer(impossible).replay()
+
+
+def test_receiptless_legacy_replay_accepts_only_exact_historical_deterministic_shapes(
+    tmp_path: Path,
+) -> None:
+    authentic = tmp_path / "authentic-legacy.sqlite3"
+    authentic_database = CareerDatabase(authentic)
+    authentic_job = _job("authentic-legacy")
+    authentic_database.upsert_scored_job(authentic_job)
+    gate_payload = {
+        "decision": "pass",
+        "reason": "opportunity_warrants_employer_reconnaissance",
+    }
+    gate_key = (
+        f"opportunity-gate:{authentic_job.key}:{authentic_job.payload_hash}:"
+        "b38a8ff32e7d74ce"
+    )
+    with authentic_database.transaction(immediate=True) as conn:
+        conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (authentic_job.key, "opportunity_gate_decided", "scored",
+             "employer_research_queued", "deterministic",
+             json.dumps(gate_payload, sort_keys=True), gate_key),
+        )
+        conn.execute(
+            "UPDATE pipeline_jobs SET state='employer_research_queued' WHERE job_key=?",
+            (authentic_job.key,),
+        )
+    assert LifecycleReducer(authentic).replay() == {
+        authentic_job.key: PipelineState.EMPLOYER_RESEARCH_QUEUED,
+    }
+
+    for attack in ("actor", "payload", "idempotency"):
+        path = tmp_path / f"forged-legacy-{attack}.sqlite3"
+        database = CareerDatabase(path)
+        job = _job(f"forged-legacy-{attack}")
+        database.upsert_scored_job(job)
+        payload = dict(gate_payload)
+        actor = "deterministic"
+        idempotency_key = f"opportunity-gate:{job.key}:{job.payload_hash}:b38a8ff32e7d74ce"
+        if attack == "actor":
+            actor = "external"
+        elif attack == "payload":
+            payload["reason"] = "forged"
+        else:
+            idempotency_key += ":forged"
+        with database.transaction(immediate=True) as conn:
+            conn.execute(
+                """INSERT INTO pipeline_events(
+                     job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (job.key, "opportunity_gate_decided", "scored",
+                 "employer_research_queued", actor,
+                 json.dumps(payload, sort_keys=True), idempotency_key),
+            )
+            conn.execute(
+                "UPDATE pipeline_jobs SET state='employer_research_queued' WHERE job_key=?",
+                (job.key,),
+            )
+        with pytest.raises(LedgerDivergence, match="exact deterministic historical event"):
+            LifecycleReducer(path).replay()
+
+    root_actor = tmp_path / "forged-legacy-root-actor.sqlite3"
+    root_database = CareerDatabase(root_actor)
+    root_database.upsert_scored_job(_job("forged-legacy-root-actor"))
+    with root_database.transaction(immediate=True) as conn:
+        conn.execute("UPDATE pipeline_events SET actor_kind='probabilistic'")
+    with pytest.raises(LedgerDivergence, match="exact deterministic historical event"):
+        LifecycleReducer(root_actor).replay()
+
+    retired = tmp_path / "retired-legacy-name.sqlite3"
+    retired_database = CareerDatabase(retired)
+    retired_job = _job("retired-legacy-name")
+    retired_database.upsert_scored_job(retired_job)
+    retired_reducer = LifecycleReducer(retired)
+    retired_reducer.commit(
+        job_key=retired_job.key,
+        to_state=PipelineState.EMPLOYER_RESEARCH_QUEUED,
+        policy=POLICY, inputs={}, outputs={}, idempotency_key="retired:queue",
+    )
+    retired_reducer.commit(
+        job_key=retired_job.key,
+        to_state=PipelineState.EMPLOYER_RESEARCHING,
+        policy=POLICY, inputs={}, outputs={}, idempotency_key="retired:researching",
+    )
+    with retired_database.transaction(immediate=True) as conn:
+        conn.execute(
+            """INSERT INTO pipeline_events(
+                 job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (retired_job.key, "employer_research_completed", "employer_researching",
+             "employer_researched", "deterministic", "{}", "retired:completed"),
+        )
+        conn.execute(
+            "UPDATE pipeline_jobs SET state='employer_researched' WHERE job_key=?",
+            (retired_job.key,),
+        )
+    with pytest.raises(LedgerDivergence, match="without reducer authority"):
+        retired_reducer.replay()
