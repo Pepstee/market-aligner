@@ -9,6 +9,8 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -17,14 +19,8 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from baseline_adoption.core import (
-    LEGACY_JAA00_ADOPTION_REVISION,
-    LEGACY_JAA00_CONTENT_SHA256,
-    LEGACY_JAA00_RECEIPT_SHA256,
-)
 from career_automation.lifecycle import LifecycleReducer
 from career_automation.migrations import JAA_01_MIGRATIONS
-from baseline_adoption.core import AdoptionError, independent_review
 from scripts.reproduce_jaa01_terra_rejection import reproduce
 from tracked_source_revision import (
     TrackedSourceRevisionError,
@@ -35,6 +31,11 @@ from tracked_source_revision import (
 EXPECTED_COUNTS = {"pipeline_jobs": 462, "pipeline_events": 924}
 FORMAT = "jaa01-runtime-certification/v1"
 ROOT = Path(__file__).resolve().parents[1]
+JAA00_EVIDENCE = Path("runtime_evidence/JAA-00-online-snapshot.yaml")
+JAA00_EVIDENCE_SHA256 = "bf4a9726c9d0608f21fadcf2591bcc8ba92516cca9659288fc28e7b9452ed161"
+JAA00_RECEIPT_CONTENT_SHA256 = "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
+JAA00_RECEIPT_FILE_SHA256 = "a5c878dd91ee80a1709c5c8d17b64e9ac0486c917029a1d69e2c514db73f5357"
+JAA00_CAREER_PIPELINE_SHA256 = "6f57c4d62ea22cfd303a9481e2620cc6f747540597d9de96b5e5822abcb7b328"
 class CertificationError(RuntimeError):
     pass
 
@@ -99,22 +100,19 @@ def load_migration_receipt(path: Path) -> tuple[dict[str, Any], str]:
             "invalid migration receipt structure")
     require(content_hash == declared, "migration receipt content hash mismatch")
     require(path.name == f"migration-{declared}.json", "migration receipt filename is not content-addressed")
-    require(declared == LEGACY_JAA00_CONTENT_SHA256,
+    require(declared == JAA00_RECEIPT_CONTENT_SHA256,
             "migration receipt is not the independently trusted JAA-00 receipt")
-    require(digest == LEGACY_JAA00_RECEIPT_SHA256,
+    require(digest == JAA00_RECEIPT_FILE_SHA256,
             "migration receipt bytes do not match the independently trusted JAA-00 receipt")
     require(content.get("format") == "jaa-00-online-snapshot-receipt/v2",
             "unsupported migration receipt format")
-    repository = content.get("repository")
-    require(isinstance(repository, dict)
-            and repository.get("label") == "canonical-repository"
-            and repository.get("revision") == LEGACY_JAA00_ADOPTION_REVISION,
-            "migration receipt repository provenance is not the independently trusted JAA-00 adoption")
     return receipt, digest
 
 
-def require_trusted_jaa00_receipt(path: Path, baseline: Path) -> dict[str, Any]:
-    """Bind JAA-01 to JAA-00's independently certified preserved snapshot."""
+def require_trusted_jaa00_receipt(
+    path: Path, baseline: Path, receipt_document: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind JAA-01 to JAA-00's certified evidence and preserved snapshot."""
     try:
         receipt = path.resolve(strict=True)
         data_root = receipt.parent.parent.resolve(strict=True)
@@ -129,14 +127,80 @@ def require_trusted_jaa00_receipt(path: Path, baseline: Path) -> dict[str, Any]:
         baseline_resolved == expected_baseline,
         "baseline is not the independently trusted JAA-00 career-pipeline snapshot",
     )
+
+    evidence_path = ROOT / JAA00_EVIDENCE
     try:
-        review = independent_review(receipt, data_root, ROOT)
-    except (AdoptionError, OSError, ValueError, KeyError) as exc:
-        raise CertificationError(
-            "migration receipt is not independently trusted JAA-00 evidence"
-        ) from exc
-    require(review.get("status") == "certified", "JAA-00 independent review did not certify")
-    return review
+        evidence_stat = evidence_path.lstat()
+    except OSError as exc:
+        raise CertificationError("tracked JAA-00 certification evidence is unavailable") from exc
+    require(stat.S_ISREG(evidence_stat.st_mode) and not stat.S_ISLNK(evidence_stat.st_mode),
+            "tracked JAA-00 certification evidence is not a regular file")
+
+    relative_evidence = JAA00_EVIDENCE.as_posix()
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative_evidence],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    unchanged = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", relative_evidence],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    require(tracked.returncode == 0 and unchanged.returncode == 0,
+            "tracked JAA-00 certification evidence must be tracked and unchanged")
+    require(hash_file(evidence_path) == JAA00_EVIDENCE_SHA256,
+            "tracked JAA-00 certification evidence bytes are not trusted")
+
+    try:
+        import yaml
+        evidence = yaml.safe_load(evidence_path.read_bytes())
+        database_evidence = evidence["databases"]["career_pipeline"]
+        evidence_repository = evidence["repository"]
+        evidence_certification = evidence["revision_binding"]["certification"]
+        receipt_content = receipt_document["content"]
+        receipt_repository = receipt_content["repository"]
+        receipt_certification = receipt_content["certification"]
+        receipt_database = receipt_content["databases"]["career_pipeline"]["frozen_snapshot"]
+    except (OSError, KeyError, TypeError, yaml.YAMLError) as exc:
+        raise CertificationError("tracked JAA-00 certification evidence is invalid") from exc
+    require(evidence.get("evidence") == "JAA-00:first-adopted-frozen-baseline"
+            and evidence.get("publication", {}).get("verification")
+            == "fail-closed-independent-review"
+            and evidence.get("reconciliation", {}).get("result") == "ok",
+            "tracked JAA-00 certification evidence is not independently verified")
+    require(evidence.get("receipt", {}).get("content_sha256") == JAA00_RECEIPT_CONTENT_SHA256,
+            "tracked JAA-00 evidence does not bind the trusted receipt")
+    require(receipt_document.get("content_sha256") == JAA00_RECEIPT_CONTENT_SHA256
+            and receipt_repository == evidence_repository
+            and receipt_certification == evidence_certification,
+            "trusted JAA-00 receipt provenance disagrees with certification evidence")
+    require(database_evidence.get("snapshot_sha256") == JAA00_CAREER_PIPELINE_SHA256
+            and database_evidence.get("snapshot_sha256") == hash_file(baseline)
+            and receipt_database.get("sha256") == database_evidence.get("snapshot_sha256")
+            and receipt_database.get("table_counts") == database_evidence.get("counts")
+            and database_evidence.get("counts", {}).get("pipeline_jobs") == EXPECTED_COUNTS["pipeline_jobs"]
+            and database_evidence.get("counts", {}).get("pipeline_events") == EXPECTED_COUNTS["pipeline_events"]
+            and database_evidence.get("integrity_check") == ["ok"],
+            "tracked JAA-00 certification evidence does not bind the frozen baseline")
+
+    evidence_revision = evidence_repository.get("revision")
+    require(evidence_repository.get("label") == "canonical-repository"
+            and isinstance(evidence_revision, str) and len(evidence_revision) == 40,
+            "tracked JAA-00 certification evidence has invalid repository provenance")
+    ancestry = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", evidence_revision, "HEAD"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    require(ancestry.returncode == 0,
+            "tracked JAA-00 certification revision is not an ancestor of the current source")
+    return {
+        "status": "certified",
+        "receipt_provenance": {
+            "contract": "jaa-00-exact-evidence-trust-anchor/v1",
+        },
+        "evidence_sha256": JAA00_EVIDENCE_SHA256,
+        "receipt_file_sha256": JAA00_RECEIPT_FILE_SHA256,
+        "certified_revision": evidence_revision,
+    }
 
 
 def require_unlinked_output_path(path: Path) -> None:
@@ -165,7 +229,7 @@ def certify(args: argparse.Namespace) -> Path:
 
     baseline_hash_before = hash_file(baseline)
     receipt, receipt_file_hash_before = load_migration_receipt(migration_receipt)
-    jaa00_review = require_trusted_jaa00_receipt(migration_receipt, baseline)
+    jaa00_review = require_trusted_jaa00_receipt(migration_receipt, baseline, receipt)
     frozen = receipt["content"]["databases"]["career_pipeline"]["frozen_snapshot"]
     require(frozen["sha256"] == baseline_hash_before, "baseline hash disagrees with migration receipt")
     require({name: int(frozen["table_counts"][name]) for name in EXPECTED_COUNTS} == EXPECTED_COUNTS,
@@ -218,6 +282,9 @@ def certify(args: argparse.Namespace) -> Path:
             "status": jaa00_review["status"],
             "receipt_content_sha256": receipt["content_sha256"],
             "contract": jaa00_review["receipt_provenance"]["contract"],
+            "evidence_sha256": jaa00_review["evidence_sha256"],
+            "receipt_file_sha256": jaa00_review["receipt_file_sha256"],
+            "certified_revision": jaa00_review["certified_revision"],
         },
         "source_content_revision": revision,
         "source_content_revision_contract": source_content_revision_contract(),
@@ -250,10 +317,10 @@ def certify(args: argparse.Namespace) -> Path:
             "migration_receipt_content_sha256": receipt["content_sha256"],
         },
         "migration_receipt_trust": {
-            "contract": "jaa-00-legacy-content-addressed-review/v1",
-            "content_sha256": LEGACY_JAA00_CONTENT_SHA256,
-            "file_sha256": LEGACY_JAA00_RECEIPT_SHA256,
-            "adoption_revision": LEGACY_JAA00_ADOPTION_REVISION,
+            "contract": "jaa-00-exact-evidence-trust-anchor/v1",
+            "content_sha256": JAA00_RECEIPT_CONTENT_SHA256,
+            "file_sha256": receipt_file_hash_before,
+            "certified_revision": jaa00_review["certified_revision"],
         },
         "migration_versions": versions,
         "baseline_integrity_check": baseline_before["integrity_check"],

@@ -22,7 +22,7 @@ from career_automation.database import SCHEMA
 ROOT = Path(__file__).resolve().parent
 CERTIFIER = ROOT / "scripts" / "certify_jaa01_runtime.py"
 REPRODUCER = ROOT / "scripts" / "reproduce_jaa01_terra_rejection.py"
-MIGRATION_CONTENT_HASH = "4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66"
+MIGRATION_CONTENT_HASH = "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
 
 
 def _sha256(path: Path) -> str:
@@ -37,9 +37,12 @@ def _jaa01_receipt() -> Path:
 
 def _runtime() -> Path:
     for parent in ROOT.parents:
-        candidate = parent / "state" / "runtime" / "job-application-baseline-20260720-v2"
-        if candidate.is_dir():
-            return candidate
+        runtime = parent / "state" / "runtime"
+        matches = sorted(runtime.glob(
+            f"jaa00-v2-*/receipts/migration-{MIGRATION_CONTENT_HASH}.json"
+        )) if runtime.is_dir() else []
+        if len(matches) == 1:
+            return matches[0].parents[1]
     pytest.fail("frozen JAA-00 runtime is unavailable")
 
 
@@ -173,10 +176,18 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert document["observed_counts"]["baseline_before"] == {"pipeline_jobs": 462, "pipeline_events": 924}
     assert document["migration_versions"] == [1]
     assert document["migration_receipt_trust"] == {
-        "contract": "jaa-00-legacy-content-addressed-review/v1",
+        "contract": "jaa-00-exact-evidence-trust-anchor/v1",
         "content_sha256": MIGRATION_CONTENT_HASH,
         "file_sha256": receipt_hash_before,
-        "adoption_revision": "d74c77cac3c121cd6c09f0f8b8f64cd46014e4ec",
+        "certified_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
+    }
+    assert document["jaa00_trust"] == {
+        "status": "certified",
+        "receipt_content_sha256": MIGRATION_CONTENT_HASH,
+        "receipt_file_sha256": receipt_hash_before,
+        "contract": "jaa-00-exact-evidence-trust-anchor/v1",
+        "evidence_sha256": "bf4a9726c9d0608f21fadcf2591bcc8ba92516cca9659288fc28e7b9452ed161",
+        "certified_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
     }
     assert document["scenario"]["replay_equal"] is True
     assert "live_sources" not in document
@@ -197,14 +208,20 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert "content-addressed evidence file mismatch" in fabricated.stderr
     assert document_path.read_text(encoding="utf-8") == "{}"
 
-    changed_database = tmp_path / "changed.sqlite3"
+    changed_root = tmp_path / "changed-runtime"
+    changed_database = changed_root / "databases" / "career_pipeline.sqlite3"
+    changed_receipt = changed_root / "receipts" / receipt.name
+    changed_database.parent.mkdir(parents=True)
+    changed_receipt.parent.mkdir(parents=True)
     shutil.copyfile(database, changed_database)
+    shutil.copyfile(receipt, changed_receipt)
     with sqlite3.connect(changed_database) as connection:
         connection.execute("PRAGMA user_version=42")
     hash_changed = _run(
-        changed_database, receipt, tmp_path / "negative-hash", clean_certifier_root,
+        changed_database, changed_receipt, tmp_path / "negative-hash", clean_certifier_root,
     )
-    assert hash_changed.returncode == 2 and "baseline hash disagrees" in hash_changed.stderr
+    assert hash_changed.returncode == 2
+    assert "JAA-00 certification evidence does not bind the frozen baseline" in hash_changed.stderr
 
     fabricated_database = tmp_path / "fabricated.sqlite3"
     _make_legacy_database(fabricated_database)
@@ -216,16 +233,40 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert fabricated.returncode == 2
     assert "independently trusted JAA-00 receipt" in fabricated.stderr
 
+    reformatted_root = tmp_path / "reformatted-runtime"
+    reformatted_database = reformatted_root / "databases" / "career_pipeline.sqlite3"
+    reformatted_receipt = reformatted_root / "receipts" / receipt.name
+    reformatted_database.parent.mkdir(parents=True)
+    reformatted_receipt.parent.mkdir(parents=True)
+    shutil.copyfile(database, reformatted_database)
+    reformatted_receipt.write_text(
+        json.dumps(json.loads(receipt.read_text(encoding="utf-8")), indent=2),
+        encoding="utf-8",
+    )
+    reformatted = _run(
+        reformatted_database, reformatted_receipt, tmp_path / "negative-reformatted",
+        clean_certifier_root,
+    )
+    assert reformatted.returncode == 2
+    assert "receipt bytes do not match" in reformatted.stderr
+
     altered = tmp_path / "altered-receipt.json"
     altered.write_text(receipt.read_text(encoding="utf-8").replace("online", "forged", 1), encoding="utf-8")
     receipt_changed = _run(database, altered, tmp_path / "negative-receipt", clean_certifier_root)
     assert receipt_changed.returncode == 2 and "content hash mismatch" in receipt_changed.stderr
 
-    corrupt = tmp_path / "corrupt.sqlite3"
+    corrupt_root = tmp_path / "corrupt-runtime"
+    corrupt = corrupt_root / "databases" / "career_pipeline.sqlite3"
+    corrupt_receipt = corrupt_root / "receipts" / receipt.name
+    corrupt.parent.mkdir(parents=True)
+    corrupt_receipt.parent.mkdir(parents=True)
     corrupt.write_bytes(b"not a sqlite database")
-    corrupt_result = _run(corrupt, receipt, tmp_path / "negative-corrupt", clean_certifier_root)
+    shutil.copyfile(receipt, corrupt_receipt)
+    corrupt_result = _run(
+        corrupt, corrupt_receipt, tmp_path / "negative-corrupt", clean_certifier_root,
+    )
     assert corrupt_result.returncode == 2
-    assert "baseline hash disagrees" in corrupt_result.stderr
+    assert "JAA-00 certification evidence does not bind the frozen baseline" in corrupt_result.stderr
 
 
 def test_runtime_certifier_rejects_symlinked_evidence_directory_without_writing_receipt(
@@ -282,10 +323,18 @@ def test_checked_in_jaa01_evidence_is_historical_content_addressed_and_path_free
     assert document["scenario"]["replay_equal"] is True
     assert document["scenario"]["identical_retry_unchanged"] is True
     assert document["migration_receipt_trust"] == {
-        "contract": "jaa-00-legacy-content-addressed-review/v1",
+        "contract": "jaa-00-exact-evidence-trust-anchor/v1",
         "content_sha256": MIGRATION_CONTENT_HASH,
         "file_sha256": _sha256(receipt),
-        "adoption_revision": "d74c77cac3c121cd6c09f0f8b8f64cd46014e4ec",
+        "certified_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
+    }
+    assert document["jaa00_trust"] == {
+        "status": "certified",
+        "receipt_content_sha256": MIGRATION_CONTENT_HASH,
+        "receipt_file_sha256": _sha256(receipt),
+        "contract": "jaa-00-exact-evidence-trust-anchor/v1",
+        "evidence_sha256": "bf4a9726c9d0608f21fadcf2591bcc8ba92516cca9659288fc28e7b9452ed161",
+        "certified_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
     }
     # A checked-in receipt records what its historical certification observed.
     # Present mutable-source state belongs exclusively to JAA-00 recertification,

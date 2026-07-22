@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -21,7 +22,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent
 DOMAIN = b"jaa-source-content-revision-v2\0"
 EXCLUDED_PREFIXES = (b"runtime_evidence/",)
-MIGRATION_CONTENT_HASH = "4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66"
+MIGRATION_CONTENT_HASH = "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
 
 
 def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
@@ -66,9 +67,12 @@ def _independent_source_revision(root: Path) -> str:
 
 def _runtime() -> Path:
     for parent in ROOT.parents:
-        candidate = parent / "state" / "runtime" / "job-application-baseline-20260720-v2"
-        if candidate.is_dir():
-            return candidate
+        runtime = parent / "state" / "runtime"
+        matches = sorted(runtime.glob(
+            f"jaa00-v2-*/receipts/migration-{MIGRATION_CONTENT_HASH}.json"
+        )) if runtime.is_dir() else []
+        if len(matches) == 1:
+            return matches[0].parents[1]
     pytest.fail("frozen JAA-00 runtime is unavailable")
 
 
@@ -81,6 +85,16 @@ def isolated_repository(tmp_path: Path) -> Path:
     assert completed.returncode == 0, completed.stderr
     _git(clone, "config", "user.email", "jaa01-test@example.test")
     _git(clone, "config", "user.name", "JAA-01 test")
+    certifier = Path("scripts/certify_jaa01_runtime.py")
+    shutil.copyfile(ROOT / certifier, clone / certifier)
+    changed = subprocess.run(
+        ("git", "diff", "--quiet", "--", certifier.as_posix()), cwd=clone, check=False,
+    )
+    if changed.returncode == 1:
+        _git(clone, "add", certifier.as_posix())
+        _git(clone, "commit", "-m", "test current JAA-01 certifier")
+    else:
+        assert changed.returncode == 0
     return clone
 
 
@@ -125,6 +139,26 @@ def _strings(value: object) -> list[str]:
 def test_fresh_receipt_matches_independent_current_tree_revision(isolated_repository: Path) -> None:
     receipt, document = _certify(isolated_repository)
     _assert_source_binding(isolated_repository, receipt, document)
+
+
+def test_certifier_rejects_dirty_tracked_jaa00_trust_evidence(
+    isolated_repository: Path,
+) -> None:
+    trust_evidence = isolated_repository / "runtime_evidence" / "JAA-00-online-snapshot.yaml"
+    trust_evidence.write_bytes(trust_evidence.read_bytes() + b"\n# untrusted mutation\n")
+    runtime = _runtime()
+    database = runtime / "databases" / "career_pipeline.sqlite3"
+    receipt = runtime / "receipts" / f"migration-{MIGRATION_CONTENT_HASH}.json"
+
+    completed = subprocess.run(
+        (sys.executable, "scripts/certify_jaa01_runtime.py", "--baseline-database", str(database),
+         "--migration-receipt", str(receipt), "--evidence-directory", "evidence"),
+        cwd=isolated_repository, text=True, capture_output=True, check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "JAA-00 certification evidence must be tracked and unchanged" in completed.stderr
+    assert not list((isolated_repository / "evidence").glob("*.json"))
 
 
 @pytest.mark.parametrize("relative", [
