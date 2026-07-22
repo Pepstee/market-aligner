@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -17,6 +18,56 @@ ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "runtime_evidence" / "JAA-00-online-snapshot.yaml"
 RECEIPT_HASH = "4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66"
 RUNTIME_NAME = "job-application-baseline-20260720-v2"
+
+
+def test_tracked_identity_documents_are_credential_free_and_consistent() -> None:
+    """Reject credential material or identity drift in the published JAA-00 record."""
+    marker_path = ROOT / "canonical-repository.json"
+    baseline_path = ROOT / "SOURCE_BASELINE.md"
+    tracked_paths = (marker_path, baseline_path, EVIDENCE)
+    texts = {path: path.read_text(encoding="utf-8") for path in tracked_paths}
+
+    credential_value_patterns = (
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        r"(?i)://[^/\s:@]+:[^/\s@]+@",
+        r"(?i)(?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret)"
+        r"\s*[:=]\s*[\"']?(?!false\b|true\b|null\b|none\b|\[\])[^\s,}\]]{8,}",
+    )
+    for path, text in texts.items():
+        for pattern in credential_value_patterns:
+            assert re.search(pattern, text) is None, f"credential value pattern in {path.name}"
+
+    marker = json.loads(texts[marker_path])
+    canonical = marker["canonical_repository"]
+    original = marker["original_project"]
+    historical = marker["historical_copies"]
+    assert canonical["role"] == "neutral-versioned-successor"
+    assert original["canonical"] is False
+    assert original["status"] == "preserved-recoverable-source"
+    assert historical["canonical"] is False
+    assert historical["status"] == "historical-only"
+    assert historical["identities"] == [
+        "giga-user/market-aligner:historical-copy-1",
+        "giga-user/market-aligner:historical-copy-2",
+    ]
+
+    baseline = texts[baseline_path]
+    assert "neutral successor repository" in baseline
+    assert "recoverable, unmodified, explicitly non-canonical source" in baseline
+    assert "Both known `giga-user/market-aligner` copies are historical only" in baseline
+
+    evidence = _evidence_document(EVIDENCE)
+    assert evidence["repository"]["label"] == "canonical-repository"
+    assert evidence["canonical_adoption"] == {
+        "repository_role": canonical["role"],
+        "original_project_canonical": original["canonical"],
+        "original_project_recoverable": True,
+        "historical_market_aligner_copies_canonical": historical["canonical"],
+    }
+    assert evidence["secret_policy"] == {
+        "references_only": True,
+        "values_persisted": False,
+    }
 
 
 def _runtime_root() -> Path:
