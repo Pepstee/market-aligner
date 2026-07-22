@@ -12,6 +12,7 @@ from .core import (
     adopt,
     adopt_online,
     independent_review,
+    publish_runtime_evidence,
     recertify_sources,
     reconcile,
     rollback_manifest,
@@ -47,6 +48,11 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--receipt", required=True)
         command.add_argument("--data-root", required=True)
         command.add_argument("--repository", required=True)
+    publish = sub.add_parser("publish-evidence", help="verify and publish deterministic JAA-00 evidence")
+    publish.add_argument("--receipt", type=Path, required=True)
+    publish.add_argument("--data-root", type=Path, required=True)
+    publish.add_argument("--repository", type=Path, required=True)
+    publish.add_argument("--output", type=Path)
     return parser
 
 
@@ -68,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
             result = reconcile(args.receipt, args.data_root)
         elif args.command == "rollback-manifest":
             result = rollback_manifest(args.receipt, args.data_root)
+        elif args.command == "publish-evidence":
+            result = {"status": "published", "path": str(publish_runtime_evidence(
+                args.receipt, args.data_root, args.repository, args.output))}
         else:
             result = independent_review(
                 args.receipt, args.data_root, repository=args.repository

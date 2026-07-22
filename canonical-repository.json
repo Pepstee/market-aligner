@@ -1,14 +1,25 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "canonical_repository": {
     "id": "market-aligner",
     "product_name": "Market Aligner",
     "status": "active",
-    "marker": "canonical-repository.json"
+    "marker": "canonical-repository.json",
+    "role": "neutral-versioned-successor",
+    "identity_rule": "canonical only at a checked-out revision that passes fail-closed marker and source verification"
+  },
+  "original_project": {
+    "canonical": false,
+    "status": "preserved-recoverable-source",
+    "mutation_policy": "never modified by adoption or evidence publication",
+    "recovery_reference": "operator-supplied source root recorded by the adoption receipt"
   },
   "historical_copies": {
     "canonical": false,
-    "discovery": "operator_supplied_only"
+    "status": "historical-only",
+    "identities": ["giga-user/market-aligner:historical-copy-1", "giga-user/market-aligner:historical-copy-2"],
+    "discovery": "operator_supplied_only",
+    "prohibition": "not canonical and not valid for certification, publication, or deployment"
   },
   "brownfield_import_contract": {
     "implicit_host_paths": false,

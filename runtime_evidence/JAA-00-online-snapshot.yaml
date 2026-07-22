@@ -1,4 +1,18 @@
 evidence: JAA-00:first-adopted-frozen-baseline
+publication:
+  format: jaa-00-deterministic-evidence/v1
+  stability: byte-stable-for-unchanged-verified-inputs
+  volatile_fields: []
+  verification: fail-closed-independent-review
+  replacement: atomic-after-successful-verification
+canonical_adoption:
+  repository_role: neutral-versioned-successor
+  original_project_canonical: false
+  original_project_recoverable: true
+  historical_market_aligner_copies_canonical: false
+secret_policy:
+  references_only: true
+  values_persisted: false
 receipt:
   label: runtime:job-application-baseline-20260720-v2:receipt
   content_sha256: 4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66

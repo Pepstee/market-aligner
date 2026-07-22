@@ -11,6 +11,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import stat
@@ -740,10 +741,20 @@ def _validate_canonical_marker(repository: Path) -> None:
         contract = marker["brownfield_import_contract"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise AdoptionError("canonical repository marker is missing or invalid") from exc
-    if (marker.get("schema_version") != 1 or
+    schema_version = marker.get("schema_version")
+    neutral_identity_valid = (
+        schema_version == 2 and
+        identity.get("role") == "neutral-versioned-successor" and
+        marker.get("original_project", {}).get("canonical") is False and
+        marker.get("original_project", {}).get("status") == "preserved-recoverable-source" and
+        marker.get("historical_copies", {}).get("canonical") is False and
+        marker.get("historical_copies", {}).get("status") == "historical-only"
+    )
+    if (schema_version not in (1, 2) or
             identity.get("id") != CANONICAL_REPOSITORY_ID or
             identity.get("product_name") != "Market Aligner" or
             identity.get("status") != "active" or
+            (schema_version == 2 and not neutral_identity_valid) or
             contract.get("implicit_host_paths") is not False or
             contract.get("required_operator_paths") != [
                 "source_root", "runtime_data_root", "repository_root"
@@ -1214,3 +1225,159 @@ def independent_review(receipt_path: str | Path, data_root: str | Path,
         },
         "pre_adoption_test_observation": dict(PRE_ADOPTION_TEST_OBSERVATION),
     }
+
+
+_SAFE_EVIDENCE_TEXT = re.compile(r"^[A-Za-z0-9_./:>=+-]+$")
+
+
+def _evidence_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        if any(isinstance(item, (dict, list)) for item in value):
+            raise AdoptionError("evidence lists must contain scalar values")
+        return "[" + ", ".join(_evidence_scalar(item) for item in value) + "]"
+    text = str(value)
+    if text and _SAFE_EVIDENCE_TEXT.fullmatch(text) and text.lower() not in {"null", "true", "false"}:
+        return text
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _render_evidence(value: Mapping[str, Any], indent: int = 0) -> str:
+    lines: list[str] = []
+    for key, item in value.items():
+        prefix = " " * indent + f"{key}:"
+        if isinstance(item, Mapping):
+            lines.append(prefix)
+            lines.extend(_render_evidence(item, indent + 2).splitlines())
+        else:
+            lines.append(prefix + " " + _evidence_scalar(item))
+    return "\n".join(lines)
+
+
+def publish_runtime_evidence(
+    receipt_path: Path, data_root: Path, repository: Path, output_path: Path | None = None
+) -> Path:
+    """Verify fail-closed before atomically publishing byte-stable JAA-00 evidence."""
+    repository = repository.resolve()
+    review = independent_review(receipt_path, data_root, repository)
+    receipt = _load_receipt(receipt_path)
+    content = receipt["content"]
+    databases = content.get("databases")
+    if content.get("format") != "jaa-00-online-snapshot-receipt/v2" or not isinstance(databases, dict) \
+            or set(databases) != set(BASELINES):
+        raise AdoptionError("evidence publication requires a valid online adoption v2 receipt")
+    references = content.get("secret_references", [])
+    if not isinstance(references, list) or any(not isinstance(item, str)
+            or not _SAFE_EVIDENCE_TEXT.fullmatch(item) for item in references):
+        raise AdoptionError("secret references must be safe symbolic names")
+    locks: dict[str, Any] = {}
+    for relative, role in (("requirements-test.lock", "fully-pinned-lock"),
+            ("requirements-scrapling-full.txt", "pinned-runtime-input"),
+            ("pyproject.toml", "python-project-metadata")):
+        path = repository / relative
+        if not path.is_file():
+            raise AdoptionError(f"required dependency record is missing: {relative}")
+        locks[relative] = {"sha256": _sha256(path), "role": role}
+    db_evidence: dict[str, Any] = {}
+    capture_evidence: dict[str, Any] = {}
+    for name in BASELINES:
+        record = databases[name]
+        snapshot = record["frozen_snapshot"]
+        db_evidence[name] = {
+            "source_label": record["source"]["label"],
+            "destination_label": record["destination"]["label"],
+            "snapshot_sha256": snapshot["sha256"],
+            "snapshot_bytes": snapshot["bytes"],
+            "schema_sha256": snapshot["schema_sha256"],
+            "schema_objects": snapshot["schema_objects"],
+            "counts": snapshot["table_counts"],
+            "integrity_check": snapshot["integrity_check"],
+        }
+        if "historical_observation" in record:
+            observation = record["historical_observation"]
+            db_evidence[name]["historical_observation"] = {
+                "status": "superseded-by-frozen-snapshot",
+                "snapshot_sha256": observation["observed_sha256"],
+                "schema_sha256": observation["observed_schema_sha256"],
+                "schema_objects": observation["observed_schema_objects"],
+                "table_row_counts": observation["observed_table_counts"],
+            }
+        capture = record["capture"]
+        capture_record: dict[str, Any] = {
+            "main_content_unchanged_during_capture": capture["main_content_unchanged"],
+            "wal_content_unchanged_during_capture": capture["wal_content_unchanged"],
+            "drift_observed": capture["drift_observed"],
+        }
+        if capture.get("changed_components"):
+            capture_record["changed_components"] = capture["changed_components"]
+        shm_observation = capture.get("shm_observation")
+        if isinstance(shm_observation, Mapping) and shm_observation.get("scope"):
+            capture_record["shm_comparison"] = shm_observation["scope"]
+        capture_evidence[name] = capture_record
+    reconciled = review["database_reconciliation"]
+    revision = review["canonical_repository"]["current_revision"]
+    evidence = {
+        "evidence": "JAA-00:first-adopted-frozen-baseline",
+        "publication": {"format": "jaa-00-deterministic-evidence/v1",
+            "stability": "byte-stable-for-unchanged-verified-inputs", "volatile_fields": [],
+            "verification": "fail-closed-independent-review", "replacement": "atomic-after-successful-verification"},
+        "receipt": {"label": f"runtime:{data_root.name}:receipt", "content_sha256": receipt["content_sha256"]},
+        "repository": {"label": "canonical-repository", "revision": revision},
+        "revision_binding": {"source_revision": content["source_revision"],
+            "source_inventory": content["inventory"], "certified_revision": revision,
+            "certification": content["certification"]},
+        "reconciliation": {
+            "command": "python -m baseline_adoption.cli reconcile --receipt <receipt> --data-root <runtime>",
+            "result": reconciled["status"],
+            "receipt_content_sha256": reconciled["receipt_content_sha256"],
+            "receipt_filename_matches_content_sha256": True,
+            "adopted_database_hashes_match": True,
+            "integrity_check": "ok",
+            "counts_match": True,
+            "schema_matches": True,
+            "adopted_snapshots_sidecar_free": True,
+        },
+        "databases": db_evidence,
+        "capture_and_drift_semantics": {"method": "sqlite-online-backup",
+            "adopted_snapshot": "frozen", "live_source_after_capture": "may_continue_changing",
+            "source_open": "read-only-query-only", "source_write_operations": "none",
+            **capture_evidence},
+        "inventory": review["secret_free_inventory"],
+        "runtime": {"required_python": review["runtime_prerequisites"]["required_python"],
+            "required_distributions": review["runtime_prerequisites"]["required_distributions"],
+            "observed": content["runtime"]},
+        "dependency_records": locks,
+        "host_prerequisites": {"python": ">=3.10", "sqlite": "online-backup-and-read-only-uri-support",
+            "filesystem": "same-directory-atomic-replace-and-fsync",
+            "source_access": "read-only-files-and-git-object-database"},
+        "preservation": {"original_project": {"canonical": False, "recoverable": True, "mutated": False},
+            "historical_market_aligner_copies": {"canonical": False, "count": 2},
+            "adopted_sources": [databases[name]["source"]["label"] for name in BASELINES]},
+        "secret_references": {"names": references, "values_persisted": False},
+        "rollback": {"precondition": "reconcile-must-pass-immediately-before-removal",
+            "preserved_source_labels": [databases[name]["rollback"]["preserved_source_label"] for name in BASELINES],
+            "removable_destination_labels": [databases[name]["rollback"]["remove_destination_label"] for name in BASELINES]},
+    }
+    payload = (_render_evidence(evidence) + "\n").encode()
+    destination = (output_path or repository / "runtime_evidence" / "JAA-00-online-snapshot.yaml").resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if temporary.read_bytes() != payload:
+            raise AdoptionError("evidence staging validation failed")
+        os.replace(temporary, destination)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return destination

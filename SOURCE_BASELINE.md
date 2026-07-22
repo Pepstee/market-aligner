@@ -161,3 +161,9 @@ retroactively replace the 20 July 2026 observation.
 - `profiler/data/` contains private candidate material and is runtime input, not product code.
 - `scraper/data_overnight/raw_cache/` and `outputs/` are generated evidence stores.
 - Credential values may only be referenced by environment-variable or credential-broker key.
+
+## Canonical identity and deterministic certification evidence
+
+Only this neutral successor repository, at a checked-out revision that passes fail-closed marker, source, inventory, runtime, database, preservation, and rollback verification, is canonical. The original project remains a recoverable, unmodified, explicitly non-canonical source. Both known `giga-user/market-aligner` copies are historical only and cannot be certification, publication, deployment, or canonical sources.
+
+`python -m baseline_adoption.cli publish-evidence --receipt <receipt> --data-root <runtime> --repository <repository>` publishes `runtime_evidence/JAA-00-online-snapshot.yaml`. It first completes independent review, so failure leaves existing evidence untouched; success stages, validates, and atomically replaces it. The evidence binds revisions, inventory, SQLite snapshots, dependency-record hashes, Python runtime and distributions, host prerequisites, preservation, rollback, and symbolic secret references. It contains no secret values or paths, declares no volatile fields, and is byte-stable while verified inputs are unchanged.
