@@ -88,6 +88,9 @@ PRE_ADOPTION_TEST_OBSERVATION = {
 LEGACY_JAA00_CONTENT_SHA256 = (
     "4f2dddaab89ea49ef991ad8a4d8598c03062c4b3ecbf11f85451ab9239a8ec66"
 )
+LEGACY_JAA00_RECEIPT_SHA256 = (
+    "0b64be50bffbbafa5158e4582720ecf25e0c358095c7d7f186858f926b06b7f0"
+)
 LEGACY_JAA00_ADOPTION_REVISION = "d74c77cac3c121cd6c09f0f8b8f64cd46014e4ec"
 LEGACY_JAA00_EVIDENCE = Path("runtime_evidence/JAA-00-online-snapshot.yaml")
 _FORBIDDEN_TRACKED_DATA_PREFIXES = (
@@ -1181,6 +1184,7 @@ def rollback_manifest(receipt_path: str | Path, data_root: str | Path) -> dict[s
 def _verify_legacy_jaa00_compatibility(
     receipt_path: Path,
     receipt: dict[str, Any],
+    data_root: str | Path,
     repository: Path,
     current_revision: str,
 ) -> dict[str, Any]:
@@ -1188,8 +1192,27 @@ def _verify_legacy_jaa00_compatibility(
     content = receipt["content"]
     if receipt["content_sha256"] != LEGACY_JAA00_CONTENT_SHA256:
         raise AdoptionError("unsealed legacy receipts are not certifiable")
-    if receipt_path.read_bytes() != _canonical_bytes(receipt) + b"\n":
-        raise AdoptionError("legacy JAA-00 receipt bytes are not canonical")
+    expected_path = (
+        Path(data_root).resolve()
+        / "receipts"
+        / f"migration-{LEGACY_JAA00_CONTENT_SHA256}.json"
+    )
+    supplied_path = Path(os.path.abspath(receipt_path))
+    if supplied_path != expected_path:
+        raise AdoptionError("legacy JAA-00 receipt is not the preserved migration receipt")
+    try:
+        receipt_stat = supplied_path.lstat()
+        resolved_receipt = supplied_path.resolve(strict=True)
+    except OSError as exc:
+        raise AdoptionError("legacy JAA-00 receipt is unavailable") from exc
+    if (
+        stat.S_ISLNK(receipt_stat.st_mode)
+        or not stat.S_ISREG(receipt_stat.st_mode)
+        or resolved_receipt != expected_path
+    ):
+        raise AdoptionError("legacy JAA-00 receipt is not a regular preserved file")
+    if _hash_file(supplied_path) != LEGACY_JAA00_RECEIPT_SHA256:
+        raise AdoptionError("legacy JAA-00 preserved receipt bytes are invalid")
     repository_record = content.get("repository")
     if not isinstance(repository_record, dict):
         raise AdoptionError("legacy JAA-00 repository identity is missing")
@@ -1301,7 +1324,7 @@ def independent_review(receipt_path: str | Path, data_root: str | Path,
     content = receipt["content"]
     if receipt["content_sha256"] == LEGACY_JAA00_CONTENT_SHA256:
         receipt_provenance = _verify_legacy_jaa00_compatibility(
-            Path(receipt_path), receipt, repository_path, current_revision
+            Path(receipt_path), receipt, data_root, repository_path, current_revision
         )
     else:
         _verify_certification_binding(content, repository_path)
