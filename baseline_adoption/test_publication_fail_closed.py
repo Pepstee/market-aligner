@@ -148,6 +148,64 @@ def test_public_cli_publishes_v2_receipt_with_bound_hashes_and_dependencies(
         assert record["bytes"] == (repository / relative).stat().st_size
 
 
+def test_tracked_publication_is_stable_after_its_own_evidence_commit(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path],
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    output = repository / "runtime_evidence" / "JAA-00-online-snapshot.yaml"
+    first_result = _cli(
+        repository, contract, "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository),
+    )
+    assert first_result.returncode == 0, first_result.stderr
+    first = output.read_bytes()
+    receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
+    capture_revision = receipt_document["content"]["repository"]["revision"]
+
+    subprocess.run(["git", "add", str(output.relative_to(repository))], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "track generated evidence"],
+        cwd=repository,
+        check=True,
+    )
+    current_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    assert current_revision != capture_revision
+
+    second_result = _cli(
+        repository, contract, "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository),
+    )
+    assert second_result.returncode == 0, second_result.stderr
+    assert output.read_bytes() == first
+    evidence = yaml.safe_load(first)
+    assert evidence["repository"]["revision"] == capture_revision
+    assert evidence["revision_binding"]["certified_revision"] == capture_revision
+
+    source_file = repository / "baseline_adoption" / "cli.py"
+    source_file.write_text(
+        source_file.read_text(encoding="utf-8") + "\n# committed source drift\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", str(source_file.relative_to(repository))], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "change product source"],
+        cwd=repository,
+        check=True,
+    )
+    rejected = _cli(
+        repository, contract, "publish-evidence", "--receipt", str(receipt),
+        "--data-root", str(data), "--repository", str(repository),
+    )
+    assert rejected.returncode == 2
+    assert "source revision" in rejected.stderr.lower() or "inventory" in rejected.stderr.lower()
+    assert output.read_bytes() == first
+
+
 def test_dirty_tracked_source_cannot_publish_certification_evidence(
     publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path], tmp_path: Path,
 ) -> None:

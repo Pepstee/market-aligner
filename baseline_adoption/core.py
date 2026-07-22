@@ -600,6 +600,25 @@ def _repository_revision(repository: Path) -> str:
     return revision
 
 
+def _require_revision_ancestor(repository: Path, recorded: object, current: str) -> str:
+    """Accept a receipt's capture commit only when Git proves it precedes this checkout."""
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{40}", recorded):
+        raise AdoptionError("receipt repository revision is missing or malformed")
+    if recorded == current:
+        return recorded
+    ancestry = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", recorded, current],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+    )
+    if ancestry.returncode == 1:
+        raise AdoptionError("receipt repository revision is not an ancestor")
+    if ancestry.returncode != 0:
+        raise AdoptionError("receipt repository ancestry proof is unavailable")
+    return recorded
+
+
 def _source_revision_binding(repository: Path) -> dict[str, Any]:
     """Return the canonical, path-free source revision contract."""
     try:
@@ -688,8 +707,10 @@ def _verify_certification_binding(content: Mapping[str, Any], repository: Path) 
 
     repository = repository.resolve()
     recorded_repository = content["repository"]
-    if recorded_repository.get("revision") != _repository_revision(repository):
-        raise AdoptionError("receipt repository revision is stale or mismatched")
+    current_revision = _repository_revision(repository)
+    _require_revision_ancestor(
+        repository, recorded_repository.get("revision"), current_revision,
+    )
     if recorded_repository.get("identity", recorded_repository.get("label")) != "canonical-repository":
         raise AdoptionError("receipt repository identity is mismatched")
     current_source_revision, current_inventory = _repository_content_bindings(repository)
@@ -1477,7 +1498,11 @@ def publish_runtime_evidence(
             capture_record["shm_comparison"] = shm_observation["scope"]
         capture_evidence[name] = capture_record
     reconciled = review["database_reconciliation"]
-    revision = review["canonical_repository"]["current_revision"]
+    # The generated evidence is committed after publication, so embedding the checkout's current
+    # HEAD would make the tracked file self-invalidating.  Bind the receipt's capture commit here;
+    # independent_review separately proves that commit is an ancestor and that every tracked,
+    # non-generated source byte still matches the receipt's content revision and inventory.
+    revision = content["repository"]["revision"]
     evidence = {
         "evidence": "JAA-00:first-adopted-frozen-baseline",
         "canonical_adoption": {
