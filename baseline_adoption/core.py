@@ -541,9 +541,21 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
     watched_files = [path]
     if wal.exists():
         watched_files.append(wal)
-    with _MutationBoundary(watched_files, directories=[path.parent]) as boundary:
-        evidence = _recertify_source_observed(path, spec)
-        boundary.assert_clean(f"{spec.name}: source mutation boundary")
+    try:
+        with _MutationBoundary(watched_files, directories=[path.parent]) as boundary:
+            evidence = _recertify_source_observed(path, spec)
+            boundary.assert_clean(f"{spec.name}: source mutation boundary")
+    except AdoptionError as exc:
+        # The source may disappear after the admission checks but before kqueue
+        # opens its descriptor. Preserve the public fail-closed diagnostic for
+        # that check-to-arm race instead of leaking a generic watcher error.
+        if not path.exists():
+            raise AdoptionError(f"{spec.name}: source does not exist") from exc
+        if not path.is_file() or path.is_symlink():
+            raise AdoptionError(
+                f"{spec.name}: source must be a regular, non-symlink file"
+            ) from exc
+        raise
     evidence["content_comparison"]["kernel_mutation_boundary"] = {
         "provider": "macos-kqueue-evfilt-vnode",
         "main_wal_and_directory_clean_through_final_observation": True,
