@@ -1,0 +1,185 @@
+"""Adversarial black-box checks for JAA-00 evidence publication."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _git_repository(destination: Path) -> Path:
+    """Make a clean repository from the caller's currently tracked bytes."""
+    destination.mkdir()
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True
+    ).stdout.split(b"\0")
+    for encoded in tracked:
+        if not encoded:
+            continue
+        relative = Path(os.fsdecode(encoded))
+        source = ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            target.symlink_to(os.readlink(source))
+        else:
+            shutil.copyfile(source, target)
+    subprocess.run(["git", "init", "-q"], cwd=destination, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=destination, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "fixture"], cwd=destination, check=True
+    )
+    return destination
+
+
+def _database(path: Path, rows: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE ledger(id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        connection.executemany("INSERT INTO ledger(value) VALUES (?)", [(f"row-{n}",) for n in range(rows)])
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _contract(source_root: Path, name: str, rows: int) -> dict[str, object]:
+    path = source_root / "inputs" / f"{name}.sqlite3"
+    with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as connection:
+        schema = [list(row) for row in connection.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        )]
+    return {
+        "name": name,
+        "source_relative": str(path.relative_to(source_root)),
+        "destination_relative": f"databases/{name}.sqlite3",
+        "size": path.stat().st_size,
+        "sha256": _sha(path),
+        "schema_sha256": hashlib.sha256(json.dumps(
+            schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest(),
+        "schema_objects": len(schema),
+        "table_counts": {"ledger": rows},
+    }
+
+
+def _cli(repository: Path, contract: list[dict[str, object]], *arguments: str) -> subprocess.CompletedProcess[str]:
+    bootstrap = """
+import json, sys
+from baseline_adoption import cli, core
+core.BASELINES = tuple(core.BaselineSpec(**item) for item in json.loads(sys.argv[1]))
+raise SystemExit(cli.main(sys.argv[2:]))
+"""
+    dependency_root = repository.parent / "test-distributions"
+    for distribution in ("PyYAML", "requests", "openpyxl", "pypdf"):
+        metadata = dependency_root / f"{distribution}-1.0.dist-info"
+        metadata.mkdir(parents=True, exist_ok=True)
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 1.0\n", encoding="utf-8"
+        )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(dependency_root)
+    return subprocess.run(
+        [sys.executable, "-c", bootstrap, json.dumps(contract), *arguments],
+        cwd=repository, env=environment, text=True, capture_output=True, check=False,
+    )
+
+
+@pytest.fixture
+def publication_case(tmp_path: Path) -> tuple[Path, Path, Path, list[dict[str, object]], Path]:
+    repository = _git_repository(tmp_path / "repository")
+    source = tmp_path / "source"
+    for name, rows in (("jobs", 3), ("pipeline", 4)):
+        _database(source / "inputs" / f"{name}.sqlite3", rows)
+    contract = [_contract(source, "jobs", 3), _contract(source, "pipeline", 4)]
+    data = tmp_path / "data"
+    adopted = _cli(repository, contract, "adopt-online", "--source-root", str(source),
+                   "--data-root", str(data), "--repository", str(repository))
+    assert adopted.returncode == 0, adopted.stderr
+    receipt = Path(json.loads(adopted.stdout)["receipt"])
+    return repository, source, data, contract, receipt
+
+
+def test_public_cli_publishes_v2_receipt_with_bound_hashes_and_dependencies(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path], tmp_path: Path,
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    output = tmp_path / "published.yaml"
+    result = _cli(repository, contract, "publish-evidence", "--receipt", str(receipt),
+                  "--data-root", str(data), "--repository", str(repository), "--output", str(output))
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"status": "published", "path": str(output.resolve())}
+    evidence = yaml.safe_load(output.read_text(encoding="utf-8"))
+    receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_document["content"]["format"] == "jaa-00-online-snapshot-receipt/v2"
+    assert receipt_document["content_sha256"] == hashlib.sha256(json.dumps(
+        receipt_document["content"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    assert evidence["publication"]["format"] == "jaa-00-deterministic-evidence/v2"
+    assert evidence["receipt"]["content_sha256"] == receipt_document["content_sha256"]
+    assert evidence["repository"]["revision"] == subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    assert evidence["reconciliation"]["result"] == "ok"
+    for item in contract:
+        name = str(item["name"])
+        snapshot = data / str(item["destination_relative"])
+        assert evidence["databases"][name]["snapshot_sha256"] == _sha(snapshot)
+        assert evidence["databases"][name]["counts"] == {"ledger": item["table_counts"]["ledger"]}
+        assert evidence["databases"][name]["schema_sha256"] == item["schema_sha256"]
+    dependencies = {record["path"]: record for record in evidence["dependency_records"]}
+    assert set(dependencies) == {"requirements-test.lock", "requirements-scrapling-full.txt"}
+    for relative, record in dependencies.items():
+        assert record["sha256"] == _sha(repository / relative)
+        assert record["bytes"] == (repository / relative).stat().st_size
+
+
+def test_dirty_tracked_source_cannot_publish_certification_evidence(
+    publication_case: tuple[Path, Path, Path, list[dict[str, object]], Path], tmp_path: Path,
+) -> None:
+    repository, _source, data, contract, receipt = publication_case
+    (repository / "baseline_adoption" / "cli.py").write_text(
+        (repository / "baseline_adoption" / "cli.py").read_text(encoding="utf-8") + "\n# dirty\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "must-not-exist.yaml"
+    result = _cli(repository, contract, "publish-evidence", "--receipt", str(receipt),
+                  "--data-root", str(data), "--repository", str(repository), "--output", str(output))
+
+    assert result.returncode == 2
+    assert not output.exists()
+    assert "published" not in result.stdout
+    assert "source" in result.stderr.lower() or "tracked" in result.stderr.lower()
+
+
+def test_online_row_floor_regression_precedes_every_snapshot_and_receipt(tmp_path: Path) -> None:
+    repository = _git_repository(tmp_path / "repository")
+    source = tmp_path / "source"
+    for name in ("jobs", "pipeline"):
+        _database(source / "inputs" / f"{name}.sqlite3", 3)
+    contract = [_contract(source, name, 3) for name in ("jobs", "pipeline")]
+    with sqlite3.connect(source / "inputs" / "jobs.sqlite3") as connection:
+        connection.execute("DELETE FROM ledger WHERE id = 1")
+    data = tmp_path / "data"
+
+    result = _cli(repository, contract, "adopt-online", "--source-root", str(source),
+                  "--data-root", str(data), "--repository", str(repository))
+
+    assert result.returncode == 2
+    assert "row counts regressed below historical floors" in result.stderr
+    assert not any((data / item["destination_relative"]).exists() for item in contract)
+    assert not (data / "receipts").exists()
