@@ -168,8 +168,8 @@
       "tests": [
         {
           "id": "JAA-04-software-contract",
-          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py"],
-          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py"],
+          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py"]
         },
         {
           "id": "JAA-04-negative-controls",
