@@ -40,8 +40,8 @@
       "tests": [
         {
           "id": "JAA-00-baseline-positive",
-          "argv": ["{python}", "-m", "pytest", "-q", "baseline_adoption/test_core.py", "baseline_adoption/test_live_recertification_semantics.py", "baseline_adoption/test_live_sqlite_online_snapshot.py", "baseline_adoption/test_runtime_evidence_contract.py", "baseline_adoption/test_wal_source_preservation.py"],
-          "files": ["baseline_adoption/test_core.py", "baseline_adoption/test_live_recertification_semantics.py", "baseline_adoption/test_live_sqlite_online_snapshot.py", "baseline_adoption/test_runtime_evidence_contract.py", "baseline_adoption/test_wal_source_preservation.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "baseline_adoption/test_core.py", "baseline_adoption/test_live_recertification_semantics.py", "baseline_adoption/test_live_sqlite_online_snapshot.py", "baseline_adoption/test_runtime_evidence_contract.py", "baseline_adoption/test_wal_source_preservation.py", "baseline_adoption/test_publication_fail_closed.py"],
+          "files": ["baseline_adoption/test_core.py", "baseline_adoption/test_live_recertification_semantics.py", "baseline_adoption/test_live_sqlite_online_snapshot.py", "baseline_adoption/test_runtime_evidence_contract.py", "baseline_adoption/test_wal_source_preservation.py", "baseline_adoption/test_publication_fail_closed.py"]
         },
         {
           "id": "JAA-00-baseline-negative-controls",
