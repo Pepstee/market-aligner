@@ -18,8 +18,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "runtime_evidence" / "JAA-00-online-snapshot.yaml"
-RECEIPT_HASH = "6d64a948f0260d68311d8a5ec2b805227f78a6c26908cef2907281bdde86f0f1"
-RUNTIME_NAME = "jaa00-v2-20260722-6256f42"
 
 
 def test_tracked_identity_documents_are_credential_free_and_consistent() -> None:
@@ -74,8 +72,13 @@ def test_tracked_identity_documents_are_credential_free_and_consistent() -> None
 
 def _runtime_root() -> Path:
     """Find the operator-provided frozen runtime without tracking its host path."""
+    evidence = _evidence_document(EVIDENCE)
+    label = evidence["receipt"]["label"]
+    match = re.fullmatch(r"runtime:([A-Za-z0-9_.+-]+):receipt", label)
+    assert match is not None, "runtime receipt label is unsafe or malformed"
+    runtime_name = match.group(1)
     for ancestor in ROOT.parents:
-        candidate = ancestor / "state" / "runtime" / RUNTIME_NAME
+        candidate = ancestor / "state" / "runtime" / runtime_name
         if candidate.is_dir():
             return candidate
     pytest.fail("the frozen JAA-00 runtime is unavailable")
@@ -89,7 +92,10 @@ def _evidence_document(path: Path) -> dict[str, object]:
 
 
 def _receipt(runtime_root: Path) -> Path:
-    receipt = runtime_root / "receipts" / f"migration-{RECEIPT_HASH}.json"
+    evidence = _evidence_document(EVIDENCE)
+    digest = evidence["receipt"]["content_sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), "receipt content hash is malformed"
+    receipt = runtime_root / "receipts" / f"migration-{digest}.json"
     assert receipt.is_file(), receipt
     return receipt
 
