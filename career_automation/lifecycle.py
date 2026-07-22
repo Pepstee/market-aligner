@@ -223,6 +223,23 @@ LEGAL_TRANSITIONS: Mapping[PipelineState, frozenset[PipelineState]] = {
     )},
 }
 
+RESEARCH_COMPLETION_POLICY_ID = "career.research-completion-validation"
+
+
+def _post_research_states() -> frozenset[str]:
+    pending = [PipelineState.EMPLOYER_RESEARCHED]
+    reached: set[PipelineState] = set()
+    while pending:
+        state = pending.pop()
+        if state in reached:
+            continue
+        reached.add(state)
+        pending.extend(LEGAL_TRANSITIONS[state])
+    return frozenset(state.value for state in reached)
+
+
+POST_RESEARCH_STATES = _post_research_states()
+
 if set(LEGAL_TRANSITIONS) != set(PipelineState):
     raise RuntimeError("lifecycle graph does not cover the complete state vocabulary")
 
@@ -598,6 +615,7 @@ class LifecycleReducer:
                     "legacy opportunity gate cohort contains an unowned admission"
                 )
             self._verify_legacy_boundary_cohorts(conn)
+            self._verify_research_side_tables(conn)
             if set(replayed) != set(jobs):
                 missing = sorted(set(jobs) - set(replayed))
                 raise LedgerDivergence(f"jobs have no replayable state history: {missing}")
@@ -631,6 +649,84 @@ class LifecycleReducer:
             raise LedgerDivergence(
                 "legacy cohorts do not reconstruct the certified JAA-00 boundary"
             )
+
+    @staticmethod
+    def _verify_research_side_tables(conn: sqlite3.Connection) -> None:
+        """Bind every completed dossier to its queue, proposal and transition receipt."""
+        keys = {
+            str(row[0]) for row in conn.execute(
+                "SELECT job_key FROM employer_dossiers "
+                "UNION SELECT job_key FROM employer_research_queue WHERE status='completed' "
+                "UNION SELECT job_key FROM lifecycle_transition_receipts WHERE policy_id=?",
+                (RESEARCH_COMPLETION_POLICY_ID,),
+            )
+        }
+        for job_key in sorted(keys):
+            rejected = f"completed research side tables diverge for {job_key}"
+            job = conn.execute(
+                "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+            ).fetchone()
+            queue = conn.execute(
+                "SELECT status FROM employer_research_queue WHERE job_key=?", (job_key,),
+            ).fetchone()
+            dossiers = conn.execute(
+                "SELECT dossier_json,dossier_hash,worker_id FROM employer_dossiers WHERE job_key=?",
+                (job_key,),
+            ).fetchall()
+            receipts = conn.execute(
+                """SELECT input_hash,idempotency_key
+                   FROM lifecycle_transition_receipts
+                   WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
+                (job_key, PipelineState.EMPLOYER_RESEARCHING.value,
+                 PipelineState.EMPLOYER_RESEARCHED.value,
+                 RESEARCH_COMPLETION_POLICY_ID),
+            ).fetchall()
+            if (job is None or queue is None or queue["status"] != "completed"
+                    or str(job["state"]) not in POST_RESEARCH_STATES
+                    or len(dossiers) != 1 or len(receipts) != 1):
+                raise LedgerDivergence(rejected)
+            row = dossiers[0]
+            try:
+                dossier = json.loads(row["dossier_json"])
+                dossier_hash = str(row["dossier_hash"])
+                if (not isinstance(dossier, dict)
+                        or dossier.get("job_key") != job_key
+                        or canonical_hash(dossier) != dossier_hash):
+                    raise ValueError("dossier identity or hash mismatch")
+                sources = dossier.get("sources")
+                if not isinstance(sources, list) or not sources:
+                    raise ValueError("dossier source identity is invalid")
+                source_ids = sorted(
+                    str(source.get("id")) for source in sources
+                    if isinstance(source, dict)
+                )
+                observation = {
+                    "dossier": dossier,
+                    "dossier_hash": dossier_hash,
+                    "source_ids": source_ids,
+                    "worker_id": str(row["worker_id"]),
+                }
+                expected_completion_key = f"research-complete:{job_key}:{dossier_hash}"
+                receipt = receipts[0]
+                if (str(receipt["input_hash"]) != canonical_hash(observation)
+                        or str(receipt["idempotency_key"]) != expected_completion_key):
+                    raise ValueError("completion receipt does not bind the dossier")
+                proposals = conn.execute(
+                    """SELECT payload_json FROM pipeline_events
+                       WHERE job_key=? AND event_type='lifecycle_transition_proposed'
+                         AND idempotency_key=?""",
+                    (job_key, f"research-observation:{job_key}:{dossier_hash}"),
+                ).fetchall()
+                if len(proposals) != 1:
+                    raise ValueError("dossier has no unique research proposal")
+                proposal = json.loads(proposals[0]["payload_json"])
+                if (not isinstance(proposal, dict)
+                        or proposal.get("proposed_state")
+                        != PipelineState.EMPLOYER_RESEARCHED.value
+                        or proposal.get("observation") != observation):
+                    raise ValueError("research proposal does not bind the dossier")
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise LedgerDivergence(f"{rejected}: {exc}") from exc
 
     @staticmethod
     def _verify_proposal_event(

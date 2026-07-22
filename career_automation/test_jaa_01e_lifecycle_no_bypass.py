@@ -12,7 +12,12 @@ import pytest
 
 from career_automation.database import CareerDatabase
 from career_automation.engine import OpportunityGate, OpportunityPolicy, scored_job_from_payload
-from career_automation.lifecycle import IdempotencyConflict, InvalidTransition, canonical_hash
+from career_automation.lifecycle import (
+    IdempotencyConflict,
+    InvalidTransition,
+    LedgerDivergence,
+    canonical_hash,
+)
 from career_automation.models import PipelineState
 
 
@@ -25,8 +30,9 @@ def _job(job_id: str = "lifecycle") -> object:
     })
 
 
-def _dossier(claim: str = "A cited observation") -> dict[str, object]:
+def _dossier(job_key: str, claim: str = "A cited observation") -> dict[str, object]:
     return {
+        "job_key": job_key,
         "model": {"provider": "test", "model_id": "researcher", "version": "1"},
         "sources": [{"id": "source-1", "url": "https://example.test/source"}],
         "claims": [{"text": claim, "source_ids": ["source-1"], "confidence": 0.8}],
@@ -92,7 +98,7 @@ def test_complete_gate_to_research_sequence_has_one_receipt_per_post_root_state_
     assert _state(path, job_key) == PipelineState.EMPLOYER_RESEARCHING.value
     _assert_committed_receipts(path, job_key, 2)
 
-    dossier_value = _dossier()
+    dossier_value = _dossier(job_key)
     database.complete_research(job_key=job_key, worker_id="worker-a", dossier=dossier_value, dossier_hash=_digest(dossier_value))
     assert _state(path, job_key) == PipelineState.EMPLOYER_RESEARCHED.value
     _assert_committed_receipts(path, job_key, 3)
@@ -140,7 +146,7 @@ def test_proposal_cannot_advance_state_and_receipt_or_transition_failures_rollba
     before = _rows(path, key)
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TRIGGER reject_completion_receipt BEFORE INSERT ON lifecycle_transition_receipts BEGIN SELECT RAISE(ABORT, 'forced completion failure'); END")
-    dossier_value = _dossier()
+    dossier_value = _dossier(key)
     with pytest.raises(sqlite3.IntegrityError, match="forced completion failure"):
         database.complete_research(job_key=key, worker_id="owner", dossier=dossier_value, dossier_hash=_digest(dossier_value))
     assert _state(path, key) == PipelineState.EMPLOYER_RESEARCHING.value
@@ -164,7 +170,7 @@ def test_retries_conflicts_lease_owner_and_replay_stay_equal_across_sequence(tmp
     assert _rows(path, key) == (first_events, first_receipts)
 
     assert database.claim_research("owner", lease_seconds=60) is not None
-    dossier_value = _dossier()
+    dossier_value = _dossier(key)
     digest = _digest(dossier_value)
     with pytest.raises(RuntimeError, match="not leased"):
         database.complete_research(job_key=key, worker_id="intruder", dossier=dossier_value, dossier_hash=digest)
@@ -173,12 +179,88 @@ def test_retries_conflicts_lease_owner_and_replay_stay_equal_across_sequence(tmp
     database.complete_research(job_key=key, worker_id="owner", dossier=dossier_value, dossier_hash=digest)
     assert _rows(path, key) == stable
 
-    changed = _dossier("Changed dossier")
+    changed = _dossier(key, "Changed dossier")
     with pytest.raises((IdempotencyConflict, InvalidTransition)):
         database.complete_research(job_key=key, worker_id="owner", dossier=changed, dossier_hash=_digest(changed))
     assert _rows(path, key) == stable
     assert database.lifecycle.replay()[key] is PipelineState.EMPLOYER_RESEARCHED
     database.lifecycle.verify()
+
+
+def test_all_dossiers_require_canonical_hash_and_replay_rejects_side_table_drift(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dossier-integrity.sqlite3"
+    database = CareerDatabase(path)
+    job = _job("dossier-integrity")
+    OpportunityGate(database).bootstrap([job])
+    task = database.claim_research("owner", lease_seconds=60)
+    assert task is not None
+    dossier = _dossier(job.key)
+    before = _rows(path, job.key)
+
+    with pytest.raises(ValueError, match="canonical content"):
+        database.complete_research(
+            job_key=job.key,
+            worker_id="owner",
+            dossier=dossier,
+            dossier_hash="0" * 64,
+        )
+    assert _state(path, job.key) == PipelineState.EMPLOYER_RESEARCHING.value
+    assert _queue_and_dossier(path, job.key) == (("leased", "owner", 1), None)
+    assert _rows(path, job.key) == before
+
+    database.complete_research(
+        job_key=job.key,
+        worker_id="owner",
+        dossier=dossier,
+        dossier_hash=_digest(dossier),
+    )
+    database.lifecycle.verify()
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE employer_dossiers SET dossier_hash=? WHERE job_key=?",
+            ("f" * 64, job.key),
+        )
+    with pytest.raises(LedgerDivergence, match="research side tables diverge"):
+        database.lifecycle.replay()
+
+
+def test_opportunity1_atomically_rejects_a_dossier_that_no_longer_matches_completion(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opportunity1-dossier-seam.sqlite3"
+    database = CareerDatabase(path)
+    job = _job("opportunity1-dossier-seam")
+    OpportunityGate(database).bootstrap([job])
+    assert database.claim_research("owner", lease_seconds=60) is not None
+    dossier = _dossier(job.key)
+    database.complete_research(
+        job_key=job.key,
+        worker_id="owner",
+        dossier=dossier,
+        dossier_hash=_digest(dossier),
+    )
+    altered = {**dossier, "claims": [{
+        "text": "Injected observation",
+        "source_ids": ["source-1"],
+        "confidence": 0.8,
+    }]}
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE employer_dossiers SET dossier_json=? WHERE job_key=?",
+            (json.dumps(altered, ensure_ascii=False, sort_keys=True), job.key),
+        )
+    stable = _rows(path, job.key)
+
+    with pytest.raises(RuntimeError, match="identity or hash"):
+        database.apply_opportunity1(job_key=job.key, signals=[])
+    assert _rows(path, job.key) == stable
+    assert _state(path, job.key) == PipelineState.EMPLOYER_RESEARCHED.value
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM opportunity_reassessments WHERE job_key=?", (job.key,),
+        ).fetchone()[0] == 0
 
 
 def test_opportunity1_identical_retry_returns_the_durable_result_without_new_rows(tmp_path: Path) -> None:
@@ -188,7 +270,7 @@ def test_opportunity1_identical_retry_returns_the_durable_result_without_new_row
     OpportunityGate(database).bootstrap([job])
     task = database.claim_research("owner", lease_seconds=60)
     assert task is not None
-    dossier_value = _dossier()
+    dossier_value = _dossier(job.key)
     database.complete_research(
         job_key=job.key,
         worker_id="owner",

@@ -15,7 +15,9 @@ from .lifecycle import (
     IdempotencyConflict,
     LifecycleReducer,
     ModelIdentity,
+    POST_RESEARCH_STATES,
     PolicyIdentity,
+    RESEARCH_COMPLETION_POLICY_ID,
     canonical_hash,
     canonical_json,
     score_snapshot_import_binding,
@@ -28,7 +30,7 @@ RESEARCH_LEASE_POLICY = PolicyIdentity(
     canonical_hash({"rule": "lease queued work; advance only queued jobs"}),
 )
 RESEARCH_COMPLETION_POLICY = PolicyIdentity(
-    "career.research-completion-validation", "1",
+    RESEARCH_COMPLETION_POLICY_ID, "1",
     canonical_hash({
         "rules": [
             "lease owner must match",
@@ -37,22 +39,6 @@ RESEARCH_COMPLETION_POLICY = PolicyIdentity(
         ]
     }),
 )
-
-
-def _research_and_successor_states() -> frozenset[str]:
-    """Return the lifecycle closure rooted at durable research completion."""
-    pending = [PipelineState.EMPLOYER_RESEARCHED]
-    reached: set[PipelineState] = set()
-    while pending:
-        state = pending.pop()
-        if state in reached:
-            continue
-        reached.add(state)
-        pending.extend(LEGAL_TRANSITIONS[state])
-    return frozenset(state.value for state in reached)
-
-
-POST_RESEARCH_STATES = _research_and_successor_states()
 
 
 SCHEMA = """
@@ -468,15 +454,17 @@ class CareerDatabase:
         dossier_hash: str,
     ) -> None:
         """Persist a provenance-validated probabilistic research result."""
-        from .employer_research import RawResponseCache, content_hash, validate_dossier
+        from .employer_research import RawResponseCache, validate_dossier
+        if dossier.get("job_key") != job_key:
+            raise ValueError("dossier job identity does not match the research task")
+        if canonical_hash(dossier) != dossier_hash:
+            raise ValueError("dossier hash does not match canonical content")
         strict = dossier.get("schema_version") in {"jaa04.dossier.v1", "jaa04.dossier.v2", "jaa04.dossier.v3"}
         if strict:
             cache_root = dossier.get("raw_cache_root")
             if not isinstance(cache_root, str) or not cache_root:
                 raise ValueError("dossier must identify its raw response cache")
             validate_dossier(dossier, RawResponseCache(cache_root))
-            if content_hash(dossier) != dossier_hash:
-                raise ValueError("dossier hash does not match canonical content")
         sources = dossier.get("sources")
         if not isinstance(sources, list) or not sources:
             raise ValueError("employer dossier requires at least one public source")
@@ -587,31 +575,27 @@ class CareerDatabase:
             raise ValueError("completed dossier is not an object")
         return dossier, str(row["dossier_hash"])
 
-    def post_research_dossier(self, job_key: str) -> tuple[dict[str, Any], str] | None:
-        """Read an immutable dossier at research completion or any successor.
-
-        This is deliberately separate from :meth:`completed_research`, which is
-        the exact-state gate used before Opportunity-1.  Partial or contradictory
-        durable state is an error rather than an absent dossier.
-        """
-        with self.connection() as conn:
-            job = conn.execute(
-                "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
-            ).fetchone()
-            queue = conn.execute(
-                "SELECT status FROM employer_research_queue WHERE job_key=?", (job_key,),
-            ).fetchone()
-            rows = conn.execute(
-                "SELECT dossier_json,dossier_hash,worker_id FROM employer_dossiers WHERE job_key=?",
-                (job_key,),
-            ).fetchall()
-            research_completion_receipts = conn.execute(
-                """SELECT input_hash FROM lifecycle_transition_receipts
-                   WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
-                (job_key, PipelineState.EMPLOYER_RESEARCHING.value,
-                 PipelineState.EMPLOYER_RESEARCHED.value,
-                 RESEARCH_COMPLETION_POLICY.policy_id),
-            ).fetchall()
+    def _post_research_dossier_in_transaction(
+        self, conn: sqlite3.Connection, job_key: str,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Validate the complete research seam using the caller's transaction."""
+        job = conn.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+        ).fetchone()
+        queue = conn.execute(
+            "SELECT status FROM employer_research_queue WHERE job_key=?", (job_key,),
+        ).fetchone()
+        rows = conn.execute(
+            "SELECT dossier_json,dossier_hash,worker_id FROM employer_dossiers WHERE job_key=?",
+            (job_key,),
+        ).fetchall()
+        research_completion_receipts = conn.execute(
+            """SELECT input_hash FROM lifecycle_transition_receipts
+               WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
+            (job_key, PipelineState.EMPLOYER_RESEARCHING.value,
+             PipelineState.EMPLOYER_RESEARCHED.value,
+             RESEARCH_COMPLETION_POLICY.policy_id),
+        ).fetchall()
         present = (job is not None, queue is not None, bool(rows))
         if not any(present):
             return None
@@ -640,6 +624,16 @@ class CareerDatabase:
                 research_completion_receipts[0]["input_hash"]):
             raise RuntimeError("completed dossier does not match its immutable receipt")
         return dossier, dossier_hash
+
+    def post_research_dossier(self, job_key: str) -> tuple[dict[str, Any], str] | None:
+        """Read an immutable dossier at research completion or any successor.
+
+        This is deliberately separate from :meth:`completed_research`, which is
+        the exact-state gate used before Opportunity-1.  Partial or contradictory
+        durable state is an error rather than an absent dossier.
+        """
+        with self.connection() as conn:
+            return self._post_research_dossier_in_transaction(conn, job_key)
 
     def opportunity1_reassessment(self, job_key: str, *,
                                   expected_dossier_hash: str | None = None) -> dict[str, Any] | None:
@@ -720,21 +714,23 @@ class CareerDatabase:
         from .opportunity1 import reassess_opportunity1
 
         with self.transaction(immediate=True) as conn:
+            completed = self._post_research_dossier_in_transaction(conn, job_key)
+            if completed is None:
+                raise RuntimeError("Opportunity-1 requires completed employer research")
+            _, dossier_hash = completed
             row = conn.execute(
-                """SELECT j.opportunity,j.state,d.dossier_hash
-                   FROM pipeline_jobs j JOIN employer_dossiers d ON d.job_key=j.job_key
-                   WHERE j.job_key=?""", (job_key,),
+                "SELECT opportunity,state FROM pipeline_jobs WHERE job_key=?", (job_key,),
             ).fetchone()
             if row is None:
                 raise RuntimeError("Opportunity-1 requires completed employer research")
             if (expected_dossier_hash is not None
-                    and row["dossier_hash"] != expected_dossier_hash):
+                    and dossier_hash != expected_dossier_hash):
                 raise RuntimeError("completed research changed before Opportunity-1")
             result = reassess_opportunity1(round(float(row["opportunity"]) * 10_000), signals)
             output = asdict(result)
             ordered_signals = list(output["changes"])
             output["changes"] = ordered_signals
-            key = f"opportunity-1:{job_key}:{row['dossier_hash']}:{result.policy_hash}"
+            key = f"opportunity-1:{job_key}:{dossier_hash}:{result.policy_hash}"
             target = (PipelineState.FIT_ASSESSED if result.decision == "pass"
                       else PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH)
             current_state = PipelineState(row["state"])
@@ -759,7 +755,7 @@ class CareerDatabase:
                 conn, job_key=job_key, to_state=PipelineState.OPPORTUNITY_1_ASSESSED,
                 policy=PolicyIdentity("career.opportunity-1", "1", result.policy_hash),
                 inputs={"opportunity0_score_bp": result.opportunity0_score_bp,
-                        "dossier_hash": row["dossier_hash"], "signals": ordered_signals},
+                        "dossier_hash": dossier_hash, "signals": ordered_signals},
                 outputs=output, idempotency_key=key,
             )
             expected_reassessment = (

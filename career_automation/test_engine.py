@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import sqlite3
 import tempfile
 import unittest
@@ -9,6 +7,7 @@ from pathlib import Path
 
 from career_automation.database import CareerDatabase
 from career_automation.engine import OpportunityGate, OpportunityPolicy, scored_job_from_payload
+from career_automation.lifecycle import canonical_hash
 from career_automation.models import PipelineState
 
 
@@ -89,6 +88,7 @@ class OpportunityGateTests(unittest.TestCase):
         self.assertEqual(task.job_key, "testboard:research")
 
         bad_dossier = {
+            "job_key": task.job_key,
             "sources": [{"id": "s1", "url": "https://example.test"}],
             "claims": [{"text": "Claim", "source_ids": ["missing"]}],
         }
@@ -97,14 +97,15 @@ class OpportunityGateTests(unittest.TestCase):
                 job_key=task.job_key,
                 worker_id="worker-1",
                 dossier=bad_dossier,
-                dossier_hash="bad",
+                dossier_hash=canonical_hash(bad_dossier),
             )
 
         dossier = {
+            "job_key": task.job_key,
             "sources": [{"id": "s1", "url": "https://example.test"}],
             "claims": [{"text": "Claim", "source_ids": ["s1"], "confidence": 0.9}],
         }
-        digest = hashlib.sha256(json.dumps(dossier, sort_keys=True).encode()).hexdigest()
+        digest = canonical_hash(dossier)
         self.database.complete_research(
             job_key=task.job_key,
             worker_id="worker-1",

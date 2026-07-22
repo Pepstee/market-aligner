@@ -42,6 +42,7 @@ def reproduce() -> dict[str, Any]:
         require(task is not None and task.job_key == job.key, "Terra lease failed")
 
         dossier = {
+            "job_key": job.key,
             "model": {"provider": "terra", "model_id": "dossier-worker", "version": "1"},
             "sources": [{"id": "terra-public-1", "url": "https://example.invalid/terra"}],
             "claims": [{
