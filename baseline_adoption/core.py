@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import re
+import select
 import shutil
 import sqlite3
 import stat
@@ -98,6 +99,71 @@ _FORBIDDEN_TRACKED_DATA_PREFIXES = (
     "outputs/", "profiler/data/", "scraper/data/", "state/",
 )
 _FORBIDDEN_TRACKED_DATA_SUFFIXES = (".sqlite", ".sqlite3", ".db", "-wal", "-shm")
+
+
+class _MutationBoundary:
+    """Use the host kernel to detect writes across a multi-file observation boundary.
+
+    Repeated hashes alone cannot make two independently mutable files an atomic observation:
+    a SQLite checkpoint can always land between the last main and WAL read.  On the supported
+    macOS host, EVFILT_VNODE records writes, extension, deletion, rename, and revocation from
+    before the first read until the caller explicitly closes the boundary.  Unsupported hosts
+    fail closed instead of silently falling back to another racy hash sequence.
+    """
+
+    def __init__(self, paths: Sequence[Path], *, directories: Sequence[Path] = ()) -> None:
+        self._paths = tuple(dict.fromkeys(path.resolve() for path in (*paths, *directories)))
+        self._queue: Any | None = None
+        self._descriptors: list[int] = []
+
+    def __enter__(self) -> "_MutationBoundary":
+        if not hasattr(select, "kqueue") or not hasattr(select, "kevent"):
+            raise AdoptionError("kernel mutation-boundary observation is unavailable")
+        queue = select.kqueue()
+        flags = (
+            select.KQ_NOTE_WRITE
+            | select.KQ_NOTE_EXTEND
+            | select.KQ_NOTE_DELETE
+            | select.KQ_NOTE_RENAME
+            | select.KQ_NOTE_REVOKE
+        )
+        try:
+            for path in self._paths:
+                descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                self._descriptors.append(descriptor)
+                event = select.kevent(
+                    descriptor,
+                    filter=select.KQ_FILTER_VNODE,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                    fflags=flags,
+                )
+                queue.control([event], 0, 0)
+        except (OSError, ValueError) as exc:
+            queue.close()
+            for descriptor in self._descriptors:
+                os.close(descriptor)
+            self._descriptors.clear()
+            raise AdoptionError("kernel mutation-boundary observation could not be armed") from exc
+        self._queue = queue
+        return self
+
+    def assert_clean(self, label: str) -> None:
+        if self._queue is None:
+            raise AdoptionError(f"{label}: mutation boundary is not armed")
+        try:
+            events = self._queue.control([], max(1, len(self._descriptors)), 0)
+        except (OSError, ValueError) as exc:
+            raise AdoptionError(f"{label}: mutation boundary could not be verified") from exc
+        if events:
+            raise AdoptionError(f"{label}: mutation boundary observed input drift")
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        if self._queue is not None:
+            self._queue.close()
+            self._queue = None
+        for descriptor in self._descriptors:
+            os.close(descriptor)
+        self._descriptors.clear()
 
 
 def _hash_file(path: Path) -> str:
@@ -316,7 +382,7 @@ def _verify_database(path: Path, spec: BaselineSpec) -> dict[str, Any]:
             "schema_objects": len(schema), "table_counts": counts, "integrity_check": integrity}
 
 
-def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
+def _recertify_source_observed(path: Path, spec: BaselineSpec) -> dict[str, Any]:
     """Recertify one live source without ever granting SQLite write access."""
     if not path.exists():
         raise AdoptionError(f"{spec.name}: source does not exist")
@@ -460,6 +526,22 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
             },
         },
     }
+
+
+def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
+    """Recertify inside one kernel-observed main/WAL mutation boundary."""
+    wal = Path(str(path) + "-wal")
+    watched_files = [path]
+    if wal.exists():
+        watched_files.append(wal)
+    with _MutationBoundary(watched_files, directories=[path.parent]) as boundary:
+        evidence = _recertify_source_observed(path, spec)
+        boundary.assert_clean(f"{spec.name}: source mutation boundary")
+    evidence["content_comparison"]["kernel_mutation_boundary"] = {
+        "provider": "macos-kqueue-evfilt-vnode",
+        "main_wal_and_directory_clean_through_final_observation": True,
+    }
+    return evidence
 
 
 def recertify_sources(source_root: str | Path, evidence_directory: str | Path) -> Path:
@@ -1515,6 +1597,70 @@ def _publication_input_bindings(
     }
 
 
+def _publication_mutation_paths(
+    receipt_path: Path,
+    data_root: Path,
+    repository: Path,
+    databases: Mapping[str, Any],
+) -> tuple[list[Path], list[Path]]:
+    """Return every mutable file and namespace observed by evidence publication."""
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=repository, check=True, capture_output=True
+        ).stdout.split(b"\0")
+        git_directory_text = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=repository, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AdoptionError("publication mutation-boundary inventory is unavailable") from exc
+
+    files = [receipt_path]
+    files.extend(
+        repository / os.fsdecode(encoded)
+        for encoded in tracked
+        if encoded and not encoded.startswith(b"runtime_evidence/")
+    )
+    files.extend(repository / relative for relative in (
+        "requirements-test.lock", "requirements-scrapling-full.txt",
+    ))
+    directories: list[Path] = []
+    for name in (spec.name for spec in BASELINES):
+        destination = data_root / databases[name]["destination"]["relative_location"]
+        files.append(destination)
+        directories.append(destination.parent)
+        files.extend(
+            sidecar for suffix in ("-journal", "-wal", "-shm")
+            if (sidecar := Path(str(destination) + suffix)).exists()
+        )
+
+    git_directory = Path(git_directory_text)
+    if not git_directory.is_absolute():
+        git_directory = repository / git_directory
+    for relative in ("HEAD", "index", "packed-refs"):
+        candidate = git_directory / relative
+        if candidate.exists():
+            files.append(candidate)
+    try:
+        head = (git_directory / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise AdoptionError("publication Git identity could not be observed") from exc
+    if head.startswith("ref: "):
+        reference = git_directory / head.removeprefix("ref: ")
+        if reference.exists():
+            files.append(reference)
+
+    return list(dict.fromkeys(files)), list(dict.fromkeys(directories))
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def publish_runtime_evidence(
     receipt_path: Path, data_root: Path, repository: Path, output_path: Path | None = None
 ) -> Path:
@@ -1666,6 +1812,8 @@ def publish_runtime_evidence(
     destination = (output_path or repository / "runtime_evidence" / "JAA-00-online-snapshot.yaml").resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
+    previous: Path | None = None
+    replaced = False
     try:
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as handle:
             temporary = Path(handle.name)
@@ -1674,13 +1822,53 @@ def publish_runtime_evidence(
             os.fsync(handle.fileno())
         if temporary.read_bytes() != payload:
             raise AdoptionError("evidence staging validation failed")
-        if _publication_input_bindings(
+        if destination.exists() or destination.is_symlink():
+            if destination.is_symlink() or not destination.is_file():
+                raise AdoptionError("existing evidence destination is not a regular file")
+            previous_stat = destination.stat()
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, prefix=f".{destination.name}.previous.", delete=False
+            ) as handle:
+                previous = Path(handle.name)
+                handle.write(destination.read_bytes())
+                handle.flush()
+                os.fchmod(handle.fileno(), stat.S_IMODE(previous_stat.st_mode))
+                os.fsync(handle.fileno())
+
+        watch_files, watch_directories = _publication_mutation_paths(
             Path(receipt_path), Path(data_root), repository, databases
-        ) != bound_inputs:
-            raise AdoptionError("certified publication inputs drifted before atomic replacement")
-        os.replace(temporary, destination)
-        temporary = None
+        )
+        with _MutationBoundary(watch_files, directories=watch_directories) as boundary:
+            if _publication_input_bindings(
+                Path(receipt_path), Path(data_root), repository, databases
+            ) != bound_inputs:
+                raise AdoptionError("certified publication inputs drifted before atomic replacement")
+            os.replace(temporary, destination)
+            temporary = None
+            replaced = True
+            _fsync_directory(destination.parent)
+            try:
+                if _publication_input_bindings(
+                    Path(receipt_path), Path(data_root), repository, databases
+                ) != bound_inputs:
+                    raise AdoptionError("certified publication inputs changed through replacement")
+                boundary.assert_clean("evidence publication atomic replacement boundary")
+            except (AdoptionError, TrackedSourceRevisionError) as exc:
+                if previous is not None:
+                    os.replace(previous, destination)
+                    previous = None
+                else:
+                    destination.unlink(missing_ok=True)
+                replaced = False
+                _fsync_directory(destination.parent)
+                raise AdoptionError(
+                    "certified publication inputs drifted through atomic replacement boundary"
+                ) from exc
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+        if previous is not None:
+            previous.unlink(missing_ok=True)
+        if replaced:
+            _fsync_directory(destination.parent)
     return destination
