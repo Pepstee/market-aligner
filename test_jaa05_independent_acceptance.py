@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import date
@@ -26,11 +27,20 @@ from career_automation.evidence_matching import (
     score_locked_labels,
 )
 from career_automation.candidate_graph import CandidateGraph
+from career_automation.database import CareerDatabase
 from career_automation.gap_optimizer import (
+    FitAssessmentStore,
     TaskEvidence,
     optimise_gaps,
     validate_task_evidence,
 )
+from career_automation.lifecycle import PolicyIdentity, canonical_hash
+from career_automation.migrations import (
+    JAA_05_MIGRATIONS,
+    apply_jaa_05_migrations,
+    verify_jaa05_installed_schema,
+)
+from career_automation.models import PipelineState, ScoredJob
 
 
 AS_OF = date(2030, 1, 1)
@@ -98,6 +108,7 @@ def _receipt(
         input_sha256=matching_input_hash(
             requirement,
             candidate_profile_sha256=profile_sha256,
+            as_of=AS_OF,
         ),
     )
 
@@ -148,6 +159,42 @@ def _evidence(
     )
 
 
+def _job_at_fit(path: Path, job_key: str, body: str) -> CareerDatabase:
+    database = CareerDatabase(path)
+    payload = {"body": body}
+    database.upsert_scored_job(ScoredJob(
+        key=job_key,
+        board="synthetic",
+        job_id=job_key,
+        url=f"https://example.test/jobs/{job_key}",
+        title="Synthetic role",
+        company="Synthetic employer",
+        fit=None,
+        opportunity=0.9,
+        final_score=None,
+        extraction_confidence=1.0,
+        payload=payload,
+        payload_hash=canonical_hash(payload),
+    ))
+    policy = PolicyIdentity("test.fit-prerequisite", "1", HASHES["artifact"])
+    for target in (
+        PipelineState.EMPLOYER_RESEARCH_QUEUED,
+        PipelineState.EMPLOYER_RESEARCHING,
+        PipelineState.EMPLOYER_RESEARCHED,
+        PipelineState.OPPORTUNITY_1_ASSESSED,
+        PipelineState.FIT_ASSESSED,
+    ):
+        database.lifecycle.commit(
+            job_key=job_key,
+            to_state=target,
+            policy=policy,
+            inputs={"target": target.value},
+            outputs={"advanced": True},
+            idempotency_key=f"test-prerequisite:{job_key}:{target.value}",
+        )
+    return database
+
+
 def test_atomic_matching_requires_current_approved_compatible_evidence() -> None:
     requirement = _requirement("essential-python")
     evidence = _evidence("python-receipt")
@@ -162,6 +209,27 @@ def test_atomic_matching_requires_current_approved_compatible_evidence() -> None
     assert result.evidence_ids == ("python-receipt",)
     assert result.policy_sha256 == POLICY.policy_hash
     assert result.proposal_sha256 is not None
+
+
+def test_jaa05_migration_is_forward_only_and_schema_verified(tmp_path: Path) -> None:
+    path = tmp_path / "migration.sqlite3"
+    assert apply_jaa_05_migrations(path) == tuple(
+        migration.version for migration in JAA_05_MIGRATIONS
+    )
+    assert apply_jaa_05_migrations(path) == ()
+    with sqlite3.connect(path) as connection:
+        assert verify_jaa05_installed_schema(connection)
+        tables = {
+            row[0] for row in connection.execute(
+                """SELECT name FROM sqlite_schema
+                   WHERE type='table' AND name IN (
+                     'fit_assessment_runs','vacancy_requirements',
+                     'evidence_match_assessments','candidate_gaps',
+                     'improvement_tasks','improvement_evidence_candidates'
+                   )"""
+            )
+        }
+    assert len(tables) == 6
 
 
 def test_production_match_projection_is_derived_from_approved_jaa02_graph(
@@ -217,13 +285,15 @@ def test_production_match_projection_is_derived_from_approved_jaa02_graph(
         evidence,
         ("api-artifact",),
     )
-    result, = match_candidate_graph(
+    batch = match_candidate_graph(
         (requirement,),
         (proposal,),
         graph.path,
         as_of=AS_OF,
     )
+    result, = batch.results
     assert result.decision == "matched"
+    assert batch.candidate_profile_sha256 == evidence_projection_hash(evidence)
 
 
 def test_low_confidence_and_missing_proposals_abstain_instead_of_guessing() -> None:
@@ -245,9 +315,9 @@ def test_low_confidence_and_missing_proposals_abstain_instead_of_guessing() -> N
 
 def test_locked_label_metrics_measure_precision_recall_and_abstention() -> None:
     results = (
-        MatchResult("matched", "matched", ("proof",), 9000, "direct", POLICY.policy_hash, HASHES["input"]),
-        MatchResult("absent", "no_match", (), 9000, "none", POLICY.policy_hash, HASHES["input"]),
-        MatchResult("uncertain", "abstain", (), 6000, "uncertain", POLICY.policy_hash, HASHES["input"]),
+        MatchResult("matched", "matched", ("proof",), 9000, "direct", POLICY.policy_hash, None),
+        MatchResult("absent", "no_match", (), 9000, "none", POLICY.policy_hash, None),
+        MatchResult("uncertain", "abstain", (), 6000, "uncertain", POLICY.policy_hash, None),
     )
     metrics = score_locked_labels(
         results,
@@ -286,7 +356,7 @@ def test_all_gap_classes_are_explicit_and_structural_gap_blocks_candidacy() -> N
             9000,
             "locked absence",
             POLICY.policy_hash,
-            HASHES["input"],
+            None,
         )
         for requirement in requirements
     )
@@ -307,7 +377,7 @@ def test_improvement_task_requires_a_verifiable_artifact_and_stays_pending() -> 
     requirement = _requirement("knowledge", kind="knowledge", essential=False)
     result = MatchResult(
         "knowledge", "no_match", (), 9000, "knowledge not demonstrated",
-        POLICY.policy_hash, HASHES["input"],
+        POLICY.policy_hash, None,
     )
     task, = optimise_gaps((requirement,), (result,)).tasks
     promotion = validate_task_evidence(
@@ -322,6 +392,144 @@ def test_improvement_task_requires_a_verifiable_artifact_and_stays_pending() -> 
     )
     assert promotion.approval_state == "pending"
     assert promotion.artifact_sha256 == HASHES["artifact"]
+
+
+def test_fit_assessment_persists_gaps_tasks_and_lifecycle_atomically(
+    tmp_path: Path,
+) -> None:
+    text = "Demonstrate systems knowledge."
+    database = _job_at_fit(tmp_path / "fit.sqlite3", "gap-job", text)
+    with database.connect() as connection:
+        payload_hash = str(connection.execute(
+            "SELECT payload_hash FROM pipeline_jobs WHERE job_key='gap-job'"
+        ).fetchone()[0])
+    requirement = Requirement(
+        "systems-knowledge", "systems-knowledge", text, False,
+        "knowledge", "learn_and_test", ("test_result",), 8000,
+        f"vacancy:gap-job:{payload_hash}", (0, len(text)),
+    )
+    proposal = _proposal(requirement, ())
+    store = FitAssessmentStore(database.path)
+    receipt = store.assess(
+        job_key="gap-job",
+        requirements=(requirement,),
+        proposals=(proposal,),
+        as_of=AS_OF,
+    )
+    assert receipt.status == "gap_identified"
+    assert receipt.lifecycle_receipt_id is not None
+    assert store.assess(
+        job_key="gap-job",
+        requirements=(requirement,),
+        proposals=(proposal,),
+        as_of=AS_OF,
+    ) == receipt
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key='gap-job'"
+        ).fetchone()[0] == "gap_identified"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM vacancy_requirements"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM evidence_match_assessments"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM candidate_gaps"
+        ).fetchone()[0] == 1
+        task_id = str(connection.execute(
+            "SELECT task_id FROM improvement_tasks"
+        ).fetchone()[0])
+    task_evidence = TaskEvidence(
+        task_id,
+        "test_result",
+        "locked-assessment-pass",
+        "deterministic",
+        HASHES["artifact"],
+    )
+    promotion = store.record_task_evidence(receipt.run_id, task_evidence)
+    assert promotion.approval_state == "pending"
+    assert store.record_task_evidence(receipt.run_id, task_evidence) == promotion
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT approval_state FROM improvement_evidence_candidates"
+        ).fetchone()[0] == "pending"
+    for table in (
+        "fit_assessment_runs",
+        "vacancy_requirements",
+        "evidence_match_assessments",
+        "candidate_gaps",
+        "improvement_tasks",
+        "improvement_evidence_candidates",
+    ):
+        with store._connect() as connection, pytest.raises(
+            sqlite3.IntegrityError,
+            match="immutable",
+        ):
+            connection.execute(f"DELETE FROM {table}")
+    assert database.lifecycle.replay()["gap-job"] is PipelineState.GAP_IDENTIFIED
+
+
+def test_fully_matched_fit_run_stays_at_fit_boundary_for_jaa06(tmp_path: Path) -> None:
+    text = "Deliver a public API."
+    database = _job_at_fit(tmp_path / "ready.sqlite3", "ready-job", text)
+    graph = CandidateGraph(database.path)
+    graph.add_evidence(
+        "api-artifact",
+        statement="Content-addressed API test and artefact.",
+        source_identity="test:artifact",
+        state="evidence",
+        evidence_kind="portfolio_artifact",
+        valid_until="2035-01-01",
+    )
+    graph.verify_evidence(
+        "api-artifact", 1, decision="approved",
+        verifier_kind="deterministic", policy_id="artifact-review",
+        policy_version="1", policy_hash=HASHES["artifact"],
+        reason="test and artefact verified", source_identity="test:verifier",
+    )
+    graph.add_claim(
+        "public-api-delivery",
+        statement="Delivered a tested public API.",
+        claim_type="achievement",
+        state="evidence",
+        source_identity="test:claim",
+        valid_until="2035-01-01",
+    )
+    graph.link_claim_evidence(
+        "public-api-delivery", "api-artifact",
+        source_identity="test:edge", edge_type="demonstrated_by",
+    )
+    graph.approve_claim("public-api-delivery")
+    evidence = candidate_graph_evidence(graph.path, as_of=AS_OF)
+    with database.connect() as connection:
+        payload_hash = str(connection.execute(
+            "SELECT payload_hash FROM pipeline_jobs WHERE job_key='ready-job'"
+        ).fetchone()[0])
+    requirement = Requirement(
+        "api", "public-api-delivery", text, False,
+        "evidence", "build_evidence", ("portfolio_artifact",), 9000,
+        f"vacancy:ready-job:{payload_hash}", (0, len(text)),
+    )
+    store = FitAssessmentStore(database.path)
+    receipt = store.assess(
+        job_key="ready-job",
+        requirements=(requirement,),
+        proposals=(_proposal(requirement, evidence, ("api-artifact",)),),
+        as_of=AS_OF,
+    )
+    assert receipt.status == "ready"
+    assert receipt.lifecycle_receipt_id is None
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key='ready-job'"
+        ).fetchone()[0] == "fit_assessed"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM candidate_gaps"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM improvement_tasks"
+        ).fetchone()[0] == 0
 
 
 def test_requirement_contract_rejects_non_atomic_or_inconsistent_policy() -> None:

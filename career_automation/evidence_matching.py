@@ -249,10 +249,34 @@ class MatchResult:
     reason: str
     policy_sha256: str
     proposal_sha256: str | None
+    receipt: InferenceReceipt | None = None
 
     def __post_init__(self) -> None:
         if self.decision not in MATCH_DECISIONS:
             raise ValueError("unknown match decision")
+        if (self.proposal_sha256 is None) != (self.receipt is None):
+            raise ValueError("proposal hash and inference receipt must appear together")
+
+
+@dataclass(frozen=True)
+class CandidateMatchBatch:
+    results: tuple[MatchResult, ...]
+    candidate_profile_sha256: str
+    policy_sha256: str
+    as_of: date
+
+    def __post_init__(self) -> None:
+        _digest("candidate profile hash", self.candidate_profile_sha256)
+        _digest("matching policy hash", self.policy_sha256)
+        if any(result.policy_sha256 != self.policy_sha256 for result in self.results):
+            raise ValueError("batch contains mixed matching policies")
+        for result in self.results:
+            if (
+                result.receipt is not None
+                and result.receipt.candidate_profile_sha256
+                != self.candidate_profile_sha256
+            ):
+                raise ValueError("batch contains mixed candidate profiles")
 
 
 def _proposal_hash(proposal: MatchProposal) -> str:
@@ -312,11 +336,13 @@ def matching_input_hash(
     requirement: Requirement,
     *,
     candidate_profile_sha256: str,
+    as_of: date,
 ) -> str:
     _digest("candidate profile hash", candidate_profile_sha256)
     return content_hash({
         "requirement": _requirement_payload(requirement),
         "candidate_profile_sha256": candidate_profile_sha256,
+        "as_of": as_of.isoformat(),
     })
 
 
@@ -399,6 +425,7 @@ def evaluate_match(
             "no match proposal was supplied",
             policy.policy_hash,
             None,
+            None,
         )
     if proposal.requirement_id != requirement.requirement_id:
         raise ValueError("proposal requirement identity mismatch")
@@ -410,6 +437,7 @@ def evaluate_match(
     expected_input = matching_input_hash(
         requirement,
         candidate_profile_sha256=profile_sha256,
+        as_of=as_of,
     )
     if proposal.receipt.input_sha256 != expected_input:
         raise ValueError("proposal input hash mismatch")
@@ -422,6 +450,7 @@ def evaluate_match(
             requirement.requirement_id, "abstain", (), proposal.confidence_bp,
             "proposal confidence is below the reviewable floor",
             policy.policy_hash, proposal_sha256,
+            proposal.receipt,
         )
     if proposal.basis == "none":
         decision = (
@@ -434,6 +463,7 @@ def evaluate_match(
             "review found no candidate evidence" if decision == "no_match"
             else "absence assessment is not confident enough",
             policy.policy_hash, proposal_sha256,
+            proposal.receipt,
         )
     cited = tuple(evidence[evidence_id] for evidence_id in proposal.evidence_ids)
     if proposal.basis == "contradicts":
@@ -445,6 +475,7 @@ def evaluate_match(
             "candidate evidence contradicts the requirement",
             policy.policy_hash,
             proposal_sha256,
+            proposal.receipt,
         )
     eligible = tuple(
         item for item in cited
@@ -457,6 +488,7 @@ def evaluate_match(
             requirement.requirement_id, "no_match", (), proposal.confidence_bp,
             "cited material is not current approved evidence of an accepted proof class",
             policy.policy_hash, proposal_sha256,
+            proposal.receipt,
         )
     if proposal.confidence_bp < policy.match_confidence_bp:
         return MatchResult(
@@ -464,12 +496,14 @@ def evaluate_match(
             tuple(item.evidence_id for item in eligible), proposal.confidence_bp,
             "direct relationship confidence is below the match threshold",
             policy.policy_hash, proposal_sha256,
+            proposal.receipt,
         )
     return MatchResult(
         requirement.requirement_id, "matched",
         tuple(item.evidence_id for item in eligible), proposal.confidence_bp,
         "current approved evidence directly demonstrates the atomic criterion",
         policy.policy_hash, proposal_sha256,
+        proposal.receipt,
     )
 
 
@@ -616,15 +650,21 @@ def match_candidate_graph(
     *,
     as_of: date,
     policy: MatchingPolicy = MatchingPolicy(),
-) -> tuple[MatchResult, ...]:
+) -> CandidateMatchBatch:
     """Match through the authoritative JAA-02 graph rather than caller claims."""
     evidence = candidate_graph_evidence(candidate_graph_path, as_of=as_of)
-    return match_requirements(
+    results = match_requirements(
         requirements,
         proposals,
         evidence,
         as_of=as_of,
         policy=policy,
+    )
+    return CandidateMatchBatch(
+        results,
+        evidence_projection_hash(evidence),
+        policy.policy_hash,
+        as_of,
     )
 
 

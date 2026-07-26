@@ -212,7 +212,13 @@
         "career_automation/fixtures/jaa05_locked_labels.json",
         "scripts/evaluate_jaa05_locked_labels.py"
       ],
-      "inputs": ["career_automation/candidate_graph.py", "career_automation/employer_research.py"],
+      "inputs": [
+        "career_automation/candidate_graph.py",
+        "career_automation/employer_research.py",
+        "career_automation/lifecycle.py",
+        "career_automation/migrations.py",
+        "career_automation/models.py"
+      ],
       "interfaces": [],
       "environment": [],
       "tests": [

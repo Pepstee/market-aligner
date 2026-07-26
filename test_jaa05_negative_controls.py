@@ -25,13 +25,18 @@ from career_automation.evidence_matching import (
     matching_input_hash,
 )
 from career_automation.candidate_graph import CandidateGraph
+from career_automation.database import CareerDatabase
 from career_automation.gap_optimizer import (
     DEFAULT_TEMPLATES,
+    FitAssessmentStore,
     TaskEvidence,
     TaskTemplate,
     optimise_gaps,
     validate_task_evidence,
 )
+from career_automation.lifecycle import PolicyIdentity, canonical_hash
+from career_automation.migrations import apply_jaa_05_migrations
+from career_automation.models import PipelineState, ScoredJob
 
 
 AS_OF = date(2030, 1, 1)
@@ -74,6 +79,7 @@ def _receipt(
         input_hash or matching_input_hash(
             requirement,
             candidate_profile_sha256=candidate_profile_sha256,
+            as_of=AS_OF,
         ),
     )
 
@@ -122,6 +128,42 @@ def _proposal(
     )
 
 
+def _job_at_fit(path: Path, job_key: str, body: str) -> CareerDatabase:
+    database = CareerDatabase(path)
+    payload = {"body": body}
+    database.upsert_scored_job(ScoredJob(
+        key=job_key,
+        board="synthetic",
+        job_id=job_key,
+        url=f"https://example.test/jobs/{job_key}",
+        title="Synthetic role",
+        company="Synthetic employer",
+        fit=None,
+        opportunity=0.9,
+        final_score=None,
+        extraction_confidence=1.0,
+        payload=payload,
+        payload_hash=canonical_hash(payload),
+    ))
+    policy = PolicyIdentity("test.fit-prerequisite", "1", DIGEST)
+    for target in (
+        PipelineState.EMPLOYER_RESEARCH_QUEUED,
+        PipelineState.EMPLOYER_RESEARCHING,
+        PipelineState.EMPLOYER_RESEARCHED,
+        PipelineState.OPPORTUNITY_1_ASSESSED,
+        PipelineState.FIT_ASSESSED,
+    ):
+        database.lifecycle.commit(
+            job_key=job_key,
+            to_state=target,
+            policy=policy,
+            inputs={"target": target.value},
+            outputs={"advanced": True},
+            idempotency_key=f"test-prerequisite:{job_key}:{target.value}",
+        )
+    return database
+
+
 @pytest.mark.parametrize("proof_class", ("verified_claim", "portfolio_artifact", "test_result"))
 def test_similarity_interest_or_project_complexity_cannot_become_professional_experience(
     proof_class: str,
@@ -165,6 +207,7 @@ def test_unapproved_unfactual_stale_or_negative_material_cannot_match(
 
 def test_unknown_evidence_and_policy_drift_fail_closed() -> None:
     requirement = _requirement()
+    evidence = _evidence("valid", "employment_record")
     with pytest.raises(ValueError, match="unknown evidence"):
         evaluate_match(
             requirement,
@@ -172,7 +215,13 @@ def test_unknown_evidence_and_policy_drift_fail_closed() -> None:
             {},
             as_of=AS_OF,
         )
-    evidence = _evidence("valid", "employment_record")
+    with pytest.raises(ValueError, match="input hash mismatch"):
+        evaluate_match(
+            requirement,
+            _proposal(requirement, (evidence,), "valid"),
+            {"valid": evidence},
+            as_of=date(2030, 1, 2),
+        )
     with pytest.raises(ValueError, match="policy hash mismatch"):
         evaluate_match(
             requirement,
@@ -337,6 +386,146 @@ def test_structural_gap_blocks_without_creating_a_task() -> None:
     assert plan.blocks_candidacy
     assert plan.gaps[0].blocking
     assert plan.tasks == ()
+
+
+def test_persisted_structural_gap_rejects_candidacy_without_a_task(
+    tmp_path: Path,
+) -> None:
+    text = "Existing unrestricted work authorisation is mandatory."
+    database = _job_at_fit(tmp_path / "blocked.sqlite3", "blocked-job", text)
+    with database.connect() as connection:
+        payload_hash = str(connection.execute(
+            "SELECT payload_hash FROM pipeline_jobs WHERE job_key='blocked-job'"
+        ).fetchone()[0])
+    requirement = Requirement(
+        "work-right", "existing-work-authorisation", text, True,
+        "structural", "fatal", ("verified_claim",), 10_000,
+        f"vacancy:blocked-job:{payload_hash}", (0, len(text)),
+    )
+    proposal = MatchProposal(
+        "work-right", (), 9900, "none", "No current right.",
+        _receipt(requirement, ()),
+    )
+    store = FitAssessmentStore(database.path)
+    receipt = store.assess(
+        job_key="blocked-job",
+        requirements=(requirement,),
+        proposals=(proposal,),
+        as_of=AS_OF,
+    )
+    assert receipt.status == "blocked"
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key='blocked-job'"
+        ).fetchone()[0] == "candidate_rejected"
+        assert connection.execute(
+            "SELECT blocking FROM candidate_gaps"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM improvement_tasks"
+        ).fetchone()[0] == 0
+
+
+def test_fit_persistence_rejects_unbound_requirement_and_rolls_back(
+    tmp_path: Path,
+) -> None:
+    text = "Demonstrate systems knowledge."
+    database = _job_at_fit(tmp_path / "unbound.sqlite3", "unbound-job", text)
+    requirement = Requirement(
+        "systems", "systems", text, False,
+        "knowledge", "learn_and_test", ("test_result",), 8000,
+        f"vacancy:unbound-job:{'0' * 64}", (0, len(text)),
+    )
+    store = FitAssessmentStore(database.path)
+    with pytest.raises(ValueError, match="exact vacancy payload"):
+        store.assess(
+            job_key="unbound-job",
+            requirements=(requirement,),
+            proposals=(MatchProposal(
+                "systems", (), 9000, "none", "No evidence.",
+                _receipt(requirement, ()),
+            ),),
+            as_of=AS_OF,
+        )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM fit_assessment_runs"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key='unbound-job'"
+        ).fetchone()[0] == "fit_assessed"
+
+
+def test_task_artifact_identity_cannot_hide_conflicting_verification(
+    tmp_path: Path,
+) -> None:
+    text = "Demonstrate systems knowledge."
+    database = _job_at_fit(tmp_path / "task-conflict.sqlite3", "task-job", text)
+    with database.connect() as connection:
+        payload_hash = str(connection.execute(
+            "SELECT payload_hash FROM pipeline_jobs WHERE job_key='task-job'"
+        ).fetchone()[0])
+    requirement = Requirement(
+        "systems", "systems", text, False,
+        "knowledge", "learn_and_test", ("test_result",), 8000,
+        f"vacancy:task-job:{payload_hash}", (0, len(text)),
+    )
+    store = FitAssessmentStore(database.path)
+    run = store.assess(
+        job_key="task-job",
+        requirements=(requirement,),
+        proposals=(MatchProposal(
+            "systems", (), 9000, "none", "No evidence.",
+            _receipt(requirement, ()),
+        ),),
+        as_of=AS_OF,
+    )
+    with store._connect() as connection:
+        task_id = str(connection.execute(
+            "SELECT task_id FROM improvement_tasks"
+        ).fetchone()[0])
+    deterministic = TaskEvidence(
+        task_id, "test_result", "locked-assessment-pass",
+        "deterministic", DIGEST,
+    )
+    store.record_task_evidence(run.run_id, deterministic)
+    with pytest.raises(ValueError, match="different verification evidence"):
+        store.record_task_evidence(
+            run.run_id,
+            TaskEvidence(
+                task_id, "test_result", "locked-assessment-pass",
+                "human", DIGEST,
+            ),
+        )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT verifier_kind FROM improvement_evidence_candidates"
+        ).fetchone()[0] == "deterministic"
+
+
+@pytest.mark.parametrize("attack", ("ledger", "trigger"))
+def test_jaa05_migration_rejects_ledger_or_installed_schema_tampering(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    path = tmp_path / f"{attack}.sqlite3"
+    apply_jaa_05_migrations(path)
+    with sqlite3.connect(path) as connection:
+        if attack == "ledger":
+            connection.execute(
+                """UPDATE career_schema_migrations SET checksum=?
+                   WHERE version=4""",
+                ("0" * 64,),
+            )
+        else:
+            connection.execute(
+                "DROP TRIGGER improvement_tasks_immutable_delete"
+            )
+    with pytest.raises(RuntimeError, match=(
+        "modified after deployment" if attack == "ledger"
+        else "installed JAA-05 schema"
+    )):
+        apply_jaa_05_migrations(path)
 
 
 @pytest.mark.parametrize(
