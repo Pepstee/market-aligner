@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import json
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -36,6 +39,7 @@ from career_automation.rendering import (
 )
 from test_jaa07_independent_acceptance import (
     DIGEST,
+    LOCKED_PACKS,
     ROOT,
     _employer_fact_document,
     _source,
@@ -476,3 +480,44 @@ def test_production_compiler_rejects_contact_authority_drift(
                 **supplied,
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("attack", "expected"),
+    (
+        ("artifact_hash", "metrics differ"),
+        ("certifies", "truth boundary"),
+        ("limitations", "truth boundary"),
+        ("pack_count", "exactly 20"),
+    ),
+)
+def test_locked_pack_truth_and_expected_outputs_cannot_be_rehashed(
+    tmp_path: Path,
+    attack: str,
+    expected: str,
+) -> None:
+    fixture = json.loads(LOCKED_PACKS.read_text(encoding="utf-8"))
+    if attack == "artifact_hash":
+        fixture["cases"][0]["expected_artifact_set_sha256"] = "0" * 64
+    elif attack == "certifies":
+        fixture["certifies_slice"] = True
+    elif attack == "limitations":
+        fixture["limitations"] = fixture["limitations"][:-1]
+    else:
+        fixture["cases"] = fixture["cases"][:-1]
+    attacked = tmp_path / "attacked.json"
+    attacked.write_text(json.dumps(fixture), encoding="utf-8")
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "scripts/evaluate_jaa07_locked_packs.py",
+            "--fixture",
+            str(attacked),
+        ),
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert expected in completed.stderr

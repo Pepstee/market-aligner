@@ -1,0 +1,42 @@
+{
+  "schema_version": "jaa07.locked-application-packs.v1",
+  "certifies_slice": false,
+  "dependency_gates": ["JAA-06", "JAA-05", "JAA-04"],
+  "limitations": [
+    "Synthetic packs do not establish production document quality.",
+    "Synthetic employers, vacancies, contacts and claims are not applicant data.",
+    "This cohort cannot certify JAA-07 or unblock upstream authority.",
+    "No artifact is released, submitted or published outside the temporary evaluator directory."
+  ],
+  "expected_metrics_bp": {
+    "page_contract": 10000,
+    "parse_success": 10000,
+    "section_contract": 10000,
+    "requirement_coverage": 10000,
+    "provenance_completeness": 10000,
+    "factual_preservation": 10000,
+    "deterministic_replay": 10000
+  },
+  "cases": [
+    {"id":"pack-01","company":"Example Alpha Ltd","role":"Platform Engineer","metric":"99.1%","year":"2021","email":"candidate01@example.test","phone":"+44 7700 900001","expected_artifact_set_sha256":"0045a5efed3d2cbca70e2e983cc22fd44aaeec43f23b9c3bd484d78a55a5e15c"},
+    {"id":"pack-02","company":"Example Bravo Ltd","role":"Data Engineer","metric":"99.2%","year":"2022","email":"candidate02@example.test","phone":"+44 7700 900002","expected_artifact_set_sha256":"16ea46b4be464c1cf99bd68573b8c338c50b297c1cd768bcf6a8289a5eab8d06"},
+    {"id":"pack-03","company":"Example Charlie Ltd","role":"Security Engineer","metric":"99.3%","year":"2023","email":"candidate03@example.test","phone":"+44 7700 900003","expected_artifact_set_sha256":"875624f9409eaa86f02a8771a4798abf91516fb3de788a6ed8147394938b0b30"},
+    {"id":"pack-04","company":"Example Delta Ltd","role":"Cloud Engineer","metric":"99.4%","year":"2024","email":"candidate04@example.test","phone":"+44 7700 900004","expected_artifact_set_sha256":"9fc6cf46e10db8c2b2b961e1ba9c0fccd3cc1f667b2091edcd9ec786f0a65a94"},
+    {"id":"pack-05","company":"Example Echo Ltd","role":"Software Engineer","metric":"99.5%","year":"2025","email":"candidate05@example.test","phone":"+44 7700 900005","expected_artifact_set_sha256":"bea5103c132ffea43730b42e767311bcda4c32399c16bc7a3d074e0480cd5ceb"},
+    {"id":"pack-06","company":"Example Foxtrot Ltd","role":"DevOps Engineer","metric":"98.6%","year":"2021","email":"candidate06@example.test","phone":"+44 7700 900006","expected_artifact_set_sha256":"93db8c4d1250c52ef9e10040778e8825f1177130b39edc5146f4b9c6ec980efa"},
+    {"id":"pack-07","company":"Example Golf Ltd","role":"Systems Engineer","metric":"98.7%","year":"2022","email":"candidate07@example.test","phone":"+44 7700 900007","expected_artifact_set_sha256":"b13866f3ee245bbe4ad21e5514f786b7d0b94a195762ca5d0df751283d37cd27"},
+    {"id":"pack-08","company":"Example Hotel Ltd","role":"Backend Engineer","metric":"98.8%","year":"2023","email":"candidate08@example.test","phone":"+44 7700 900008","expected_artifact_set_sha256":"8d822a1a0a7fa40ae56835bee94ca8e87590d8628eb642e5b00c3c051cf94519"},
+    {"id":"pack-09","company":"Example India Ltd","role":"Infrastructure Engineer","metric":"98.9%","year":"2024","email":"candidate09@example.test","phone":"+44 7700 900009","expected_artifact_set_sha256":"d900f289f8f1344e4e307bba007526d7122761cf9610bf996b7511d3cbfb3b22"},
+    {"id":"pack-10","company":"Example Juliet Ltd","role":"Site Reliability Engineer","metric":"99.0%","year":"2025","email":"candidate10@example.test","phone":"+44 7700 900010","expected_artifact_set_sha256":"2e39d7ae8f95332a55f6d463b65f2f570f07a8e9bffb877ab38309dae175b916"},
+    {"id":"pack-11","company":"Example Kilo Ltd","role":"Machine Learning Engineer","metric":"97.1%","year":"2021","email":"candidate11@example.test","phone":"+44 7700 900011","expected_artifact_set_sha256":"a1c24b42ebf3a8f2dd004b437020f50d4ce94bb787f1dcd38a3f9df739e8eab2"},
+    {"id":"pack-12","company":"Example Lima Ltd","role":"Application Engineer","metric":"97.2%","year":"2022","email":"candidate12@example.test","phone":"+44 7700 900012","expected_artifact_set_sha256":"5cde6c78d2cec6612482bf6a8c63f583ff759153dd9144d608c778f1b0dd7ebd"},
+    {"id":"pack-13","company":"Example Mike Ltd","role":"Integration Engineer","metric":"97.3%","year":"2023","email":"candidate13@example.test","phone":"+44 7700 900013","expected_artifact_set_sha256":"48bd29fdab316165314a4eb0f5404e33a523ed892a15d406a29b51863b08c7fa"},
+    {"id":"pack-14","company":"Example November Ltd","role":"Automation Engineer","metric":"97.4%","year":"2024","email":"candidate14@example.test","phone":"+44 7700 900014","expected_artifact_set_sha256":"4ba7d91c2aadafb8783c897658cdda8d7224055f8b0277aa7bceab8d94dd09ca"},
+    {"id":"pack-15","company":"Example Oscar Ltd","role":"Product Engineer","metric":"97.5%","year":"2025","email":"candidate15@example.test","phone":"+44 7700 900015","expected_artifact_set_sha256":"0b8fda7a643be532cdd073f234d2207801fab41419a02cbf13b0bede0510f741"},
+    {"id":"pack-16","company":"Example Papa Ltd","role":"Quality Engineer","metric":"96.6%","year":"2021","email":"candidate16@example.test","phone":"+44 7700 900016","expected_artifact_set_sha256":"fa6c738bc9c192a9c75c5d0b733996decc9821ad50309e380123c1ea52219b9e"},
+    {"id":"pack-17","company":"Example Quebec Ltd","role":"Release Engineer","metric":"96.7%","year":"2022","email":"candidate17@example.test","phone":"+44 7700 900017","expected_artifact_set_sha256":"ff809db7c7642d8ae34948c5fd73af13cc7ecd4b64da755a80fc7d759df6f587"},
+    {"id":"pack-18","company":"Example Romeo Ltd","role":"Network Engineer","metric":"96.8%","year":"2023","email":"candidate18@example.test","phone":"+44 7700 900018","expected_artifact_set_sha256":"30fe6ab8abe8bfc1a97f5f22730e824b9c5c731192330ba048403e946890693d"},
+    {"id":"pack-19","company":"Example Sierra Ltd","role":"Solutions Engineer","metric":"96.9%","year":"2024","email":"candidate19@example.test","phone":"+44 7700 900019","expected_artifact_set_sha256":"4ecc50e0f0282ebb312d2cd8cc924b287218f2a26fa1bd8fd91ff173c5b65f59"},
+    {"id":"pack-20","company":"Example Tango Ltd","role":"Technical Engineer","metric":"97.0%","year":"2025","email":"candidate20@example.test","phone":"+44 7700 900020","expected_artifact_set_sha256":"7c8b5e9faa6120e8f3fe199a271ff71c8ac1d1c8b515e2e753fff46eb4a00b4a"}
+  ]
+}

@@ -259,7 +259,9 @@
       "owns": [
         "career_automation/application_compiler.py",
         "career_automation/rendering.py",
-        "career_automation/application_artifacts.py"
+        "career_automation/application_artifacts.py",
+        "career_automation/fixtures/jaa07_locked_application_packs.json",
+        "scripts/evaluate_jaa07_locked_packs.py"
       ],
       "inputs": ["career_automation/application_strategy.py", "career_automation/documents.py"],
       "interfaces": [],

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -56,6 +58,9 @@ from test_jaa06_independent_acceptance import _fit_database
 DIGEST = hashlib.sha256(b"jaa07-contract").hexdigest()
 POLICY = MatchingPolicy()
 ROOT = Path(__file__).resolve().parent
+LOCKED_PACKS = (
+    ROOT / "career_automation/fixtures/jaa07_locked_application_packs.json"
+)
 
 
 def _strategy() -> ApplicationStrategy:
@@ -459,3 +464,25 @@ def test_production_compiler_resolves_vacancy_contact_claim_and_employer_authori
     artifacts = render_pdf_artifacts(source)
     assert artifacts.cv_pdf.page_count == 2
     assert artifacts.cover_letter_pdf.page_count == 1
+
+
+def test_twenty_locked_packs_pass_exact_noncertifying_software_metrics() -> None:
+    completed = subprocess.run(
+        (sys.executable, "scripts/evaluate_jaa07_locked_packs.py"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    report = json.loads(completed.stdout)
+    assert report["status"] == "SOFTWARE_CONTRACT_PASS"
+    assert report["packs"] == 20
+    assert set(report["metrics_bp"].values()) == {10_000}
+    assert len(report["results"]) == 20
+    assert all(
+        set(row["checks"].values()) == {True}
+        for row in report["results"]
+    )
+    assert report["certifies_slice"] is False
+    assert report["dependency_gates"] == ["JAA-06", "JAA-05", "JAA-04"]
+    assert report["live_requests"] == 0
