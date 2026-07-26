@@ -88,6 +88,147 @@ def test_corpus_certifier_requires_an_explicit_external_capture(tmp_path: Path) 
     assert not destination.exists()
 
 
+def test_corpus_certifier_requires_an_explicit_external_receipt(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "scripts/accept_jaa_04.py",
+            "--capture",
+            str(tmp_path / "missing-capture"),
+            "--access-policy",
+            str(tmp_path / "missing-policy.json"),
+        ),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "--receipt" in completed.stderr
+
+
+def test_corpus_certifier_refuses_a_repository_receipt_path(tmp_path: Path) -> None:
+    destination = ROOT / "never-write-jaa04-runtime-receipt.json"
+    assert not destination.exists()
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "scripts/accept_jaa_04.py",
+            "--capture",
+            str(tmp_path / "missing-capture"),
+            "--access-policy",
+            str(tmp_path / "missing-policy.json"),
+            "--receipt",
+            str(destination),
+        ),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "outside the product repository" in completed.stderr
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("script", "internal_flag", "external_flag"),
+    (
+        ("scripts/capture_jaa_04.py", "--destination", "--workspace"),
+        ("scripts/capture_jaa_04.py", "--workspace", "--destination"),
+        ("scripts/rebuild_jaa04_corpus.py", "--corpus", "--workspace"),
+        ("scripts/rebuild_jaa04_corpus.py", "--workspace", "--corpus"),
+    ),
+)
+def test_acquisition_commands_refuse_repository_runtime_paths(
+    tmp_path: Path,
+    script: str,
+    internal_flag: str,
+    external_flag: str,
+) -> None:
+    internal = ROOT / "never-write-jaa04-runtime"
+    assert not internal.exists()
+    argv = [
+        sys.executable,
+        script,
+        "--queue-snapshot",
+        str(ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"),
+        internal_flag,
+        str(internal),
+        external_flag,
+        str(tmp_path / "external-runtime"),
+        "--access-policy",
+        str(tmp_path / "missing-policy.json"),
+    ]
+    completed = subprocess.run(
+        argv,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "outside the product repository" in (completed.stderr + completed.stdout)
+    assert not internal.exists()
+
+
+@pytest.mark.parametrize(
+    ("script", "destination_flag"),
+    (
+        ("scripts/capture_jaa_04.py", "--destination"),
+        ("scripts/rebuild_jaa04_corpus.py", "--corpus"),
+    ),
+)
+def test_acquisition_commands_refuse_repository_access_policy(
+    tmp_path: Path,
+    script: str,
+    destination_flag: str,
+) -> None:
+    completed = subprocess.run(
+        (
+            sys.executable,
+            script,
+            "--queue-snapshot",
+            str(ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"),
+            destination_flag,
+            str(tmp_path / "external-runtime"),
+            "--workspace",
+            str(tmp_path / "external-workspace"),
+            "--access-policy",
+            str(ROOT / "never-read-jaa04-policy.json"),
+        ),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "access policy must be outside the product repository" in (
+        completed.stderr + completed.stdout
+    )
+
+
+def test_certifier_refuses_repository_access_policy(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "scripts/accept_jaa_04.py",
+            "--capture",
+            str(tmp_path / "external-capture"),
+            "--access-policy",
+            str(ROOT / "never-read-jaa04-policy.json"),
+            "--receipt",
+            str(tmp_path / "external-receipt"),
+        ),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "access policy must be outside the product repository" in completed.stderr
+
+
 @pytest.mark.parametrize("attack", ("unsupported-receipt-schema", "manifest-digest-mismatch"))
 def test_corpus_certifier_rejects_malformed_external_bytes_without_receipt(
     tmp_path: Path,

@@ -183,14 +183,23 @@ def test_full_jaa04_gate_fails_closed_without_external_capture_and_policy(tmp_pa
     for supplied, required in (
         (("--capture", str(absent)), "--access-policy"),
         (("--access-policy", str(absent)), "--capture"),
+        (
+            (
+                "--capture",
+                str(absent),
+                "--access-policy",
+                str(absent),
+            ),
+            "--receipt",
+        ),
     ):
+        receipt_args = () if required == "--receipt" else ("--receipt", str(receipt))
         result = _run(
             clone,
             sys.executable,
             "scripts/accept_jaa_04.py",
             *supplied,
-            "--receipt",
-            str(receipt),
+            *receipt_args,
         )
         assert result.returncode != 0
         assert required in result.stderr

@@ -156,9 +156,13 @@ on the capture, and replays every embedded terms attestation and robots
 decision against the exact published robots bytes. A dossier with a missing
 receipt, a self-declared policy, a disallowed engine, or robots denial cannot
 certify.
-Neither live corpus bytes, in-flight state nor full-corpus receipts are stored
-in Git. A clean source clone contains the acquisition software and admitted
-queue projection only; it never fabricates a live corpus.
+The access-policy draft/final policy, acquisition workspace, corpus pointer and
+full-corpus receipt must each be supplied explicitly outside the product
+repository. The commands reject repository-contained runtime paths rather than
+relying on `.gitignore`. Neither live corpus bytes, in-flight state nor
+full-corpus receipts are stored in Git. A clean source clone contains the
+acquisition software and admitted queue projection only; it never fabricates a
+live corpus.
 
 ## Operator correction for the next implementation cycle
 

@@ -311,7 +311,7 @@ class PublicAccessController:
             receipt = self._receipts[host]
             body = self.cache.resolve(receipt.raw_response_ref, receipt.content_sha256)
             allowed = True
-            if receipt.status_code == 200:
+            if 200 <= receipt.status_code < 300:
                 allowed, _ = _robots_rules(body, url)
                 if not allowed:
                     raise PublicAccessDenied(f"ROBOTS_DISALLOWED: {url}")

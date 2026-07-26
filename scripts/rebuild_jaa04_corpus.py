@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from capture_jaa_04 import ROOT, capture
+from capture_jaa_04 import ROOT, capture, external_runtime_path
 from career_automation.corpus_publication import publish_by_pointer, validate_inventory
 from career_automation.employer_research import RawResponseCache, load_frozen_dossiers
 from career_automation.public_access import PublicAccessPolicy
@@ -62,15 +62,16 @@ def main() -> int:
     parser.add_argument("--access-policy", type=Path, required=True,
                         help="external human terms-review attestations")
     args = parser.parse_args()
-    destination = args.corpus.resolve()
+    destination = external_runtime_path(args.corpus, label="corpus destination")
+    workspace = external_runtime_path(args.workspace, label="acquisition workspace")
+    access_policy_path = external_runtime_path(args.access_policy, label="access policy")
     destination.parent.mkdir(parents=True, exist_ok=True)
     fresh = Path(tempfile.mkdtemp(prefix="jaa04-authentic-", dir=destination.parent))
     fresh.rmdir()
     try:
         if args.maximum_routes < 1 or args.timeout_seconds < 1:
             raise ValueError("retrieval limits must be positive")
-        workspace = args.workspace.resolve()
-        access_policy = PublicAccessPolicy.load(args.access_policy.resolve())
+        access_policy = PublicAccessPolicy.load(access_policy_path)
         queue_snapshot = _capture_input(
             args.queue_snapshot.resolve(),
             workspace,

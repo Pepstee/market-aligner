@@ -180,6 +180,24 @@ def test_robots_disallow_and_longest_allow_are_enforced_from_exact_bytes(
     assert receipt.content_sha256 == hashlib.sha256(body).hexdigest()
 
 
+def test_cached_non_200_success_replays_rules_for_each_url(tmp_path: Path) -> None:
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        "Disallow: /jobs\n"
+        "Allow: /jobs/public\n"
+    ).encode()
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, client, _, _ = _controller(
+        tmp_path,
+        _response(204, body, url=robots_url),
+    )
+    public = f"https://{HOST}/jobs/public/engineer"
+    assert controller.before_request(public).allowed
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(URL)
+    assert client.calls == [("static", robots_url)]
+
+
 def test_absent_robots_is_receipted_and_ten_second_floor_is_enforced(
     tmp_path: Path,
 ) -> None:

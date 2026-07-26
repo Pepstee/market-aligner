@@ -37,6 +37,15 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _external(path: Path, *, label: str) -> Path:
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(ROOT.resolve())
+    except ValueError:
+        return resolved
+    raise ValueError(f"{label} must be outside the product repository")
+
+
 def revision() -> str:
     result = subprocess.run(("git", "rev-parse", "HEAD^{commit}"), cwd=ROOT,
                             text=True, capture_output=True, check=True)
@@ -58,6 +67,9 @@ def _load_access_policy(capture: Path, path: Path) -> PublicAccessPolicy:
 
 
 def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:
+    capture = _external(capture, label="capture")
+    destination = _external(destination, label="certification receipt")
+    access_policy_path = _external(access_policy_path, label="access policy")
     receipt_path = capture / "capture_receipt.json"
     manifest_path = capture / "research_manifest.json"
     dossiers_path = capture / "frozen_dossiers.json"
@@ -169,8 +181,8 @@ def main() -> int:
                         help="external published corpus pointer or release path")
     parser.add_argument("--access-policy", type=Path, required=True,
                         help="operator-presented human terms-review policy used by acquisition")
-    parser.add_argument("--receipt", type=Path,
-                        default=ROOT / "runtime_evidence/jaa04")
+    parser.add_argument("--receipt", type=Path, required=True,
+                        help="external content-addressed certification receipt path")
     args = parser.parse_args()
     try:
         receipt = certify(

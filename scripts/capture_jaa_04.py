@@ -55,6 +55,16 @@ def canonical(value: object) -> bytes:
                        separators=(",", ":"), allow_nan=False) + "\n").encode()
 
 
+def external_runtime_path(path: Path, *, label: str) -> Path:
+    """Resolve one runtime path and reject the entire product worktree."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(ROOT.resolve())
+    except ValueError:
+        return resolved
+    raise ValueError(f"{label} must be outside the product repository")
+
+
 def _revision() -> str:
     result = subprocess.run(("git", "rev-parse", "HEAD^{commit}"), cwd=ROOT,
                             text=True, capture_output=True, check=True)
@@ -290,6 +300,11 @@ def _bootstrap_json_database(work_db: Path, records: list[dict[str, object]],
 def capture(database_path: Path, destination: Path, *, workspace: Path | None = None,
             maximum_routes: int = 12, timeout_seconds: int = 45,
             access_policy: PublicAccessPolicy | None = None) -> None:
+    destination = external_runtime_path(destination, label="capture destination")
+    workspace = external_runtime_path(
+        workspace or destination.with_name(f".{destination.name}.inflight"),
+        label="capture workspace",
+    )
     if destination.exists():
         raise RuntimeError("capture destination already exists")
     if not database_path.is_file():
@@ -307,7 +322,6 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
     calibrated = CalibrationPolicy()
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    workspace = (workspace or destination.with_name(f".{destination.name}.inflight")).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     work_db = workspace / "queue.sqlite3"
     state_path = workspace / "acquisition_state.json"
@@ -523,14 +537,26 @@ def main() -> int:
     try:
         if args.maximum_routes < 1 or args.timeout_seconds < 1:
             raise ValueError("retrieval limits must be positive")
-        access_policy = PublicAccessPolicy.load(args.access_policy.resolve())
-        capture(args.queue_snapshot.resolve(), args.destination.resolve(), workspace=args.workspace.resolve(),
+        destination = external_runtime_path(
+            args.destination,
+            label="capture destination",
+        )
+        workspace = external_runtime_path(
+            args.workspace,
+            label="acquisition workspace",
+        )
+        access_policy_path = external_runtime_path(
+            args.access_policy,
+            label="access policy",
+        )
+        access_policy = PublicAccessPolicy.load(access_policy_path)
+        capture(args.queue_snapshot.resolve(), destination, workspace=workspace,
                 maximum_routes=args.maximum_routes, timeout_seconds=args.timeout_seconds,
                 access_policy=access_policy)
     except Exception as exc:
         print(f"JAA-04 capture: ERROR: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"status": "SUCCESS", "capture": str(args.destination)}))
+    print(json.dumps({"status": "SUCCESS", "capture": str(destination)}))
     return 0
 
 
