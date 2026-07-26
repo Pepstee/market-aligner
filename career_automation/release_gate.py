@@ -684,6 +684,20 @@ class IssuedRelease:
             raise ValueError("release lifecycle receipt must be positive")
 
 
+@dataclass(frozen=True)
+class ConsumedRelease:
+    release_manifest_sha256: str
+    token_sha256: str
+    consumed_at: str
+
+    def __post_init__(self) -> None:
+        _digest(self.release_manifest_sha256, "consumed manifest hash")
+        _digest(self.token_sha256, "consumed token hash")
+        parsed = datetime.fromisoformat(self.consumed_at)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("token consumption time must include a timezone")
+
+
 class ReleaseGateStore:
     """Re-resolve all authority and atomically issue one offline release token."""
 
@@ -963,10 +977,11 @@ class ReleaseGateStore:
         jurisdiction: str,
         contract_type: str,
         evaluated_at: date,
+        expected_state: PipelineState = PipelineState.APPLICATION_COMPILED,
     ) -> ReleaseBinding:
         row = self._compilation_row(connection, compilation.compilation_id)
         if (
-            str(row["job_state"]) != PipelineState.APPLICATION_COMPILED.value
+            str(row["job_state"]) != expected_state.value
             or str(row["strategy_id"]) != compilation.strategy_id
             or str(row["application_source_id"])
             != compilation.application_source_id
@@ -1379,6 +1394,272 @@ class ReleaseGateStore:
                 token,
                 token_sha256,
                 transition.receipt_id,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _stored_compilation(row: sqlite3.Row) -> ApplicationCompilation:
+        compilation = ApplicationCompilation(
+            str(row["compilation_id"]),
+            str(row["job_key"]),
+            str(row["strategy_id"]),
+            str(row["application_source_id"]),
+            str(row["application_source_hash"]),
+            str(row["artifact_set_hash"]),
+            str(row["artifact_receipt_hash"]),
+            str(row["artifact_relative_directory"]),
+            str(row["contact_record_id"]),
+            int(row["contact_record_version"]),
+            str(row["questions_hash"]),
+            int(row["lifecycle_receipt_id"]),
+        )
+        try:
+            document = json.loads(str(row["compilation_document_json"]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "stored application compilation is invalid JSON"
+            ) from exc
+        if (
+            not isinstance(document, dict)
+            or canonical_json(document)
+            != str(row["compilation_document_json"])
+            or document != compilation.document(include_receipt=False)
+        ):
+            raise ValueError(
+                "stored application compilation differs from its identity"
+            )
+        return compilation
+
+    @staticmethod
+    def _stored_manifest_document(
+        row: sqlite3.Row,
+    ) -> dict[str, object]:
+        try:
+            document = json.loads(str(row["manifest_document_json"]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("stored release manifest is invalid JSON") from exc
+        if (
+            not isinstance(document, dict)
+            or canonical_json(document)
+            != str(row["manifest_document_json"])
+        ):
+            raise ValueError("stored release manifest is not canonical")
+        identity = document.get("release_manifest_sha256")
+        unsigned = dict(document)
+        unsigned.pop("release_manifest_sha256", None)
+        expected = hashlib.sha256(canonical_json(unsigned).encode()).hexdigest()
+        if (
+            identity != str(row["release_manifest_hash"])
+            or expected != str(row["release_manifest_hash"])
+            or document.get("input_sha256") != str(row["input_hash"])
+        ):
+            raise ValueError("stored release manifest identity is invalid")
+        return document
+
+    @staticmethod
+    def _verify_stored_validations(
+        connection: sqlite3.Connection,
+        manifest: ReleaseManifest,
+    ) -> None:
+        rows = connection.execute(
+            """SELECT * FROM release_validation_receipts
+               WHERE release_manifest_hash=?
+               ORDER BY CASE validator_id
+                 WHEN 'authority' THEN 1
+                 WHEN 'truth' THEN 2
+                 WHEN 'eligibility' THEN 3
+                 WHEN 'freshness' THEN 4
+                 WHEN 'consistency' THEN 5
+                 WHEN 'ats' THEN 6
+                 WHEN 'duplicate' THEN 7
+                 WHEN 'official_route' THEN 8
+               END""",
+            (manifest.release_manifest_sha256,),
+        ).fetchall()
+        if len(rows) != len(REQUIRED_VALIDATORS):
+            raise ValueError("stored release validations are incomplete")
+        for row, expected in zip(rows, manifest.validations, strict=True):
+            try:
+                document = json.loads(str(row["receipt_document_json"]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "stored release validation is invalid JSON"
+                ) from exc
+            if (
+                str(row["validator_id"]) != expected.validator_id
+                or str(row["validator_version"])
+                != expected.validator_version
+                or str(row["validator_impl_hash"])
+                != expected.validator_impl_sha256
+                or str(row["input_hash"]) != expected.input_sha256
+                or str(row["artifact_set_hash"])
+                != expected.artifact_set_sha256
+                or str(row["decision"]) != expected.decision
+                or canonical_json(document)
+                != str(row["receipt_document_json"])
+                or canonical_json(document)
+                != canonical_json(expected.document())
+            ):
+                raise ValueError(
+                    "stored release validation differs from current authority"
+                )
+
+    def consume_release_token(
+        self,
+        *,
+        release_token: str,
+        source: ApplicationSource,
+        artifacts: ApplicationArtifacts,
+        contact: CandidateContact,
+        questions: dict[str, tuple[str, str]] | None,
+        artifact_root: str | Path,
+        repository_root: str | Path,
+        jurisdiction: str,
+        contract_type: str,
+        consumed_at: datetime,
+    ) -> ConsumedRelease:
+        """Consume once after full same-day drift checks; perform no action."""
+        if (
+            not release_token.startswith("jaa08.")
+            or len(release_token.split(".")) != 3
+        ):
+            raise ValueError("release token format is invalid")
+        if consumed_at.tzinfo is None or consumed_at.utcoffset() is None:
+            raise ValueError("token consumption time must include a timezone")
+        consumed_utc = consumed_at.astimezone(timezone.utc)
+        consumed_iso = consumed_utc.isoformat()
+        token_sha256 = hashlib.sha256(release_token.encode()).hexdigest()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT token.token_hash,token.consumed_at,
+                          manifest.release_manifest_hash,
+                          manifest.input_hash,
+                          manifest.manifest_document_json,
+                          compilation.compilation_id,
+                          compilation.job_key,
+                          compilation.strategy_id,
+                          compilation.application_source_id,
+                          compilation.application_source_hash,
+                          compilation.artifact_set_hash,
+                          compilation.artifact_receipt_hash,
+                          compilation.artifact_relative_directory,
+                          compilation.contact_record_id,
+                          compilation.contact_record_version,
+                          compilation.questions_hash,
+                          compilation.compilation_document_json,
+                          compilation.lifecycle_receipt_id
+                   FROM release_tokens token
+                   JOIN release_manifests manifest
+                     ON manifest.release_manifest_hash=
+                        token.release_manifest_hash
+                   JOIN application_compilations compilation
+                     ON compilation.compilation_id=manifest.compilation_id
+                   WHERE token.token_hash=?""",
+                (token_sha256,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("release token is unknown")
+            if row["consumed_at"] is not None:
+                raise ValueError("release token was already consumed")
+            if (
+                release_token.split(".")[1]
+                != str(row["release_manifest_hash"])
+            ):
+                raise ValueError(
+                    "release token cites a different manifest identity"
+                )
+            stored_document = self._stored_manifest_document(row)
+            binding_document = stored_document.get("binding")
+            if not isinstance(binding_document, dict):
+                raise ValueError("stored release binding is invalid")
+            try:
+                issued_date = date.fromisoformat(
+                    str(binding_document["evaluated_at"])
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "stored release clock is invalid"
+                ) from exc
+            if consumed_utc.date() != issued_date:
+                raise ValueError(
+                    "release token is valid only on its evaluated UTC date"
+                )
+            compilation = self._stored_compilation(row)
+            current_source = ProductionApplicationCompiler(
+                self.path
+            ).compile(
+                source.strategy_id,
+                as_of=consumed_utc.date(),
+                contact=contact,
+                questions=(
+                    ApplicationCompilationStore._questions_document(questions)
+                ),
+            )
+            current_artifacts = render_pdf_artifacts(current_source)
+            publication = verify_published_application_artifacts(
+                source,
+                artifacts,
+                root=artifact_root,
+                repository_root=repository_root,
+            )
+            current_binding = self._binding(
+                connection,
+                compilation=compilation,
+                contact=contact,
+                jurisdiction=jurisdiction,
+                contract_type=contract_type,
+                evaluated_at=consumed_utc.date(),
+                expected_state=PipelineState.RELEASED,
+            )
+            if current_binding.prior_application_count != 1:
+                raise ValueError(
+                    "release identity has an unexpected application count"
+                )
+            replay_binding = replace(
+                current_binding,
+                evaluated_at=issued_date,
+                prior_application_count=0,
+            )
+            validations = self._validations(
+                replay_binding,
+                compilation=compilation,
+                source=source,
+                current_source=current_source,
+                artifacts=artifacts,
+                current_artifacts=current_artifacts,
+                contact=contact,
+                publication=publication,
+            )
+            replay_manifest = compile_release_manifest(
+                replay_binding,
+                validations,
+            )
+            verify_release_manifest(replay_manifest)
+            if canonical_json(replay_manifest.document()) != canonical_json(
+                stored_document
+            ):
+                raise ValueError(
+                    "release token was invalidated by bound-input drift"
+                )
+            self._verify_stored_validations(connection, replay_manifest)
+            changed = connection.execute(
+                """UPDATE release_tokens SET consumed_at=?
+                   WHERE token_hash=? AND consumed_at IS NULL""",
+                (consumed_iso, token_sha256),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("release token consumption lost its lease")
+            connection.commit()
+            return ConsumedRelease(
+                replay_manifest.release_manifest_sha256,
+                token_sha256,
+                consumed_iso,
             )
         except Exception:
             connection.rollback()

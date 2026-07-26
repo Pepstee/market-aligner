@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from career_automation.candidate_graph import CandidateGraph
 from career_automation.release_gate import (
     REQUIRED_VALIDATORS,
     ApplicationCompilationStore,
@@ -19,10 +20,12 @@ from career_automation.release_gate import (
 )
 from test_jaa08_independent_acceptance import (
     AS_OF,
+    DIGEST,
     ROOT,
     _authorized_release_inputs,
     _binding,
     _compilation_inputs,
+    _issued_release_inputs,
     _validations,
 )
 
@@ -552,3 +555,180 @@ def test_release_gate_rejects_mismatched_compilation_identity(tmp_path) -> None:
         assert connection.execute(
             "SELECT COUNT(*) FROM release_tokens"
         ).fetchone()[0] == 0
+
+
+def _consume_arguments(values):
+    (
+        _database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        _compilation,
+        _gate,
+        _route,
+        issued,
+    ) = values
+    return {
+        "release_token": issued.release_token,
+        "source": source,
+        "artifacts": artifacts,
+        "contact": contact,
+        "questions": questions,
+        "artifact_root": artifact_root,
+        "repository_root": ROOT,
+        "jurisdiction": "GB",
+        "contract_type": "employee",
+        "consumed_at": datetime.combine(
+            date.today(),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ),
+    }
+
+
+def test_release_token_replay_is_rejected(tmp_path) -> None:
+    values = _issued_release_inputs(tmp_path)
+    database, *_, gate, _route, _issued = values
+    arguments = _consume_arguments(values)
+    first = gate.consume_release_token(**arguments)
+    with pytest.raises(ValueError, match="already consumed"):
+        gate.consume_release_token(**arguments)
+    with database.connection() as connection:
+        stored = connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0]
+    assert stored == first.consumed_at
+
+
+def test_unknown_release_token_is_rejected_without_consumption(tmp_path) -> None:
+    values = _issued_release_inputs(tmp_path)
+    database, *_, gate, _route, _issued = values
+    arguments = _consume_arguments(values)
+    arguments["release_token"] = (
+        "jaa08." + "0" * 64 + ".not-the-issued-secret"
+    )
+    with pytest.raises(ValueError, match="unknown"):
+        gate.consume_release_token(**arguments)
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] is None
+
+
+@pytest.mark.parametrize("day_delta", (-1, 1))
+def test_release_token_rejects_other_utc_dates(
+    tmp_path,
+    day_delta: int,
+) -> None:
+    values = _issued_release_inputs(tmp_path)
+    database, *_, gate, _route, _issued = values
+    arguments = _consume_arguments(values)
+    arguments["consumed_at"] += timedelta(days=day_delta)
+    with pytest.raises(ValueError, match="only on its evaluated UTC date"):
+        gate.consume_release_token(**arguments)
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] is None
+
+
+def test_release_token_drift_check_rejects_post_issue_artifact_tamper(
+    tmp_path,
+) -> None:
+    values = _issued_release_inputs(tmp_path)
+    (
+        database,
+        _strategy,
+        _contact,
+        _questions,
+        _source,
+        _artifacts,
+        artifact_root,
+        publication,
+        _compilation,
+        gate,
+        _route,
+        _issued,
+    ) = values
+    target = artifact_root / publication.relative_directory / "cv.pdf"
+    target.write_bytes(target.read_bytes() + b"tamper")
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        gate.consume_release_token(**_consume_arguments(values))
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] is None
+
+
+def test_release_token_requires_timezone_aware_consumption_clock(
+    tmp_path,
+) -> None:
+    values = _issued_release_inputs(tmp_path)
+    database, *_, gate, _route, _issued = values
+    arguments = _consume_arguments(values)
+    arguments["consumed_at"] = datetime.combine(
+        date.today(),
+        datetime.min.time(),
+    )
+    with pytest.raises(ValueError, match="timezone"):
+        gate.consume_release_token(**arguments)
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] is None
+
+
+def test_release_token_drift_check_rejects_newer_contact_authority(
+    tmp_path,
+) -> None:
+    values = _issued_release_inputs(tmp_path)
+    (
+        database,
+        _strategy,
+        _contact,
+        _questions,
+        _source,
+        _artifacts,
+        _artifact_root,
+        _publication,
+        _compilation,
+        gate,
+        _route,
+        _issued,
+    ) = values
+    graph = CandidateGraph(database.path)
+    graph.add_record(
+        "contact-primary",
+        kind="fact",
+        subject="contact",
+        value={
+            "full_name": "Alex Example",
+            "email": "changed@example.test",
+            "phone": "+44 7700 900123",
+            "city": "London",
+        },
+        state="fact",
+        source_identity="test:newer-contact",
+        version=2,
+    )
+    graph.verify_record(
+        "contact-primary",
+        2,
+        decision="approved",
+        verifier_kind="configured",
+        policy_id="test.contact",
+        policy_version="2",
+        policy_hash=DIGEST,
+        reason="newer operator-verified contact",
+        source_identity="test:newer-contact-verifier",
+    )
+    with pytest.raises(ValueError):
+        gate.consume_release_token(**_consume_arguments(values))
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] is None

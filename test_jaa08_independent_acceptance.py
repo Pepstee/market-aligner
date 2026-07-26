@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from career_automation.application_artifacts import publish_application_artifacts
@@ -24,6 +24,7 @@ from career_automation.migrations import (
 from career_automation.release_gate import (
     REQUIRED_VALIDATORS,
     ApplicationCompilationStore,
+    ConsumedRelease,
     IssuedRelease,
     OfficialRouteBinding,
     ReleaseBinding,
@@ -259,6 +260,36 @@ def _authorized_release_inputs(
     return (*values, compilation, gate, route)
 
 
+def _issued_release_inputs(tmp_path: Path):
+    values = _authorized_release_inputs(tmp_path)
+    (
+        _database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = values
+    issued = gate.evaluate_and_issue(
+        compilation_id=compilation.compilation_id,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        evaluated_at=date.today(),
+    )
+    return (*values, issued)
+
+
 def test_release_manifest_binds_every_consequential_input_and_validator() -> None:
     binding = _binding()
     manifest = compile_release_manifest(binding, _validations(binding))
@@ -432,3 +463,55 @@ def test_release_gate_reresolves_authority_and_issues_hash_only_token_atomically
     assert tuple(stored) == (issued.token_sha256, None)
     assert validation_count == len(REQUIRED_VALIDATORS)
     assert issued.release_token not in all_text
+
+
+def test_release_token_consumes_once_only_after_exact_authority_replay(
+    tmp_path: Path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        _compilation,
+        gate,
+        _route,
+        issued,
+    ) = _issued_release_inputs(tmp_path)
+    consumed_at = datetime.combine(
+        date.today(),
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    )
+    consumed = gate.consume_release_token(
+        release_token=issued.release_token,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        consumed_at=consumed_at,
+    )
+    assert isinstance(consumed, ConsumedRelease)
+    assert consumed.release_manifest_sha256 == (
+        issued.manifest.release_manifest_sha256
+    )
+    assert consumed.token_sha256 == issued.token_sha256
+    assert consumed.consumed_at == consumed_at.isoformat()
+    with database.connection() as connection:
+        stored = connection.execute(
+            "SELECT token_hash,consumed_at FROM release_tokens"
+        ).fetchone()
+        state = connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0]
+    assert tuple(stored) == (issued.token_sha256, consumed_at.isoformat())
+    assert state == "released"
