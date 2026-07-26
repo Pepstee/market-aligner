@@ -34,7 +34,7 @@ from tracked_source_revision import (  # noqa: E402
 FORMAT = "jaa04-increment-a-temporal-provenance-certification/v1"
 CANARY_DIRECTORY = ROOT / "career_automation/fixtures/jaa04_authority_canaries"
 INVENTORY_PATH = ROOT / "scripts/jaa04_increment_a_test_inventory.json"
-INVENTORY_SHA256 = "4685a0b53ec15b89adce13fa2a30da54a5cc443aa49a7ba1d3bfb855e7f43a5d"
+INVENTORY_SHA256 = "5a4160575bd19159f1cf591c6529a3aed3fb5c4743265d540c181b72c23acb44"
 PYTEST_PLUGIN = ROOT / "scripts/jaa04_pytest_inventory_plugin.py"
 PYTEST_PLUGIN_SHA256 = "4b167aa1ad974e772ad309f6d69c055a4912025ba9c4a0b0c78ba6f59d6487b3"
 # Compatibility integrity sentinels. Discovery and expected outcomes come only
