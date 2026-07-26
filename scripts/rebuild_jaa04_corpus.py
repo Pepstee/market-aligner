@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -11,6 +13,39 @@ from pathlib import Path
 from capture_jaa_04 import ROOT, capture
 from career_automation.corpus_publication import publish_by_pointer, validate_inventory
 from career_automation.employer_research import RawResponseCache, load_frozen_dossiers
+from career_automation.seed_cohort import hydrate_seed
+
+
+def _capture_input(
+    queue_snapshot: Path,
+    workspace: Path,
+    *,
+    maximum_routes: int,
+    timeout_seconds: int,
+) -> Path:
+    """Turn a checked v1 seed into v2 evidence without weakening capture."""
+    if queue_snapshot.suffix.casefold() != ".json":
+        return queue_snapshot
+    payload = json.loads(queue_snapshot.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != "jaa04.admitted-queue.v1":
+        return queue_snapshot
+    admission = workspace / "admission"
+    prepared = admission / "official-admitted-queue-v2.json"
+    if prepared.exists():
+        existing = json.loads(prepared.read_text(encoding="utf-8"))
+        seed = existing.get("seed")
+        expected = hashlib.sha256(queue_snapshot.read_bytes()).hexdigest()
+        if not isinstance(seed, dict) or seed.get("sha256") != expected:
+            raise RuntimeError("prepared v2 queue belongs to a different checked seed")
+        return prepared
+    hydrate_seed(
+        queue_snapshot,
+        prepared,
+        admission / "raw",
+        maximum_routes=maximum_routes,
+        timeout_seconds=timeout_seconds,
+    )
+    return prepared
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -29,7 +64,14 @@ def main() -> int:
     try:
         if args.maximum_routes < 1 or args.timeout_seconds < 1:
             raise ValueError("retrieval limits must be positive")
-        capture(args.queue_snapshot.resolve(), fresh, workspace=args.workspace.resolve(),
+        workspace = args.workspace.resolve()
+        queue_snapshot = _capture_input(
+            args.queue_snapshot.resolve(),
+            workspace,
+            maximum_routes=args.maximum_routes,
+            timeout_seconds=args.timeout_seconds,
+        )
+        capture(queue_snapshot, fresh, workspace=workspace / "research",
                 maximum_routes=args.maximum_routes, timeout_seconds=args.timeout_seconds)
         def validate(path: Path) -> None:
             validate_inventory(path)

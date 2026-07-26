@@ -102,8 +102,9 @@ def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_
 ) -> None:
     """Completed dossiers are immutable; only the remaining 26 are fetched once."""
     module = _capture_module()
-    snapshot = tmp_path / "admitted.json"
-    records = _snapshot(snapshot)
+    records = _snapshot(tmp_path / "generated-identities.json")
+    source_database = tmp_path / "opportunity-zero.sqlite3"
+    _bootstrap(source_database, records)
     workspace, destination = tmp_path / "workspace", tmp_path / "published"
     workspace.mkdir()
     database = _bootstrap(workspace / "queue.sqlite3", records)
@@ -131,13 +132,21 @@ def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_
             return task.job_key
 
     class GeneratedCoordinator:
-        def __init__(self, _database, worker): self.worker = worker
-        def run_once(self): return self.worker.run_once()
+        def __init__(self, coordinator_database, worker):
+            self.database, self.worker = coordinator_database, worker
+
+        def run_once(self):
+            job_key = self.worker.run_once()
+            if job_key is not None:
+                self.database.apply_opportunity1(job_key=job_key, signals=[])
+            return job_key
 
     # Establish four durable completed dossiers before the resumed invocation.
     seed_worker = GeneratedWorker(database, "seed", cache)
     for _ in range(4):
         assert seed_worker.run_once()
+        completed_key = fetched[-1]
+        database.apply_opportunity1(job_key=completed_key, signals=[])
     stale = database.claim_research("dead-worker")
     assert stale and stale.job_key == "generated:05"
     with database.connection() as connection:
@@ -152,7 +161,7 @@ def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_
     monkeypatch.setattr(module, "load_frozen_dossiers", generated_loader)
     monkeypatch.setattr(module, "_revision", lambda: "generated-revision")
     monkeypatch.setattr(module, "source_content_revision", lambda _root: "generated-content")
-    module.capture(snapshot, destination, workspace=workspace, timeout_seconds=1)
+    module.capture(source_database, destination, workspace=workspace, timeout_seconds=1)
 
     assert fetched == [f"generated:{number:02d}" for number in range(5, 31)]
     assert len(fetched) == len(set(fetched)) == 26
