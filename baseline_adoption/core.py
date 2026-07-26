@@ -23,7 +23,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -556,7 +556,11 @@ def _verify_database(path: Path, spec: BaselineSpec) -> dict[str, Any]:
             "schema_objects": len(schema), "table_counts": counts, "integrity_check": integrity}
 
 
-def _recertify_source_observed(path: Path, spec: BaselineSpec) -> dict[str, Any]:
+def _recertify_source_observed(
+    path: Path,
+    spec: BaselineSpec,
+    connection: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
     """Recertify one live source without ever granting SQLite write access."""
     if not path.exists():
         raise AdoptionError(f"{spec.name}: source does not exist")
@@ -577,19 +581,28 @@ def _recertify_source_observed(path: Path, spec: BaselineSpec) -> dict[str, Any]
 
     write_probe: dict[str, Any]
     try:
-        with closing(_readonly_connection(path)) as connection:
-            if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
+        connection_context = (
+            nullcontext(connection)
+            if connection is not None
+            else closing(_readonly_connection(path))
+        )
+        with connection_context as observed_connection:
+            if int(
+                observed_connection.execute(
+                    "PRAGMA query_only"
+                ).fetchone()[0]
+            ) != 1:
                 raise AdoptionError(f"{spec.name}: read-only query mode was not enforced")
 
             # This is a real main-schema write, enclosed in a transaction so it
             # remains harmless even if a defective connection unexpectedly permits it.
-            connection.execute("BEGIN")
+            observed_connection.execute("BEGIN")
             try:
-                connection.execute(
+                observed_connection.execute(
                     'CREATE TABLE main."__jaa_recertification_write_probe" (value INTEGER)'
                 )
             except sqlite3.Error as exc:
-                connection.rollback()
+                observed_connection.rollback()
                 error_code = getattr(exc, "sqlite_errorcode", None)
                 if error_code is None or error_code & 0xff != sqlite3.SQLITE_READONLY:
                     raise AdoptionError(
@@ -602,19 +615,24 @@ def _recertify_source_observed(path: Path, spec: BaselineSpec) -> dict[str, Any]
                     "sqlite_primary_error": "SQLITE_READONLY",
                 }
             else:
-                connection.rollback()
+                observed_connection.rollback()
                 raise AdoptionError(
                     f"{spec.name}: schema write probe unexpectedly succeeded"
                 )
 
-            integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
+            integrity = [
+                str(row[0])
+                for row in observed_connection.execute(
+                    "PRAGMA integrity_check"
+                )
+            ]
             if integrity != ["ok"]:
                 raise AdoptionError(f"{spec.name}: integrity_check failed: {integrity}")
-            schema = _schema_rows(connection)
+            schema = _schema_rows(observed_connection)
             schema_hash = hashlib.sha256(_canonical_bytes(schema)).hexdigest()
             tables = sorted(row[1] for row in schema if row[0] == "table")
             counts = {
-                table: int(connection.execute(
+                table: int(observed_connection.execute(
                     'SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"'
                 ).fetchone()[0])
                 for table in tables
@@ -715,11 +733,24 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
     watched_files = [path]
     if wal.exists():
         watched_files.append(wal)
+    connection: sqlite3.Connection | None = None
     try:
-        with _MutationBoundary(watched_files, directories=[path.parent]) as boundary:
-            boundary_provider = boundary.provider
-            evidence = _recertify_source_observed(path, spec)
-            boundary.assert_clean(f"{spec.name}: source mutation boundary")
+        try:
+            with _MutationBoundary(
+                watched_files,
+                directories=[path.parent],
+            ) as boundary:
+                boundary_provider = boundary.provider
+                connection = _readonly_connection(path)
+                evidence = _recertify_source_observed(
+                    path,
+                    spec,
+                    connection,
+                )
+                boundary.assert_clean(f"{spec.name}: source mutation boundary")
+        finally:
+            if connection is not None:
+                connection.close()
     except AdoptionError as exc:
         # The source may disappear after the admission checks but before kqueue
         # opens its descriptor. Preserve the public fail-closed diagnostic for

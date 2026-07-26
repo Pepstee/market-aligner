@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
+import sqlite3
 import struct
 import sys
 from pathlib import Path
 
 import pytest
 
+from baseline_adoption import core
 from baseline_adoption.core import AdoptionError, _MutationBoundary
 
 
@@ -30,6 +33,45 @@ def test_read_only_access_is_clean_and_provider_is_truthful(
         assert target.read_bytes() == b"stable"
         target.stat()
         boundary.assert_clean("read-only")
+
+
+def test_quiescent_sqlite_wal_recertification_is_clean(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "source.sqlite3"
+    writer = sqlite3.connect(target, isolation_level=None)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute(
+        "CREATE TABLE ledger (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    writer.execute("INSERT INTO ledger(value) VALUES ('stable')")
+    with sqlite3.connect(
+        f"file:{target.resolve()}?mode=ro",
+        uri=True,
+    ) as reader:
+        schema = core._schema_rows(reader)
+    spec = core.BaselineSpec(
+        name="quiescent",
+        source_relative=target.name,
+        destination_relative="databases/source.sqlite3",
+        size=target.stat().st_size,
+        sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+        schema_sha256=hashlib.sha256(
+            core._canonical_bytes(schema)
+        ).hexdigest(),
+        schema_objects=len(schema),
+        table_counts={"ledger": 1},
+    )
+    try:
+        evidence = core._recertify_source(target, spec)
+    finally:
+        writer.close()
+
+    assert evidence["content_comparison"]["kernel_mutation_boundary"] == {
+        "provider": "linux-inotify-in-modify",
+        "main_wal_and_directory_clean_through_final_observation": True,
+    }
 
 
 @pytest.mark.parametrize(
