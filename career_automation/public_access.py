@@ -77,8 +77,8 @@ def _robots_rules(body: bytes, url: str) -> tuple[bool, float | None]:
             continue
         if not agents:
             continue
-        directives_started = True
         if name in {"allow", "disallow"}:
+            directives_started = True
             if value or name == "allow":
                 rules.append((name == "allow", value))
         elif name == "crawl-delay":

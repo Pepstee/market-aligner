@@ -214,6 +214,32 @@ def test_robots_product_token_matching_is_exact_and_wildcard_is_fallback(
     assert receipt.crawl_delay_seconds == 14
 
 
+@pytest.mark.parametrize(
+    "other_record",
+    (
+        "Sitemap: https://jobs.example.test/sitemap.xml",
+        "Crawl-delay: 12",
+    ),
+)
+def test_robots_other_records_do_not_split_consecutive_user_agents(
+    tmp_path: Path,
+    other_record: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        f"{other_record}\n"
+        "User-agent: OtherBot\n"
+        "Disallow: /jobs\n"
+    ).encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(URL)
+
+
 def test_cached_non_200_success_replays_rules_for_each_url(tmp_path: Path) -> None:
     body = (
         f"User-agent: {USER_AGENT}\n"
