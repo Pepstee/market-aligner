@@ -51,8 +51,17 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
 
     jaa09 = components["JAA-09"]
     assert jaa09["increment"] == "implementation_in_progress_dependency_blocked"
-    assert (ROOT / "career_automation/ats_fixture.py").exists()
-    assert not (ROOT / "career_automation/browser_executor.py").exists()
+    assert jaa09["evidence"] == []
+    assert "non-submit" in jaa09["claim"]
+    for relative in jaa09["owns"]:
+        assert (ROOT / relative).is_file(), (
+            f"JAA-09 materialised path missing: {relative}"
+        )
+    for test in jaa09["tests"]:
+        for relative in test["files"]:
+            assert (ROOT / relative).is_file(), (
+                f"JAA-09 declared test missing: {relative}"
+            )
 
     for number in range(10, 17):
         slice_id = f"JAA-{number:02d}"

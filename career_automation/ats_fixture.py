@@ -116,9 +116,11 @@ class _FixtureState:
         vacancy: FixtureVacancy,
         *,
         nonce: Callable[[], str],
+        form_token: str,
     ) -> None:
         self.vacancy = vacancy
         self.nonce = nonce
+        self.form_token = form_token
         self.lock = threading.Lock()
         self.pending: dict[str, _PendingReview] = {}
         self.receipt: FixtureReceipt | None = None
@@ -128,6 +130,8 @@ class _FixtureState:
         text: Mapping[str, str],
         uploads: Mapping[str, tuple[str, str, bytes]],
     ) -> _PendingReview:
+        if text.get("fixture_token") != self.form_token:
+            raise PermissionError("fixture form authorization is invalid")
         missing = [
             key for key in _REQUIRED_TEXT if not text.get(key, "").strip()
         ]
@@ -194,8 +198,10 @@ class _FixtureState:
             self.pending[value] = review
             return review
 
-    def submit(self, nonce: str) -> FixtureReceipt:
+    def submit(self, nonce: str, form_token: str) -> FixtureReceipt:
         with self.lock:
+            if form_token != self.form_token:
+                raise PermissionError("fixture form authorization is invalid")
             if self.receipt is not None:
                 raise FileExistsError("fixture application already submitted")
             review = self.pending.pop(nonce, None)
@@ -330,11 +336,12 @@ def _page(title: str, body: str) -> bytes:
 """.encode()
 
 
-def _application_page(vacancy: FixtureVacancy) -> bytes:
+def _application_page(vacancy: FixtureVacancy, form_token: str) -> bytes:
     body = f"""
 <h1>{escape(vacancy.role_title)}</h1>
 <p class="context">{escape(vacancy.company_name)} · synthetic vacancy · no external submission</p>
 <form method="post" action="/applications/{escape(vacancy.application_id)}/review" enctype="multipart/form-data">
+  <input type="hidden" name="fixture_token" value="{escape(form_token)}">
   <fieldset>
     <legend>Candidate details</legend>
     <div class="fields">
@@ -377,7 +384,11 @@ def _application_page(vacancy: FixtureVacancy) -> bytes:
     return _page(f"{vacancy.role_title} application", body)
 
 
-def _review_page(vacancy: FixtureVacancy, review: _PendingReview) -> bytes:
+def _review_page(
+    vacancy: FixtureVacancy,
+    review: _PendingReview,
+    form_token: str,
+) -> bytes:
     rows = "".join(
         f"<dt>{escape(key.replace('_', ' ').title())}</dt><dd>{escape(value)}</dd>"
         for key, value in review.summary.items()
@@ -390,6 +401,7 @@ def _review_page(vacancy: FixtureVacancy, review: _PendingReview) -> bytes:
 <div class="status"><dl>{rows}</dl></div>
 <form method="post" action="/applications/{escape(vacancy.application_id)}/submit">
   <input type="hidden" name="review_nonce" value="{escape(review.nonce)}">
+  <input type="hidden" name="fixture_token" value="{escape(form_token)}">
   <button type="submit" data-testid="final-submit">Submit test application</button>
 </form>
 """,
@@ -421,6 +433,7 @@ class LocalATSFixture:
         vacancy: FixtureVacancy,
         *,
         nonce: Callable[[], str] | None = None,
+        form_token: str | None = None,
         host: str = "127.0.0.1",
     ) -> None:
         if not _host_is_loopback(host):
@@ -428,6 +441,7 @@ class LocalATSFixture:
         self.state = _FixtureState(
             vacancy,
             nonce=nonce or (lambda: secrets.token_urlsafe(24)),
+            form_token=form_token or secrets.token_urlsafe(24),
         )
         self.host = host
         self._server: ThreadingHTTPServer | None = None
@@ -502,6 +516,7 @@ class LocalATSFixture:
                 origin = self.headers.get("Origin")
                 return _host_is_loopback(host) and (
                     origin is None
+                    or origin == "null"
                     or _host_is_loopback(urlsplit(origin).netloc)
                 )
 
@@ -518,7 +533,10 @@ class LocalATSFixture:
                 if path == f"/applications/{state.vacancy.application_id}":
                     self._send(
                         HTTPStatus.OK,
-                        _application_page(state.vacancy),
+                        _application_page(
+                            state.vacancy,
+                            state.form_token,
+                        ),
                     )
                     return
                 if path == "/health":
@@ -590,7 +608,11 @@ class LocalATSFixture:
                         review = state.review(text, uploads)
                         self._send(
                             HTTPStatus.OK,
-                            _review_page(state.vacancy, review),
+                            _review_page(
+                                state.vacancy,
+                                review,
+                                state.form_token,
+                            ),
                         )
                         return
                     if urlsplit(self.path).path == self._path("submit"):
@@ -599,11 +621,18 @@ class LocalATSFixture:
                             strict_parsing=True,
                         )
                         nonce_values = values.get("review_nonce", [])
-                        if len(nonce_values) != 1:
+                        token_values = values.get("fixture_token", [])
+                        if (
+                            len(nonce_values) != 1
+                            or len(token_values) != 1
+                        ):
                             raise PermissionError(
                                 "fixture review authorization is invalid"
                             )
-                        receipt = state.submit(nonce_values[0])
+                        receipt = state.submit(
+                            nonce_values[0],
+                            token_values[0],
+                        )
                         self._send(
                             HTTPStatus.CREATED,
                             _receipt_page(receipt),

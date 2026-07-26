@@ -287,7 +287,7 @@
       "evidence": []
     },
     "JAA-09": {
-      "claim": "The simulated ATS walking skeleton proves browser checkpoints, leases and receipt integrity.",
+      "claim": "A dependency-blocked cooperative fixture and non-submit local browser executor prove approved field materialisation, selector recovery and durable checkpoints; JAA-08 token-bound final submit remains incomplete.",
       "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-08"],
       "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
