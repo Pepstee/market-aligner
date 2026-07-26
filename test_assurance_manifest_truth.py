@@ -66,7 +66,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa10 = components["JAA-10"]
     assert jaa10["increment"] == "implementation_in_progress_dependency_blocked"
     assert jaa10["evidence"] == []
-    assert "withholds production certification" in jaa10["claim"]
+    assert "production certification is withheld" in jaa10["claim"]
     for relative in jaa10["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-10 materialised path missing: {relative}"

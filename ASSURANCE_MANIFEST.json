@@ -301,7 +301,7 @@
       "evidence": []
     },
     "JAA-10": {
-      "claim": "A frozen synthetic shadow contract pins the accepted JAA-09 golden identities and structurally withholds production certification; executable interruption and mutation cohort evidence remains incomplete.",
+      "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract and all three submit interruption windows recover or fail closed; the executable seven-control mutation cohort remains incomplete and production certification is withheld.",
       "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-09"],
       "owns": ["career_automation/shadow_certification.py"],

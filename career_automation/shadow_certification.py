@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Mapping
+from urllib.parse import urlsplit
 
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -76,6 +77,67 @@ def _digest(value: str, label: str) -> str:
     return value
 
 
+def normalized_workflow_sha256(
+    workflow_document: Mapping[str, object],
+) -> str:
+    """Hash a workflow after replacing its ephemeral loopback port with zero."""
+    document = json.loads(_canonical_json(dict(workflow_document)))
+    actions = document.get("actions")
+    if not isinstance(actions, list):
+        raise ValueError("workflow template actions are invalid")
+    for action in actions:
+        if not isinstance(action, dict):
+            raise ValueError("workflow template action is invalid")
+        if action.get("kind") != "navigate":
+            continue
+        target = action.get("target_url")
+        if not isinstance(target, str):
+            raise ValueError("workflow navigate target is invalid")
+        parsed = urlsplit(target)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "::1", "localhost"}
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("shadow workflow target must be loopback HTTP")
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        action["target_url"] = (
+            f"http://{host}:0{parsed.path}"
+            + (f"?{parsed.query}" if parsed.query else "")
+        )
+    return _content_hash(document)
+
+
+def normalized_submit_event_sha256(
+    *,
+    workflow_sha256: str,
+    receipt_id: str,
+    receipt_payload_sha256: str,
+    screenshot_sha256: str,
+    field_map_sha256: str,
+) -> str:
+    """Hash the stable semantic submit event without runtime run/origin IDs."""
+    for value, label in (
+        (workflow_sha256, "normalized workflow hash"),
+        (receipt_id, "receipt identity"),
+        (receipt_payload_sha256, "receipt payload hash"),
+        (screenshot_sha256, "screenshot hash"),
+        (field_map_sha256, "field-map hash"),
+    ):
+        _digest(value, label)
+    return _content_hash(
+        {
+            "contract": "jaa10.normalized-submit-event.v1",
+            "workflow_sha256": workflow_sha256,
+            "receipt_id": receipt_id,
+            "receipt_payload_sha256": receipt_payload_sha256,
+            "screenshot_sha256": screenshot_sha256,
+            "field_map_sha256": field_map_sha256,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class FrozenShadowContract:
     workflow_sha256: str
@@ -129,7 +191,7 @@ class FrozenShadowContract:
 
 FROZEN_SHADOW_CONTRACT = FrozenShadowContract(
     workflow_sha256=(
-        "ccd8f38596d1d31682ae126c45c61ee45fcff48df8f8650d25b6ccda8411e025"
+        "ec9329ec86534bc2a1fa37c0f12034806cdedbdd0ba472d34fc74b2ae69961da"
     ),
     application_id="jaa10-frozen-platform-engineer",
     job_key="jaa06-synthetic:strategy-job",
@@ -146,7 +208,7 @@ FROZEN_SHADOW_CONTRACT = FrozenShadowContract(
         "91a316e9f44cb894792896ad063e975badff08e6c5fd762de47a8798a5b3feb4"
     ),
     submit_event_sha256=(
-        "460b812d08197ba927b851193ef9a0bdc7191fb42f8ceecd3dbc2ab0b52ce1a7"
+        "ab9985ca0792079093161d234036109d4769838b5335454425e93fe4a20eb7c9"
     ),
 )
 
@@ -212,6 +274,7 @@ class ShadowObservation:
     observation_id: str
     observed_at: str
     workflow_sha256: str
+    release_manifest_sha256: str
     receipt_id: str
     receipt_payload_sha256: str
     field_map_sha256: str
@@ -242,6 +305,10 @@ class ShadowObservation:
             raise ValueError("shadow observation time must include a timezone")
         for value, label in (
             (self.workflow_sha256, "observation workflow hash"),
+            (
+                self.release_manifest_sha256,
+                "observation release manifest hash",
+            ),
             (self.receipt_id, "observation receipt identity"),
             (self.receipt_payload_sha256, "observation payload hash"),
             (self.field_map_sha256, "observation field-map hash"),
@@ -287,6 +354,7 @@ class ShadowObservation:
             "observed_at": self.observed_at,
             "evidence_kind": self.evidence_kind,
             "workflow_sha256": self.workflow_sha256,
+            "release_manifest_sha256": self.release_manifest_sha256,
             "receipt_id": self.receipt_id,
             "receipt_payload_sha256": self.receipt_payload_sha256,
             "field_map_sha256": self.field_map_sha256,
@@ -312,6 +380,7 @@ class ShadowObservation:
 class WithheldShadowEvidence:
     contract_sha256: str
     observation_sha256s: tuple[str, ...]
+    release_manifest_sha256s: tuple[str, ...]
     hard_quality_metrics: Mapping[str, int]
     evidence_id: str
     production_certification: str = "withheld"
@@ -325,6 +394,7 @@ class WithheldShadowEvidence:
             "schema_version": self.schema_version,
             "contract_sha256": self.contract_sha256,
             "observation_sha256s": self.observation_sha256s,
+            "release_manifest_sha256s": self.release_manifest_sha256s,
             "hard_quality_metrics": dict(sorted(self.hard_quality_metrics.items())),
             "production_certification": "withheld",
             "withheld_reason": self.withheld_reason,
@@ -341,6 +411,14 @@ class WithheldShadowEvidence:
             raise ValueError("withheld shadow evidence requires observations")
         for value in self.observation_sha256s:
             _digest(value, "shadow observation hash")
+        if len(self.release_manifest_sha256s) != len(
+            self.observation_sha256s
+        ):
+            raise ValueError(
+                "shadow manifest and observation inventories differ"
+            )
+        for value in self.release_manifest_sha256s:
+            _digest(value, "shadow release manifest hash")
         if len(set(self.observation_sha256s)) != len(
             self.observation_sha256s
         ):
@@ -401,6 +479,9 @@ def compile_withheld_shadow_evidence(
         "observation_sha256s": tuple(
             row.observation_sha256 for row in observations
         ),
+        "release_manifest_sha256s": tuple(
+            row.release_manifest_sha256 for row in observations
+        ),
         "hard_quality_metrics": HARD_QUALITY_TARGETS,
         "production_certification": "withheld",
         "withheld_reason": "upstream_jaa04_authentic_authority_blocked",
@@ -410,6 +491,9 @@ def compile_withheld_shadow_evidence(
     result = WithheldShadowEvidence(
         contract_sha256=contract.contract_sha256,
         observation_sha256s=tuple(body["observation_sha256s"]),
+        release_manifest_sha256s=tuple(
+            body["release_manifest_sha256s"]
+        ),
         hard_quality_metrics=HARD_QUALITY_TARGETS,
         evidence_id=_content_hash(body),
     )

@@ -4,7 +4,20 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from time import perf_counter_ns
 
+import pytest
+from playwright.sync_api import sync_playwright
+
+from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
+from career_automation.browser_executor import (
+    LocalBrowserExecutor,
+    SubmissionIndeterminateError,
+)
+from career_automation.browser_workflows import (
+    BrowserWorkflowStore,
+)
 from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
     HARD_QUALITY_TARGETS,
@@ -15,6 +28,15 @@ from career_automation.shadow_certification import (
     MutationObservation,
     ShadowObservation,
     compile_withheld_shadow_evidence,
+    normalized_submit_event_sha256,
+    normalized_workflow_sha256,
+)
+from test_jaa08_independent_acceptance import _issued_release_inputs
+from test_jaa09_independent_acceptance import (
+    FORM_TOKEN,
+    NONCE,
+    ROOT,
+    _released_browser_inputs,
 )
 
 
@@ -27,6 +49,7 @@ def _observation(
         observation_id=identifier,
         observed_at=observed_at.isoformat(),
         workflow_sha256=golden.workflow_sha256,
+        release_manifest_sha256="1" * 64,
         receipt_id=golden.receipt_id,
         receipt_payload_sha256=golden.receipt_payload_sha256,
         field_map_sha256=golden.field_map_sha256,
@@ -59,13 +82,321 @@ def _observation(
     )
 
 
+def _frozen_fixture_inputs(tmp_path: Path):
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        FROZEN_SHADOW_CONTRACT.application_id,
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    return release_inputs, vacancy
+
+
+def _execute_frozen_observation(
+    tmp_path: Path,
+    *,
+    observation_id: str,
+    observed_at: datetime,
+    interruptions: tuple[InterruptionObservation, ...],
+) -> ShadowObservation:
+    release_inputs, vacancy = _frozen_fixture_inputs(tmp_path)
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        workflow_sha256 = normalized_workflow_sha256(workflow.to_dict())
+        assert workflow_sha256 == FROZEN_SHADOW_CONTRACT.workflow_sha256
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(
+            workflow,
+            run_id="jaa10-frozen-run-1",
+        )
+        assert store.claim_run("jaa10_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        elapsed: dict[str, int] = {}
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for action in workflow.actions:
+                started = perf_counter_ns()
+                completed = executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="jaa10_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+                elapsed[action.step_id] = (
+                    perf_counter_ns() - started
+                ) // 1_000_000
+                assert completed is not None
+            screenshot_bytes = len(page.screenshot(full_page=True))
+            browser.close()
+        outputs = store.checkpoint_outputs(run_id)["submit"]
+        for key, expected in (
+            ("field_map_sha256", FROZEN_SHADOW_CONTRACT.field_map_sha256),
+            ("receipt_id", FROZEN_SHADOW_CONTRACT.receipt_id),
+            (
+                "receipt_payload_sha256",
+                FROZEN_SHADOW_CONTRACT.receipt_payload_sha256,
+            ),
+            ("screenshot_sha256", FROZEN_SHADOW_CONTRACT.screenshot_sha256),
+        ):
+            assert outputs[key] == expected
+        dispatch = store.submit_dispatch(run_id)
+        assert dispatch is not None
+        normalized_event = normalized_submit_event_sha256(
+            workflow_sha256=workflow_sha256,
+            receipt_id=str(outputs["receipt_id"]),
+            receipt_payload_sha256=str(
+                outputs["receipt_payload_sha256"]
+            ),
+            screenshot_sha256=str(outputs["screenshot_sha256"]),
+            field_map_sha256=str(outputs["field_map_sha256"]),
+        )
+        assert (
+            normalized_event
+            == FROZEN_SHADOW_CONTRACT.submit_event_sha256
+        )
+        return ShadowObservation(
+            observation_id=observation_id,
+            observed_at=observed_at.isoformat(),
+            workflow_sha256=workflow_sha256,
+            release_manifest_sha256=str(
+                dispatch["release_manifest_hash"]
+            ),
+            receipt_id=str(outputs["receipt_id"]),
+            receipt_payload_sha256=str(
+                outputs["receipt_payload_sha256"]
+            ),
+            field_map_sha256=str(outputs["field_map_sha256"]),
+            screenshot_sha256=str(outputs["screenshot_sha256"]),
+            submit_event_sha256=normalized_event,
+            action_elapsed_ms=elapsed,
+            browser_launch_count=1,
+            database_bytes=database.path.stat().st_size,
+            screenshot_bytes=screenshot_bytes,
+            interruptions=interruptions,
+            mutations=tuple(
+                MutationObservation(control, True, False)
+                for control in REQUIRED_MUTATION_CONTROLS
+            ),
+        )
+
+
+def _execute_interruption(
+    tmp_path: Path,
+    injection_point: str,
+) -> InterruptionObservation:
+    release_inputs, vacancy = _frozen_fixture_inputs(tmp_path)
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(
+            workflow,
+            run_id=f"jaa10-{injection_point}",
+        )
+        assert store.claim_run("jaa10_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for _action in workflow.actions[:-1]:
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="jaa10_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            if injection_point == "post_prepare_pre_consume":
+                original_consume = authority.gate.consume_release_token
+
+                def stop_before_consume(**_kwargs):
+                    raise RuntimeError("injected before consume")
+
+                authority.gate.consume_release_token = stop_before_consume
+                with pytest.raises(RuntimeError, match="before consume"):
+                    executor.execute_next(
+                        page,
+                        run_id=run_id,
+                        worker_id="jaa10_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=authority,
+                    )
+                authority.gate.consume_release_token = original_consume
+                browser.close()
+                assert store.submit_dispatch(run_id)["state"] == "prepared"  # type: ignore[index]
+                assert fixture.receipt is None
+                result = InterruptionObservation(
+                    injection_point,
+                    "fail_closed",
+                    0,
+                    0,
+                )
+            elif injection_point == "post_consume_pre_click":
+                original_mark = store.mark_submit_started
+
+                def stop_before_click(*_args, **_kwargs):
+                    raise RuntimeError("injected before click")
+
+                store.mark_submit_started = stop_before_click  # type: ignore[method-assign]
+                with pytest.raises(RuntimeError, match="before click"):
+                    executor.execute_next(
+                        page,
+                        run_id=run_id,
+                        worker_id="jaa10_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=authority,
+                    )
+                store.mark_submit_started = original_mark  # type: ignore[method-assign]
+                browser.close()
+                assert (
+                    store.submit_dispatch(run_id)["state"]  # type: ignore[index]
+                    == "release_consumed"
+                )
+                resumed = LocalBrowserExecutor(store, repository_root=ROOT)
+                resumed_browser = playwright.chromium.launch(headless=True)
+                resumed_page = resumed_browser.new_page()
+                with pytest.raises(
+                    SubmissionIndeterminateError,
+                    match="cannot be reconstructed",
+                ):
+                    resumed.execute_next(
+                        resumed_page,
+                        run_id=run_id,
+                        worker_id="jaa10_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=authority,
+                    )
+                resumed_browser.close()
+                assert fixture.receipt is None
+                result = InterruptionObservation(
+                    injection_point,
+                    "fail_closed",
+                    0,
+                    0,
+                )
+            else:
+                assert injection_point == "post_click_pre_checkpoint"
+                original_complete = store.complete_step
+                interrupted = False
+
+                def stop_after_click(*args, **kwargs):
+                    nonlocal interrupted
+                    if kwargs.get("step_id") == "submit" and not interrupted:
+                        interrupted = True
+                        raise RuntimeError("injected after click")
+                    return original_complete(*args, **kwargs)
+
+                store.complete_step = stop_after_click  # type: ignore[method-assign]
+                with pytest.raises(RuntimeError, match="after click"):
+                    executor.execute_next(
+                        page,
+                        run_id=run_id,
+                        worker_id="jaa10_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=authority,
+                    )
+                store.complete_step = original_complete  # type: ignore[method-assign]
+                browser.close()
+                first_receipt = fixture.receipt
+                assert first_receipt is not None
+                resumed = LocalBrowserExecutor(store, repository_root=ROOT)
+                resumed_browser = playwright.chromium.launch(headless=True)
+                resumed_page = resumed_browser.new_page()
+                resumed.execute_next(
+                    resumed_page,
+                    run_id=run_id,
+                    worker_id="jaa10_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+                resumed_browser.close()
+                assert fixture.receipt is first_receipt
+                dispatch = store.submit_dispatch(run_id)
+                assert dispatch is not None
+                assert dispatch["state"] == "receipt_recorded"
+                assert dispatch["receipt_id"] == first_receipt.receipt_id
+                assert (
+                    dispatch["receipt_payload_hash"]
+                    == first_receipt.payload_sha256
+                )
+                result = InterruptionObservation(
+                    injection_point,
+                    "recovered",
+                    1,
+                    1,
+                )
+        events = store.events(run_id)
+        assert sum(
+            row["event_type"] == "submit_click_started"
+            for row in events
+        ) == result.submit_click_count
+        return result
+
+
 def test_frozen_shadow_contract_binds_exact_accepted_jaa09_golden_set() -> None:
     golden = FROZEN_SHADOW_CONTRACT
     assert golden.baseline_revision == (
         "6e627e3ae07744e2c658a2046f0cd3121b7c2254"
     )
     assert golden.workflow_sha256 == (
-        "ccd8f38596d1d31682ae126c45c61ee45fcff48df8f8650d25b6ccda8411e025"
+        "ec9329ec86534bc2a1fa37c0f12034806cdedbdd0ba472d34fc74b2ae69961da"
     )
     assert golden.application_id == "jaa10-frozen-platform-engineer"
     assert golden.job_key == "jaa06-synthetic:strategy-job"
@@ -93,6 +424,7 @@ def test_time_separated_shadow_evidence_is_content_addressed_and_withheld() -> N
     assert tuple(
         row.observation_sha256 for row in observations
     ) == evidence.observation_sha256s
+    assert evidence.release_manifest_sha256s == ("1" * 64, "1" * 64)
     assert "receipt" not in evidence.document()
     assert "model_cost_microusd" not in evidence.document()
 
@@ -105,3 +437,43 @@ def test_observation_identity_changes_with_runtime_metrics() -> None:
         database_bytes=first.database_bytes + 1,
     )
     assert first.observation_sha256 != changed.observation_sha256
+
+
+def test_actual_time_separated_frozen_runs_and_interruption_drills_compile(
+    tmp_path: Path,
+) -> None:
+    interruptions = tuple(
+        _execute_interruption(
+            tmp_path / point,
+            point,
+        )
+        for point in REQUIRED_INTERRUPTION_POINTS
+    )
+    first_time = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    observations = (
+        _execute_frozen_observation(
+            tmp_path / "shadow-001",
+            observation_id="executed-shadow-001",
+            observed_at=first_time,
+            interruptions=interruptions,
+        ),
+        _execute_frozen_observation(
+            tmp_path / "shadow-002",
+            observation_id="executed-shadow-002",
+            observed_at=first_time + timedelta(days=1),
+            interruptions=interruptions,
+        ),
+    )
+    evidence = compile_withheld_shadow_evidence(
+        FROZEN_SHADOW_CONTRACT,
+        observations,
+    )
+    evidence.verify()
+    assert len(
+        {row.release_manifest_sha256 for row in observations}
+    ) == len(observations)
+    assert evidence.release_manifest_sha256s == tuple(
+        row.release_manifest_sha256 for row in observations
+    )
+    assert evidence.production_certification == "withheld"
+    assert evidence.certifies_slice is False
