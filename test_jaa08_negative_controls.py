@@ -323,6 +323,62 @@ def test_release_gate_rejects_external_tamper_without_token_or_release(
         assert connection.execute(
             "SELECT state FROM pipeline_jobs WHERE job_key=?",
             (source.job_key,),
+        ).fetchone()[0] == "release_blocked"
+        attempt = connection.execute(
+            """SELECT verdict,finding_codes_json
+               FROM release_gate_attempts"""
+        ).fetchone()
+    assert tuple(attempt) == ("block", '["artifact_integrity"]')
+
+
+def test_blocked_attempt_insert_failure_rolls_back_blocked_state(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    target = artifact_root / publication.relative_directory / "cover-letter.txt"
+    target.write_text("tampered after compilation", encoding="utf-8")
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            """CREATE TRIGGER test_block_release_attempt
+               BEFORE INSERT ON release_gate_attempts
+               BEGIN SELECT RAISE(ABORT,'blocked test attempt'); END"""
+        )
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_gate_attempts"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            """SELECT COUNT(*) FROM lifecycle_transition_receipts
+               WHERE to_state='release_blocked'"""
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
         ).fetchone()[0] == "application_compiled"
 
 
@@ -373,6 +429,16 @@ def test_release_gate_rejects_missing_work_right_without_token(tmp_path) -> None
         assert connection.execute(
             "SELECT COUNT(*) FROM release_tokens"
         ).fetchone()[0] == 0
+        attempt = connection.execute(
+            """SELECT verdict,finding_codes_json
+               FROM release_gate_attempts"""
+        ).fetchone()
+        state = connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0]
+    assert tuple(attempt) == ("block", '["eligibility"]')
+    assert state == "release_blocked"
 
 
 def test_release_insert_failure_rolls_back_release_transition(tmp_path) -> None:
@@ -518,10 +584,21 @@ def test_release_gate_rejects_expired_or_disallowed_authority(
         assert connection.execute(
             "SELECT COUNT(*) FROM release_tokens"
         ).fetchone()[0] == 0
-        assert connection.execute(
+        attempt = connection.execute(
+            """SELECT verdict,finding_codes_json
+               FROM release_gate_attempts"""
+        ).fetchone()
+        state = connection.execute(
             "SELECT state FROM pipeline_jobs WHERE job_key=?",
             (source.job_key,),
-        ).fetchone()[0] == "application_compiled"
+        ).fetchone()[0]
+    expected = (
+        "eligibility"
+        if authority_failure == "expired_work_right"
+        else "official_route"
+    )
+    assert tuple(attempt) == ("block", f'["{expected}"]')
+    assert state == "release_blocked"
 
 
 def test_release_gate_rejects_mismatched_compilation_identity(tmp_path) -> None:
@@ -555,6 +632,65 @@ def test_release_gate_rejects_mismatched_compilation_identity(tmp_path) -> None:
         assert connection.execute(
             "SELECT COUNT(*) FROM release_tokens"
         ).fetchone()[0] == 0
+        attempt = connection.execute(
+            """SELECT verdict,finding_codes_json
+               FROM release_gate_attempts"""
+        ).fetchone()
+        state = connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0]
+    assert tuple(attempt) == ("block", '["authority"]')
+    assert state == "release_blocked"
+
+
+def test_mismatched_compilation_audit_failure_preserves_authority_error(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        _compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            """CREATE TRIGGER test_block_mismatch_attempt
+               BEFORE INSERT ON release_gate_attempts
+               BEGIN SELECT RAISE(ABORT,'blocked mismatch audit'); END"""
+        )
+    with pytest.raises(ValueError, match="different compilation identity"):
+        gate.evaluate_and_issue(
+            compilation_id="0" * 64,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_gate_attempts"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            """SELECT COUNT(*) FROM lifecycle_transition_receipts
+               WHERE to_state='release_blocked'"""
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "application_compiled"
 
 
 def _consume_arguments(values):

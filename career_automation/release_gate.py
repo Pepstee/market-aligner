@@ -748,6 +748,16 @@ class ReleaseGateStore:
         )
         for validator_id, rule in VALIDATOR_CONTRACTS.items()
     }
+    BLOCK_FINDING_CODES = (
+        "artifact_integrity",
+        "authority",
+        "consistency",
+        "duplicate",
+        "eligibility",
+        "freshness",
+        "official_route",
+        "truth",
+    )
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -1224,6 +1234,137 @@ class ReleaseGateStore:
             for validator_id in REQUIRED_VALIDATORS
         )
 
+    @classmethod
+    def _finding_code(cls, error: Exception) -> str:
+        message = str(error).casefold()
+        if "work-right" in message or "work right" in message:
+            return "eligibility"
+        if (
+            "official route" in message
+            or "official-route" in message
+            or "application route" in message
+        ):
+            return "official_route"
+        if "vacancy is stale" in message or "freshness" in message:
+            return "freshness"
+        if "prior release" in message or "duplicate" in message:
+            return "duplicate"
+        if "publication" in message or "receipt" in message:
+            return "artifact_integrity"
+        if "artifact" in message or "pdf" in message:
+            return "consistency"
+        if "source authority" in message or "truth validator" in message:
+            return "truth"
+        return "authority"
+
+    def _record_blocked_attempt(
+        self,
+        *,
+        compilation: ApplicationCompilation,
+        source: ApplicationSource,
+        artifacts: ApplicationArtifacts,
+        jurisdiction: str,
+        contract_type: str,
+        evaluated_at: date,
+        finding_code: str,
+    ) -> None:
+        if finding_code not in self.BLOCK_FINDING_CODES:
+            raise ValueError("release block finding code is unsupported")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                "SELECT state FROM pipeline_jobs WHERE job_key=?",
+                (compilation.job_key,),
+            ).fetchone()
+            if (
+                state is None
+                or str(state["state"])
+                != PipelineState.APPLICATION_COMPILED.value
+            ):
+                connection.rollback()
+                return
+            sequence = int(connection.execute(
+                """SELECT COUNT(*) FROM release_gate_attempts
+                   WHERE compilation_id=?""",
+                (compilation.compilation_id,),
+            ).fetchone()[0]) + 1
+            attempted_input = {
+                "contract": "jaa08.blocked-release-input.v1",
+                "compilation_id": compilation.compilation_id,
+                "job_key": compilation.job_key,
+                "application_source_id": source.source_id,
+                "application_source_sha256": source.content_sha256,
+                "artifact_set_sha256": artifacts.artifact_set_sha256,
+                "jurisdiction": jurisdiction,
+                "contract_type": contract_type,
+                "evaluated_at": evaluated_at.isoformat(),
+                "attempt_sequence": sequence,
+            }
+            input_sha256 = content_hash(attempted_input)
+            attempt_id = content_hash(
+                {
+                    "contract": "jaa08.release-attempt.v1",
+                    "compilation_id": compilation.compilation_id,
+                    "evaluated_at": evaluated_at.isoformat(),
+                    "input_sha256": input_sha256,
+                    "verdict": "block",
+                    "finding_codes": (finding_code,),
+                }
+            )
+            transition = self.lifecycle.commit_in_transaction(
+                connection,
+                job_key=compilation.job_key,
+                to_state=PipelineState.RELEASE_BLOCKED,
+                policy=PolicyIdentity(
+                    self.POLICY_ID,
+                    self.POLICY_VERSION,
+                    self.POLICY_SHA256,
+                ),
+                inputs=attempted_input,
+                outputs={
+                    "attempt_id": attempt_id,
+                    "verdict": "block",
+                    "finding_codes": (finding_code,),
+                },
+                idempotency_key=(
+                    f"release-blocked:{compilation.job_key}:{attempt_id}"
+                ),
+            )
+            connection.execute(
+                """INSERT INTO release_gate_attempts(
+                     attempt_id,compilation_id,evaluated_at,input_hash,
+                     verdict,finding_codes_json,lifecycle_receipt_id)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (
+                    attempt_id,
+                    compilation.compilation_id,
+                    evaluated_at.isoformat(),
+                    input_sha256,
+                    "block",
+                    canonical_json((finding_code,)),
+                    transition.receipt_id,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _existing_compilation(
+        self,
+        strategy_id: str,
+    ) -> ApplicationCompilation | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM application_compilations
+                   WHERE strategy_id=?""",
+                (strategy_id,),
+            ).fetchone()
+        return None if row is None else self._stored_compilation(row)
+
     def evaluate_and_issue(
         self,
         *,
@@ -1239,17 +1380,55 @@ class ReleaseGateStore:
         evaluated_at: date,
     ) -> IssuedRelease:
         """Issue one token; never invoke or expose any consequential action."""
-        compilation = self.compilations.register(
-            source=source,
-            artifacts=artifacts,
-            contact=contact,
-            questions=questions,
-            artifact_root=artifact_root,
-            repository_root=repository_root,
-            as_of=evaluated_at,
-        )
+        try:
+            compilation = self.compilations.register(
+                source=source,
+                artifacts=artifacts,
+                contact=contact,
+                questions=questions,
+                artifact_root=artifact_root,
+                repository_root=repository_root,
+                as_of=evaluated_at,
+            )
+        except (ValueError, KeyError) as error:
+            existing = self._existing_compilation(source.strategy_id)
+            if existing is not None:
+                try:
+                    self._record_blocked_attempt(
+                        compilation=existing,
+                        source=source,
+                        artifacts=artifacts,
+                        jurisdiction=jurisdiction,
+                        contract_type=contract_type,
+                        evaluated_at=evaluated_at,
+                        finding_code=self._finding_code(error),
+                    )
+                except Exception as audit_error:
+                    error.add_note(
+                        "blocked-attempt audit failed: "
+                        f"{type(audit_error).__name__}"
+                    )
+            raise
         if compilation.compilation_id != compilation_id:
-            raise ValueError("release cites a different compilation identity")
+            error = ValueError(
+                "release cites a different compilation identity"
+            )
+            try:
+                self._record_blocked_attempt(
+                    compilation=compilation,
+                    source=source,
+                    artifacts=artifacts,
+                    jurisdiction=jurisdiction,
+                    contract_type=contract_type,
+                    evaluated_at=evaluated_at,
+                    finding_code="authority",
+                )
+            except Exception as audit_error:
+                error.add_note(
+                    "blocked-attempt audit failed: "
+                    f"{type(audit_error).__name__}"
+                )
+            raise error
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1395,6 +1574,24 @@ class ReleaseGateStore:
                 token_sha256,
                 transition.receipt_id,
             )
+        except (ValueError, KeyError) as error:
+            connection.rollback()
+            try:
+                self._record_blocked_attempt(
+                    compilation=compilation,
+                    source=source,
+                    artifacts=artifacts,
+                    jurisdiction=jurisdiction,
+                    contract_type=contract_type,
+                    evaluated_at=evaluated_at,
+                    finding_code=self._finding_code(error),
+                )
+            except Exception as audit_error:
+                error.add_note(
+                    "blocked-attempt audit failed: "
+                    f"{type(audit_error).__name__}"
+                )
+            raise
         except Exception:
             connection.rollback()
             raise
