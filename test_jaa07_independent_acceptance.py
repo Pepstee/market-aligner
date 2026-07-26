@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import stat
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 
 from career_automation.application_compiler import (
     CV_SECTION_ORDER,
@@ -14,6 +17,7 @@ from career_automation.application_compiler import (
     FactAuthority,
     FactualSentence,
     ModelReceipt,
+    ProductionApplicationCompiler,
     StructuredAnswer,
     StyleProposal,
     StyleSlot,
@@ -21,12 +25,19 @@ from career_automation.application_compiler import (
     compile_application_source,
     verify_application_source,
 )
+from career_automation.application_artifacts import (
+    ARTIFACT_FILENAMES,
+    load_published_artifacts,
+    publish_application_artifacts,
+)
 from career_automation.application_strategy import (
     ApplicationStrategy,
     CandidateSupport,
     EmployerResearchFact,
     compile_application_strategy,
+    ApplicationStrategyStore,
 )
+from career_automation.candidate_graph import CandidateGraph
 from career_automation.evidence_matching import (
     MatchResult,
     MatchingPolicy,
@@ -39,10 +50,12 @@ from career_automation.rendering import (
     render_pdf_artifacts,
     validate_pdf_artifact,
 )
+from test_jaa06_independent_acceptance import _fit_database
 
 
 DIGEST = hashlib.sha256(b"jaa07-contract").hexdigest()
 POLICY = MatchingPolicy()
+ROOT = Path(__file__).resolve().parent
 
 
 def _strategy() -> ApplicationStrategy:
@@ -326,3 +339,123 @@ def test_pdf_artifacts_are_two_page_cv_one_page_letter_and_parse_exactly() -> No
     assert artifacts.artifact_set_sha256 == render_pdf_artifacts(
         source
     ).artifact_set_sha256
+
+
+def test_artifacts_publish_externally_once_with_private_exact_receipts(
+    tmp_path: Path,
+) -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    root = tmp_path / "application-artifacts"
+    receipt = publish_application_artifacts(
+        source,
+        artifacts,
+        root=root,
+        repository_root=ROOT,
+    )
+    assert receipt.certifies_slice is False
+    assert receipt.artifact_set_sha256 == artifacts.artifact_set_sha256
+    directory = root / receipt.relative_directory
+    assert tuple(row.filename for row in receipt.files) == ARTIFACT_FILENAMES
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    for row in receipt.files:
+        target = directory / row.filename
+        assert target.stat().st_size == row.size_bytes
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert hashlib.sha256(target.read_bytes()).hexdigest() == row.sha256
+    receipt_document = json.loads(
+        (directory / "receipt.json").read_text(encoding="utf-8")
+    )
+    assert str(ROOT) not in json.dumps(receipt_document)
+    assert load_published_artifacts(
+        artifacts.artifact_set_sha256,
+        root=root,
+        repository_root=ROOT,
+    ) == receipt
+    assert publish_application_artifacts(
+        source,
+        artifacts,
+        root=root,
+        repository_root=ROOT,
+    ) == receipt
+
+
+def test_production_compiler_resolves_vacancy_contact_claim_and_employer_authority(
+    tmp_path: Path,
+) -> None:
+    database, run, requirement = _fit_database(tmp_path, matched=True)
+    strategy = ApplicationStrategyStore(database.path).compile_and_record(
+        fit_run_id=run.run_id,
+        as_of=date.today(),
+    )
+    graph = CandidateGraph(database.path)
+    contact_value = {
+        "full_name": "Alex Example",
+        "email": "alex@example.test",
+        "phone": "+44 7700 900123",
+        "city": "London",
+    }
+    graph.add_record(
+        "contact-primary",
+        kind="fact",
+        subject="contact",
+        value=contact_value,
+        state="fact",
+        source_identity="test:verified-contact",
+    )
+    graph.verify_record(
+        "contact-primary",
+        1,
+        decision="approved",
+        verifier_kind="configured",
+        policy_id="test.contact",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="operator-verified contact projection",
+        source_identity="test:contact-verifier",
+    )
+    with database.connection() as connection:
+        source_hash = str(connection.execute(
+            """SELECT provenance.source_hash
+               FROM candidate_records record
+               JOIN candidate_provenance provenance
+                 ON provenance.provenance_id=record.provenance_id
+               WHERE record.record_id='contact-primary' AND record.version=1"""
+        ).fetchone()[0])
+    source = ProductionApplicationCompiler(database.path).compile(
+        strategy.strategy_id,
+        as_of=date.today(),
+        contact=CandidateContact(
+            record_id="contact-primary",
+            record_version=1,
+            provenance_sha256=source_hash,
+            **contact_value,
+        ),
+        questions={
+            requirement.requirement_id: (
+                "delivery-example",
+                "Describe a relevant delivery example.",
+            )
+        },
+    )
+    verify_application_source(source)
+    assert source.strategy_id == strategy.strategy_id
+    assert source.role_title == "Engineer"
+    assert source.company_name == "Example"
+    assert source.vacancy_sha256
+    assert {row.document_kind for row in source.facts} == {
+        "cv",
+        "cover_letter",
+        "answer",
+    }
+    assert all(
+        row.text == row.approved_source_text for row in source.facts
+    )
+    rendered = render_editable_text(source)
+    for fact in source.facts:
+        if fact.document_kind == "cover_letter":
+            assert rendered.cover_letter_text.count(fact.text) == 1
+    artifacts = render_pdf_artifacts(source)
+    assert artifacts.cv_pdf.page_count == 2
+    assert artifacts.cover_letter_pdf.page_count == 1

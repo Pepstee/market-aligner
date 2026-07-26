@@ -353,9 +353,12 @@ def render_pdf_artifacts(source: ApplicationSource) -> ApplicationArtifacts:
             values.extend(facts[value] for value in section.sentence_ids)
         return tuple(values)
 
+    split = max(1, (len(source.cv_sections) + 1) // 2)
     cv_pages = (
-        _wrapped_lines((*contact_values, *section_values((0, 1)))),
-        _wrapped_lines(section_values((2, 3))),
+        _wrapped_lines((*contact_values, *section_values(tuple(range(split))))),
+        _wrapped_lines(
+            section_values(tuple(range(split, len(source.cv_sections))))
+        ),
     )
     letter_values: list[str] = [
         *contact_values,
@@ -414,3 +417,41 @@ def render_pdf_artifacts(source: ApplicationSource) -> ApplicationArtifacts:
         letter_pdf,
         artifact_set_sha256,
     )
+
+
+def verify_application_artifacts(artifacts: ApplicationArtifacts) -> None:
+    """Verify exact component and set identities without trusting construction."""
+    editable = artifacts.editable
+    for text, digest in (
+        (editable.cv_text, editable.cv_sha256),
+        (editable.cover_letter_text, editable.cover_letter_sha256),
+        (editable.answers_text, editable.answers_sha256),
+    ):
+        if hashlib.sha256(text.encode()).hexdigest() != digest:
+            raise ValueError("editable artifact differs from its content hash")
+    validate_pdf_artifact(
+        artifacts.cv_pdf,
+        expected_page_count=2,
+        required_values=(),
+    )
+    validate_pdf_artifact(
+        artifacts.cover_letter_pdf,
+        expected_page_count=1,
+        required_values=(),
+    )
+    expected = hashlib.sha256(
+        "\n".join(
+            (
+                artifacts.source_id,
+                editable.cv_sha256,
+                editable.cover_letter_sha256,
+                editable.answers_sha256,
+                artifacts.cv_pdf.pdf_sha256,
+                artifacts.cv_pdf.extracted_text_sha256,
+                artifacts.cover_letter_pdf.pdf_sha256,
+                artifacts.cover_letter_pdf.extracted_text_sha256,
+            )
+        ).encode()
+    ).hexdigest()
+    if artifacts.artifact_set_sha256 != expected:
+        raise ValueError("artifact-set identity differs from its exact components")

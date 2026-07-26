@@ -11,10 +11,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 from dataclasses import dataclass, replace
+from datetime import date
+from pathlib import Path
 from typing import Iterable, Mapping
 
-from .application_strategy import ApplicationStrategy, StrategyElement
+from .application_strategy import (
+    ApplicationStrategy,
+    ApplicationStrategyStore,
+    StrategyElement,
+)
 from .evidence_matching import canonical_json, content_hash
 
 
@@ -319,8 +326,8 @@ class DocumentSection:
 
     def __post_init__(self) -> None:
         _safe_plain_text(self.heading, "section heading")
-        if not self.sentence_ids:
-            raise ValueError("document sections require factual content")
+        if not self.sentence_ids and not self.style_slot_ids:
+            raise ValueError("document sections require content")
         if len(set(self.sentence_ids)) != len(self.sentence_ids):
             raise ValueError("section sentence identities must be unique")
 
@@ -428,7 +435,23 @@ def _validate_sections(
     facts: Mapping[str, FactualSentence],
     slots: Mapping[str, StyleSlot],
 ) -> set[str]:
-    if tuple(row.heading for row in sections) != expected_headings:
+    headings = tuple(row.heading for row in sections)
+    if document_kind == "cv":
+        try:
+            positions = tuple(expected_headings.index(value) for value in headings)
+        except ValueError as exc:
+            raise ValueError("cv sections are not canonical") from exc
+        if (
+            not headings
+            or headings[0] != "Professional Summary"
+            or len(set(headings)) != len(headings)
+            or positions != tuple(sorted(positions))
+            or not any(
+                value in headings for value in ("Experience", "Skills", "Education")
+            )
+        ):
+            raise ValueError("cv sections are not canonical")
+    elif headings != expected_headings:
         raise ValueError(f"{document_kind} sections are not canonical")
     covered: set[str] = set()
     for section in sections:
@@ -618,3 +641,434 @@ def apply_style_proposal(
         }
     )
     return replace(provisional, source_id=new_id, content_sha256=new_hash)
+
+
+class ProductionApplicationCompiler:
+    """Resolve every source atom from current durable JAA authority."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.strategies = ApplicationStrategyStore(self.path)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    @staticmethod
+    def _sentence(
+        element: StrategyElement,
+        *,
+        text: str,
+        fact_kind: str,
+        document_kind: str,
+        employer_fact_json: str | None = None,
+    ) -> FactualSentence:
+        sentence_id = content_hash(
+            {
+                "contract": "jaa07.factual-sentence.v1",
+                "element_id": element.element_id,
+                "text": text,
+                "fact_kind": fact_kind,
+                "document_kind": document_kind,
+            }
+        )
+        return FactualSentence(
+            sentence_id,
+            text,
+            text,
+            fact_kind,
+            document_kind,
+            FactAuthority.from_element(element),
+            employer_fact_json,
+        )
+
+    @staticmethod
+    def _slot(document_kind: str, purpose: str, text: str) -> StyleSlot:
+        return StyleSlot(
+            content_hash(
+                {
+                    "contract": "jaa07.deterministic-style-slot.v1",
+                    "document_kind": document_kind,
+                    "purpose": purpose,
+                    "text": text,
+                }
+            ),
+            document_kind,
+            text,
+        )
+
+    @staticmethod
+    def _contact(
+        connection: sqlite3.Connection,
+        contact: CandidateContact,
+        as_of: date,
+    ) -> None:
+        row = connection.execute(
+            """SELECT record.*,provenance.source_hash
+               FROM candidate_records record
+               JOIN candidate_provenance provenance
+                 ON provenance.provenance_id=record.provenance_id
+               WHERE record.record_id=? AND record.version=?
+                 AND record.record_kind='fact'
+                 AND record.subject='contact'
+                 AND record.epistemic_state='fact'
+                 AND (record.valid_from IS NULL OR record.valid_from<=?)
+                 AND (record.valid_until IS NULL OR record.valid_until>=?)
+                 AND NOT EXISTS(
+                   SELECT 1 FROM candidate_records newer
+                   WHERE newer.record_id=record.record_id
+                     AND newer.version>record.version
+                 )
+                 AND 1=(
+                   SELECT COUNT(*) FROM candidate_verification_decisions decision
+                   WHERE decision.target_kind='record'
+                     AND decision.target_id=record.record_id
+                     AND decision.target_version=record.version
+                     AND decision.decision='approved'
+                 )
+                 AND 1=(
+                   SELECT COUNT(*) FROM candidate_verification_decisions decision
+                   WHERE decision.target_kind='record'
+                     AND decision.target_id=record.record_id
+                     AND decision.target_version=record.version
+                 )""",
+            (
+                contact.record_id,
+                contact.record_version,
+                as_of.isoformat(),
+                as_of.isoformat(),
+            ),
+        ).fetchone()
+        expected = {
+            "full_name": contact.full_name,
+            "email": contact.email,
+            "phone": contact.phone,
+            "city": contact.city,
+        }
+        if row is None:
+            raise ValueError("contact projection lacks current verified authority")
+        try:
+            value = json.loads(str(row["value_json"]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("contact authority is not valid JSON") from exc
+        if (
+            value != expected
+            or canonical_json(value) != str(row["value_json"])
+            or str(row["source_hash"]) != contact.provenance_sha256
+        ):
+            raise ValueError("contact projection differs from its durable authority")
+
+    @staticmethod
+    def _candidate_statement(
+        connection: sqlite3.Connection,
+        element: StrategyElement,
+        as_of: date,
+    ) -> tuple[str, str]:
+        rows = connection.execute(
+            """SELECT claim.statement,claim.claim_type
+               FROM candidate_claims claim
+               JOIN candidate_claim_edges edge
+                 ON edge.claim_id=claim.claim_id
+                AND edge.claim_version=claim.version
+               JOIN candidate_evidence evidence
+                 ON evidence.evidence_id=edge.evidence_id
+                AND evidence.version=edge.evidence_version
+               WHERE claim.claim_id=? AND claim.version=?
+                 AND evidence.evidence_id=? AND evidence.version=?
+                 AND edge.edge_type IN ('supports','demonstrated_by')
+                 AND claim.approval_state='approved'
+                 AND claim.epistemic_state IN ('fact','evidence')
+                 AND evidence.approval_state='approved'
+                 AND evidence.epistemic_state IN ('fact','evidence')
+                 AND EXISTS(
+                   SELECT 1 FROM candidate_verification_decisions decision
+                   WHERE decision.target_kind='evidence'
+                     AND decision.target_id=evidence.evidence_id
+                     AND decision.target_version=evidence.version
+                     AND decision.decision='approved'
+                 )
+                 AND (claim.valid_until IS NULL OR claim.valid_until>=?)
+                 AND (evidence.valid_until IS NULL OR evidence.valid_until>=?)
+                 AND NOT EXISTS(
+                   SELECT 1 FROM candidate_claims newer
+                   WHERE newer.claim_id=claim.claim_id
+                     AND newer.version>claim.version
+                 )
+                 AND NOT EXISTS(
+                   SELECT 1 FROM candidate_evidence newer
+                   WHERE newer.evidence_id=evidence.evidence_id
+                     AND newer.version>evidence.version
+                 )""",
+            (
+                element.candidate_claim_id,
+                element.candidate_claim_version,
+                element.candidate_evidence_id,
+                element.candidate_evidence_version,
+                as_of.isoformat(),
+                as_of.isoformat(),
+            ),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ValueError(
+                "strategy element lacks one exact current approved candidate fact"
+            )
+        return str(rows[0]["statement"]), str(rows[0]["claim_type"])
+
+    @staticmethod
+    def _employer_statement(
+        connection: sqlite3.Connection,
+        *,
+        job_key: str,
+        element: StrategyElement,
+    ) -> tuple[str, str]:
+        row = connection.execute(
+            """SELECT claim_json,classification
+               FROM employer_intelligence
+               WHERE job_key=? AND claim_id=?""",
+            (job_key, element.employer_research_claim_id),
+        ).fetchone()
+        if row is None or str(row["classification"]) != "fact":
+            raise ValueError("strategy employer fact authority is unavailable")
+        try:
+            document = json.loads(str(row["claim_json"]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("strategy employer fact is not valid JSON") from exc
+        if (
+            not isinstance(document, dict)
+            or document.get("classification") != "fact"
+            or document.get("id") != element.employer_research_claim_id
+            or not isinstance(document.get("text"), str)
+            or not document["text"].strip()
+            or not isinstance(document.get("source_ids"), list)
+            or not document["source_ids"]
+            or content_hash(document) != element.employer_fact_sha256
+        ):
+            raise ValueError("strategy employer fact differs from exact authority")
+        return str(document["text"]), canonical_json(document)
+
+    def compile(
+        self,
+        strategy_id: str,
+        *,
+        as_of: date,
+        contact: CandidateContact,
+        questions: Mapping[str, tuple[str, str]] | None = None,
+    ) -> ApplicationSource:
+        """Compile routine prose without accepting caller-authored factual text."""
+        question_rows = questions or {}
+        strategy = self.strategies.load(strategy_id, as_of=as_of)
+        if strategy.decision != "apply_now":
+            raise ValueError("production document compilation requires apply-now")
+        with self._connect() as connection:
+            parent = connection.execute(
+                """SELECT strategy.job_key,job.title,job.company,job.url,
+                          job.payload_json,job.payload_hash
+                   FROM application_strategies strategy
+                   JOIN pipeline_jobs job ON job.job_key=strategy.job_key
+                   WHERE strategy.strategy_id=?""",
+                (strategy.strategy_id,),
+            ).fetchone()
+            if parent is None:
+                raise ValueError("strategy vacancy identity is unavailable")
+            try:
+                payload = json.loads(str(parent["payload_json"]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("strategy vacancy payload is not valid JSON") from exc
+            payload_hash = hashlib.sha256(
+                str(parent["payload_json"]).encode()
+            ).hexdigest()
+            if (
+                not isinstance(payload, dict)
+                or canonical_json(payload) != str(parent["payload_json"])
+                or payload_hash != str(parent["payload_hash"])
+                or str(payload.get("job_title") or "") != str(parent["title"])
+                or str(payload.get("company") or "") != str(parent["company"])
+            ):
+                raise ValueError("strategy vacancy identity is inconsistent")
+            self._contact(connection, contact, as_of)
+            job_key = str(parent["job_key"])
+            candidate_cache: dict[
+                tuple[str, int, str, int], tuple[str, str]
+            ] = {}
+            employer_cache: dict[str, tuple[str, str]] = {}
+            facts: list[FactualSentence] = []
+            claim_type_by_sentence: dict[str, str] = {}
+            for element in strategy.elements:
+                if element.kind in {
+                    "cv_emphasis",
+                    "cover_letter_argument",
+                    "structured_answer",
+                }:
+                    if (
+                        element.kind == "structured_answer"
+                        and element.requirement_id not in question_rows
+                    ):
+                        continue
+                    cache_key = (
+                        element.candidate_claim_id,
+                        element.candidate_claim_version,
+                        element.candidate_evidence_id,
+                        element.candidate_evidence_version,
+                    )
+                    if cache_key not in candidate_cache:
+                        candidate_cache[cache_key] = self._candidate_statement(
+                            connection,
+                            element,
+                            as_of,
+                        )
+                    text, claim_type = candidate_cache[cache_key]
+                    document_kind = {
+                        "cv_emphasis": "cv",
+                        "cover_letter_argument": "cover_letter",
+                        "structured_answer": "answer",
+                    }[element.kind]
+                    sentence = self._sentence(
+                        element,
+                        text=text,
+                        fact_kind="candidate",
+                        document_kind=document_kind,
+                    )
+                    facts.append(sentence)
+                    claim_type_by_sentence[sentence.sentence_id] = claim_type
+                elif element.kind == "employer_hook":
+                    if element.employer_research_claim_id not in employer_cache:
+                        employer_cache[element.employer_research_claim_id] = (
+                            self._employer_statement(
+                                connection,
+                                job_key=job_key,
+                                element=element,
+                            )
+                        )
+                    text, claim_json = employer_cache[
+                        element.employer_research_claim_id
+                    ]
+                    facts.append(self._sentence(
+                        element,
+                        text=text,
+                        fact_kind="employer",
+                        document_kind="cover_letter",
+                        employer_fact_json=claim_json,
+                    ))
+
+        cv_facts = tuple(row for row in facts if row.document_kind == "cv")
+        letter_candidate = tuple(
+            row
+            for row in facts
+            if row.document_kind == "cover_letter" and row.fact_kind == "candidate"
+        )
+        letter_employer = tuple(
+            row
+            for row in facts
+            if row.document_kind == "cover_letter" and row.fact_kind == "employer"
+        )
+        answer_facts = {
+            row.authority.requirement_id: row
+            for row in facts
+            if row.document_kind == "answer"
+        }
+        if not cv_facts or not letter_candidate or not letter_employer:
+            raise ValueError("strategy does not contain complete document authority")
+
+        cv_slot = self._slot("cv", "summary-lead", "Relevant evidence")
+        letter_open = self._slot(
+            "cover_letter",
+            "salutation",
+            "Dear Hiring Manager",
+        )
+        letter_close = self._slot(
+            "cover_letter",
+            "signoff",
+            "Kind regards",
+        )
+        slots: list[StyleSlot] = [cv_slot, letter_open, letter_close]
+        education = tuple(
+            row.sentence_id
+            for row in cv_facts
+            if claim_type_by_sentence.get(row.sentence_id) == "education"
+        )
+        skills = tuple(
+            row.sentence_id
+            for row in cv_facts
+            if claim_type_by_sentence.get(row.sentence_id)
+            in {"skill", "capability", "certification"}
+        )
+        used_special = set((*education, *skills))
+        experience = tuple(
+            row.sentence_id
+            for row in cv_facts
+            if row.sentence_id not in used_special
+        )
+        if not experience:
+            experience = tuple(row.sentence_id for row in cv_facts)
+        cv_sections: list[DocumentSection] = [
+            DocumentSection(
+                "Professional Summary",
+                (cv_facts[0].sentence_id,),
+                (cv_slot.slot_id,),
+            ),
+            DocumentSection("Experience", experience),
+        ]
+        if skills:
+            cv_sections.append(DocumentSection("Skills", skills))
+        if education:
+            cv_sections.append(DocumentSection("Education", education))
+
+        answers: list[StructuredAnswer] = []
+        for requirement_id, (question_id, question_text) in sorted(
+            question_rows.items()
+        ):
+            fact = answer_facts.get(requirement_id)
+            if fact is None:
+                raise ValueError("portal question lacks structured-answer authority")
+            slot = self._slot(
+                "answer",
+                f"answer:{question_id}",
+                "A relevant example follows.",
+            )
+            slots.append(slot)
+            answers.append(
+                StructuredAnswer(
+                    question_id,
+                    question_text,
+                    (fact.sentence_id,),
+                    (slot.slot_id,),
+                )
+            )
+        return compile_application_source(
+            strategy=strategy,
+            job_key=job_key,
+            role_title=str(parent["title"]),
+            company_name=str(parent["company"]),
+            vacancy_source_identity=(
+                f"vacancy:{job_key}:{parent['payload_hash']}"
+            ),
+            vacancy_sha256=str(parent["payload_hash"]),
+            contact=contact,
+            facts=facts,
+            style_slots=slots,
+            cv_sections=cv_sections,
+            letter_sections=(
+                DocumentSection(
+                    "Opening",
+                    (),
+                    (letter_open.slot_id,),
+                ),
+                DocumentSection(
+                    "Evidence Match",
+                    tuple(row.sentence_id for row in letter_candidate),
+                ),
+                DocumentSection(
+                    "Company Fit",
+                    tuple(row.sentence_id for row in letter_employer),
+                ),
+                DocumentSection(
+                    "Close",
+                    (),
+                    (letter_close.slot_id,),
+                ),
+            ),
+            answers=answers,
+        )

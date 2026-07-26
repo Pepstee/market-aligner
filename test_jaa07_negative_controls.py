@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import replace
+from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -11,12 +14,19 @@ from career_automation.application_compiler import (
     CandidateContact,
     FactualSentence,
     ModelReceipt,
+    ProductionApplicationCompiler,
     StyleProposal,
     StyleSlot,
     apply_style_proposal,
     compile_application_source,
     verify_application_source,
 )
+from career_automation.application_artifacts import (
+    load_published_artifacts,
+    publish_application_artifacts,
+)
+from career_automation.application_strategy import ApplicationStrategyStore
+from career_automation.candidate_graph import CandidateGraph
 from career_automation.evidence_matching import canonical_json, content_hash
 from career_automation.rendering import (
     PDF_FORBIDDEN,
@@ -26,9 +36,11 @@ from career_automation.rendering import (
 )
 from test_jaa07_independent_acceptance import (
     DIGEST,
+    ROOT,
     _employer_fact_document,
     _source,
 )
+from test_jaa06_independent_acceptance import _fit_database
 
 
 def test_factual_sentence_cannot_paraphrase_or_add_an_unsupported_metric() -> None:
@@ -244,4 +256,223 @@ def test_pdf_rich_or_hidden_feature_markers_fail_closed() -> None:
             attacked,
             expected_page_count=1,
             required_values=("Example Ltd",),
+        )
+
+
+def test_artifact_publication_rejects_repository_and_symlink_roots(
+    tmp_path: Path,
+) -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    with pytest.raises(ValueError, match="outside"):
+        publish_application_artifacts(
+            source,
+            artifacts,
+            root=ROOT / "runtime_evidence" / "jaa07",
+            repository_root=ROOT,
+        )
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    os.symlink(real, link)
+    with pytest.raises(ValueError, match="symlink"):
+        publish_application_artifacts(
+            source,
+            artifacts,
+            root=link,
+            repository_root=ROOT,
+        )
+
+
+def test_artifact_tamper_and_changed_set_identity_never_overwrite(
+    tmp_path: Path,
+) -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    root = tmp_path / "artifacts"
+    receipt = publish_application_artifacts(
+        source,
+        artifacts,
+        root=root,
+        repository_root=ROOT,
+    )
+    target = root / receipt.relative_directory / "cv.txt"
+    original = target.read_bytes()
+    target.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        load_published_artifacts(
+            artifacts.artifact_set_sha256,
+            root=root,
+            repository_root=ROOT,
+        )
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        publish_application_artifacts(
+            source,
+            artifacts,
+            root=root,
+            repository_root=ROOT,
+        )
+    assert target.read_bytes() == b"tampered"
+    target.write_bytes(original)
+    with pytest.raises(ValueError, match="artifact-set identity"):
+        publish_application_artifacts(
+            source,
+            replace(artifacts, artifact_set_sha256="0" * 64),
+            root=root,
+            repository_root=ROOT,
+        )
+
+
+def test_artifact_publication_rejects_source_mismatch(tmp_path: Path) -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    with pytest.raises(ValueError, match="different application source"):
+        publish_application_artifacts(
+            source,
+            replace(artifacts, source_id="0" * 64),
+            root=tmp_path / "artifacts",
+            repository_root=ROOT,
+        )
+
+
+def test_production_compiler_rejects_unverified_or_changed_contact(
+    tmp_path: Path,
+) -> None:
+    database, run, _requirement = _fit_database(tmp_path, matched=True)
+    strategy = ApplicationStrategyStore(database.path).compile_and_record(
+        fit_run_id=run.run_id,
+        as_of=date.today(),
+    )
+    contact = CandidateContact(
+        "Alex Example",
+        "alex@example.test",
+        "+44 7700 900123",
+        "London",
+        "missing-contact",
+        1,
+        DIGEST,
+    )
+    with pytest.raises(ValueError, match="verified authority"):
+        ProductionApplicationCompiler(database.path).compile(
+            strategy.strategy_id,
+            as_of=date.today(),
+            contact=contact,
+        )
+
+
+def test_production_compiler_rejects_ambiguous_contact_verification(
+    tmp_path: Path,
+) -> None:
+    database, run, _requirement = _fit_database(tmp_path, matched=True)
+    strategy = ApplicationStrategyStore(database.path).compile_and_record(
+        fit_run_id=run.run_id,
+        as_of=date.today(),
+    )
+    graph = CandidateGraph(database.path)
+    value = {
+        "full_name": "Alex Example",
+        "email": "alex@example.test",
+        "phone": "+44 7700 900123",
+        "city": "London",
+    }
+    graph.add_record(
+        "contact",
+        kind="fact",
+        subject="contact",
+        value=value,
+        state="fact",
+        source_identity="test:contact",
+    )
+    for decision in ("approved", "rejected"):
+        graph.verify_record(
+            "contact",
+            1,
+            decision=decision,
+            verifier_kind="configured",
+            policy_id=f"test.contact.{decision}",
+            policy_version="1",
+            policy_hash=hashlib.sha256(decision.encode()).hexdigest(),
+            reason=f"{decision} test decision",
+            source_identity=f"test:contact:{decision}",
+        )
+    with database.connection() as connection:
+        source_hash = str(connection.execute(
+            """SELECT provenance.source_hash
+               FROM candidate_records record
+               JOIN candidate_provenance provenance
+                 ON provenance.provenance_id=record.provenance_id
+               WHERE record.record_id='contact'"""
+        ).fetchone()[0])
+    with pytest.raises(ValueError, match="verified authority"):
+        ProductionApplicationCompiler(database.path).compile(
+            strategy.strategy_id,
+            as_of=date.today(),
+            contact=CandidateContact(
+                record_id="contact",
+                record_version=1,
+                provenance_sha256=source_hash,
+                **value,
+            ),
+        )
+
+
+@pytest.mark.parametrize("attack", ("value", "provenance"))
+def test_production_compiler_rejects_contact_authority_drift(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    database, run, _requirement = _fit_database(tmp_path, matched=True)
+    strategy = ApplicationStrategyStore(database.path).compile_and_record(
+        fit_run_id=run.run_id,
+        as_of=date.today(),
+    )
+    graph = CandidateGraph(database.path)
+    value = {
+        "full_name": "Alex Example",
+        "email": "alex@example.test",
+        "phone": "+44 7700 900123",
+        "city": "London",
+    }
+    graph.add_record(
+        "contact",
+        kind="fact",
+        subject="contact",
+        value=value,
+        state="fact",
+        source_identity="test:contact",
+    )
+    graph.verify_record(
+        "contact",
+        1,
+        decision="approved",
+        verifier_kind="configured",
+        policy_id="test.contact",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="verified contact",
+        source_identity="test:contact:review",
+    )
+    with database.connection() as connection:
+        source_hash = str(connection.execute(
+            """SELECT provenance.source_hash
+               FROM candidate_records record
+               JOIN candidate_provenance provenance
+                 ON provenance.provenance_id=record.provenance_id
+               WHERE record.record_id='contact'"""
+        ).fetchone()[0])
+    supplied = dict(value)
+    if attack == "value":
+        supplied["full_name"] = "Changed Name"
+    else:
+        source_hash = DIGEST
+    with pytest.raises(ValueError, match="differs from its durable authority"):
+        ProductionApplicationCompiler(database.path).compile(
+            strategy.strategy_id,
+            as_of=date.today(),
+            contact=CandidateContact(
+                record_id="contact",
+                record_version=1,
+                provenance_sha256=source_hash,
+                **supplied,
+            ),
         )
