@@ -18,6 +18,12 @@ from career_automation.application_compiler import (
     verify_application_source,
 )
 from career_automation.evidence_matching import canonical_json, content_hash
+from career_automation.rendering import (
+    PDF_FORBIDDEN,
+    PdfArtifact,
+    render_pdf_artifacts,
+    validate_pdf_artifact,
+)
 from test_jaa07_independent_acceptance import (
     DIGEST,
     _employer_fact_document,
@@ -181,4 +187,61 @@ def test_employer_sentence_must_match_hashed_fact_not_caller_label() -> None:
             employer_fact_json=canonical_json(
                 _employer_fact_document(text=changed_text)
             ),
+        )
+
+
+def test_pdf_hash_page_count_and_extracted_text_tamper_fail_closed() -> None:
+    source, _ = _source()
+    artifact = render_pdf_artifacts(source).cv_pdf
+    with pytest.raises(ValueError, match="content hash|text-only subset"):
+        validate_pdf_artifact(
+            replace(artifact, pdf_bytes=artifact.pdf_bytes + b" "),
+            expected_page_count=2,
+            required_values=("Alex Example",),
+        )
+    with pytest.raises(ValueError, match="page count"):
+        validate_pdf_artifact(
+            artifact,
+            expected_page_count=1,
+            required_values=("Alex Example",),
+        )
+    with pytest.raises(ValueError, match="retained artifact"):
+        validate_pdf_artifact(
+            replace(artifact, extracted_text="tampered\n"),
+            expected_page_count=2,
+            required_values=("Alex Example",),
+        )
+
+
+def test_pdf_rich_or_hidden_feature_markers_fail_closed() -> None:
+    source, _ = _source()
+    artifact = render_pdf_artifacts(source).cover_letter_pdf
+    marker = PDF_FORBIDDEN[0]
+    poisoned = artifact.pdf_bytes + b"\n% " + marker
+    attacked = PdfArtifact(
+        artifact.document_kind,
+        poisoned,
+        hashlib.sha256(poisoned).hexdigest(),
+        artifact.extracted_text,
+        artifact.extracted_text_sha256,
+        artifact.page_count,
+        artifact.rendered_lines,
+    )
+    with pytest.raises(ValueError, match="forbidden"):
+        validate_pdf_artifact(
+            attacked,
+            expected_page_count=1,
+            required_values=("Example Ltd",),
+        )
+    newline_hidden = artifact.pdf_bytes + b"\n3 Tr\n"
+    attacked = replace(
+        artifact,
+        pdf_bytes=newline_hidden,
+        pdf_sha256=hashlib.sha256(newline_hidden).hexdigest(),
+    )
+    with pytest.raises(ValueError, match="text-only subset"):
+        validate_pdf_artifact(
+            attacked,
+            expected_page_count=1,
+            required_values=("Example Ltd",),
         )

@@ -34,7 +34,11 @@ from career_automation.evidence_matching import (
     content_hash,
     canonical_json,
 )
-from career_automation.rendering import render_editable_text
+from career_automation.rendering import (
+    render_editable_text,
+    render_pdf_artifacts,
+    validate_pdf_artifact,
+)
 
 
 DIGEST = hashlib.sha256(b"jaa07-contract").hexdigest()
@@ -293,3 +297,32 @@ def test_style_proposal_is_non_authoritative_atomic_and_rehashes_source() -> Non
     assert revised.facts == source.facts
     assert revised.contact == source.contact
     assert replace(revised, style_slots=source.style_slots) != source
+
+
+def test_pdf_artifacts_are_two_page_cv_one_page_letter_and_parse_exactly() -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    assert artifacts.certifies_slice is False
+    assert artifacts.cv_pdf.page_count == 2
+    assert artifacts.cover_letter_pdf.page_count == 1
+    assert len(artifacts.cv_pdf.pdf_bytes) > 500
+    assert len(artifacts.cover_letter_pdf.pdf_bytes) > 500
+    for value in (
+        "Alex Example",
+        "alex@example.test",
+        "+44 7700 900123",
+        "Delivered reliable services with tested evidence.",
+    ):
+        assert value in artifacts.cv_pdf.extracted_text.replace("\n", " ")
+    assert (
+        "Example Ltd operates a documented service."
+        in artifacts.cover_letter_pdf.extracted_text.replace("\n", " ")
+    )
+    validate_pdf_artifact(
+        artifacts.cv_pdf,
+        expected_page_count=2,
+        required_values=("Alex Example", "alex@example.test"),
+    )
+    assert artifacts.artifact_set_sha256 == render_pdf_artifacts(
+        source
+    ).artifact_set_sha256
