@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -163,7 +164,13 @@ def _mutated_snapshot(tmp_path: Path, attack: str) -> Path:
 
 def test_exact_local_four_ats_cohort_is_accepted_with_original_opportunity_zero_decisions(tmp_path: Path) -> None:
     snapshot, original = _cohort(tmp_path)
-    admitted = _capture_module()._admitted_input(snapshot)
+    portable_raw = tmp_path / "portable-authority-bytes"
+    source_raw = Path(json.loads(snapshot.read_text(encoding="utf-8"))["raw_store"]["root"])
+    shutil.copytree(source_raw, portable_raw)
+    admitted = _capture_module().load_admitted_input(
+        snapshot,
+        raw_root_override=portable_raw,
+    )
     assert len(admitted) == 30
     assert {record["board"] for record in admitted.values()} == set(ATS)
     assert {key: value["opportunity0_decision"] for key, value in admitted.items()} == original

@@ -23,6 +23,7 @@ from career_automation.admission_evidence import (  # noqa: E402
 from career_automation.corpus_publication import sha256_file, validate_inventory  # noqa: E402
 from career_automation.opportunity1 import reassess_opportunity1  # noqa: E402
 from career_automation.public_access import PublicAccessPolicy  # noqa: E402
+from scripts.capture_jaa_04 import load_admitted_input  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
 FORMAT = "jaa04-revision-certification/v4"
@@ -73,6 +74,29 @@ def _load_access_policy(capture: Path, path: Path) -> PublicAccessPolicy:
     return policy
 
 
+def _replay_official_admission(
+    capture: Path,
+    admission: dict[str, object],
+    manifest_records: list[dict[str, object]],
+    access_policies: dict[str, PublicAccessPolicy],
+) -> None:
+    """Independently replay official-v2 semantics from published bytes."""
+    if admission.get("mode") != "official-json-v2":
+        return
+    if admission.get("snapshot_path") != "admission/queue_snapshot.json":
+        raise ValueError("official admission replay requires its exact portable snapshot")
+    snapshot = capture / "admission/queue_snapshot.json"
+    raw_root = capture / "admission/raw"
+    admitted = load_admitted_input(
+        snapshot,
+        access_policies=access_policies,
+        raw_root_override=raw_root,
+    )
+    manifest_keys = {str(record.get("job_key", "")) for record in manifest_records}
+    if set(admitted) != manifest_keys:
+        raise ValueError("official admission replay differs from manifest identities")
+
+
 def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:
     capture = _external(capture, label="capture")
     destination = _external(destination, label="certification receipt")
@@ -109,6 +133,12 @@ def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:
         manifest["records"],
         expected_snapshot_sha256=str(receipt.get("queue_snapshot_sha256", "")),
         access_policies=access_policies,
+    )
+    _replay_official_admission(
+        capture,
+        admission,
+        manifest["records"],
+        access_policies,
     )
     if (receipt.get("queue_input_sha256") != admission.get("source_snapshot_sha256")
             or receipt.get("queue_snapshot_sha256") != admission.get("snapshot_sha256")):

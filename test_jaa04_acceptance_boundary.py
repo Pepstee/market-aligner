@@ -265,6 +265,46 @@ def test_certifier_uses_its_current_clock_for_policy_freshness(
         _certifier()._load_access_policy(capture, policy)
 
 
+def test_certifier_replays_official_queue_semantics_from_portable_bytes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    certifier = _certifier()
+    capture = tmp_path / "capture"
+    snapshot = capture / "admission/queue_snapshot.json"
+    raw = capture / "admission/raw"
+    raw.mkdir(parents=True)
+    snapshot.write_text("{}\n", encoding="utf-8")
+    policies = {"policy-sha": object()}
+    calls = []
+
+    def replay(path, *, access_policies, raw_root_override):
+        calls.append((path, access_policies, raw_root_override))
+        return {"greenhouse:example:1": {}}
+
+    monkeypatch.setattr(certifier, "load_admitted_input", replay)
+    certifier._replay_official_admission(
+        capture,
+        {
+            "mode": "official-json-v2",
+            "snapshot_path": "admission/queue_snapshot.json",
+        },
+        [{"job_key": "greenhouse:example:1"}],
+        policies,
+    )
+    assert calls == [(snapshot, policies, raw)]
+    with pytest.raises(ValueError, match="exact portable snapshot"):
+        certifier._replay_official_admission(
+            capture,
+            {
+                "mode": "official-json-v2",
+                "snapshot_path": "../outside/queue_snapshot.json",
+            },
+            [{"job_key": "greenhouse:example:1"}],
+            policies,
+        )
+
+
 @pytest.mark.parametrize("attack", ("unsupported-receipt-schema", "manifest-digest-mismatch"))
 def test_corpus_certifier_rejects_malformed_external_bytes_without_receipt(
     tmp_path: Path,

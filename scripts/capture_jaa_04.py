@@ -96,10 +96,11 @@ def _admitted(connection: sqlite3.Connection) -> dict[str, dict[str, str]]:
     return {str(row["job_key"]): dict(row) for row in rows}
 
 
-def _admitted_input(
+def load_admitted_input(
     path: Path,
     *,
     access_policies: dict[str, PublicAccessPolicy] | None = None,
+    raw_root_override: Path | None = None,
 ) -> dict[str, dict[str, str]]:
     if path.suffix.casefold() != ".json":
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as source:
@@ -115,7 +116,11 @@ def _admitted_input(
     raw_store = payload.get("raw_store")
     if not isinstance(raw_store, dict) or not raw_store.get("root"):
         raise RuntimeError("official admitted queue lacks its raw response store")
-    raw_root = Path(str(raw_store["root"])).resolve()
+    raw_root = (
+        raw_root_override.resolve()
+        if raw_root_override is not None
+        else Path(str(raw_store["root"])).resolve()
+    )
     policy = payload.get("policy")
     if not isinstance(policy, dict) or not policy.get("identity") or not policy.get("hash"):
         raise RuntimeError("official admitted queue lacks policy identity/hash")
@@ -211,6 +216,10 @@ def _admitted_input(
     if len(result) != CORPUS_SIZE:
         raise RuntimeError("official admitted queue contains duplicate vacancy identities")
     return result
+
+
+# Compatibility name retained for the focused independent parser tests.
+_admitted_input = load_admitted_input
 
 
 def _bootstrap_is_complete(work_db: Path, records: list[dict[str, object]],
@@ -409,7 +418,7 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         )
     if access_policy is None or not access_policy.policy_sha256:
         raise RuntimeError("capture requires an operator-presented public access policy")
-    admitted = _admitted_input(
+    admitted = load_admitted_input(
         database_path,
         access_policies={access_policy.policy_sha256: access_policy}
         if database_path.suffix.casefold() == ".json"
