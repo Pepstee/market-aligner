@@ -54,9 +54,20 @@
       "evidence": []
     },
     "JAA-01": {
-      "claim": "Lifecycle migrations, deterministic transitions, replay and idempotency satisfy JAA-01.",
-      "increment": "complete",
+      "claim": "Lifecycle migrations, deterministic transitions, replay and idempotency are implemented and historically certified; current whole-tree recertification is blocked because the genuine frozen JAA-00 runtime is unavailable.",
+      "increment": "implementation_complete_current_recertification_blocked",
       "depends_on": ["JAA-00"],
+      "certification": {
+        "status": "historical_receipt_stale",
+        "historical_receipt": "runtime_evidence/jaa01/sha256-a8454e3515c95d73e7dc502016dd1c54bc4e78395c47430bb9fb34f254ec4d84.json",
+        "historical_source_content_revision": "sha256:14eb7db0bc3575eee6854eef4ce0bd729e76d6eee8d20ac261db657f87b7854b",
+        "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
+        "current_recertification_blocked_by": "genuine_frozen_jaa00_runtime_unavailable",
+        "required_current_scope": [
+          "current-tracked-source-tree",
+          "exact-source-commit"
+        ]
+      },
       "owns": [
         "career_automation/database.py",
         "career_automation/lifecycle.py",

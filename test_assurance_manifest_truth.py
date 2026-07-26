@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from tracked_source_revision import source_git_revision
+
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "ASSURANCE_MANIFEST.json"
@@ -127,7 +129,35 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
 def test_stale_and_incomplete_slice_states_are_explicit() -> None:
     components = _manifest()["components"]
     assert components["JAA-00"]["increment"] == "historical_baseline"
-    assert components["JAA-01"]["increment"] == "complete"
+    jaa01 = components["JAA-01"]
+    assert jaa01["increment"] == "implementation_complete_current_recertification_blocked"
+    historical_receipt = ROOT / jaa01["certification"]["historical_receipt"]
+    historical_document = json.loads(historical_receipt.read_text(encoding="utf-8"))
+    assert jaa01["certification"] == {
+        "status": "historical_receipt_stale",
+        "historical_receipt": (
+            "runtime_evidence/jaa01/"
+            "sha256-a8454e3515c95d73e7dc502016dd1c54bc4e78395c47430bb9fb34f254ec4d84.json"
+        ),
+        "historical_source_content_revision": (
+            "sha256:14eb7db0bc3575eee6854eef4ce0bd729e76d6eee8d20ac261db657f87b7854b"
+        ),
+        "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
+        "current_recertification_blocked_by": "genuine_frozen_jaa00_runtime_unavailable",
+        "required_current_scope": [
+            "current-tracked-source-tree",
+            "exact-source-commit",
+        ],
+    }
+    assert (
+        historical_document["source_content_revision"]
+        == jaa01["certification"]["historical_source_content_revision"]
+    )
+    assert (
+        historical_document["source_git_revision"]
+        == jaa01["certification"]["historical_source_git_revision"]
+    )
+    assert historical_document["source_git_revision"] != source_git_revision(ROOT)
     assert components["JAA-02"]["increment"] == "complete"
     assert components["JAA-03"]["increment"] == "complete"
     assert components["JAA-04"]["increment"] == "increment_b_incomplete"
