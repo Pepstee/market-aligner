@@ -167,8 +167,21 @@ def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_
     assert len(fetched) == len(set(fetched)) == 26
     assert destination.is_dir() and not list(destination.parent.glob("jaa04-complete-*"))
     envelope = json.loads((destination / "frozen_dossiers.json").read_text(encoding="utf-8"))
+    manifest = json.loads((destination / "research_manifest.json").read_text(encoding="utf-8"))
     receipt = json.loads((destination / "capture_receipt.json").read_text(encoding="utf-8"))
     assert len(envelope["dossiers"]) == receipt["captured_count"] == 30
+    assert receipt["schema_version"] == "jaa04.capture-receipt.v5"
+    admission = manifest["admission_evidence"]
+    assert admission["mode"] == "sqlite-lifecycle-snapshot"
+    published_snapshot = destination / admission["snapshot_path"]
+    assert published_snapshot.is_file()
+    assert hashlib.sha256(published_snapshot.read_bytes()).hexdigest() == (
+        receipt["queue_snapshot_sha256"]
+    )
+    with sqlite3.connect(published_snapshot) as published:
+        assert published.execute(
+            "SELECT COUNT(*) FROM pipeline_jobs WHERE opportunity_decision='pass'"
+        ).fetchone()[0] == 30
     assert len(list(destination.glob("capture_receipt.json"))) == 1
 
 

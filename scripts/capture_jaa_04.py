@@ -23,6 +23,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.database import CareerDatabase  # noqa: E402
+from career_automation.admission_evidence import (  # noqa: E402
+    publish_admission_evidence,
+    raw_evidence_hash,
+    source_snapshot_hash,
+)
 from career_automation.corpus_publication import sha256_file, write_inventory  # noqa: E402
 from career_automation.employer_research import (  # noqa: E402
     EmployerResearchWorker, Opportunity1Coordinator, PortableAuthorityRetriever, RawResponseCache,
@@ -273,7 +278,7 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
     workspace.mkdir(parents=True, exist_ok=True)
     work_db = workspace / "queue.sqlite3"
     state_path = workspace / "acquisition_state.json"
-    snapshot_sha256 = hashlib.sha256(database_path.read_bytes()).hexdigest()
+    snapshot_sha256 = source_snapshot_hash(database_path)
     state = {"schema_version": "jaa04.acquisition-state.v1", "queue_snapshot_sha256": snapshot_sha256,
              "selected_job_keys": sorted(selected), "status": "in_flight"}
     if state_path.exists():
@@ -403,13 +408,22 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
                 ],
                 "opportunity1_reassessment": reassessment,
             })
+        stage = Path(tempfile.mkdtemp(prefix="jaa04-complete-", dir=destination.parent))
+        admission_evidence = publish_admission_evidence(database_path, records, stage)
+        if admission_evidence["source_snapshot_sha256"] != snapshot_sha256:
+            raise RuntimeError("admission input changed while its portable snapshot was created")
+        published_queue_hash = hashlib.sha256(
+            (stage / admission_evidence["snapshot_path"]).read_bytes()
+        ).hexdigest()
+        if published_queue_hash != admission_evidence["snapshot_sha256"]:
+            raise RuntimeError("portable admission snapshot hash is inconsistent")
         envelope = {"schema_version": "jaa04.frozen-dossiers.v4", "dossiers": dossiers,
                     "dossiers_hash": content_hash(dossiers)}
-        manifest = {"schema_version": "jaa04.research-manifest.v4",
+        manifest = {"schema_version": "jaa04.research-manifest.v5",
                     "opportunity0_queue_size": len(admitted),
+                    "admission_evidence": admission_evidence,
                     "records": manifest_records,
                     "records_hash": content_hash(manifest_records)}
-        stage = Path(tempfile.mkdtemp(prefix="jaa04-complete-", dir=destination.parent))
         (stage / "frozen_dossiers.json").write_bytes(canonical(envelope))
         (stage / "research_manifest.json").write_bytes(canonical(manifest))
         shutil.copytree(workspace / "raw", stage / "raw", copy_function=os.link)
@@ -432,16 +446,14 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
                 identities.add(identity)
                 body_hashes.add(str(source["content_sha256"]))
                 source_ids.add(str(source["id"]))
-        files = sorted(path for path in (stage / "raw").rglob("*") if path.is_file())
-        corpus_hash = hashlib.sha256(b"".join(
-            path.relative_to(stage).as_posix().encode() + b"\0" + path.read_bytes()
-            for path in files)).hexdigest()
+        corpus_hash = raw_evidence_hash(stage)
         inventory_path = write_inventory(stage)
         receipt = {
-            "schema_version": "jaa04.capture-receipt.v4", "status": "SUCCESS",
+            "schema_version": "jaa04.capture-receipt.v5", "status": "SUCCESS",
             "captured_count": CORPUS_SIZE,
             "source_count": sum(len(row["sources"]) for row in dossiers),
-            "queue_snapshot_sha256": snapshot_sha256,
+            "queue_input_sha256": snapshot_sha256,
+            "queue_snapshot_sha256": published_queue_hash,
             "discovery_mode": "typed-ats-and-official-route-validation",
             "manifest_sha256": hashlib.sha256((stage / "research_manifest.json").read_bytes()).hexdigest(),
             "dossiers_sha256": hashlib.sha256((stage / "frozen_dossiers.json").read_bytes()).hexdigest(),

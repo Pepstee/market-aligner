@@ -15,11 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import RawResponseCache, content_hash, load_frozen_dossiers  # noqa: E402
+from career_automation.admission_evidence import (  # noqa: E402
+    raw_evidence_hash,
+    validate_admission_evidence,
+)
 from career_automation.corpus_publication import sha256_file, validate_inventory  # noqa: E402
 from career_automation.opportunity1 import reassess_opportunity1  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
-FORMAT = "jaa04-revision-certification/v2"
+FORMAT = "jaa04-revision-certification/v3"
 
 
 def canonical(value: object) -> bytes:
@@ -43,7 +47,7 @@ def certify(capture: Path, destination: Path) -> Path:
     dossiers_path = capture / "frozen_dossiers.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if receipt.get("schema_version") != "jaa04.capture-receipt.v4" or receipt.get("status") != "SUCCESS":
+    if receipt.get("schema_version") != "jaa04.capture-receipt.v5" or receipt.get("status") != "SUCCESS":
         raise ValueError("capture has no authentic acquisition receipt")
     if (receipt.get("manifest_sha256") != sha(manifest_path)
             or receipt.get("dossiers_sha256") != sha(dossiers_path)):
@@ -52,11 +56,23 @@ def certify(capture: Path, destination: Path) -> Path:
     validate_inventory(capture)
     if receipt.get("inventory_sha256") != sha256_file(inventory_path):
         raise ValueError("capture inventory is not bound to the acquisition receipt")
-    if (manifest.get("schema_version") != "jaa04.research-manifest.v4"
+    if (manifest.get("schema_version") != "jaa04.research-manifest.v5"
             or manifest.get("opportunity0_queue_size", 0) < 30
             or len(manifest.get("records", [])) != 30
             or manifest.get("records_hash") != content_hash(manifest["records"])):
         raise ValueError("manifest is not bound to the frozen admitted queue")
+    admission = manifest.get("admission_evidence")
+    if not isinstance(admission, dict):
+        raise ValueError("manifest has no portable Opportunity-0 evidence")
+    validate_admission_evidence(
+        capture,
+        admission,
+        manifest["records"],
+        expected_snapshot_sha256=str(receipt.get("queue_snapshot_sha256", "")),
+    )
+    if (receipt.get("queue_input_sha256") != admission.get("source_snapshot_sha256")
+            or receipt.get("queue_snapshot_sha256") != admission.get("snapshot_sha256")):
+        raise ValueError("capture receipt does not bind the admission snapshot")
     dossiers = load_frozen_dossiers(dossiers_path, RawResponseCache(capture / "raw"), strict_corpus=True)
     dossier_by_key = {row["job_key"]: row for row in dossiers}
     record_keys = [row.get("job_key") for row in manifest["records"]]
@@ -92,10 +108,7 @@ def certify(capture: Path, destination: Path) -> Path:
                 or expected.policy_hash != reassessment["policy_hash"]
                 or [vars(change) for change in expected.changes] != changes):
             raise ValueError("Opportunity-1 reassessment is inconsistent")
-    raw_files = sorted(path for path in (capture / "raw").rglob("*") if path.is_file())
-    raw_hash = hashlib.sha256(b"".join(
-        path.relative_to(capture).as_posix().encode() + b"\0" + path.read_bytes()
-        for path in raw_files)).hexdigest()
+    raw_hash = raw_evidence_hash(capture)
     if raw_hash != receipt.get("raw_corpus_sha256"):
         raise ValueError("raw authority cache was modified")
     current_revision = revision()
@@ -108,6 +121,7 @@ def certify(capture: Path, destination: Path) -> Path:
         "source_content_revision": current_content_revision,
         "capture_receipt_sha256": sha(receipt_path),
         "manifest_sha256": sha(manifest_path), "dossiers_sha256": sha(dossiers_path),
+        "queue_snapshot_sha256": admission["snapshot_sha256"],
         "raw_corpus_sha256": raw_hash,
     })
     if destination.suffix != ".json":

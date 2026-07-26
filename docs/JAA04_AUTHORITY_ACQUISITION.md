@@ -95,9 +95,14 @@ dossier, manifest and raw response by path, byte length and SHA-256. The public
 `jaa04_capture` path is a single atomically replaced symlink to that release;
 failed acquisition or validation therefore cannot move or alter the prior
 certified corpus. The successful acquisition receipt binds the inventory hash.
-The capture receipt binds the queue snapshot, discovery mode, manifest,
-dossiers, raw corpus, Git commit, and tracked source-content revision. Certify
-the result with:
+The release also carries `admission/queue_snapshot.json` plus exactly the
+Opportunity-0 and robots bytes referenced by that snapshot. For a SQLite input,
+it carries a consistent SQLite backup instead. The research manifest links
+each dossier back to this portable admission evidence; certification replays
+the link and rejects missing, extra, altered or path-escaping bytes. The
+capture receipt binds the input snapshot, portable queue snapshot, discovery
+mode, manifest, dossiers, both raw stores, Git commit, and tracked
+source-content revision. Certify the result with:
 
 ```sh
 python3 scripts/accept_jaa_04.py \
