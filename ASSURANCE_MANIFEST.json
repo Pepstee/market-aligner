@@ -254,7 +254,7 @@
     },
     "JAA-07": {
       "claim": "ATS-safe documents and answers compile only from approved claims and retain provenance.",
-      "increment": "not_implemented",
+      "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-06"],
       "owns": ["career_automation/application_compiler.py", "career_automation/rendering.py"],
       "inputs": ["career_automation/application_strategy.py", "career_automation/documents.py"],
