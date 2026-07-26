@@ -49,11 +49,22 @@ _JAA06_SCHEMA_TABLES = (
     "strategy_requirement_coverage",
     "strategy_elements",
 )
+_JAA08_SCHEMA_TABLES = (
+    "application_compilations",
+    "official_application_routes",
+    "release_gate_attempts",
+    "release_manifests",
+    "release_validation_receipts",
+    "release_tokens",
+)
 JAA05_INSTALLED_SCHEMA_SHA256 = (
     "3c4e4fe4d934b2995d8ccde907c59bfb9abc56615c193d081e6b07ca0f341dda"
 )
 JAA06_INSTALLED_SCHEMA_SHA256 = (
     "77d1d8ae29d5d77c48800f751b25d4e4d50598b9dd71576c42aeb6436b4a2bd1"
+)
+JAA08_INSTALLED_SCHEMA_SHA256 = (
+    "bee5bc40d1933d412f2424a7bea5418664bc2698fcc808e99e59a1988290e09c"
 )
 
 
@@ -190,6 +201,35 @@ def verify_jaa06_installed_schema(conn: sqlite3.Connection) -> str:
     if digest != JAA06_INSTALLED_SCHEMA_SHA256:
         raise RuntimeError(
             "installed JAA-06 schema or trigger set does not match the checked contract"
+        )
+    return digest
+
+
+def jaa08_installed_schema_digest(conn: sqlite3.Connection) -> str:
+    """Hash every table, index and trigger owned by the JAA-08 migration."""
+    placeholders = ",".join("?" for _ in _JAA08_SCHEMA_TABLES)
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql
+            FROM sqlite_schema
+            WHERE sql IS NOT NULL AND tbl_name IN ({placeholders})
+            ORDER BY type,name""",
+        _JAA08_SCHEMA_TABLES,
+    ).fetchall()
+    document = json.dumps(
+        [list(row) for row in rows],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"jaa08-installed-schema-v1\0" + document).hexdigest()
+
+
+def verify_jaa08_installed_schema(conn: sqlite3.Connection) -> str:
+    digest = jaa08_installed_schema_digest(conn)
+    if digest != JAA08_INSTALLED_SCHEMA_SHA256:
+        raise RuntimeError(
+            "installed JAA-08 schema or trigger set does not match the checked contract"
         )
     return digest
 
@@ -1172,6 +1212,189 @@ _JAA_06_APPLICATION_STRATEGY_MIGRATION = Migration(
 )
 
 
+_JAA_08_RELEASE_GATE_MIGRATION = Migration(
+    8,
+    "jaa_08_release_gate",
+    (
+        """CREATE TABLE application_compilations(
+             compilation_id TEXT PRIMARY KEY
+               CHECK(length(compilation_id)=64
+                 AND compilation_id NOT GLOB '*[^0-9a-f]*'),
+             job_key TEXT NOT NULL
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             strategy_id TEXT NOT NULL UNIQUE
+               REFERENCES application_strategies(strategy_id)
+               ON DELETE RESTRICT,
+             application_source_id TEXT NOT NULL UNIQUE
+               CHECK(length(application_source_id)=64
+                 AND application_source_id NOT GLOB '*[^0-9a-f]*'),
+             application_source_hash TEXT NOT NULL
+               CHECK(length(application_source_hash)=64
+                 AND application_source_hash NOT GLOB '*[^0-9a-f]*'),
+             artifact_set_hash TEXT NOT NULL UNIQUE
+               CHECK(length(artifact_set_hash)=64
+                 AND artifact_set_hash NOT GLOB '*[^0-9a-f]*'),
+             artifact_receipt_hash TEXT NOT NULL UNIQUE
+               CHECK(length(artifact_receipt_hash)=64
+                 AND artifact_receipt_hash NOT GLOB '*[^0-9a-f]*'),
+             artifact_relative_directory TEXT NOT NULL
+               CHECK(length(artifact_relative_directory)=64
+                 AND artifact_relative_directory NOT GLOB '*[^0-9a-f]*'),
+             contact_record_id TEXT NOT NULL,
+             contact_record_version INTEGER NOT NULL,
+             questions_hash TEXT NOT NULL
+               CHECK(length(questions_hash)=64
+                 AND questions_hash NOT GLOB '*[^0-9a-f]*'),
+             compilation_document_json TEXT NOT NULL,
+             lifecycle_receipt_id INTEGER NOT NULL UNIQUE
+               REFERENCES lifecycle_transition_receipts(receipt_id)
+               ON DELETE RESTRICT,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             UNIQUE(compilation_id,job_key,strategy_id),
+             FOREIGN KEY(contact_record_id,contact_record_version)
+               REFERENCES candidate_records(record_id,version)
+               ON DELETE RESTRICT,
+             CHECK(artifact_relative_directory=artifact_set_hash)
+           )""",
+        """CREATE TABLE official_application_routes(
+             route_id TEXT PRIMARY KEY,
+             job_key TEXT NOT NULL
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             adapter_id TEXT NOT NULL,
+             adapter_version TEXT NOT NULL,
+             source_identity TEXT NOT NULL,
+             route_policy_hash TEXT NOT NULL
+               CHECK(length(route_policy_hash)=64
+                 AND route_policy_hash NOT GLOB '*[^0-9a-f]*'),
+             verified_at TEXT NOT NULL
+               CHECK(date(verified_at)=verified_at),
+             valid_until TEXT NOT NULL
+               CHECK(date(valid_until)=valid_until
+                 AND valid_until>=verified_at),
+             allowed INTEGER NOT NULL CHECK(allowed IN (0,1)),
+             route_document_json TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE UNIQUE INDEX official_application_routes_one_allowed
+             ON official_application_routes(job_key)
+             WHERE allowed=1""",
+        """CREATE TABLE release_gate_attempts(
+             attempt_id TEXT PRIMARY KEY
+               CHECK(length(attempt_id)=64
+                 AND attempt_id NOT GLOB '*[^0-9a-f]*'),
+             compilation_id TEXT NOT NULL
+               REFERENCES application_compilations(compilation_id)
+               ON DELETE RESTRICT,
+             evaluated_at TEXT NOT NULL CHECK(date(evaluated_at)=evaluated_at),
+             input_hash TEXT NOT NULL
+               CHECK(length(input_hash)=64
+                 AND input_hash NOT GLOB '*[^0-9a-f]*'),
+             verdict TEXT NOT NULL CHECK(verdict IN ('pass','block')),
+             finding_codes_json TEXT NOT NULL,
+             lifecycle_receipt_id INTEGER NOT NULL UNIQUE
+               REFERENCES lifecycle_transition_receipts(receipt_id)
+               ON DELETE RESTRICT,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE TABLE release_manifests(
+             release_manifest_hash TEXT PRIMARY KEY
+               CHECK(length(release_manifest_hash)=64
+                 AND release_manifest_hash NOT GLOB '*[^0-9a-f]*'),
+             attempt_id TEXT NOT NULL UNIQUE
+               REFERENCES release_gate_attempts(attempt_id)
+               ON DELETE RESTRICT,
+             compilation_id TEXT NOT NULL UNIQUE
+               REFERENCES application_compilations(compilation_id)
+               ON DELETE RESTRICT,
+             job_key TEXT NOT NULL
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             candidate_identity_hash TEXT NOT NULL,
+             input_hash TEXT NOT NULL,
+             artifact_set_hash TEXT NOT NULL,
+             manifest_document_json TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             UNIQUE(job_key,candidate_identity_hash)
+           )""",
+        """CREATE TABLE release_validation_receipts(
+             release_manifest_hash TEXT NOT NULL
+               REFERENCES release_manifests(release_manifest_hash)
+               ON DELETE RESTRICT,
+             validator_id TEXT NOT NULL CHECK(validator_id IN
+               ('authority','truth','eligibility','freshness','consistency',
+                'ats','duplicate','official_route')),
+             validator_version TEXT NOT NULL,
+             validator_impl_hash TEXT NOT NULL,
+             input_hash TEXT NOT NULL,
+             artifact_set_hash TEXT NOT NULL,
+             decision TEXT NOT NULL CHECK(decision='pass'),
+             receipt_document_json TEXT NOT NULL,
+             PRIMARY KEY(release_manifest_hash,validator_id),
+             UNIQUE(release_manifest_hash,validator_impl_hash)
+           )""",
+        """CREATE TABLE release_tokens(
+             token_hash TEXT PRIMARY KEY
+               CHECK(length(token_hash)=64
+                 AND token_hash NOT GLOB '*[^0-9a-f]*'),
+             release_manifest_hash TEXT NOT NULL UNIQUE
+               REFERENCES release_manifests(release_manifest_hash)
+               ON DELETE RESTRICT,
+             issued_at TEXT NOT NULL,
+             consumed_at TEXT,
+             CHECK(consumed_at IS NULL OR consumed_at>=issued_at)
+           )""",
+        """CREATE TRIGGER application_compilations_immutable_update
+             BEFORE UPDATE ON application_compilations
+             BEGIN SELECT RAISE(ABORT,'application compilations are immutable'); END""",
+        """CREATE TRIGGER application_compilations_immutable_delete
+             BEFORE DELETE ON application_compilations
+             BEGIN SELECT RAISE(ABORT,'application compilations are immutable'); END""",
+        """CREATE TRIGGER official_application_routes_immutable_update
+             BEFORE UPDATE ON official_application_routes
+             BEGIN SELECT RAISE(ABORT,'official routes are immutable'); END""",
+        """CREATE TRIGGER official_application_routes_immutable_delete
+             BEFORE DELETE ON official_application_routes
+             BEGIN SELECT RAISE(ABORT,'official routes are immutable'); END""",
+        """CREATE TRIGGER release_gate_attempts_immutable_update
+             BEFORE UPDATE ON release_gate_attempts
+             BEGIN SELECT RAISE(ABORT,'release attempts are immutable'); END""",
+        """CREATE TRIGGER release_gate_attempts_immutable_delete
+             BEFORE DELETE ON release_gate_attempts
+             BEGIN SELECT RAISE(ABORT,'release attempts are immutable'); END""",
+        """CREATE TRIGGER release_manifests_immutable_update
+             BEFORE UPDATE ON release_manifests
+             BEGIN SELECT RAISE(ABORT,'release manifests are immutable'); END""",
+        """CREATE TRIGGER release_manifests_immutable_delete
+             BEFORE DELETE ON release_manifests
+             BEGIN SELECT RAISE(ABORT,'release manifests are immutable'); END""",
+        """CREATE TRIGGER release_validation_receipts_immutable_update
+             BEFORE UPDATE ON release_validation_receipts
+             BEGIN SELECT RAISE(ABORT,'release validations are immutable'); END""",
+        """CREATE TRIGGER release_validation_receipts_immutable_delete
+             BEFORE DELETE ON release_validation_receipts
+             BEGIN SELECT RAISE(ABORT,'release validations are immutable'); END""",
+        """CREATE TRIGGER release_tokens_guard_update
+             BEFORE UPDATE ON release_tokens
+             WHEN NEW.token_hash<>OLD.token_hash
+               OR NEW.release_manifest_hash<>OLD.release_manifest_hash
+               OR NEW.issued_at<>OLD.issued_at
+               OR OLD.consumed_at IS NOT NULL
+               OR NEW.consumed_at IS NULL
+             BEGIN SELECT RAISE(ABORT,'release token update is invalid'); END""",
+        """CREATE TRIGGER release_tokens_require_complete_validations
+             BEFORE INSERT ON release_tokens
+             WHEN (
+               SELECT COUNT(DISTINCT validator_id)
+               FROM release_validation_receipts
+               WHERE release_manifest_hash=NEW.release_manifest_hash
+             )<>8
+             BEGIN SELECT RAISE(ABORT,'release token requires all validators'); END""",
+        """CREATE TRIGGER release_tokens_immutable_delete
+             BEFORE DELETE ON release_tokens
+             BEGIN SELECT RAISE(ABORT,'release tokens are immutable'); END""",
+    ),
+)
+
+
 # Migration 2 was already allocated to JAA-02 before the independent JAA-01
 # review required an immutable score-import receipt. Public sets remain ordered
 # and checksummed while each slice applies only the schema it owns.
@@ -1192,6 +1415,10 @@ JAA_05_MIGRATIONS: tuple[Migration, ...] = (
 JAA_06_MIGRATIONS: tuple[Migration, ...] = (
     *JAA_05_MIGRATIONS,
     _JAA_06_APPLICATION_STRATEGY_MIGRATION,
+)
+JAA_08_MIGRATIONS: tuple[Migration, ...] = (
+    *JAA_06_MIGRATIONS,
+    _JAA_08_RELEASE_GATE_MIGRATION,
 )
 
 
@@ -1224,4 +1451,11 @@ def apply_jaa_06_migrations(path: str | Path) -> tuple[int, ...]:
     applied = MigrationRunner(path).apply(JAA_06_MIGRATIONS)
     with sqlite3.connect(path) as connection:
         verify_jaa06_installed_schema(connection)
+    return applied
+
+
+def apply_jaa_08_migrations(path: str | Path) -> tuple[int, ...]:
+    applied = MigrationRunner(path).apply(JAA_08_MIGRATIONS)
+    with sqlite3.connect(path) as connection:
+        verify_jaa08_installed_schema(connection)
     return applied

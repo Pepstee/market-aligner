@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from dataclasses import replace
 from datetime import date
 
@@ -10,13 +11,16 @@ import pytest
 
 from career_automation.release_gate import (
     REQUIRED_VALIDATORS,
+    ApplicationCompilationStore,
     ValidationReceipt,
     compile_release_manifest,
     verify_release_manifest,
 )
 from test_jaa08_independent_acceptance import (
     AS_OF,
+    ROOT,
     _binding,
+    _compilation_inputs,
     _validations,
 )
 
@@ -148,3 +152,129 @@ def test_manifest_identity_cannot_be_rehashed_by_caller() -> None:
 def test_clock_is_explicit_and_not_implicitly_today() -> None:
     binding = _binding(evaluated_at=AS_OF)
     assert compile_release_manifest(binding, _validations(binding)).binding.evaluated_at == AS_OF
+
+
+def test_compilation_registration_rejects_external_tamper_without_state_change(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        receipt,
+    ) = _compilation_inputs(tmp_path)
+    target = artifact_root / receipt.relative_directory / "cv.txt"
+    target.write_text("tampered", encoding="utf-8")
+    store = ApplicationCompilationStore(database.path)
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        store.register(
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            as_of=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM application_compilations"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "strategy_ready"
+
+
+def test_compilation_insert_failure_rolls_back_lifecycle_transition(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _receipt,
+    ) = _compilation_inputs(tmp_path)
+    store = ApplicationCompilationStore(database.path)
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            """CREATE TRIGGER test_block_compilation
+               BEFORE INSERT ON application_compilations
+               BEGIN SELECT RAISE(ABORT,'blocked test insert'); END"""
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="blocked test insert"):
+        store.register(
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            as_of=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "strategy_ready"
+        assert connection.execute(
+            """SELECT COUNT(*) FROM lifecycle_transition_receipts
+               WHERE to_state='application_compiled'"""
+        ).fetchone()[0] == 0
+
+
+def test_compilation_register_rejects_stale_source(tmp_path) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _receipt,
+    ) = _compilation_inputs(tmp_path)
+    tampered = replace(source, role_title="Different Role")
+    with pytest.raises(ValueError, match="differs from current authority"):
+        ApplicationCompilationStore(database.path).register(
+            source=tampered,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            as_of=date.today(),
+        )
+
+
+def test_publication_verification_never_creates_missing_root(tmp_path) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        _artifact_root,
+        _receipt,
+    ) = _compilation_inputs(tmp_path)
+    missing = tmp_path / "missing-read-root"
+    with pytest.raises(KeyError):
+        ApplicationCompilationStore(database.path).register(
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=missing,
+            repository_root=ROOT,
+            as_of=date.today(),
+        )
+    assert not missing.exists()

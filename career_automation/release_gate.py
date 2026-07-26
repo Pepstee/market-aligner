@@ -8,11 +8,26 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import date
+from pathlib import Path
 from typing import Iterable
 
-from .evidence_matching import canonical_json
+from .application_artifacts import (
+    PublishedArtifactReceipt,
+    verify_published_application_artifacts,
+)
+from .application_compiler import (
+    ApplicationSource,
+    CandidateContact,
+    ProductionApplicationCompiler,
+)
+from .evidence_matching import canonical_json, content_hash
+from .lifecycle import LifecycleReducer, PolicyIdentity
+from .migrations import apply_jaa_08_migrations
+from .models import PipelineState
+from .rendering import ApplicationArtifacts, render_pdf_artifacts
 
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -357,3 +372,285 @@ def verify_release_manifest(manifest: ReleaseManifest) -> None:
     replay = compile_release_manifest(manifest.binding, manifest.validations)
     if replay != manifest:
         raise ValueError("release manifest deterministic replay differs")
+
+
+@dataclass(frozen=True)
+class ApplicationCompilation:
+    compilation_id: str
+    job_key: str
+    strategy_id: str
+    application_source_id: str
+    application_source_sha256: str
+    artifact_set_sha256: str
+    artifact_receipt_sha256: str
+    artifact_relative_directory: str
+    contact_record_id: str
+    contact_record_version: int
+    questions_sha256: str
+    lifecycle_receipt_id: int
+    schema_version: str = "jaa07.application-compilation.v1"
+    certifies_slice: bool = False
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.compilation_id, "compilation ID"),
+            (self.strategy_id, "compilation strategy ID"),
+            (self.application_source_id, "compilation source ID"),
+            (self.application_source_sha256, "compilation source hash"),
+            (self.artifact_set_sha256, "compilation artifact-set hash"),
+            (self.artifact_receipt_sha256, "compilation receipt hash"),
+            (self.artifact_relative_directory, "artifact directory identity"),
+            (self.questions_sha256, "compilation questions hash"),
+        ):
+            _digest(value, label)
+        _required(self.job_key, "compilation job key")
+        _required(self.contact_record_id, "compilation contact record ID")
+        if self.contact_record_version < 1 or self.lifecycle_receipt_id < 1:
+            raise ValueError("compilation versions and receipt must be positive")
+        if self.artifact_relative_directory != self.artifact_set_sha256:
+            raise ValueError("compilation artifact directory is inconsistent")
+        if self.certifies_slice is not False:
+            raise ValueError("application compilation cannot certify JAA-07")
+
+    def document(self, *, include_receipt: bool = True) -> dict[str, object]:
+        result: dict[str, object] = {
+            "schema_version": self.schema_version,
+            "compilation_id": self.compilation_id,
+            "job_key": self.job_key,
+            "strategy_id": self.strategy_id,
+            "application_source_id": self.application_source_id,
+            "application_source_sha256": self.application_source_sha256,
+            "artifact_set_sha256": self.artifact_set_sha256,
+            "artifact_receipt_sha256": self.artifact_receipt_sha256,
+            "artifact_relative_directory": self.artifact_relative_directory,
+            "contact_record_id": self.contact_record_id,
+            "contact_record_version": self.contact_record_version,
+            "questions_sha256": self.questions_sha256,
+            "certifies_slice": False,
+        }
+        if include_receipt:
+            result["lifecycle_receipt_id"] = self.lifecycle_receipt_id
+        return result
+
+
+class ApplicationCompilationStore:
+    """Atomically bind verified external JAA-07 artifacts into the lifecycle."""
+
+    POLICY_ID = "career.application-compilation"
+    POLICY_VERSION = "1"
+    POLICY_SHA256 = hashlib.sha256(
+        canonical_json(
+            {
+                "contract": "jaa07.application-compilation.v1",
+                "rules": [
+                    "recompile from current authority",
+                    "rerender exact artifacts",
+                    "verify existing external publication",
+                    "advance atomically to application_compiled",
+                ],
+            }
+        ).encode()
+    ).hexdigest()
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        apply_jaa_08_migrations(self.path)
+        self.lifecycle = LifecycleReducer(self.path)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    @staticmethod
+    def _questions_document(
+        questions: dict[str, tuple[str, str]] | None,
+    ) -> dict[str, tuple[str, str]]:
+        values = questions or {}
+        result: dict[str, tuple[str, str]] = {}
+        for requirement_id, pair in sorted(values.items()):
+            _required(requirement_id, "question requirement ID")
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or not all(isinstance(value, str) and value.strip() for value in pair)
+            ):
+                raise ValueError("portal question binding must be two non-empty strings")
+            result[requirement_id] = pair
+        return result
+
+    @staticmethod
+    def _compilation(
+        *,
+        source: ApplicationSource,
+        receipt: PublishedArtifactReceipt,
+        contact: CandidateContact,
+        questions_sha256: str,
+        lifecycle_receipt_id: int,
+    ) -> ApplicationCompilation:
+        body = {
+            "contract": "jaa07.application-compilation.v1",
+            "job_key": source.job_key,
+            "strategy_id": source.strategy_id,
+            "application_source_id": source.source_id,
+            "application_source_sha256": source.content_sha256,
+            "artifact_set_sha256": receipt.artifact_set_sha256,
+            "artifact_receipt_sha256": receipt.receipt_sha256,
+            "artifact_relative_directory": receipt.relative_directory,
+            "contact_record_id": contact.record_id,
+            "contact_record_version": contact.record_version,
+            "questions_sha256": questions_sha256,
+        }
+        return ApplicationCompilation(
+            content_hash(body),
+            source.job_key,
+            source.strategy_id,
+            source.source_id,
+            source.content_sha256,
+            receipt.artifact_set_sha256,
+            receipt.receipt_sha256,
+            receipt.relative_directory,
+            contact.record_id,
+            contact.record_version,
+            questions_sha256,
+            lifecycle_receipt_id,
+        )
+
+    def register(
+        self,
+        *,
+        source: ApplicationSource,
+        artifacts: ApplicationArtifacts,
+        contact: CandidateContact,
+        questions: dict[str, tuple[str, str]] | None,
+        artifact_root: str | Path,
+        repository_root: str | Path,
+        as_of: date,
+    ) -> ApplicationCompilation:
+        """Re-resolve and atomically register one exact existing publication."""
+        question_rows = self._questions_document(questions)
+        expected_source = ProductionApplicationCompiler(self.path).compile(
+            source.strategy_id,
+            as_of=as_of,
+            contact=contact,
+            questions=question_rows,
+        )
+        if expected_source != source:
+            raise ValueError("application source differs from current authority")
+        expected_artifacts = render_pdf_artifacts(expected_source)
+        if expected_artifacts != artifacts:
+            raise ValueError("application artifacts differ from deterministic rendering")
+        publication = verify_published_application_artifacts(
+            source,
+            artifacts,
+            root=artifact_root,
+            repository_root=repository_root,
+        )
+        questions_sha256 = hashlib.sha256(
+            canonical_json(question_rows).encode()
+        ).hexdigest()
+        provisional = self._compilation(
+            source=source,
+            receipt=publication,
+            contact=contact,
+            questions_sha256=questions_sha256,
+            lifecycle_receipt_id=1,
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM application_compilations WHERE strategy_id=?",
+                (source.strategy_id,),
+            ).fetchone()
+            transition = self.lifecycle.commit_in_transaction(
+                connection,
+                job_key=source.job_key,
+                to_state=PipelineState.APPLICATION_COMPILED,
+                policy=PolicyIdentity(
+                    self.POLICY_ID,
+                    self.POLICY_VERSION,
+                    self.POLICY_SHA256,
+                ),
+                inputs={
+                    "strategy_id": source.strategy_id,
+                    "source_id": source.source_id,
+                    "source_sha256": source.content_sha256,
+                    "artifact_set_sha256": artifacts.artifact_set_sha256,
+                    "artifact_receipt_sha256": publication.receipt_sha256,
+                    "questions_sha256": questions_sha256,
+                },
+                outputs={
+                    "compilation_id": provisional.compilation_id,
+                    "artifact_relative_directory": (
+                        publication.relative_directory
+                    ),
+                },
+                idempotency_key=(
+                    f"application-compilation:{source.job_key}:"
+                    f"{provisional.compilation_id}"
+                ),
+            )
+            compilation = replace(
+                provisional,
+                lifecycle_receipt_id=transition.receipt_id,
+            )
+            document_json = canonical_json(
+                compilation.document(include_receipt=False)
+            )
+            expected = (
+                compilation.compilation_id,
+                compilation.job_key,
+                compilation.strategy_id,
+                compilation.application_source_id,
+                compilation.application_source_sha256,
+                compilation.artifact_set_sha256,
+                compilation.artifact_receipt_sha256,
+                compilation.artifact_relative_directory,
+                compilation.contact_record_id,
+                compilation.contact_record_version,
+                compilation.questions_sha256,
+                document_json,
+                compilation.lifecycle_receipt_id,
+            )
+            if existing is not None:
+                actual = tuple(existing[key] for key in (
+                    "compilation_id",
+                    "job_key",
+                    "strategy_id",
+                    "application_source_id",
+                    "application_source_hash",
+                    "artifact_set_hash",
+                    "artifact_receipt_hash",
+                    "artifact_relative_directory",
+                    "contact_record_id",
+                    "contact_record_version",
+                    "questions_hash",
+                    "compilation_document_json",
+                    "lifecycle_receipt_id",
+                ))
+                if actual != expected:
+                    raise ValueError(
+                        "strategy already has a different application compilation"
+                    )
+            else:
+                connection.execute(
+                    """INSERT INTO application_compilations(
+                         compilation_id,job_key,strategy_id,
+                         application_source_id,application_source_hash,
+                         artifact_set_hash,artifact_receipt_hash,
+                         artifact_relative_directory,contact_record_id,
+                         contact_record_version,questions_hash,
+                         compilation_document_json,lifecycle_receipt_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    expected,
+                )
+            connection.commit()
+            return compilation
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()

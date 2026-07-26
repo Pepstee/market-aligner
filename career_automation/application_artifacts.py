@@ -98,7 +98,12 @@ def _overlaps(first: Path, second: Path) -> bool:
     return first == second or first in second.parents or second in first.parents
 
 
-def _external_root(root: str | Path, repository_root: str | Path) -> Path:
+def _external_root(
+    root: str | Path,
+    repository_root: str | Path,
+    *,
+    create: bool,
+) -> Path:
     candidate = Path(root)
     repository = Path(repository_root).resolve(strict=True)
     if not repository.is_dir():
@@ -109,7 +114,10 @@ def _external_root(root: str | Path, repository_root: str | Path) -> Path:
     resolved = parent / candidate.name
     if _overlaps(resolved, repository):
         raise ValueError("application artifacts must remain outside the repository")
-    resolved.mkdir(mode=0o700, exist_ok=True)
+    if create:
+        resolved.mkdir(mode=0o700, exist_ok=True)
+    elif not resolved.is_dir():
+        raise KeyError(str(resolved))
     if resolved.is_symlink() or resolved.resolve(strict=True) != resolved:
         raise ValueError("artifact root cannot resolve through a symlink")
     os.chmod(resolved, 0o700)
@@ -253,7 +261,7 @@ def publish_application_artifacts(
     repository_root: str | Path,
 ) -> PublishedArtifactReceipt:
     """Publish once outside Git; exact retries verify rather than overwrite."""
-    publication_root = _external_root(root, repository_root)
+    publication_root = _external_root(root, repository_root, create=True)
     payloads = _artifact_payloads(source, artifacts)
     receipt = _receipt(source, artifacts, payloads)
     destination = publication_root / receipt.relative_directory
@@ -299,7 +307,7 @@ def load_published_artifacts(
     root: str | Path,
     repository_root: str | Path,
 ) -> PublishedArtifactReceipt:
-    publication_root = _external_root(root, repository_root)
+    publication_root = _external_root(root, repository_root, create=False)
     if (
         len(artifact_set_sha256) != 64
         or any(value not in "0123456789abcdef" for value in artifact_set_sha256)
@@ -309,3 +317,23 @@ def load_published_artifacts(
     if directory.is_symlink() or not directory.is_dir():
         raise KeyError(artifact_set_sha256)
     return _read_receipt(directory)
+
+
+def verify_published_application_artifacts(
+    source: ApplicationSource,
+    artifacts: ApplicationArtifacts,
+    *,
+    root: str | Path,
+    repository_root: str | Path,
+) -> PublishedArtifactReceipt:
+    """Re-hash an existing publication without creating or overwriting it."""
+    payloads = _artifact_payloads(source, artifacts)
+    expected = _receipt(source, artifacts, payloads)
+    actual = load_published_artifacts(
+        artifacts.artifact_set_sha256,
+        root=root,
+        repository_root=repository_root,
+    )
+    if actual != expected:
+        raise ValueError("published artifact receipt differs from exact artifacts")
+    return actual
