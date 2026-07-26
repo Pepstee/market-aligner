@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .lifecycle import canonical_hash, canonical_json
 from .public_access import PublicAccessPolicy, replay_access_receipt
 
 
@@ -192,9 +193,28 @@ def validate_admission_evidence(
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """SELECT j.job_key,j.url,j.company,j.title,j.payload_hash,
-                          j.opportunity
+                          j.opportunity,j.opportunity_reason,q.priority,
+                          r.from_state AS receipt_from_state,
+                          r.to_state AS receipt_to_state,
+                          r.policy_hash AS receipt_policy_hash,
+                          r.model_provider AS receipt_model_provider,
+                          r.model_id AS receipt_model_id,
+                          r.model_version AS receipt_model_version,
+                          r.input_hash AS receipt_input_hash,
+                          r.output_hash AS receipt_output_hash,
+                          r.idempotency_key AS receipt_idempotency_key,
+                          e.job_key AS event_job_key,
+                          e.event_type,e.from_state AS event_from_state,
+                          e.to_state AS event_to_state,e.actor_kind,
+                          e.payload_json AS event_payload_json,
+                          e.idempotency_key AS event_idempotency_key
                    FROM employer_research_queue q
                    JOIN pipeline_jobs j USING(job_key)
+                   JOIN lifecycle_transition_receipts r
+                     ON r.job_key=j.job_key
+                    AND r.policy_id='career.opportunity-gate'
+                    AND r.policy_version='1'
+                   JOIN pipeline_events e ON e.id=r.event_id
                    WHERE j.opportunity_decision='pass'"""
             ).fetchall()
         snapshot_records = {str(row["job_key"]): row for row in rows}
@@ -211,6 +231,24 @@ def validate_admission_evidence(
         for key, manifest_record in records_by_key.items():
             source = snapshot_records[key]
             reassessment = manifest_record.get("opportunity1_reassessment")
+            receipt_input_hash = canonical_hash({
+                "payload_hash": source["payload_hash"],
+            })
+            receipt_output_hash = canonical_hash({
+                "decision": "pass",
+                "reason": source["opportunity_reason"],
+                "priority": source["priority"],
+            })
+            receipt_binding = canonical_json({
+                "policy": {
+                    "id": "career.opportunity-gate",
+                    "version": "1",
+                    "sha256": source["receipt_policy_hash"],
+                },
+                "model": None,
+                "input_hash": receipt_input_hash,
+                "output_hash": receipt_output_hash,
+            })
             if (manifest_record.get("vacancy_url") != source["url"]
                     or manifest_record.get("company") != source["company"]
                     or manifest_record.get("role") != source["title"]
@@ -221,9 +259,22 @@ def validate_admission_evidence(
                     or not isinstance(reassessment, Mapping)
                     or type(reassessment.get("opportunity0_score_bp")) is not int
                     or reassessment["opportunity0_score_bp"]
-                    != int(round(float(source["opportunity"]) * 10_000))):
+                    != int(round(float(source["opportunity"]) * 10_000))
+                    or source["receipt_input_hash"] != receipt_input_hash
+                    or source["receipt_output_hash"] != receipt_output_hash
+                    or source["receipt_model_provider"] is not None
+                    or source["receipt_model_id"] is not None
+                    or source["receipt_model_version"] is not None
+                    or source["event_job_key"] != key
+                    or source["event_type"] != "lifecycle_transition_committed"
+                    or source["actor_kind"] != "deterministic"
+                    or source["event_from_state"] != source["receipt_from_state"]
+                    or source["event_to_state"] != source["receipt_to_state"]
+                    or source["event_idempotency_key"]
+                    != source["receipt_idempotency_key"]
+                    or source["event_payload_json"] != receipt_binding):
                 raise ValueError(
-                    "manifest admission differs from its published SQLite snapshot"
+                    "manifest or Opportunity-0 receipt differs from its SQLite snapshot"
                 )
     elif mode == "official-json-v2":
         if descriptor.get("source_snapshot_sha256") != descriptor.get("snapshot_sha256"):

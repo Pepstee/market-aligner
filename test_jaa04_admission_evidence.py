@@ -17,6 +17,8 @@ from career_automation.admission_evidence import (
     source_snapshot_hash,
     validate_admission_evidence,
 )
+from career_automation.database import CareerDatabase
+from career_automation.engine import OpportunityGate, scored_job_from_payload
 from career_automation.public_access import (
     PublicAccessPolicy,
     RobotsReceipt,
@@ -136,6 +138,48 @@ def _json_evidence(tmp_path: Path):
         "opportunity1_reassessment": {"opportunity0_score_bp": 8750},
     }
     return snapshot, source_record, manifest_record, {policy_hash: policy}
+
+
+def _production_sqlite_evidence(
+    path: Path,
+    job_keys: tuple[str, ...] = ("greenhouse:example-1",),
+) -> tuple[CareerDatabase, dict[str, dict[str, object]]]:
+    database = CareerDatabase(path)
+    jobs = []
+    for job_key in job_keys:
+        board, job_id = job_key.split(":", 1)
+        jobs.append(scored_job_from_payload({
+            "board": board,
+            "job_id": job_id,
+            "url": f"https://jobs.example.test/{job_id}",
+            "job_title": "Platform Engineer",
+            "company": "Example",
+            "fit": 0.8,
+            "opportunity": 0.9,
+            "final": 85,
+            "extraction_confidence": 0.99,
+        }))
+    OpportunityGate(database).bootstrap(jobs)
+    with database.connection() as connection:
+        rows = connection.execute(
+            """SELECT job_key,url,company,title,payload_hash,opportunity
+               FROM pipeline_jobs ORDER BY job_key"""
+        ).fetchall()
+    assert len(rows) == len(job_keys)
+    return database, {
+        str(row["job_key"]): {
+            "job_key": row["job_key"],
+            "vacancy_url": row["url"],
+            "company": row["company"],
+            "role": row["title"],
+            "admitted_payload_hash": row["payload_hash"],
+            "opportunity0_raw_response_refs": None,
+            "opportunity1_reassessment": {
+                "opportunity0_score_bp": int(round(row["opportunity"] * 10_000)),
+            },
+        }
+        for row in rows
+    }
 
 
 def test_json_admission_snapshot_and_only_referenced_raw_bytes_are_portable(
@@ -275,31 +319,16 @@ def test_sqlite_admission_uses_consistent_backup_and_replays_passed_keys(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "queue.sqlite3"
-    with sqlite3.connect(source) as connection:
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(
-            """CREATE TABLE pipeline_jobs(
-                 job_key TEXT PRIMARY KEY,url TEXT,company TEXT,title TEXT,
-                 payload_hash TEXT,opportunity REAL,opportunity_decision TEXT
-               )"""
-        )
-        connection.execute(
-            "CREATE TABLE employer_research_queue(job_key TEXT PRIMARY KEY)"
-        )
-        connection.execute(
-            """INSERT INTO pipeline_jobs VALUES(
-                 'greenhouse:example:1','https://jobs.example.test/1','Example',
-                 'Platform Engineer','payload-sha',0.9,'pass'
-               )"""
-        )
-        connection.execute(
-            "INSERT INTO employer_research_queue VALUES('greenhouse:example:1')"
-        )
+    _, manifests = _production_sqlite_evidence(
+        source,
+        ("greenhouse:example-1",),
+    )
+    manifest = manifests["greenhouse:example-1"]
     stage = tmp_path / "stage"
     stage.mkdir()
     descriptor = publish_admission_evidence(
         source,
-        [{"job_key": "greenhouse:example:1"}],
+        [{"job_key": manifest["job_key"]}],
         stage,
     )
     assert descriptor["mode"] == "sqlite-lifecycle-snapshot"
@@ -309,15 +338,7 @@ def test_sqlite_admission_uses_consistent_backup_and_replays_passed_keys(
     validate_admission_evidence(
         stage,
         descriptor,
-        [{
-            "job_key": "greenhouse:example:1",
-            "vacancy_url": "https://jobs.example.test/1",
-            "company": "Example",
-            "role": "Platform Engineer",
-            "admitted_payload_hash": "payload-sha",
-            "opportunity0_raw_response_refs": None,
-            "opportunity1_reassessment": {"opportunity0_score_bp": 9000},
-        }],
+        [manifest],
         expected_snapshot_sha256=expected_snapshot_hash,
         access_policies={},
     )
@@ -340,41 +361,18 @@ def test_sqlite_admission_binds_manifest_identity_and_opportunity0_score(
     attack: str,
 ) -> None:
     source = tmp_path / "queue.sqlite3"
-    with sqlite3.connect(source) as connection:
-        connection.execute(
-            """CREATE TABLE pipeline_jobs(
-                 job_key TEXT PRIMARY KEY,url TEXT,company TEXT,title TEXT,
-                 payload_hash TEXT,opportunity REAL,opportunity_decision TEXT
-               )"""
-        )
-        connection.execute(
-            "CREATE TABLE employer_research_queue(job_key TEXT PRIMARY KEY)"
-        )
-        connection.execute(
-            """INSERT INTO pipeline_jobs VALUES(
-                 'greenhouse:example:1','https://jobs.example.test/1','Example',
-                 'Platform Engineer','payload-sha',0.9,'pass'
-               )"""
-        )
-        connection.execute(
-            "INSERT INTO employer_research_queue VALUES('greenhouse:example:1')"
-        )
+    _, manifests = _production_sqlite_evidence(
+        source,
+        ("greenhouse:example-1",),
+    )
+    manifest = manifests["greenhouse:example-1"]
     stage = tmp_path / "stage"
     stage.mkdir()
     descriptor = publish_admission_evidence(
         source,
-        [{"job_key": "greenhouse:example:1"}],
+        [{"job_key": manifest["job_key"]}],
         stage,
     )
-    manifest = {
-        "job_key": "greenhouse:example:1",
-        "vacancy_url": "https://jobs.example.test/1",
-        "company": "Example",
-        "role": "Platform Engineer",
-        "admitted_payload_hash": "payload-sha",
-        "opportunity0_raw_response_refs": None,
-        "opportunity1_reassessment": {"opportunity0_score_bp": 9000},
-    }
     if attack == "vacancy":
         manifest["vacancy_url"] = "https://jobs.example.test/substituted"
     elif attack == "company":
@@ -404,33 +402,10 @@ def test_sqlite_admission_replays_deterministic_sorted_cohort_selection(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "queue.sqlite3"
-    with sqlite3.connect(source) as connection:
-        connection.execute(
-            """CREATE TABLE pipeline_jobs(
-                 job_key TEXT PRIMARY KEY,url TEXT,company TEXT,title TEXT,
-                 payload_hash TEXT,opportunity REAL,opportunity_decision TEXT
-               )"""
-        )
-        connection.execute(
-            "CREATE TABLE employer_research_queue(job_key TEXT PRIMARY KEY)"
-        )
-        for key in ("a:first", "z:favourable"):
-            connection.execute(
-                "INSERT INTO pipeline_jobs VALUES(?,?,?,?,?,?,?)",
-                (
-                    key,
-                    f"https://jobs.example.test/{key}",
-                    "Example",
-                    "Platform Engineer",
-                    f"payload-{key}",
-                    0.9,
-                    "pass",
-                ),
-            )
-            connection.execute(
-                "INSERT INTO employer_research_queue VALUES(?)",
-                (key,),
-            )
+    _, manifests = _production_sqlite_evidence(
+        source,
+        ("a:first", "z:favourable"),
+    )
     stage = tmp_path / "stage"
     stage.mkdir()
     descriptor = publish_admission_evidence(
@@ -442,15 +417,50 @@ def test_sqlite_admission_replays_deterministic_sorted_cohort_selection(
         validate_admission_evidence(
             stage,
             descriptor,
-            [{
-                "job_key": "z:favourable",
-                "vacancy_url": "https://jobs.example.test/z:favourable",
-                "company": "Example",
-                "role": "Platform Engineer",
-                "admitted_payload_hash": "payload-z:favourable",
-                "opportunity0_raw_response_refs": None,
-                "opportunity1_reassessment": {"opportunity0_score_bp": 9000},
-            }],
+            [manifests["z:favourable"]],
+            expected_snapshot_sha256=descriptor["snapshot_sha256"],
+            access_policies={},
+        )
+
+
+@pytest.mark.parametrize("attack", ("input-hash", "output-hash", "event-binding"))
+def test_sqlite_admission_replays_gate_receipt_semantics(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    source = tmp_path / "queue.sqlite3"
+    database, manifests = _production_sqlite_evidence(source)
+    manifest = manifests["greenhouse:example-1"]
+    with database.connection() as connection:
+        if attack == "event-binding":
+            connection.execute(
+                """UPDATE pipeline_events SET payload_json='{}'
+                   WHERE job_key=? AND event_type='lifecycle_transition_committed'
+                     AND to_state='employer_research_queued'""",
+                (manifest["job_key"],),
+            )
+        else:
+            connection.execute(
+                "DROP TRIGGER lifecycle_transition_receipt_immutable_update"
+            )
+            field = "input_hash" if attack == "input-hash" else "output_hash"
+            connection.execute(
+                f"""UPDATE lifecycle_transition_receipts SET {field}=?
+                    WHERE job_key=? AND policy_id='career.opportunity-gate'""",
+                ("0" * 64, manifest["job_key"]),
+            )
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    descriptor = publish_admission_evidence(
+        source,
+        [{"job_key": manifest["job_key"]}],
+        stage,
+    )
+    with pytest.raises(ValueError, match="receipt|Opportunity-0|SQLite"):
+        validate_admission_evidence(
+            stage,
+            descriptor,
+            [manifest],
             expected_snapshot_sha256=descriptor["snapshot_sha256"],
             access_policies={},
         )
