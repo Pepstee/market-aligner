@@ -172,20 +172,33 @@
       "tests": [
         {
           "id": "JAA-04-software-contract",
-          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_admission_evidence.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"],
-          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_admission_evidence.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_acceptance_boundary.py", "test_jaa04_admission_evidence.py", "test_jaa04_ambiguity_resume_independent.py", "test_jaa04_increment_a_authority_canaries.py", "test_jaa04_increment_a_temporal_authority_regression.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_policy_serialization_retest.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"],
+          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_acceptance_boundary.py", "test_jaa04_admission_evidence.py", "test_jaa04_ambiguity_resume_independent.py", "test_jaa04_increment_a_authority_canaries.py", "test_jaa04_increment_a_temporal_authority_regression.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_policy_serialization_retest.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"]
         },
         {
           "id": "JAA-04-negative-controls",
-          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa04_increment_a_certifier_fail_closed.py", "test_jaa04_increment_a_independent_regressions.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_runtime_recertification.py", "test_split_repair_contract.py"],
-          "files": ["test_jaa04_increment_a_certifier_fail_closed.py", "test_jaa04_increment_a_independent_regressions.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_runtime_recertification.py", "test_split_repair_contract.py"],
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa04_increment_a_certifier_fail_closed.py", "test_jaa04_increment_a_independent_regressions.py", "test_jaa04_portable_authority_contract.py"],
+          "files": ["test_jaa04_increment_a_certifier_fail_closed.py", "test_jaa04_increment_a_independent_regressions.py", "test_jaa04_portable_authority_contract.py"],
           "negative_control": true,
           "timeout_seconds": 1800
         }
       ],
       "evidence": [
-        {"kind": "corpus", "scope": "JAA-04-corpus"},
-        {"kind": "live_canary", "scope": "JAA-04-live-canary", "max_age_seconds": 86400}
+        {
+          "kind": "corpus",
+          "scope": "JAA-04-corpus",
+          "required": true,
+          "tracked": false,
+          "argv": ["{python}", "scripts/accept_jaa_04.py", "--capture", "{external_jaa04_corpus}", "--receipt", "{external_jaa04_receipts}"]
+        },
+        {
+          "kind": "live_canary",
+          "scope": "JAA-04-live-canary",
+          "required": true,
+          "tracked": false,
+          "argv": ["{python}", "scripts/capture_jaa04_authority_canaries.py", "--destination", "{external_jaa04_canaries}", "--access-policy", "{external_jaa04_access_policy}"],
+          "max_age_seconds": 86400
+        }
       ]
     },
     "JAA-05": {

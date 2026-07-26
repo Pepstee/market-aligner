@@ -227,9 +227,10 @@ def test_release_order_and_acceptance_declaration_are_deterministic_and_data_onl
     ]
     # The declaration is executable data: each record is one shell command,
     # rather than an embedded multi-line program or a JAA-02 demo shortcut.
-    assert commands == [
-        'python3 "${BASH_SOURCE[0]:+${BASH_SOURCE[0]%/*}/}scripts/run_acceptance_declaration.py"',
-    ]
+    assert len(commands) == 1
+    assert "scripts/run_acceptance_declaration.py" in commands[0]
+    assert commands[0].startswith("if [ -f scripts/run_acceptance_declaration.py ]")
+    assert "BASH_SOURCE" in commands[0] and commands[0].endswith("; fi")
     assert all("-c" not in command and "$0" not in command for command in commands)
 
     # Keep this inventory independent of the runner module: parse the source
@@ -238,7 +239,8 @@ def test_release_order_and_acceptance_declaration_are_deterministic_and_data_onl
     commands_node = next(
         node for node in runner.body
         if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "COMMANDS" for target in node.targets
+            isinstance(target, ast.Name) and target.id == "SOURCE_COMMANDS"
+            for target in node.targets
         )
     )
     assert isinstance(commands_node.value, ast.Tuple)
@@ -255,9 +257,12 @@ def test_release_order_and_acceptance_declaration_are_deterministic_and_data_onl
         ("__PYTHON__", "scripts/accept_jaa_02.py"),
         ("__PYTHON__", "scripts/accept_jaa02_receipt.py"),
         ("__PYTHON__", "scripts/accept_jaa03_receipt.py"),
+        ("__PYTHON__", "scripts/accept_jaa04_policy_serialization.py"),
         ("__PYTHON__", "scripts/accept_jaa04_coordination.py"),
-        ("__PYTHON__", "scripts/accept_jaa_04.py"),
     )
+    source = (root / "scripts" / "run_acceptance_declaration.py").read_text(encoding="utf-8")
+    assert "JAA04_CORPUS" in source
+    assert '"scripts/accept_jaa_04.py", "--capture", corpus' in source
 
 
 def test_direct_root_acceptance_fails_closed_when_its_first_declared_gate_fails(tmp_path: Path) -> None:

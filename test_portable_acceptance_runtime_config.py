@@ -217,9 +217,10 @@ def test_acceptance_declaration_commands_are_independent_and_direct_execution_is
 ) -> None:
     lines = [line.strip() for line in (ROOT / "acceptance").read_text(encoding="utf-8").splitlines()]
     commands = [line for line in lines if line and not line.startswith("#")]
-    assert commands == [
-        'python3 "${BASH_SOURCE[0]:+${BASH_SOURCE[0]%/*}/}scripts/run_acceptance_declaration.py"',
-    ]
+    assert len(commands) == 1
+    assert "scripts/run_acceptance_declaration.py" in commands[0]
+    assert commands[0].startswith("if [ -f scripts/run_acceptance_declaration.py ]")
+    assert "BASH_SOURCE" in commands[0] and commands[0].endswith("; fi")
     assert all("-c" not in command and "$0" not in command for command in commands)
 
     # Run every extracted record independently.  A tiny isolated runner keeps
