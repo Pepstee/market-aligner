@@ -192,7 +192,8 @@ def _admitted_input(
         body_identity = str(row.get("content_sha256") or "")
         if not body_identity or url_identity in urls or body_identity in bodies:
             raise RuntimeError("official admitted queue contains duplicate URL or content body")
-        urls.add(url_identity); bodies.add(body_identity)
+        urls.add(url_identity)
+        bodies.add(body_identity)
         result[str(row["job_key"])] = dict(row)
     if len(result) != CORPUS_SIZE:
         raise RuntimeError("official admitted queue contains duplicate vacancy identities")
@@ -309,6 +310,12 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         raise RuntimeError("capture destination already exists")
     if not database_path.is_file():
         raise RuntimeError("frozen Opportunity-0 database snapshot is missing")
+    work_db = workspace / "queue.sqlite3"
+    if (database_path.resolve() == work_db.resolve()
+            or work_db.exists() and database_path.samefile(work_db)):
+        raise RuntimeError(
+            "capture workspace queue must not alias the frozen Opportunity-0 snapshot"
+        )
     if access_policy is None or not access_policy.policy_sha256:
         raise RuntimeError("capture requires an operator-presented public access policy")
     admitted = _admitted_input(
@@ -323,7 +330,6 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     workspace.mkdir(parents=True, exist_ok=True)
-    work_db = workspace / "queue.sqlite3"
     state_path = workspace / "acquisition_state.json"
     snapshot_sha256 = source_snapshot_hash(database_path)
     state = {"schema_version": "jaa04.acquisition-state.v1", "queue_snapshot_sha256": snapshot_sha256,

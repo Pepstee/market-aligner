@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -95,6 +96,42 @@ def _bootstrap(work_db: Path, records: list[dict[str, str]]) -> CareerDatabase:
         for row in records
     ])
     return database
+
+
+@pytest.mark.parametrize("alias_kind", ("same-path", "hard-link"))
+def test_capture_refuses_workspace_queue_aliasing_frozen_sqlite_snapshot(
+    tmp_path: Path,
+    alias_kind: str,
+) -> None:
+    module = _capture_module()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    work_queue = workspace / "queue.sqlite3"
+    if alias_kind == "same-path":
+        snapshot = work_queue
+        snapshot.write_bytes(b"frozen-snapshot")
+    else:
+        snapshot = tmp_path / "frozen-opportunity-zero.sqlite3"
+        snapshot.write_bytes(b"frozen-snapshot")
+        os.link(snapshot, work_queue)
+    before = snapshot.read_bytes()
+    access_policy = type(
+        "GeneratedAccessPolicy",
+        (),
+        {"policy_sha256": hashlib.sha256(b"generated-test-policy").hexdigest()},
+    )()
+
+    with pytest.raises(RuntimeError, match="must not alias"):
+        module.capture(
+            snapshot,
+            tmp_path / "published",
+            workspace=workspace,
+            timeout_seconds=1,
+            access_policy=access_policy,
+        )
+
+    assert snapshot.read_bytes() == before
+    assert not (tmp_path / "published").exists()
 
 
 def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_exactly_thirty(
