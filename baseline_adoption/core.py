@@ -6,6 +6,8 @@ new snapshot rather than silently teaching the importer to accept the changed fi
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import importlib
 import importlib.metadata
@@ -17,6 +19,7 @@ import select
 import shutil
 import sqlite3
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -106,18 +109,37 @@ class _MutationBoundary:
 
     Repeated hashes alone cannot make two independently mutable files an atomic observation:
     a SQLite checkpoint can always land between the last main and WAL read.  On the supported
-    macOS host, EVFILT_VNODE records writes, extension, deletion, rename, and revocation from
-    before the first read until the caller explicitly closes the boundary.  Unsupported hosts
-    fail closed instead of silently falling back to another racy hash sequence.
+    macOS host, EVFILT_VNODE records writes, extension, deletion, rename, and revocation.
+    Linux uses inotify for the equivalent file and directory namespace boundary. Both remain
+    armed from before the first read until the caller explicitly closes the boundary.
+    Unsupported hosts fail closed instead of silently falling back to a racy hash sequence.
     """
 
     def __init__(self, paths: Sequence[Path], *, directories: Sequence[Path] = ()) -> None:
-        self._paths = tuple(dict.fromkeys(path.resolve() for path in (*paths, *directories)))
+        self._files = tuple(dict.fromkeys(path.resolve() for path in paths))
+        self._directories = tuple(
+            dict.fromkeys(path.resolve() for path in directories)
+        )
+        self._paths = tuple(
+            dict.fromkeys((*self._files, *self._directories))
+        )
         self._queue: Any | None = None
         self._descriptors: list[int] = []
+        self._inotify_fd: int | None = None
+        self._inotify_watches: dict[int, Path] = {}
+
+    @property
+    def provider(self) -> str:
+        if self._inotify_fd is not None:
+            return "linux-inotify-in-modify"
+        if self._queue is not None:
+            return "macos-kqueue-evfilt-vnode"
+        raise AdoptionError("kernel mutation boundary is not armed")
 
     def __enter__(self) -> "_MutationBoundary":
         if not hasattr(select, "kqueue") or not hasattr(select, "kevent"):
+            if sys.platform.startswith("linux"):
+                return self._enter_linux_inotify()
             raise AdoptionError("kernel mutation-boundary observation is unavailable")
         queue = select.kqueue()
         flags = (
@@ -147,7 +169,128 @@ class _MutationBoundary:
         self._queue = queue
         return self
 
+    def _enter_linux_inotify(self) -> "_MutationBoundary":
+        in_nonblock = getattr(os, "O_NONBLOCK", 0x800)
+        in_cloexec = getattr(os, "O_CLOEXEC", 0x80000)
+        file_mask = (
+            0x00000002  # IN_MODIFY
+            | 0x00000004  # IN_ATTRIB
+            | 0x00000008  # IN_CLOSE_WRITE
+            | 0x00000400  # IN_DELETE_SELF
+            | 0x00000800  # IN_MOVE_SELF
+            | 0x00002000  # IN_UNMOUNT
+        )
+        directory_mask = (
+            0x00000100  # IN_CREATE
+            | 0x00000200  # IN_DELETE
+            | 0x00000040  # IN_MOVED_FROM
+            | 0x00000080  # IN_MOVED_TO
+            | 0x00000400  # IN_DELETE_SELF
+            | 0x00000800  # IN_MOVE_SELF
+            | 0x00002000  # IN_UNMOUNT
+        )
+        libc = ctypes.CDLL(None, use_errno=True)
+        init = libc.inotify_init1
+        init.argtypes = [ctypes.c_int]
+        init.restype = ctypes.c_int
+        add_watch = libc.inotify_add_watch
+        add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        add_watch.restype = ctypes.c_int
+        descriptor = init(in_nonblock | in_cloexec)
+        if descriptor < 0:
+            number = ctypes.get_errno()
+            raise AdoptionError(
+                "kernel mutation-boundary observation could not be armed"
+            ) from OSError(number, os.strerror(number))
+        self._inotify_fd = descriptor
+        try:
+            for path, mask in (
+                *((path, file_mask) for path in self._files),
+                *((path, directory_mask) for path in self._directories),
+            ):
+                watch = add_watch(descriptor, os.fsencode(path), mask)
+                if watch < 0:
+                    number = ctypes.get_errno()
+                    raise OSError(number, os.strerror(number), path)
+                if watch in self._inotify_watches:
+                    raise OSError(
+                        errno.EINVAL,
+                        "inotify returned a duplicate watch descriptor",
+                        path,
+                    )
+                self._inotify_watches[watch] = path
+        except (OSError, ValueError) as exc:
+            try:
+                os.close(descriptor)
+            finally:
+                self._inotify_fd = None
+                self._inotify_watches.clear()
+            raise AdoptionError(
+                "kernel mutation-boundary observation could not be armed"
+            ) from exc
+        return self
+
+    def _assert_linux_inotify_clean(self, label: str) -> None:
+        if self._inotify_fd is None:
+            raise AdoptionError(f"{label}: mutation boundary is not armed")
+        event_header = struct.Struct("iIII")
+        saw_event = False
+        saw_overflow = False
+        try:
+            while True:
+                try:
+                    payload = os.read(self._inotify_fd, 1024 * 1024)
+                except BlockingIOError as exc:
+                    if exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                        break
+                    raise
+                except InterruptedError:
+                    continue
+                if not payload:
+                    raise AdoptionError(
+                        f"{label}: mutation boundary returned an empty event read"
+                    )
+                offset = 0
+                while offset < len(payload):
+                    if len(payload) - offset < event_header.size:
+                        raise AdoptionError(
+                            f"{label}: mutation boundary returned a malformed event"
+                        )
+                    watch, mask, _cookie, name_length = event_header.unpack_from(
+                        payload,
+                        offset,
+                    )
+                    offset += event_header.size
+                    end = offset + name_length
+                    if end > len(payload):
+                        raise AdoptionError(
+                            f"{label}: mutation boundary returned a malformed event"
+                        )
+                    if watch == -1 and mask & 0x00004000:  # IN_Q_OVERFLOW
+                        saw_overflow = True
+                    elif watch not in self._inotify_watches:
+                        raise AdoptionError(
+                            f"{label}: mutation boundary returned an unknown watch"
+                        )
+                    saw_event = True
+                    offset = end
+        except AdoptionError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise AdoptionError(
+                f"{label}: mutation boundary could not be verified"
+            ) from exc
+        if saw_overflow:
+            raise AdoptionError(
+                f"{label}: mutation boundary event queue overflowed"
+            )
+        if saw_event:
+            raise AdoptionError(f"{label}: mutation boundary observed input drift")
+
     def assert_clean(self, label: str) -> None:
+        if self._inotify_fd is not None:
+            self._assert_linux_inotify_clean(label)
+            return
         if self._queue is None:
             raise AdoptionError(f"{label}: mutation boundary is not armed")
         try:
@@ -160,7 +303,9 @@ class _MutationBoundary:
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         verification_error: Exception | None = None
         cleanup_error: Exception | None = None
-        if _value is None and self._queue is not None:
+        if _value is None and (
+            self._queue is not None or self._inotify_fd is not None
+        ):
             try:
                 # The final event drain is part of watcher disarm.  A clean
                 # assertion in the body is not sufficient because a write can
@@ -174,6 +319,13 @@ class _MutationBoundary:
             except Exception as exc:
                 cleanup_error = exc
             self._queue = None
+        if self._inotify_fd is not None:
+            try:
+                os.close(self._inotify_fd)
+            except OSError as exc:
+                cleanup_error = exc
+            self._inotify_fd = None
+            self._inotify_watches.clear()
         for descriptor in self._descriptors:
             try:
                 os.close(descriptor)
@@ -565,6 +717,7 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
         watched_files.append(wal)
     try:
         with _MutationBoundary(watched_files, directories=[path.parent]) as boundary:
+            boundary_provider = boundary.provider
             evidence = _recertify_source_observed(path, spec)
             boundary.assert_clean(f"{spec.name}: source mutation boundary")
     except AdoptionError as exc:
@@ -579,7 +732,7 @@ def _recertify_source(path: Path, spec: BaselineSpec) -> dict[str, Any]:
             ) from exc
         raise
     evidence["content_comparison"]["kernel_mutation_boundary"] = {
-        "provider": "macos-kqueue-evfilt-vnode",
+        "provider": boundary_provider,
         "main_wal_and_directory_clean_through_final_observation": True,
     }
     return evidence
