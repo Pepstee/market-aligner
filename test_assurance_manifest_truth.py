@@ -17,7 +17,15 @@ def _manifest() -> dict[str, object]:
 
 def test_unimplemented_slices_are_not_declared_complete() -> None:
     components = _manifest()["components"]
-    for number in range(5, 17):
+    jaa05 = components["JAA-05"]
+    assert jaa05["increment"] == "implementation_in_progress_dependency_blocked"
+    for relative in jaa05["owns"]:
+        assert (ROOT / relative).is_file(), f"JAA-05 materialised path missing: {relative}"
+    for test in jaa05["tests"]:
+        for relative in test["files"]:
+            assert (ROOT / relative).is_file(), f"JAA-05 declared test missing: {relative}"
+
+    for number in range(6, 17):
         slice_id = f"JAA-{number:02d}"
         component = components[slice_id]
         assert component["increment"] == "not_implemented"

@@ -204,9 +204,14 @@
     },
     "JAA-05": {
       "claim": "Evidence matching and gap optimisation are calibrated, abstaining and evidence-gated.",
-      "increment": "not_implemented",
+      "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-04"],
-      "owns": ["career_automation/evidence_matching.py", "career_automation/gap_optimizer.py"],
+      "owns": [
+        "career_automation/evidence_matching.py",
+        "career_automation/gap_optimizer.py",
+        "career_automation/fixtures/jaa05_locked_labels.json",
+        "scripts/evaluate_jaa05_locked_labels.py"
+      ],
       "inputs": ["career_automation/candidate_graph.py", "career_automation/employer_research.py"],
       "interfaces": [],
       "environment": [],
