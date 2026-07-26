@@ -240,6 +240,41 @@ def test_robots_other_records_do_not_split_consecutive_user_agents(
         controller.before_request(URL)
 
 
+@pytest.mark.parametrize(
+    ("rule", "path"),
+    (
+        ("/jobs/%70rivate", "/jobs/private/engineer"),
+        ("/jobs/ツ", "/jobs/%E3%83%84"),
+        ("/jobs/a%2Fb", "/jobs/a%2fb"),
+    ),
+)
+def test_robots_rules_compare_canonical_octets(
+    tmp_path: Path,
+    rule: str,
+    path: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = f"User-agent: {USER_AGENT}\nDisallow: {rule}\n".encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(f"https://{HOST}{path}")
+
+
+def test_robots_encoded_reserved_separator_remains_distinct(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = f"User-agent: {USER_AGENT}\nDisallow: /jobs/a%2Fb\n".encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    assert controller.before_request(f"https://{HOST}/jobs/a/b").allowed
+
+
 def test_cached_non_200_success_replays_rules_for_each_url(tmp_path: Path) -> None:
     body = (
         f"User-agent: {USER_AGENT}\n"

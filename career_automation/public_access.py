@@ -24,6 +24,10 @@ POLICY_SCHEMA = "jaa04.public-access-policy.v1"
 USER_AGENT = "JAA-Public-Research"
 DEFAULT_DELAY_SECONDS = 10.0
 MAX_ATTESTATION_AGE_DAYS = 90
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_UNRESERVED_OCTETS = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
 
 
 class PublicAccessDenied(RuntimeError):
@@ -48,6 +52,46 @@ def _public_origin(url: str) -> tuple[str, str, str]:
     host = parsed.hostname.casefold()
     port = f":{parsed.port}" if parsed.port else ""
     return parsed.scheme.casefold(), host, port
+
+
+def _canonical_robots_octets(value: str) -> str:
+    """Canonicalize a REP path while preserving reserved encoded octets."""
+    canonical: list[str] = []
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if (character == "%" and index + 2 < len(value)
+                and value[index + 1] in _HEX_DIGITS
+                and value[index + 2] in _HEX_DIGITS):
+            octet = int(value[index + 1:index + 3], 16)
+            if octet in _UNRESERVED_OCTETS:
+                canonical.append(chr(octet))
+            else:
+                canonical.append(f"%{octet:02X}")
+            index += 3
+            continue
+        for octet in character.encode("utf-8"):
+            if 0x21 <= octet <= 0x7E and octet != ord("%"):
+                canonical.append(chr(octet))
+            else:
+                canonical.append(f"%{octet:02X}")
+        index += 1
+    return "".join(canonical)
+
+
+def _canonical_octet_length(value: str) -> int:
+    """Count canonical REP octets rather than percent-encoding characters."""
+    length = 0
+    index = 0
+    while index < len(value):
+        if (value[index] == "%" and index + 2 < len(value)
+                and value[index + 1] in _HEX_DIGITS
+                and value[index + 2] in _HEX_DIGITS):
+            index += 3
+        else:
+            index += 1
+        length += 1
+    return length
 
 
 def _robots_rules(body: bytes, url: str) -> tuple[bool, float | None]:
@@ -112,6 +156,7 @@ def _robots_rules(body: bytes, url: str) -> tuple[bool, float | None]:
     target = parsed_url.path or "/"
     if parsed_url.query:
         target += "?" + parsed_url.query
+    target = _canonical_robots_octets(target)
     matches: list[tuple[int, bool]] = []
     declared_delays: list[float] = []
     for group in selected:
@@ -119,11 +164,15 @@ def _robots_rules(body: bytes, url: str) -> tuple[bool, float | None]:
             declared_delays.append(float(group["delay"]))
         for allowed, pattern in group["rules"]:
             anchored = pattern.endswith("$")
-            raw_pattern = pattern[:-1] if anchored else pattern
+            raw_pattern = _canonical_robots_octets(
+                pattern[:-1] if anchored else pattern
+            )
             expression = re.escape(raw_pattern).replace(r"\*", ".*")
             expression = "^" + expression + ("$" if anchored else "")
             if re.search(expression, target):
-                specificity_length = len(raw_pattern.replace("*", ""))
+                specificity_length = _canonical_octet_length(
+                    raw_pattern.replace("*", "")
+                )
                 matches.append((specificity_length, allowed))
     if not matches:
         return True, max(declared_delays) if declared_delays else None
