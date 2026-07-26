@@ -114,7 +114,7 @@
     },
     "JAA-03": {
       "claim": "Vacancy extraction and Opportunity-0 admission are calibrated on locked evidence without fit leakage.",
-      "increment": "implemented_receipt_stale",
+      "increment": "complete",
       "depends_on": ["JAA-02"],
       "owns": [
         "career_automation/opportunity_calibration.py",
