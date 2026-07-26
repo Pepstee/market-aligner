@@ -301,7 +301,7 @@
       "evidence": []
     },
     "JAA-10": {
-      "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract and all three submit interruption windows recover or fail closed; the executable seven-control mutation cohort remains incomplete and production certification is withheld.",
+      "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract, all three submit interruption windows recover or fail closed, and the exact seven-control executable mutation cohort passes; production certification is withheld.",
       "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-09"],
       "owns": ["career_automation/shadow_certification.py"],
@@ -310,7 +310,22 @@
       "environment": [],
       "tests": [
         {"id": "JAA-10-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_independent_acceptance.py"], "files": ["test_jaa10_independent_acceptance.py"]},
-        {"id": "JAA-10-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_negative_controls.py"], "files": ["test_jaa10_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-10-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_negative_controls.py"], "files": ["test_jaa10_negative_controls.py"], "negative_control": true},
+        {
+          "id": "JAA-10-mutation-cohort",
+          "argv": [
+            "{python}", "-m", "pytest", "-q",
+            "test_jaa09_negative_controls.py::test_executor_detects_upload_mutation_before_browser_materialization",
+            "test_jaa09_negative_controls.py::test_executor_records_ambiguous_selector_without_advancing",
+            "test_jaa10_negative_controls.py::test_frozen_field_map_drift_cannot_enter_shadow_evidence",
+            "test_jaa09_negative_controls.py::test_invalid_jaa08_token_cannot_create_fixture_receipt",
+            "test_jaa09_negative_controls.py::test_click_action_cannot_disguise_final_submission",
+            "test_jaa09_negative_controls.py::test_duplicate_submit_and_second_review_produce_no_second_receipt",
+            "test_jaa09_negative_controls.py::test_one_jaa08_token_cannot_prepare_two_browser_submit_runs"
+          ],
+          "files": ["test_jaa09_negative_controls.py", "test_jaa10_negative_controls.py"],
+          "negative_control": true
+        }
       ],
       "evidence": []
     },

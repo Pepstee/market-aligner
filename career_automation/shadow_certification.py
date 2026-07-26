@@ -34,6 +34,36 @@ REQUIRED_MUTATION_CONTROLS = (
     "duplicate_submit",
     "concurrent_submit",
 )
+MUTATION_TEST_NODES: Mapping[str, str] = MappingProxyType({
+    "upload_byte_drift": (
+        "test_jaa09_negative_controls.py::"
+        "test_executor_detects_upload_mutation_before_browser_materialization"
+    ),
+    "selector_drift": (
+        "test_jaa09_negative_controls.py::"
+        "test_executor_records_ambiguous_selector_without_advancing"
+    ),
+    "field_map_drift": (
+        "test_jaa10_negative_controls.py::"
+        "test_frozen_field_map_drift_cannot_enter_shadow_evidence"
+    ),
+    "release_token_tamper": (
+        "test_jaa09_negative_controls.py::"
+        "test_invalid_jaa08_token_cannot_create_fixture_receipt"
+    ),
+    "disguised_submit": (
+        "test_jaa09_negative_controls.py::"
+        "test_click_action_cannot_disguise_final_submission"
+    ),
+    "duplicate_submit": (
+        "test_jaa09_negative_controls.py::"
+        "test_duplicate_submit_and_second_review_produce_no_second_receipt"
+    ),
+    "concurrent_submit": (
+        "test_jaa09_negative_controls.py::"
+        "test_one_jaa08_token_cannot_prepare_two_browser_submit_runs"
+    ),
+})
 REQUIRED_ACTIONS = (
     "open",
     "full_name",
@@ -182,6 +212,7 @@ class FrozenShadowContract:
             "field_map_sha256": self.field_map_sha256,
             "screenshot_sha256": self.screenshot_sha256,
             "submit_event_sha256": self.submit_event_sha256,
+            "mutation_test_nodes": dict(sorted(MUTATION_TEST_NODES.items())),
         }
 
     @property
@@ -252,18 +283,22 @@ class InterruptionObservation:
 @dataclass(frozen=True)
 class MutationObservation:
     control_id: str
+    test_node: str
     blocked: bool
     receipt_created: bool
 
     def __post_init__(self) -> None:
         if self.control_id not in REQUIRED_MUTATION_CONTROLS:
             raise ValueError("mutation control is outside the frozen contract")
+        if self.test_node != MUTATION_TEST_NODES[self.control_id]:
+            raise ValueError("mutation control cites a different executable test")
         if not self.blocked or self.receipt_created:
             raise ValueError("shadow mutation control did not fail closed")
 
     def document(self) -> dict[str, object]:
         return {
             "control_id": self.control_id,
+            "test_node": self.test_node,
             "blocked": True,
             "receipt_created": False,
         }

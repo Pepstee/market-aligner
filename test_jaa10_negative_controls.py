@@ -10,6 +10,7 @@ import pytest
 
 from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
+    MUTATION_TEST_NODES,
     InterruptionObservation,
     MutationObservation,
     compile_withheld_shadow_evidence,
@@ -31,6 +32,28 @@ def test_fabricated_receipt_cannot_match_the_frozen_golden_set() -> None:
                     first_time + timedelta(days=1),
                 ),
             ),
+        )
+
+
+def test_stub_executor_output_cannot_enter_shadow_evidence() -> None:
+    class StubExecutor:
+        def run(self) -> dict[str, object]:
+            return {
+                "receipt_id": FROZEN_SHADOW_CONTRACT.receipt_id,
+                "certifies_slice": True,
+            }
+
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="two typed"):
+        compile_withheld_shadow_evidence(
+            FROZEN_SHADOW_CONTRACT,
+            (
+                StubExecutor().run(),
+                _observation(
+                    "shadow-002",
+                    observed_at + timedelta(days=1),
+                ),
+            ),  # type: ignore[arg-type]
         )
 
 
@@ -60,11 +83,36 @@ def test_interruption_and_mutation_rows_fail_if_they_claim_unsafe_success() -> N
             2,
             1,
         )
+    with pytest.raises(ValueError, match="different executable test"):
+        MutationObservation(
+            "release_token_tamper",
+            MUTATION_TEST_NODES["selector_drift"],
+            blocked=True,
+            receipt_created=False,
+        )
     with pytest.raises(ValueError, match="did not fail closed"):
         MutationObservation(
             "release_token_tamper",
+            MUTATION_TEST_NODES["release_token_tamper"],
             blocked=False,
             receipt_created=True,
+        )
+
+
+def test_frozen_field_map_drift_cannot_enter_shadow_evidence() -> None:
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    first = _observation("shadow-001", observed_at)
+    changed = replace(first, field_map_sha256="f" * 64)
+    with pytest.raises(ValueError, match="frozen golden"):
+        compile_withheld_shadow_evidence(
+            FROZEN_SHADOW_CONTRACT,
+            (
+                changed,
+                _observation(
+                    "shadow-002",
+                    observed_at + timedelta(days=1),
+                ),
+            ),
         )
 
 

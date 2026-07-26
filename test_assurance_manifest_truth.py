@@ -67,6 +67,13 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert jaa10["increment"] == "implementation_in_progress_dependency_blocked"
     assert jaa10["evidence"] == []
     assert "production certification is withheld" in jaa10["claim"]
+    assert "exact seven-control executable mutation cohort passes" in jaa10["claim"]
+    mutation_tests = [
+        test for test in jaa10["tests"]
+        if test["id"] == "JAA-10-mutation-cohort"
+    ]
+    assert len(mutation_tests) == 1
+    assert len(mutation_tests[0]["argv"][4:]) == 7
     for relative in jaa10["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-10 materialised path missing: {relative}"

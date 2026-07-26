@@ -21,6 +21,7 @@ from career_automation.browser_workflows import (
 from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
     HARD_QUALITY_TARGETS,
+    MUTATION_TEST_NODES,
     REQUIRED_ACTIONS,
     REQUIRED_INTERRUPTION_POINTS,
     REQUIRED_MUTATION_CONTROLS,
@@ -76,7 +77,12 @@ def _observation(
             for point in REQUIRED_INTERRUPTION_POINTS
         ),
         mutations=tuple(
-            MutationObservation(control, True, False)
+            MutationObservation(
+                control,
+                MUTATION_TEST_NODES[control],
+                True,
+                False,
+            )
             for control in REQUIRED_MUTATION_CONTROLS
         ),
     )
@@ -203,7 +209,12 @@ def _execute_frozen_observation(
             screenshot_bytes=screenshot_bytes,
             interruptions=interruptions,
             mutations=tuple(
-                MutationObservation(control, True, False)
+                MutationObservation(
+                    control,
+                    MUTATION_TEST_NODES[control],
+                    True,
+                    False,
+                )
                 for control in REQUIRED_MUTATION_CONTROLS
             ),
         )
