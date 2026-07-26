@@ -6,9 +6,12 @@ import json
 import subprocess
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "ASSURANCE_MANIFEST.json"
+SLICES = ROOT / "IMPLEMENTATION_SLICES.yaml"
 
 
 def _manifest() -> dict[str, object]:
@@ -17,6 +20,10 @@ def _manifest() -> dict[str, object]:
 
 def test_unimplemented_slices_are_not_declared_complete() -> None:
     components = _manifest()["components"]
+    executable_slices = {
+        item["id"]: item
+        for item in yaml.safe_load(SLICES.read_text(encoding="utf-8"))["slices"]
+    }
     jaa05 = components["JAA-05"]
     assert jaa05["increment"] == "implementation_in_progress_dependency_blocked"
     for relative in jaa05["owns"]:
@@ -88,6 +95,21 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         slice_id = f"JAA-{number:02d}"
         component = components[slice_id]
         assert component["increment"] == "not_implemented"
+        assert component["claim"] == executable_slices[slice_id]["objective"]
+        assert component["depends_on"] == executable_slices[slice_id]["depends_on"]
+        if slice_id == "JAA-11":
+            assert component["evidence"] == [
+                {
+                    "kind": "live_canary",
+                    "scope": "JAA-11-live-canary",
+                    "required": True,
+                    "status": "not_collected",
+                    "external_action_gate": "explicit_operator_approval_required",
+                    "max_age_seconds": 86400,
+                }
+            ]
+        else:
+            assert component["evidence"] == []
 
         # A future declaration cannot become progress merely by changing this
         # status string. Every declared owned path and named slice test is

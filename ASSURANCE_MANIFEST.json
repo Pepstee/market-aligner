@@ -330,7 +330,7 @@
       "evidence": []
     },
     "JAA-11": {
-      "claim": "One official ATS adapter and bounded live canary preserve release and receipt invariants.",
+      "claim": "Submit through one selected official application route and prove receipt/status integrity on the actual machine.",
       "increment": "not_implemented",
       "depends_on": ["JAA-10"],
       "owns": ["career_automation/official_ats_adapter.py"],
@@ -342,11 +342,18 @@
         {"id": "JAA-11-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_negative_controls.py"], "files": ["test_jaa11_negative_controls.py"], "negative_control": true}
       ],
       "evidence": [
-        {"kind": "live_canary", "scope": "JAA-11-live-canary", "max_age_seconds": 86400}
+        {
+          "kind": "live_canary",
+          "scope": "JAA-11-live-canary",
+          "required": true,
+          "status": "not_collected",
+          "external_action_gate": "explicit_operator_approval_required",
+          "max_age_seconds": 86400
+        }
       ]
     },
     "JAA-12": {
-      "claim": "Post-submission statuses and follow-ups are evidence-backed, deduplicated and replayable.",
+      "claim": "Track the application after submission without manual bookkeeping.",
       "increment": "not_implemented",
       "depends_on": ["JAA-11"],
       "owns": ["career_automation/status_ingestion.py"],
@@ -360,11 +367,11 @@
       "evidence": []
     },
     "JAA-13": {
-      "claim": "Outcome feedback updates calibration without contaminating locked evaluation evidence.",
+      "claim": "Convert the same evidence and employer intelligence into interview preparation and post-interview continuity.",
       "increment": "not_implemented",
       "depends_on": ["JAA-12"],
-      "owns": ["career_automation/outcome_feedback.py"],
-      "inputs": ["career_automation/status_ingestion.py", "career_automation/opportunity_calibration.py"],
+      "owns": ["career_automation/interview_communication.py"],
+      "inputs": ["career_automation/status_ingestion.py", "career_automation/employer_research.py", "career_automation/candidate_graph.py", "career_automation/application_compiler.py"],
       "interfaces": [],
       "environment": [],
       "tests": [
@@ -374,13 +381,13 @@
       "evidence": []
     },
     "JAA-14": {
-      "claim": "Source expansion remains policy-bounded, deduplicated and quality-measured.",
+      "claim": "Improve selection and application strategy automatically from observed funnel outcomes.",
       "increment": "not_implemented",
       "depends_on": ["JAA-13"],
-      "owns": ["career_automation/source_expansion.py"],
-      "inputs": ["scraper/**", "career_automation/outcome_feedback.py"],
+      "owns": ["career_automation/outcome_feedback.py"],
+      "inputs": ["career_automation/status_ingestion.py", "career_automation/opportunity_calibration.py", "career_automation/gap_optimizer.py"],
       "interfaces": [],
-      "environment": ["requirements-scrapling-full.txt"],
+      "environment": [],
       "tests": [
         {"id": "JAA-14-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa14_independent_acceptance.py"], "files": ["test_jaa14_independent_acceptance.py"]},
         {"id": "JAA-14-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa14_negative_controls.py"], "files": ["test_jaa14_negative_controls.py"], "negative_control": true}
@@ -388,13 +395,13 @@
       "evidence": []
     },
     "JAA-15": {
-      "claim": "Operational scheduling, budgets, observability and circuit breakers support unattended running.",
+      "claim": "Add only the sources and ATS routes with measured incremental career value.",
       "increment": "not_implemented",
       "depends_on": ["JAA-14"],
-      "owns": ["career_automation/operations.py"],
-      "inputs": ["career_automation/observability.py", "career_automation/source_expansion.py"],
+      "owns": ["career_automation/source_expansion.py"],
+      "inputs": ["scraper/**", "career_automation/official_ats_adapter.py", "career_automation/outcome_feedback.py"],
       "interfaces": [],
-      "environment": [],
+      "environment": ["requirements-scrapling-full.txt"],
       "tests": [
         {"id": "JAA-15-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa15_independent_acceptance.py"], "files": ["test_jaa15_independent_acceptance.py"]},
         {"id": "JAA-15-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa15_negative_controls.py"], "files": ["test_jaa15_negative_controls.py"], "negative_control": true}
@@ -402,11 +409,11 @@
       "evidence": []
     },
     "JAA-16": {
-      "claim": "The complete product passes release, authenticity, security and end-to-end certification.",
+      "claim": "Operate continuously with bounded failures, model fallback, recovery and honest reporting.",
       "increment": "not_implemented",
       "depends_on": ["JAA-15"],
-      "owns": ["career_automation/release_certification.py"],
-      "inputs": ["career_automation/operations.py", "acceptance", "scripts/run_acceptance_declaration.py"],
+      "owns": ["career_automation/operations.py", "career_automation/release_certification.py"],
+      "inputs": ["career_automation/observability.py", "career_automation/source_expansion.py", "acceptance", "scripts/run_acceptance_declaration.py"],
       "interfaces": [],
       "environment": [],
       "tests": [
