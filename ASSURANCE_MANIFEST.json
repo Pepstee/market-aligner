@@ -85,7 +85,7 @@
     },
     "JAA-02": {
       "claim": "Candidate facts, evidence, claim lineage, privacy projection and quarantine satisfy JAA-02.",
-      "increment": "implemented_receipt_stale",
+      "increment": "complete",
       "depends_on": ["JAA-01"],
       "owns": [
         "career_automation/candidate_graph.py",

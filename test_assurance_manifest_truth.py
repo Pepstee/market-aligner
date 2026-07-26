@@ -39,7 +39,7 @@ def test_stale_and_incomplete_slice_states_are_explicit() -> None:
     components = _manifest()["components"]
     assert components["JAA-00"]["increment"] == "historical_baseline"
     assert components["JAA-01"]["increment"] == "complete"
-    assert components["JAA-02"]["increment"] == "implemented_receipt_stale"
+    assert components["JAA-02"]["increment"] == "complete"
     assert components["JAA-03"]["increment"] == "implemented_receipt_stale"
     assert components["JAA-04"]["increment"] == "increment_b_incomplete"
 
