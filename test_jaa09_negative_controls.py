@@ -6,7 +6,9 @@ import hashlib
 import json
 import re
 import socket
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -14,7 +16,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from career_automation.ats_fixture import LocalATSFixture
+from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
 from career_automation.browser_executor import (
     ConsequentialActionError,
     LocalBrowserBoundaryError,
@@ -27,20 +29,25 @@ from career_automation.browser_workflows import (
     BrowserAction,
     BrowserWorkflow,
     BrowserWorkflowStore,
+    ReleaseGateError,
     SelectorCandidate,
+    SelectorOutcome,
     SelectorPlan,
     SelectorStrategy,
 )
 from playwright.sync_api import sync_playwright
 from test_jaa09_independent_acceptance import (
     FORM_TOKEN,
+    NONCE,
     ROOT,
     _fixture,
     _local_browser_inputs,
     _multipart,
     _review,
+    _released_browser_inputs,
     _vacancy,
 )
+from test_jaa08_independent_acceptance import _issued_release_inputs
 
 
 def test_fixture_refuses_non_loopback_bind_or_host_header() -> None:
@@ -553,3 +560,311 @@ def test_click_action_cannot_disguise_final_submission(
             store.run_snapshot(run_id)["checkpoint_count"]
             == len(workflow.actions)
         )
+
+
+def test_interruption_after_click_recovers_receipt_without_second_submit(
+    tmp_path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "interrupted-platform-engineer",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        original_complete = store.complete_step
+        interrupted = False
+
+        def interrupt_submit(*args, **kwargs):
+            nonlocal interrupted
+            if kwargs.get("step_id") == "submit" and not interrupted:
+                interrupted = True
+                raise RuntimeError("injected post-click interruption")
+            return original_complete(*args, **kwargs)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for _action in workflow.actions[:-1]:
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            store.complete_step = interrupt_submit  # type: ignore[method-assign]
+            with pytest.raises(
+                RuntimeError,
+                match="post-click interruption",
+            ):
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            browser.close()
+            first_receipt = fixture.receipt
+            assert first_receipt is not None
+            assert (
+                store.submit_dispatch(run_id)["state"]  # type: ignore[index]
+                == "click_started"
+            )
+            store.complete_step = original_complete  # type: ignore[method-assign]
+            resumed_executor = LocalBrowserExecutor(
+                store,
+                repository_root=ROOT,
+            )
+            resumed_browser = playwright.chromium.launch(headless=True)
+            resumed_page = resumed_browser.new_page()
+            completed = resumed_executor.execute_next(
+                resumed_page,
+                run_id=run_id,
+                worker_id="local_worker",
+                approved_values=approvals,
+                materialized_values=values,
+                release_authority=authority,
+            )
+            resumed_browser.close()
+        assert completed is not None
+        assert completed.action_kind is ActionKind.SUBMIT
+        assert fixture.receipt is first_receipt
+        assert store.run_snapshot(run_id)["status"] == "completed"
+        events = store.events(run_id)
+        assert sum(
+            row["event_type"] == "submit_click_started"
+            for row in events
+        ) == 1
+
+
+def test_invalid_jaa08_token_cannot_create_fixture_receipt(
+    tmp_path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "invalid-token-platform-engineer",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        replacement = (
+            "0" if authority.release_token[-1] != "0" else "1"
+        )
+        invalid_token = authority.release_token[:-1] + replacement
+        invalid_authority = replace(
+            authority,
+            release_token=invalid_token,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=invalid_token,
+            authorization_reference="JAA08:INVALID_TOKEN_CONTROL",
+            idempotency_key="invalid-token-control",
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for _action in workflow.actions[:-1]:
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=invalid_authority,
+                )
+            with pytest.raises(
+                ReleaseGateError,
+                match="not issued",
+            ):
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=invalid_authority,
+                )
+            browser.close()
+        assert fixture.receipt is None
+        assert store.submit_dispatch(run_id) is None
+        with database.connection() as connection:
+            consumed_at = connection.execute(
+                """SELECT consumed_at FROM release_tokens
+                   WHERE token_hash=?""",
+                (issued.token_sha256,),
+            ).fetchone()[0]
+        assert consumed_at is None
+
+
+def test_one_jaa08_token_cannot_prepare_two_browser_submit_runs(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        _contact,
+        _questions,
+        _source,
+        _artifacts,
+        _artifact_root,
+        _publication,
+        _compilation,
+        _gate,
+        _route,
+        issued,
+    ) = _issued_release_inputs(tmp_path)
+    submit = BrowserAction(
+        "submit",
+        ActionKind.SUBMIT,
+        selectors=SelectorPlan(
+            (
+                SelectorCandidate(
+                    SelectorStrategy.TEST_ID,
+                    "final-submit",
+                ),
+            )
+        ),
+    )
+    workflow = BrowserWorkflow("token_race_control", (submit,))
+    store = BrowserWorkflowStore(database.path)
+    first = store.create_run(workflow)
+    second = store.create_run(
+        workflow,
+        idempotency_key="second-token-race-run",
+    )
+    assert store.claim_run("first_worker", run_id=first) is not None
+    assert store.claim_run("second_worker", run_id=second) is not None
+    for run_id, decision in (
+        (first, "first-token-race-decision"),
+        (second, "second-token-race-decision"),
+    ):
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=decision,
+        )
+    report = submit.selectors.assess(  # type: ignore[union-attr]
+        (SelectorOutcome.MATCHED,)
+    )
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="dispatch insert is invalid",
+    ):
+        with store.connection() as connection:
+            connection.execute(
+                """INSERT INTO browser_submit_dispatches(
+                     run_id,step_id,action_hash,release_manifest_hash,
+                     release_token_hash,field_map_hash,
+                     selector_report_json,state)
+                   VALUES(?,?,?,?,?,?,?,'click_started')""",
+                (
+                    second,
+                    "submit",
+                    "b" * 64,
+                    issued.manifest.release_manifest_sha256,
+                    issued.token_sha256,
+                    "a" * 64,
+                    "{}",
+                ),
+            )
+    assert store.prepare_submit_dispatch(
+        first,
+        "first_worker",
+        step_id="submit",
+        release_token=issued.release_token,
+        field_map_sha256="a" * 64,
+        selector_report=report,
+    )
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="dispatch update is invalid",
+    ):
+        with store.connection() as connection:
+            connection.execute(
+                """UPDATE browser_submit_dispatches
+                   SET state='release_consumed',
+                       release_consumed_at='2030-01-01T00:00:00+00:00'
+                   WHERE run_id=?""",
+                (first,),
+            )
+    with pytest.raises(
+        ReleaseGateError,
+        match="another submit run",
+    ):
+        store.prepare_submit_dispatch(
+            second,
+            "second_worker",
+            step_id="submit",
+            release_token=issued.release_token,
+            field_map_sha256="a" * 64,
+            selector_report=report,
+        )
+    with database.connection() as connection:
+        consumed_at = connection.execute(
+            """SELECT consumed_at FROM release_tokens
+               WHERE token_hash=?""",
+            (issued.token_sha256,),
+        ).fetchone()[0]
+    assert consumed_at is None

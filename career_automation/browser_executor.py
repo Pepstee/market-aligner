@@ -1,22 +1,29 @@
 """Deterministic loopback-only Playwright executor for JAA-09.
 
-This first executor increment performs non-submit actions against the
-cooperative local fixture. Materialised values exist only in caller memory and
-are never written to workflow definitions, checkpoints or events.
+Materialised values exist only in caller memory and are never written to
+workflow definitions, checkpoints or events. Final fixture submission consumes
+one genuine JAA-08 token and records only content-addressed evidence.
 """
 
 from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Collection, Mapping
 from urllib.parse import urljoin, urlsplit
 
 from playwright.sync_api import Locator, Page, Route
 
+from .application_compiler import (
+    ApplicationSource,
+    CandidateContact,
+)
+from .ats_fixture import FixtureReceipt
 from .browser_workflows import (
     ActionKind,
     ApprovalRequiredError,
@@ -24,13 +31,18 @@ from .browser_workflows import (
     BrowserAction,
     BrowserWorkflowStore,
     PendingAction,
+    ReleaseGateError,
     SelectorCandidate,
     SelectorOutcome,
     SelectorRecoveryReport,
     SelectorStrategy,
     StepResult,
+    SubmissionProof,
     ValueReference,
+    WorkflowError,
 )
+from .release_gate import ReleaseGateStore
+from .rendering import ApplicationArtifacts
 
 
 class LocalBrowserBoundaryError(RuntimeError):
@@ -42,7 +54,11 @@ class SelectorExecutionError(RuntimeError):
 
 
 class ConsequentialActionError(RuntimeError):
-    """A submit action reached an executor increment that cannot dispatch it."""
+    """A browser action attempted an unapproved consequential boundary."""
+
+
+class SubmissionIndeterminateError(RuntimeError):
+    """A started submit has no recoverable receipt and cannot be repeated."""
 
 
 @dataclass(frozen=True)
@@ -80,6 +96,55 @@ class ExecutedAction:
     action_kind: ActionKind
     selector_report: SelectorRecoveryReport | None
     checkpoint_created: bool
+
+
+@dataclass(frozen=True)
+class ReleaseExecutionAuthority:
+    gate: ReleaseGateStore = field(repr=False)
+    release_token: str = field(repr=False)
+    source: ApplicationSource = field(repr=False)
+    artifacts: ApplicationArtifacts = field(repr=False)
+    contact: CandidateContact = field(repr=False)
+    questions: dict[str, tuple[str, str]] | None = field(repr=False)
+    artifact_root: Path
+    repository_root: Path
+    jurisdiction: str
+    contract_type: str
+    consumed_at: datetime
+    receipt_url: str
+    application_id: str
+    job_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.gate, ReleaseGateStore):
+            raise TypeError("release authority requires the JAA-08 gate")
+        if (
+            not self.release_token.startswith("jaa08.")
+            or len(self.release_token.split(".")) != 3
+        ):
+            raise ValueError("release authority token format is invalid")
+        if not _loopback_url(self.receipt_url):
+            raise ValueError("release receipt URL must be loopback HTTP")
+        if (
+            urlsplit(self.receipt_url).path
+            != f"/applications/{self.application_id}/receipt"
+        ):
+            raise ValueError(
+                "release receipt URL differs from its application"
+            )
+        if self.source.job_key != self.job_key:
+            raise ValueError("release authority job identity is inconsistent")
+        if (
+            not self.application_id
+            or not self.jurisdiction
+            or not self.contract_type
+        ):
+            raise ValueError("release execution authority is incomplete")
+        if (
+            self.consumed_at.tzinfo is None
+            or self.consumed_at.utcoffset() is None
+        ):
+            raise ValueError("release consumption time must include a timezone")
 
 
 def _loopback_url(value: str) -> bool:
@@ -242,6 +307,45 @@ class LocalBrowserExecutor:
             )
         return resolved, digest
 
+    @staticmethod
+    def _assert_release_materialization(
+        action: BrowserAction,
+        materialized: MaterializedValue,
+        authority: ReleaseExecutionAuthority | None,
+    ) -> None:
+        if authority is None or action.value_reference is None:
+            return
+        expected_text = {
+            "EV_FULL_NAME": authority.contact.full_name,
+            "EV_EMAIL": authority.contact.email,
+            "EV_PHONE": authority.contact.phone,
+            "EV_CITY": authority.contact.city,
+            "EV_WORK_AUTHORISATION": "authorised",
+            "EV_COVER_NOTE": (
+                authority.artifacts.editable.answers_text.strip()
+            ),
+        }
+        reference_id = action.value_reference.reference_id
+        if reference_id == "EV_CV":
+            expected_hash = authority.artifacts.cv_pdf.pdf_sha256
+        elif reference_id == "EV_COVER_LETTER":
+            expected_hash = (
+                authority.artifacts.cover_letter_pdf.pdf_sha256
+            )
+        else:
+            expected_hash = None
+        if expected_hash is not None:
+            if materialized.expected_sha256 != expected_hash:
+                raise ApprovalRequiredError(
+                    "upload materialization differs from JAA-08 authority"
+                )
+            return
+        expected = expected_text.get(reference_id)
+        if expected is None or materialized.value != expected:
+            raise ApprovalRequiredError(
+                "field materialization differs from JAA-08 authority"
+            )
+
     def _selector_failure(
         self,
         pending: PendingAction,
@@ -289,6 +393,289 @@ class LocalBrowserExecutor:
                 return True
         return False
 
+    @staticmethod
+    def _field_map_sha256(page: Page) -> str:
+        rows = page.locator("form [name]").evaluate_all(
+            """(elements) => elements.map((element) => ({
+                id: element.id || "",
+                name: element.getAttribute("name") || "",
+                tag: element.tagName.toLowerCase(),
+                type: element.getAttribute("type") || "",
+                required: Boolean(element.required),
+                multiple: Boolean(element.multiple),
+                labels: Array.from(element.labels || []).map(
+                    (label) => (label.textContent || "").trim()
+                )
+            }))"""
+        )
+        document = json.dumps(
+            rows,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(document.encode()).hexdigest()
+
+    @staticmethod
+    def _stored_selector_report(
+        action: BrowserAction,
+        dispatch: Mapping[str, object],
+    ) -> SelectorRecoveryReport:
+        if action.selectors is None:
+            raise ValueError("submit action is missing its selector plan")
+        try:
+            document = json.loads(str(dispatch["selector_report_json"]))
+            outcomes = tuple(
+                SelectorOutcome(str(row["outcome"]))
+                for row in document["attempts"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            raise ValueError(
+                "durable submit selector report is invalid"
+            ) from exc
+        report = action.selectors.assess(outcomes)
+        if report.to_dict() != document:
+            raise ValueError(
+                "durable submit selector report differs from its plan"
+            )
+        return report
+
+    def _execute_submit(
+        self,
+        page: Page,
+        pending: PendingAction,
+        worker_id: str,
+        authority: ReleaseExecutionAuthority,
+    ) -> ExecutedAction:
+        action = pending.action
+        if self.store.path.resolve() != authority.gate.path.resolve():
+            raise ReleaseGateError(
+                "browser and JAA-08 authority must share one database"
+            )
+        if (
+            authority.repository_root.resolve(strict=True)
+            != self.repository_root
+        ):
+            raise ReleaseGateError(
+                "browser and JAA-08 repository authority differ"
+            )
+        release_manifest_sha256 = authority.release_token.split(".")[1]
+        for step_id in (
+            "full_name",
+            "email",
+            "phone",
+            "city",
+            "work_authorisation",
+            "cover_note",
+            "cv",
+            "cover_letter",
+        ):
+            outputs = pending.prior_outputs.get(step_id, {})
+            if (
+                outputs.get("release_materialization_status")
+                != "verified"
+                or outputs.get("release_manifest_sha256")
+                != release_manifest_sha256
+            ):
+                raise ApprovalRequiredError(
+                    "submit lacks exact JAA-08 field materialization"
+                )
+        dispatch = self.store.submit_dispatch(pending.run_id)
+        locator: Locator | None = None
+        if dispatch is None:
+            allowed_origin = self._allowed_origins.get(page)
+            if (
+                allowed_origin is None
+                or _origin(page.url) != allowed_origin
+                or _origin(authority.receipt_url) != allowed_origin
+            ):
+                raise LocalBrowserBoundaryError(
+                    "submit page is outside its approved local fixture"
+                )
+            locator, report = self._resolve(page, action)
+            if not self._click_is_consequential(page, locator):
+                raise ConsequentialActionError(
+                    "SUBMIT action does not target the final-submit boundary"
+                )
+            field_map_sha256 = next(
+                (
+                    str(outputs["field_map_sha256"])
+                    for outputs in pending.prior_outputs.values()
+                    if "field_map_sha256" in outputs
+                ),
+                "",
+            )
+            if not field_map_sha256:
+                raise WorkflowError(
+                    "submit requires a prior field-map checkpoint"
+                )
+            self.store.prepare_submit_dispatch(
+                pending.run_id,
+                worker_id,
+                step_id=action.step_id,
+                release_token=authority.release_token,
+                field_map_sha256=field_map_sha256,
+                selector_report=report,
+            )
+            dispatch = self.store.submit_dispatch(pending.run_id)
+        if dispatch is None:
+            raise WorkflowError("submit dispatch was not persisted")
+        report = self._stored_selector_report(action, dispatch)
+        state = str(dispatch["state"])
+        if state in {"prepared", "release_consumed"} and locator is None:
+            allowed_origin = self._allowed_origins.get(page)
+            if (
+                allowed_origin is None
+                or _origin(page.url) != allowed_origin
+            ):
+                raise SubmissionIndeterminateError(
+                    "pre-click browser state cannot be reconstructed safely"
+                )
+            locator, current_report = self._resolve(page, action)
+            if current_report != report:
+                raise SelectorExecutionError(
+                    "submit selector changed after dispatch preparation"
+                )
+            if not self._click_is_consequential(page, locator):
+                raise ConsequentialActionError(
+                    "prepared SUBMIT no longer targets final submit"
+                )
+        if state == "prepared":
+            try:
+                authority.gate.consume_release_token(
+                    release_token=authority.release_token,
+                    source=authority.source,
+                    artifacts=authority.artifacts,
+                    contact=authority.contact,
+                    questions=authority.questions,
+                    artifact_root=authority.artifact_root,
+                    repository_root=authority.repository_root,
+                    jurisdiction=authority.jurisdiction,
+                    contract_type=authority.contract_type,
+                    consumed_at=authority.consumed_at,
+                )
+            except ValueError as error:
+                if str(error) != "release token was already consumed":
+                    raise
+            self.store.reconcile_release_consumed(
+                pending.run_id,
+                worker_id,
+                release_token=authority.release_token,
+            )
+            dispatch = self.store.submit_dispatch(pending.run_id)
+            if dispatch is None:
+                raise WorkflowError(
+                    "consumed release dispatch was not persisted"
+                )
+            state = str(dispatch["state"])
+        fresh_click = False
+        if state == "release_consumed":
+            fresh_click = self.store.mark_submit_started(
+                pending.run_id,
+                worker_id,
+                release_token=authority.release_token,
+            )
+            state = "click_started"
+        if state != "click_started":
+            raise WorkflowError("submit dispatch state cannot produce a receipt")
+        if fresh_click:
+            if locator is None:
+                raise SubmissionIndeterminateError(
+                    "submit click target is no longer available"
+                )
+            locator.click()
+            if _origin(page.url) != _origin(authority.receipt_url):
+                raise LocalBrowserBoundaryError(
+                    "submit action left the local fixture"
+                )
+        else:
+            receipt_origin = _origin(authority.receipt_url)
+            if receipt_origin is None:
+                raise LocalBrowserBoundaryError(
+                    "fixture receipt origin is invalid"
+                )
+            self._allowed_origins[page] = receipt_origin
+            response = page.goto(
+                authority.receipt_url,
+                wait_until="domcontentloaded",
+            )
+            if response is None or response.status != 200:
+                raise SubmissionIndeterminateError(
+                    "started submit has no recoverable official receipt"
+                )
+        receipt_id = page.get_by_test_id("receipt-id").inner_text().strip()
+        payload_sha256 = page.get_by_test_id(
+            "payload-hash"
+        ).inner_text().strip()
+        receipt = FixtureReceipt(
+            receipt_id=receipt_id,
+            application_id=authority.application_id,
+            job_key=authority.job_key,
+            payload_sha256=payload_sha256,
+        )
+        receipt.verify()
+        screenshot_sha256 = hashlib.sha256(
+            page.screenshot(full_page=True)
+        ).hexdigest()
+        field_map_sha256 = str(dispatch["field_map_hash"])
+        release_manifest_sha256 = str(dispatch["release_manifest_hash"])
+        token_sha256 = str(dispatch["release_token_hash"])
+        submit_event_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "contract": "jaa09.fixture-submit-event.v1",
+                    "run_id": pending.run_id,
+                    "workflow_hash": pending.workflow_hash,
+                    "step_id": action.step_id,
+                    "release_manifest_sha256": (
+                        release_manifest_sha256
+                    ),
+                    "receipt_id": receipt_id,
+                    "receipt_payload_sha256": payload_sha256,
+                    "screenshot_sha256": screenshot_sha256,
+                    "field_map_sha256": field_map_sha256,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        proof = SubmissionProof(
+            release_manifest_sha256=release_manifest_sha256,
+            token_sha256=token_sha256,
+            receipt_id=receipt_id,
+            receipt_payload_sha256=payload_sha256,
+            screenshot_sha256=screenshot_sha256,
+            field_map_sha256=field_map_sha256,
+            submit_event_sha256=submit_event_sha256,
+        )
+        outputs = {
+            "receipt_id": receipt_id,
+            "receipt_payload_sha256": payload_sha256,
+            "screenshot_sha256": screenshot_sha256,
+            "field_map_sha256": field_map_sha256,
+            "submit_event_sha256": submit_event_sha256,
+        }
+        created = self.store.complete_step(
+            pending.run_id,
+            worker_id,
+            step_id=action.step_id,
+            result=StepResult(outputs, report),
+            release_gate_token=authority.release_token,
+            submission_proof=proof,
+        )
+        return ExecutedAction(
+            pending.run_id,
+            action.step_id,
+            action.kind,
+            report,
+            created,
+        )
+
     def execute_next(
         self,
         page: Page,
@@ -297,6 +684,7 @@ class LocalBrowserExecutor:
         worker_id: str,
         approved_values: Collection[ApprovedValue] = (),
         materialized_values: Mapping[str, MaterializedValue] | None = None,
+        release_authority: ReleaseExecutionAuthority | None = None,
     ) -> ExecutedAction | None:
         """Execute and checkpoint only the first missing non-submit action."""
         self._secure_page(page)
@@ -305,13 +693,25 @@ class LocalBrowserExecutor:
             run_id,
             worker_id,
             approved_values=approved_values,
+            release_gate_token=(
+                release_authority.release_token
+                if release_authority is not None
+                else None
+            ),
         )
         if pending is None:
             return None
         action = pending.action
         if action.kind is ActionKind.SUBMIT:
-            raise ConsequentialActionError(
-                "submit requires the isolated JAA-08 token package"
+            if release_authority is None:
+                raise ConsequentialActionError(
+                    "submit requires exact JAA-08 execution authority"
+                )
+            return self._execute_submit(
+                page,
+                pending,
+                worker_id,
+                release_authority,
             )
         if action.kind is ActionKind.NAVIGATE:
             if action.target_url is None or not _loopback_url(
@@ -348,6 +748,7 @@ class LocalBrowserExecutor:
                         "url_sha256": hashlib.sha256(
                             page.url.encode()
                         ).hexdigest(),
+                        "field_map_sha256": self._field_map_sha256(page),
                     }
                 ),
             )
@@ -382,6 +783,11 @@ class LocalBrowserExecutor:
                 approved_values,
                 values,
             )
+            self._assert_release_materialization(
+                action,
+                materialized,
+                release_authority,
+            )
             if not isinstance(materialized.value, str):
                 raise TypeError("fill materialization must be text")
             locator.fill(materialized.value)
@@ -392,6 +798,11 @@ class LocalBrowserExecutor:
                 approved_values,
                 values,
             )
+            self._assert_release_materialization(
+                action,
+                materialized,
+                release_authority,
+            )
             if not isinstance(materialized.value, str):
                 raise TypeError("select materialization must be text")
             locator.select_option(materialized.value)
@@ -401,6 +812,11 @@ class LocalBrowserExecutor:
                 action,
                 approved_values,
                 values,
+            )
+            self._assert_release_materialization(
+                action,
+                materialized,
+                release_authority,
             )
             upload, digest = self._upload_path(materialized)
             locator.set_input_files(str(upload))
@@ -419,6 +835,19 @@ class LocalBrowserExecutor:
         else:
             raise ConsequentialActionError(
                 f"{action.kind.value} is not enabled in this executor increment"
+            )
+        if (
+            action.kind
+            in {
+                ActionKind.FILL,
+                ActionKind.SELECT_OPTION,
+                ActionKind.UPLOAD,
+            }
+            and release_authority is not None
+        ):
+            outputs["release_materialization_status"] = "verified"
+            outputs["release_manifest_sha256"] = (
+                release_authority.release_token.split(".")[1]
             )
         if _origin(page.url) != allowed_origin:
             raise LocalBrowserBoundaryError(

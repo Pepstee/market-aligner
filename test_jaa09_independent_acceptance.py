@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import hashlib
 from contextlib import contextmanager
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.request import Request, urlopen
@@ -18,6 +19,7 @@ from career_automation.ats_fixture import (
 from career_automation.browser_executor import (
     LocalBrowserExecutor,
     MaterializedValue,
+    ReleaseExecutionAuthority,
 )
 from career_automation.browser_workflows import (
     ActionKind,
@@ -31,6 +33,7 @@ from career_automation.browser_workflows import (
     ValueReference,
     ValueSource,
 )
+from test_jaa08_independent_acceptance import _issued_release_inputs
 
 
 PDF = b"%PDF-1.4\nsynthetic fixture PDF\n%%EOF\n"
@@ -142,7 +145,7 @@ def _local_browser_inputs(
         (
             "cover_note",
             ActionKind.FILL,
-            "Describe one relevant delivery example.",
+            fixture.state.vacancy.question,
             "Delivered a synthetic migration example.",
         ),
         ("cv", ActionKind.UPLOAD, "CV (PDF)", cv),
@@ -223,6 +226,115 @@ def _local_browser_inputs(
         BrowserWorkflow("local_fixture_application", tuple(actions)),
         tuple(approvals),
         values,
+    )
+
+
+def _released_browser_inputs(
+    fixture: LocalATSFixture,
+    tmp_path: Path,
+    release_inputs=None,
+):
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        publication,
+        _compilation,
+        gate,
+        _route,
+        issued,
+    ) = release_inputs or _issued_release_inputs(tmp_path)
+    base_workflow, approvals, values = _local_browser_inputs(
+        fixture,
+        tmp_path,
+    )
+
+    def bind(reference_key: str, value: str | Path, digest: str | None) -> None:
+        prior = values[reference_key]
+        values[reference_key] = MaterializedValue(
+            prior.reference,
+            prior.authorization_reference,
+            value,
+            digest,
+        )
+
+    artifact_directory = (
+        artifact_root / publication.relative_directory
+    )
+    bind("evidence:EV_FULL_NAME", contact.full_name, None)
+    bind("evidence:EV_EMAIL", contact.email, None)
+    bind("evidence:EV_PHONE", contact.phone, None)
+    bind("evidence:EV_CITY", contact.city, None)
+    bind("evidence:EV_WORK_AUTHORISATION", "authorised", None)
+    bind(
+        "evidence:EV_COVER_NOTE",
+        artifacts.editable.answers_text.strip(),
+        None,
+    )
+    bind(
+        "evidence:EV_CV",
+        artifact_directory / "cv.pdf",
+        artifacts.cv_pdf.pdf_sha256,
+    )
+    bind(
+        "evidence:EV_COVER_LETTER",
+        artifact_directory / "cover-letter.pdf",
+        artifacts.cover_letter_pdf.pdf_sha256,
+    )
+    submit = BrowserAction(
+        "submit",
+        ActionKind.SUBMIT,
+        selectors=SelectorPlan(
+            (
+                SelectorCandidate(
+                    SelectorStrategy.TEST_ID,
+                    "final-submit",
+                ),
+            )
+        ),
+        required_output_keys=(
+            "receipt_id",
+            "receipt_payload_sha256",
+            "screenshot_sha256",
+            "field_map_sha256",
+            "submit_event_sha256",
+        ),
+    )
+    workflow = BrowserWorkflow(
+        "released_local_fixture_application",
+        base_workflow.actions + (submit,),
+    )
+    authority = ReleaseExecutionAuthority(
+        gate=gate,
+        release_token=issued.release_token,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        consumed_at=datetime.combine(
+            date.today(),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ),
+        receipt_url=fixture.receipt_url,
+        application_id=fixture.state.vacancy.application_id,
+        job_key=source.job_key,
+    )
+    return (
+        database,
+        workflow,
+        approvals,
+        values,
+        authority,
+        issued,
     )
 
 
@@ -382,3 +494,94 @@ def test_real_browser_executor_completes_approved_local_form_without_submit(
         ):
             assert private_value not in database_bytes
         assert fixture.receipt is None
+
+
+def test_real_browser_consumes_jaa08_token_and_records_official_receipt(
+    tmp_path: Path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "released-platform-engineer",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            completed = tuple(
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+                for _action in workflow.actions
+            )
+            assert page.get_by_role(
+                "heading",
+                name="Application received",
+            ).is_visible()
+            browser.close()
+        receipt = fixture.receipt
+        assert receipt is not None
+        receipt.verify()
+        assert completed[-1] is not None
+        assert completed[-1].action_kind is ActionKind.SUBMIT
+        outputs = store.checkpoint_outputs(run_id)["submit"]
+        assert outputs["receipt_id"] == receipt.receipt_id
+        assert outputs["receipt_payload_sha256"] == receipt.payload_sha256
+        for key in (
+            "screenshot_sha256",
+            "field_map_sha256",
+            "submit_event_sha256",
+        ):
+            assert re.fullmatch(r"[0-9a-f]{64}", str(outputs[key]))
+        snapshot = store.run_snapshot(run_id)
+        assert snapshot["status"] == "completed"
+        assert snapshot["checkpoint_count"] == len(workflow.actions)
+        dispatch = store.submit_dispatch(run_id)
+        assert dispatch is not None
+        assert dispatch["state"] == "receipt_recorded"
+        with database.connection() as connection:
+            token = connection.execute(
+                """SELECT token_hash,consumed_at FROM release_tokens
+                   WHERE release_manifest_hash=?""",
+                (issued.manifest.release_manifest_sha256,),
+            ).fetchone()
+        assert token["token_hash"] == issued.token_sha256
+        assert token["consumed_at"] is not None
+        assert issued.release_token.encode() not in database.path.read_bytes()

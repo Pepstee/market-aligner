@@ -287,11 +287,11 @@
       "evidence": []
     },
     "JAA-09": {
-      "claim": "A dependency-blocked cooperative fixture and non-submit local browser executor prove approved field materialisation, selector recovery and durable checkpoints; JAA-08 token-bound final submit remains incomplete.",
+      "claim": "A dependency-blocked cooperative local browser walking skeleton consumes one genuine JAA-08 token, binds exact approved materialisations, checkpoints one fixture receipt and recovers post-click interruption without a repeated submit.",
       "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-08"],
-      "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
-      "inputs": ["career_automation/browser_workflows.py", "career_automation/release_gate.py"],
+      "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py", "career_automation/browser_workflows.py"],
+      "inputs": ["career_automation/release_gate.py"],
       "interfaces": [],
       "environment": [],
       "tests": [

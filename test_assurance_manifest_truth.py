@@ -52,7 +52,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa09 = components["JAA-09"]
     assert jaa09["increment"] == "implementation_in_progress_dependency_blocked"
     assert jaa09["evidence"] == []
-    assert "non-submit" in jaa09["claim"]
+    assert "one genuine JAA-08 token" in jaa09["claim"]
     for relative in jaa09["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-09 materialised path missing: {relative}"

@@ -353,19 +353,29 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 result=StepResult({"receipt_id": "receipt-42"}, report),
                 release_gate_token="wrong-token-value!",
             )
-        self.store.complete_step(
-            run_id,
-            "worker",
-            step_id="submit",
-            result=StepResult({"receipt_id": "receipt-42"}, report),
-            release_gate_token=token,
-        )
+        with self.assertRaisesRegex(
+            ReleaseGateError,
+            "canonical submission proof",
+        ):
+            self.store.complete_step(
+                run_id,
+                "worker",
+                step_id="submit",
+                result=StepResult({"receipt_id": "receipt-42"}, report),
+                release_gate_token=token,
+            )
         snapshot = self.store.run_snapshot(run_id)
-        self.assertEqual(snapshot["status"], "completed")
-        self.assertIsNotNone(snapshot["release_gate_used_at"])
+        self.assertEqual(snapshot["status"], "leased")
+        self.assertIsNone(snapshot["release_gate_used_at"])
         self.assertNotEqual(snapshot["release_gate_hash"], token)
         events = self.store.events(run_id)
-        self.assertEqual(sum(e["event_type"] == "release_gate_consumed" for e in events), 1)
+        self.assertEqual(
+            sum(
+                e["event_type"] == "release_gate_consumed"
+                for e in events
+            ),
+            0,
+        )
         self.assertNotIn(token, "".join(str(event) for event in events))
 
     def test_events_are_physically_append_only(self) -> None:

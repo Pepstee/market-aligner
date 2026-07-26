@@ -461,6 +461,10 @@ class LocalATSFixture:
         )
 
     @property
+    def receipt_url(self) -> str:
+        return self.application_url + "/receipt"
+
+    @property
     def receipt(self) -> FixtureReceipt | None:
         return self.state.receipt
 
@@ -538,6 +542,18 @@ class LocalATSFixture:
                             state.form_token,
                         ),
                     )
+                    return
+                if path == self._path("receipt"):
+                    if state.receipt is None:
+                        self._send(
+                            HTTPStatus.NOT_FOUND,
+                            b"receipt not found",
+                        )
+                    else:
+                        self._send(
+                            HTTPStatus.OK,
+                            _receipt_page(state.receipt),
+                        )
                     return
                 if path == "/health":
                     self._send(

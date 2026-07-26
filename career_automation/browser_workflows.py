@@ -410,6 +410,35 @@ class StepResult:
             raise TypeError("selector_report must be a SelectorRecoveryReport")
 
 
+@dataclass(frozen=True)
+class SubmissionProof:
+    release_manifest_sha256: str
+    token_sha256: str
+    receipt_id: str
+    receipt_payload_sha256: str
+    screenshot_sha256: str
+    field_map_sha256: str
+    submit_event_sha256: str
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.release_manifest_sha256,
+            self.token_sha256,
+            self.receipt_id,
+            self.receipt_payload_sha256,
+            self.screenshot_sha256,
+            self.field_map_sha256,
+            self.submit_event_sha256,
+        ):
+            if not isinstance(value, str) or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                value,
+            ):
+                raise ValueError(
+                    "submission proof identities must be lowercase SHA-256"
+                )
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -465,6 +494,129 @@ CREATE TABLE IF NOT EXISTS browser_workflow_events (
 );
 CREATE INDEX IF NOT EXISTS browser_workflow_events_run
   ON browser_workflow_events(run_id,id);
+
+CREATE TABLE IF NOT EXISTS browser_submit_dispatches (
+  run_id TEXT PRIMARY KEY REFERENCES browser_workflow_runs(run_id),
+  step_id TEXT NOT NULL,
+  action_hash TEXT NOT NULL,
+  release_manifest_hash TEXT NOT NULL,
+  release_token_hash TEXT NOT NULL UNIQUE
+    REFERENCES release_tokens(token_hash) ON DELETE RESTRICT,
+  field_map_hash TEXT NOT NULL,
+  selector_report_json TEXT NOT NULL,
+  state TEXT NOT NULL
+    CHECK(state IN ('prepared','release_consumed','click_started','receipt_recorded')),
+  release_consumed_at TEXT,
+  receipt_id TEXT,
+  receipt_payload_hash TEXT,
+  screenshot_hash TEXT,
+  submit_event_hash TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TRIGGER IF NOT EXISTS browser_submit_dispatches_guard_insert
+BEFORE INSERT ON browser_submit_dispatches
+WHEN NEW.state<>'prepared'
+  OR NEW.release_consumed_at IS NOT NULL
+  OR NEW.receipt_id IS NOT NULL
+  OR NEW.receipt_payload_hash IS NOT NULL
+  OR NEW.screenshot_hash IS NOT NULL
+  OR NEW.submit_event_hash IS NOT NULL
+  OR NOT EXISTS (
+    SELECT 1 FROM release_tokens
+    WHERE token_hash=NEW.release_token_hash
+      AND release_manifest_hash=NEW.release_manifest_hash
+      AND consumed_at IS NULL
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'browser submit dispatch insert is invalid');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_submit_dispatches_guard_update
+BEFORE UPDATE ON browser_submit_dispatches
+WHEN NEW.run_id<>OLD.run_id
+  OR NEW.step_id<>OLD.step_id
+  OR NEW.action_hash<>OLD.action_hash
+  OR NEW.release_manifest_hash<>OLD.release_manifest_hash
+  OR NEW.release_token_hash<>OLD.release_token_hash
+  OR NEW.field_map_hash<>OLD.field_map_hash
+  OR NEW.selector_report_json<>OLD.selector_report_json
+  OR (
+    OLD.state='prepared'
+    AND (
+      NEW.state<>'release_consumed'
+      OR NEW.release_consumed_at IS NULL
+      OR NEW.release_consumed_at IS NOT (
+        SELECT consumed_at FROM release_tokens
+        WHERE token_hash=OLD.release_token_hash
+      )
+      OR NEW.receipt_id IS NOT NULL
+      OR NEW.receipt_payload_hash IS NOT NULL
+      OR NEW.screenshot_hash IS NOT NULL
+      OR NEW.submit_event_hash IS NOT NULL
+    )
+  )
+  OR (
+    OLD.state='release_consumed'
+    AND (
+      NEW.state<>'click_started'
+      OR NEW.release_consumed_at IS NOT OLD.release_consumed_at
+      OR NEW.receipt_id IS NOT NULL
+      OR NEW.receipt_payload_hash IS NOT NULL
+      OR NEW.screenshot_hash IS NOT NULL
+      OR NEW.submit_event_hash IS NOT NULL
+    )
+  )
+  OR (
+    OLD.state='click_started'
+    AND (
+      NEW.state<>'receipt_recorded'
+      OR NEW.release_consumed_at IS NOT OLD.release_consumed_at
+      OR NEW.receipt_id IS NULL
+      OR NEW.receipt_payload_hash IS NULL
+      OR NEW.screenshot_hash IS NULL
+      OR NEW.submit_event_hash IS NULL
+    )
+  )
+  OR NOT (
+    (OLD.state='prepared' AND NEW.state='release_consumed')
+    OR (OLD.state='release_consumed' AND NEW.state='click_started')
+    OR (OLD.state='click_started' AND NEW.state='receipt_recorded')
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'browser submit dispatch update is invalid');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_submit_dispatches_immutable_delete
+BEFORE DELETE ON browser_submit_dispatches
+BEGIN
+  SELECT RAISE(ABORT, 'browser submit dispatches are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_workflow_definitions_immutable_update
+BEFORE UPDATE ON browser_workflow_definitions
+BEGIN
+  SELECT RAISE(ABORT, 'browser workflow definitions are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_workflow_definitions_immutable_delete
+BEFORE DELETE ON browser_workflow_definitions
+BEGIN
+  SELECT RAISE(ABORT, 'browser workflow definitions are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_workflow_checkpoints_immutable_update
+BEFORE UPDATE ON browser_workflow_checkpoints
+BEGIN
+  SELECT RAISE(ABORT, 'browser workflow checkpoints are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_workflow_checkpoints_immutable_delete
+BEFORE DELETE ON browser_workflow_checkpoints
+BEGIN
+  SELECT RAISE(ABORT, 'browser workflow checkpoints are immutable');
+END;
 
 CREATE TRIGGER IF NOT EXISTS browser_workflow_events_no_update
 BEFORE UPDATE ON browser_workflow_events
@@ -770,6 +922,250 @@ class BrowserWorkflowStore:
                 },
             )
 
+    def prepare_submit_dispatch(
+        self,
+        run_id: str,
+        worker_id: str,
+        *,
+        step_id: str,
+        release_token: str,
+        field_map_sha256: str,
+        selector_report: SelectorRecoveryReport,
+    ) -> bool:
+        """Bind a pending submit to one currently unconsumed JAA-08 token."""
+        if not re.fullmatch(r"[0-9a-f]{64}", field_map_sha256):
+            raise ValueError("field-map identity must be lowercase SHA-256")
+        token_parts = release_token.split(".")
+        if (
+            len(token_parts) != 3
+            or token_parts[0] != "jaa08"
+            or not re.fullmatch(r"[0-9a-f]{64}", token_parts[1])
+        ):
+            raise ReleaseGateError("release token format is invalid")
+        token_sha256 = hashlib.sha256(release_token.encode()).hexdigest()
+        now = float(self._clock())
+        with self.transaction() as conn:
+            run = self._require_live_lease(conn, run_id, worker_id, now)
+            self._assert_release_token(run, run_id, release_token)
+            workflow = self._load_workflow(
+                conn,
+                str(run["workflow_hash"]),
+            )
+            checkpoints = self._checkpoint_rows(conn, run_id)
+            next_index = len(checkpoints)
+            if next_index >= len(workflow.actions):
+                raise WorkflowError("submit dispatch has no pending action")
+            action = workflow.actions[next_index]
+            if (
+                action.step_id != step_id
+                or action.kind is not ActionKind.SUBMIT
+            ):
+                raise WorkflowError(
+                    "submit dispatch is not for the next pending action"
+                )
+            action_hash = _sha256(_canonical_json(action.to_dict()))
+            self._validate_selector_report(
+                action,
+                selector_report,
+                require_success=True,
+            )
+            selector_report_json = _canonical_json(
+                selector_report.to_dict()
+            )
+            prior = conn.execute(
+                "SELECT * FROM browser_submit_dispatches WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            expected = (
+                step_id,
+                action_hash,
+                token_parts[1],
+                token_sha256,
+                field_map_sha256,
+                selector_report_json,
+            )
+            token = conn.execute(
+                """SELECT release_manifest_hash,consumed_at
+                   FROM release_tokens WHERE token_hash=?""",
+                (token_sha256,),
+            ).fetchone()
+            if (
+                token is None
+                or str(token["release_manifest_hash"]) != token_parts[1]
+            ):
+                raise ReleaseGateError(
+                    "release token is not issued by the JAA-08 gate"
+                )
+            if prior is not None:
+                actual = (
+                    str(prior["step_id"]),
+                    str(prior["action_hash"]),
+                    str(prior["release_manifest_hash"]),
+                    str(prior["release_token_hash"]),
+                    str(prior["field_map_hash"]),
+                    str(prior["selector_report_json"]),
+                )
+                if actual != expected:
+                    raise IdempotencyConflictError(
+                        "submit dispatch cannot be rebound"
+                    )
+                return False
+            if token["consumed_at"] is not None:
+                raise ReleaseGateError(
+                    "release token was consumed before submit preparation"
+                )
+            competing = conn.execute(
+                """SELECT run_id FROM browser_submit_dispatches
+                   WHERE release_token_hash=?""",
+                (token_sha256,),
+            ).fetchone()
+            if (
+                competing is not None
+                and str(competing["run_id"]) != run_id
+            ):
+                raise ReleaseGateError(
+                    "release token is already bound to another submit run"
+                )
+            conn.execute(
+                """INSERT INTO browser_submit_dispatches(
+                     run_id,step_id,action_hash,release_manifest_hash,
+                     release_token_hash,field_map_hash,selector_report_json,
+                     state)
+                   VALUES(?,?,?,?,?,?,?,'prepared')""",
+                (run_id, *expected),
+            )
+            return self._insert_event(
+                conn,
+                run_id=run_id,
+                step_id=step_id,
+                event_type="submit_dispatch_prepared",
+                idempotency_key=f"browser-submit-prepared:{run_id}",
+                payload={
+                    "action_hash": action_hash,
+                    "release_manifest_hash": token_parts[1],
+                    "release_token_hash": token_sha256,
+                    "field_map_hash": field_map_sha256,
+                },
+            )
+
+    def reconcile_release_consumed(
+        self,
+        run_id: str,
+        worker_id: str,
+        *,
+        release_token: str,
+    ) -> bool:
+        """Record exact JAA-08 consumption after observing its canonical row."""
+        token_sha256 = hashlib.sha256(release_token.encode()).hexdigest()
+        now = float(self._clock())
+        with self.transaction() as conn:
+            run = self._require_live_lease(conn, run_id, worker_id, now)
+            self._assert_release_token(run, run_id, release_token)
+            dispatch = conn.execute(
+                "SELECT * FROM browser_submit_dispatches WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if (
+                dispatch is None
+                or str(dispatch["release_token_hash"]) != token_sha256
+            ):
+                raise ReleaseGateError("submit dispatch is absent or invalid")
+            token = conn.execute(
+                """SELECT release_manifest_hash,consumed_at
+                   FROM release_tokens WHERE token_hash=?""",
+                (token_sha256,),
+            ).fetchone()
+            if (
+                token is None
+                or token["consumed_at"] is None
+                or str(token["release_manifest_hash"])
+                != str(dispatch["release_manifest_hash"])
+            ):
+                raise ReleaseGateError(
+                    "canonical JAA-08 token consumption is absent"
+                )
+            if str(dispatch["state"]) != "prepared":
+                return False
+            conn.execute(
+                """UPDATE browser_submit_dispatches
+                   SET state='release_consumed',release_consumed_at=?,
+                       updated_at=CURRENT_TIMESTAMP
+                   WHERE run_id=?""",
+                (str(token["consumed_at"]), run_id),
+            )
+            return self._insert_event(
+                conn,
+                run_id=run_id,
+                step_id=str(dispatch["step_id"]),
+                event_type="jaa08_release_consumed",
+                idempotency_key=f"browser-jaa08-consumed:{run_id}",
+                payload={
+                    "release_manifest_hash": str(
+                        dispatch["release_manifest_hash"]
+                    ),
+                    "release_token_hash": token_sha256,
+                    "consumed_at": str(token["consumed_at"]),
+                },
+            )
+
+    def mark_submit_started(
+        self,
+        run_id: str,
+        worker_id: str,
+        *,
+        release_token: str,
+    ) -> bool:
+        """Persist click intent before the one permitted fixture action."""
+        token_sha256 = hashlib.sha256(release_token.encode()).hexdigest()
+        now = float(self._clock())
+        with self.transaction() as conn:
+            run = self._require_live_lease(conn, run_id, worker_id, now)
+            self._assert_release_token(run, run_id, release_token)
+            dispatch = conn.execute(
+                "SELECT * FROM browser_submit_dispatches WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if (
+                dispatch is None
+                or str(dispatch["release_token_hash"]) != token_sha256
+            ):
+                raise ReleaseGateError("submit dispatch is absent or invalid")
+            state = str(dispatch["state"])
+            if state == "click_started":
+                return False
+            if state != "release_consumed":
+                raise WorkflowError(
+                    "submit click requires consumed release authority"
+                )
+            conn.execute(
+                """UPDATE browser_submit_dispatches
+                   SET state='click_started',updated_at=CURRENT_TIMESTAMP
+                   WHERE run_id=?""",
+                (run_id,),
+            )
+            return self._insert_event(
+                conn,
+                run_id=run_id,
+                step_id=str(dispatch["step_id"]),
+                event_type="submit_click_started",
+                idempotency_key=f"browser-submit-click-started:{run_id}",
+                payload={
+                    "release_manifest_hash": str(
+                        dispatch["release_manifest_hash"]
+                    ),
+                    "release_token_hash": token_sha256,
+                },
+                actor_kind="external",
+            )
+
+    def submit_dispatch(self, run_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM browser_submit_dispatches WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     @staticmethod
     def _require_live_lease(
         conn: sqlite3.Connection, run_id: str, worker_id: str, now: float
@@ -919,6 +1315,7 @@ class BrowserWorkflowStore:
         result: StepResult,
         approved_values: Collection[ApprovedValue] = (),
         release_gate_token: str | None = None,
+        submission_proof: SubmissionProof | None = None,
     ) -> bool:
         """Atomically checkpoint one step and advance, or return False for an exact retry."""
         if not isinstance(result, StepResult):
@@ -971,6 +1368,50 @@ class BrowserWorkflowStore:
             self._validate_selector_report(action, result.selector_report, require_success=True)
             if action.kind is ActionKind.SUBMIT:
                 self._assert_release_token(run, run_id, release_gate_token)
+                if submission_proof is None:
+                    raise ReleaseGateError(
+                        "final submit requires a canonical submission proof"
+                    )
+                dispatch = conn.execute(
+                    """SELECT * FROM browser_submit_dispatches
+                       WHERE run_id=?""",
+                    (run_id,),
+                ).fetchone()
+                if (
+                    dispatch is None
+                    or str(dispatch["state"]) != "click_started"
+                    or str(dispatch["step_id"]) != step_id
+                    or str(dispatch["release_manifest_hash"])
+                    != submission_proof.release_manifest_sha256
+                    or str(dispatch["release_token_hash"])
+                    != submission_proof.token_sha256
+                    or str(dispatch["field_map_hash"])
+                    != submission_proof.field_map_sha256
+                ):
+                    raise ReleaseGateError(
+                        "submission proof differs from its durable dispatch"
+                    )
+                proof_outputs = {
+                    "receipt_id": submission_proof.receipt_id,
+                    "receipt_payload_sha256": (
+                        submission_proof.receipt_payload_sha256
+                    ),
+                    "screenshot_sha256": (
+                        submission_proof.screenshot_sha256
+                    ),
+                    "field_map_sha256": submission_proof.field_map_sha256,
+                    "submit_event_sha256": (
+                        submission_proof.submit_event_sha256
+                    ),
+                }
+                if dict(result.outputs) != proof_outputs:
+                    raise ReleaseGateError(
+                        "submission outputs differ from their proof"
+                    )
+            elif submission_proof is not None:
+                raise WorkflowError(
+                    "submission proof is valid only for a submit action"
+                )
 
             conn.execute(
                 """INSERT INTO browser_workflow_checkpoints(
@@ -997,6 +1438,25 @@ class BrowserWorkflowStore:
             )
             is_final = action_index == len(workflow.actions) - 1
             if action.kind is ActionKind.SUBMIT:
+                assert submission_proof is not None
+                updated = conn.execute(
+                    """UPDATE browser_submit_dispatches
+                       SET state='receipt_recorded',receipt_id=?,
+                           receipt_payload_hash=?,screenshot_hash=?,
+                           submit_event_hash=?,updated_at=CURRENT_TIMESTAMP
+                       WHERE run_id=? AND state='click_started'""",
+                    (
+                        submission_proof.receipt_id,
+                        submission_proof.receipt_payload_sha256,
+                        submission_proof.screenshot_sha256,
+                        submission_proof.submit_event_sha256,
+                        run_id,
+                    ),
+                ).rowcount
+                if updated != 1:
+                    raise ReleaseGateError(
+                        "submission dispatch lost its receipt lease"
+                    )
                 conn.execute(
                     """UPDATE browser_workflow_runs SET release_gate_used_at=CURRENT_TIMESTAMP
                        WHERE run_id=?""",
