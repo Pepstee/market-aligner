@@ -37,10 +37,11 @@ def _canonical(value: Any) -> bytes:
 
 def _policy(path: Path, *, hosts: tuple[str, ...] = (HOST,),
             reviewer_type: str = "human_operator",
-            age_days: int = 1) -> PublicAccessPolicy:
+            age_days: int = 1,
+            terms_url: str | None = None) -> PublicAccessPolicy:
     records = [{
         "host": host,
-        "terms_url": f"https://{host}/terms",
+        "terms_url": terms_url or f"https://{host}/terms",
         "determination": "public_read_only_research_permitted",
         "reviewed_at": (NOW - timedelta(days=age_days)).isoformat(),
         "reviewed_by": "Test Operator",
@@ -125,6 +126,34 @@ def test_missing_or_nonhuman_terms_attestation_denies_before_network(
         DenyAllPublicAccess().before_request(URL)
     with pytest.raises(ValueError, match="stale"):
         _policy(tmp_path / "stale.json", age_days=91)
+
+
+@pytest.mark.parametrize("host", ("localhost", "api.localhost", "127.0.0.1", "169.254.1.1"))
+def test_private_policy_hosts_are_rejected_before_network(
+    tmp_path: Path,
+    host: str,
+) -> None:
+    with pytest.raises(ValueError, match="public hosts"):
+        _policy(tmp_path / "private.json", hosts=(host,))
+
+
+@pytest.mark.parametrize(
+    "terms_url",
+    (
+        f"https://operator:secret@{HOST}/terms",
+        "https://localhost/terms",
+        "https://127.0.0.1/terms",
+    ),
+)
+def test_nonpublic_terms_url_is_rejected(
+    tmp_path: Path,
+    terms_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="anonymous public HTTPS"):
+        _policy(
+            tmp_path / "nonpublic-terms.json",
+            terms_url=terms_url,
+        )
 
 
 @pytest.mark.parametrize("status", (401, 403, 429, 500, 503))
@@ -477,3 +506,32 @@ def test_access_receipt_replay_accepts_exact_operator_policy_and_robots_bytes(
         policies={controller.policy.policy_sha256: controller.policy},
     )
     assert replayed == RobotsReceipt(**value)
+
+
+@pytest.mark.parametrize(
+    "terms_url",
+    (
+        f"https://operator:secret@{HOST}/terms",
+        "https://localhost/terms",
+        "https://127.0.0.1/terms",
+    ),
+)
+def test_access_receipt_replay_rejects_nonpublic_embedded_terms_without_policy(
+    tmp_path: Path,
+    terms_url: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(200, b"User-agent: *\nAllow: /\n", url=robots_url),
+    )
+    value = asdict(controller.before_request(URL))
+    value["terms_attestation"]["terms_url"] = terms_url
+    with pytest.raises(ValueError, match="anonymous public HTTPS"):
+        replay_access_receipt(
+            value,
+            cache,
+            content_urls=(URL,),
+            content_retrieved_at=NOW.isoformat(),
+            policies=None,
+        )

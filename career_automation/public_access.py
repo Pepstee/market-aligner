@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import re
 import time
@@ -44,12 +45,24 @@ def policy_records_hash(records: Any) -> str:
     return hashlib.sha256(_canonical(records)).hexdigest()
 
 
+def _require_public_host(host: str) -> None:
+    if host == "localhost" or host.endswith(".localhost"):
+        raise PublicAccessDenied("access policy accepts public hosts only")
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not literal.is_global:
+        raise PublicAccessDenied("access policy accepts public hosts only")
+
+
 def _public_origin(url: str) -> tuple[str, str, str]:
     parsed = urlsplit(url)
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username or parsed.password):
         raise PublicAccessDenied("access policy accepts anonymous public HTTP(S) only")
     host = parsed.hostname.casefold()
+    _require_public_host(host)
     port = f":{parsed.port}" if parsed.port else ""
     return parsed.scheme.casefold(), host, port
 
@@ -259,8 +272,17 @@ class PublicAccessPolicy:
             if (host != attestation.host or host in attestations
                     or parsed_host.hostname != host or parsed_host.port is not None):
                 raise ValueError("access policy hosts must be unique lowercase names")
-            terms = urlsplit(attestation.terms_url)
-            if terms.scheme != "https" or not terms.hostname:
+            try:
+                _require_public_host(host)
+            except PublicAccessDenied as exc:
+                raise ValueError("access policy accepts public hosts only") from exc
+            try:
+                terms_scheme, _, _ = _public_origin(attestation.terms_url)
+            except PublicAccessDenied as exc:
+                raise ValueError(
+                    "terms review must cite anonymous public HTTPS"
+                ) from exc
+            if terms_scheme != "https":
                 raise ValueError("terms review must cite a public HTTPS URL")
             if attestation.determination != "public_read_only_research_permitted":
                 raise ValueError("terms review does not permit public read-only research")
@@ -538,9 +560,14 @@ def replay_access_receipt(
             or reviewed.tzinfo is None or reviewed > retrieved
             or retrieved - reviewed > timedelta(days=MAX_ATTESTATION_AGE_DAYS)):
         raise ValueError("access receipt terms authority is absent, future-dated or stale")
-    terms = urlsplit(attestation.terms_url)
-    if terms.scheme != "https" or not terms.hostname:
-        raise ValueError("access receipt terms URL is invalid")
+    try:
+        terms_scheme, _, _ = _public_origin(attestation.terms_url)
+    except PublicAccessDenied as exc:
+        raise ValueError(
+            "access receipt terms URL is not anonymous public HTTPS"
+        ) from exc
+    if terms_scheme != "https":
+        raise ValueError("access receipt terms URL is not anonymous public HTTPS")
     if policies is not None:
         policy = policies.get(receipt.terms_policy_sha256)
         if policy is None or policy.attestations.get(receipt.host.casefold()) != attestation:
