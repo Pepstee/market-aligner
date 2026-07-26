@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -12,8 +14,10 @@ from career_automation.application_strategy import (
     CandidateSupport,
     EmployerResearchFact,
     compile_application_strategy,
+    verify_strategy_identity,
 )
 from career_automation.evidence_matching import MatchResult, MatchingPolicy, Requirement
+from career_automation.migrations import apply_jaa_06_migrations
 
 
 AS_OF = date(2030, 1, 2)
@@ -177,3 +181,21 @@ def test_offline_strategy_cannot_claim_slice_certification() -> None:
     strategy = _compile()
     with pytest.raises(ValueError, match="cannot certify"):
         replace(strategy, certifies_slice=True)
+
+
+def test_strategy_identity_cannot_be_rehashed_or_mutated_by_a_caller() -> None:
+    strategy = _compile()
+    verify_strategy_identity(strategy)
+    with pytest.raises(ValueError, match="exact document"):
+        verify_strategy_identity(replace(strategy, strategy_id="0" * 64))
+    with pytest.raises(ValueError, match="exact document"):
+        verify_strategy_identity(replace(strategy, as_of=date(2030, 1, 3)))
+
+
+def test_jaa06_installed_schema_tamper_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "schema-tamper.sqlite3"
+    apply_jaa_06_migrations(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TRIGGER strategy_elements_immutable_delete")
+    with pytest.raises(RuntimeError, match="installed JAA-06 schema"):
+        apply_jaa_06_migrations(path)

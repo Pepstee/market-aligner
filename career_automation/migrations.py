@@ -44,8 +44,16 @@ _JAA05_SCHEMA_TABLES = (
     "improvement_task_activations",
     "gap_verification_receipts",
 )
+_JAA06_SCHEMA_TABLES = (
+    "application_strategies",
+    "strategy_requirement_coverage",
+    "strategy_elements",
+)
 JAA05_INSTALLED_SCHEMA_SHA256 = (
     "3c4e4fe4d934b2995d8ccde907c59bfb9abc56615c193d081e6b07ca0f341dda"
+)
+JAA06_INSTALLED_SCHEMA_SHA256 = (
+    "77d1d8ae29d5d77c48800f751b25d4e4d50598b9dd71576c42aeb6436b4a2bd1"
 )
 
 
@@ -156,6 +164,32 @@ def verify_jaa05_installed_schema(conn: sqlite3.Connection) -> str:
     if digest != JAA05_INSTALLED_SCHEMA_SHA256:
         raise RuntimeError(
             "installed JAA-05 schema or trigger set does not match the checked contract"
+        )
+    return digest
+
+
+def jaa06_installed_schema_digest(conn: sqlite3.Connection) -> str:
+    """Hash every table, index and trigger owned by the JAA-06 migration."""
+    placeholders = ",".join("?" for _ in _JAA06_SCHEMA_TABLES)
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql
+            FROM sqlite_schema
+            WHERE sql IS NOT NULL AND tbl_name IN ({placeholders})
+            ORDER BY type,name""",
+        _JAA06_SCHEMA_TABLES,
+    ).fetchall()
+    document = json.dumps(
+        [list(row) for row in rows],
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"jaa06-installed-schema-v1\0" + document).hexdigest()
+
+
+def verify_jaa06_installed_schema(conn: sqlite3.Connection) -> str:
+    digest = jaa06_installed_schema_digest(conn)
+    if digest != JAA06_INSTALLED_SCHEMA_SHA256:
+        raise RuntimeError(
+            "installed JAA-06 schema or trigger set does not match the checked contract"
         )
     return digest
 
@@ -1009,6 +1043,135 @@ _JAA_05_FIT_REASSESSMENT_MIGRATION = Migration(
 )
 
 
+_JAA_06_APPLICATION_STRATEGY_MIGRATION = Migration(
+    7,
+    "jaa_06_application_strategies",
+    (
+        """CREATE TABLE application_strategies(
+             strategy_id TEXT PRIMARY KEY
+               CHECK(length(strategy_id)=64
+                 AND strategy_id NOT GLOB '*[^0-9a-f]*'),
+             job_key TEXT NOT NULL
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             fit_run_id TEXT NOT NULL UNIQUE
+               REFERENCES fit_assessment_runs(run_id) ON DELETE RESTRICT,
+             dossier_hash TEXT NOT NULL
+               CHECK(length(dossier_hash)=64
+                 AND dossier_hash NOT GLOB '*[^0-9a-f]*'),
+             candidate_profile_hash TEXT NOT NULL
+               CHECK(length(candidate_profile_hash)=64
+                 AND candidate_profile_hash NOT GLOB '*[^0-9a-f]*'),
+             as_of TEXT NOT NULL
+               CHECK(date(as_of) IS NOT NULL AND date(as_of)=as_of),
+             decision TEXT NOT NULL
+               CHECK(decision IN
+                 ('apply_now','close_gap_first','reject_candidacy')),
+             input_hash TEXT NOT NULL
+               CHECK(length(input_hash)=64
+                 AND input_hash NOT GLOB '*[^0-9a-f]*'),
+             policy_hash TEXT NOT NULL
+               CHECK(length(policy_hash)=64
+                 AND policy_hash NOT GLOB '*[^0-9a-f]*'),
+             document_json TEXT NOT NULL,
+             document_hash TEXT NOT NULL
+               CHECK(length(document_hash)=64
+                 AND document_hash NOT GLOB '*[^0-9a-f]*'),
+             lifecycle_receipt_id INTEGER UNIQUE
+               REFERENCES lifecycle_transition_receipts(receipt_id)
+               ON DELETE RESTRICT,
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             UNIQUE(strategy_id,fit_run_id),
+             UNIQUE(strategy_id,job_key,fit_run_id),
+             CHECK(
+               (decision='apply_now' AND lifecycle_receipt_id IS NOT NULL)
+               OR
+               (decision<>'apply_now' AND lifecycle_receipt_id IS NULL)
+             )
+           )""",
+        """CREATE TABLE strategy_requirement_coverage(
+             strategy_id TEXT NOT NULL
+               REFERENCES application_strategies(strategy_id)
+               ON DELETE RESTRICT,
+             fit_run_id TEXT NOT NULL,
+             requirement_id TEXT NOT NULL,
+             coverage_state TEXT NOT NULL
+               CHECK(coverage_state IN
+                 ('covered','absent','release_blocking')),
+             candidate_claim_ids_json TEXT NOT NULL,
+             candidate_evidence_ids_json TEXT NOT NULL,
+             reason_code TEXT NOT NULL,
+             PRIMARY KEY(strategy_id,requirement_id),
+             FOREIGN KEY(strategy_id,fit_run_id)
+               REFERENCES application_strategies(strategy_id,fit_run_id)
+               ON DELETE RESTRICT,
+             FOREIGN KEY(fit_run_id,requirement_id)
+               REFERENCES vacancy_requirements(run_id,requirement_id)
+               ON DELETE RESTRICT
+           )""",
+        """CREATE TABLE strategy_elements(
+             element_id TEXT PRIMARY KEY
+               CHECK(length(element_id)=64
+                 AND element_id NOT GLOB '*[^0-9a-f]*'),
+             strategy_id TEXT NOT NULL
+               REFERENCES application_strategies(strategy_id)
+               ON DELETE RESTRICT,
+             job_key TEXT NOT NULL,
+             fit_run_id TEXT NOT NULL,
+             element_kind TEXT NOT NULL
+               CHECK(element_kind IN
+                 ('cv_emphasis','cover_letter_argument','structured_answer',
+                  'interview_seed','objection_response','employer_hook')),
+             requirement_id TEXT NOT NULL,
+             candidate_claim_id TEXT NOT NULL,
+             candidate_claim_version INTEGER NOT NULL,
+             candidate_evidence_id TEXT NOT NULL,
+             candidate_evidence_version INTEGER NOT NULL,
+             research_claim_id TEXT NOT NULL,
+             employer_fact_hash TEXT NOT NULL
+               CHECK(length(employer_fact_hash)=64
+                 AND employer_fact_hash NOT GLOB '*[^0-9a-f]*'),
+             directive TEXT NOT NULL,
+             UNIQUE(strategy_id,element_kind,requirement_id),
+             FOREIGN KEY(strategy_id,job_key,fit_run_id)
+               REFERENCES application_strategies(
+                 strategy_id,job_key,fit_run_id
+               )
+               ON DELETE RESTRICT,
+             FOREIGN KEY(fit_run_id,requirement_id)
+               REFERENCES vacancy_requirements(run_id,requirement_id)
+               ON DELETE RESTRICT,
+             FOREIGN KEY(candidate_claim_id,candidate_claim_version)
+               REFERENCES candidate_claims(claim_id,version)
+               ON DELETE RESTRICT,
+             FOREIGN KEY(candidate_evidence_id,candidate_evidence_version)
+               REFERENCES candidate_evidence(evidence_id,version)
+               ON DELETE RESTRICT,
+             FOREIGN KEY(job_key,research_claim_id)
+               REFERENCES employer_intelligence(job_key,claim_id)
+               ON DELETE RESTRICT
+           )""",
+        """CREATE TRIGGER application_strategies_immutable_update
+             BEFORE UPDATE ON application_strategies
+             BEGIN SELECT RAISE(ABORT,'application strategies are immutable'); END""",
+        """CREATE TRIGGER application_strategies_immutable_delete
+             BEFORE DELETE ON application_strategies
+             BEGIN SELECT RAISE(ABORT,'application strategies are immutable'); END""",
+        """CREATE TRIGGER strategy_requirement_coverage_immutable_update
+             BEFORE UPDATE ON strategy_requirement_coverage
+             BEGIN SELECT RAISE(ABORT,'strategy coverage is immutable'); END""",
+        """CREATE TRIGGER strategy_requirement_coverage_immutable_delete
+             BEFORE DELETE ON strategy_requirement_coverage
+             BEGIN SELECT RAISE(ABORT,'strategy coverage is immutable'); END""",
+        """CREATE TRIGGER strategy_elements_immutable_update
+             BEFORE UPDATE ON strategy_elements
+             BEGIN SELECT RAISE(ABORT,'strategy elements are immutable'); END""",
+        """CREATE TRIGGER strategy_elements_immutable_delete
+             BEFORE DELETE ON strategy_elements
+             BEGIN SELECT RAISE(ABORT,'strategy elements are immutable'); END""",
+    ),
+)
+
+
 # Migration 2 was already allocated to JAA-02 before the independent JAA-01
 # review required an immutable score-import receipt. Public sets remain ordered
 # and checksummed while each slice applies only the schema it owns.
@@ -1025,6 +1188,10 @@ JAA_05_MIGRATIONS: tuple[Migration, ...] = (
     _JAA_05_EVIDENCE_MATCHING_MIGRATION,
     _JAA_05_GAP_VERIFICATION_MIGRATION,
     _JAA_05_FIT_REASSESSMENT_MIGRATION,
+)
+JAA_06_MIGRATIONS: tuple[Migration, ...] = (
+    *JAA_05_MIGRATIONS,
+    _JAA_06_APPLICATION_STRATEGY_MIGRATION,
 )
 
 
@@ -1050,4 +1217,11 @@ def apply_jaa_05_migrations(path: str | Path) -> tuple[int, ...]:
     with sqlite3.connect(path) as conn:
         verify_jaa01_installed_schema(conn)
         verify_jaa05_installed_schema(conn)
+    return applied
+
+
+def apply_jaa_06_migrations(path: str | Path) -> tuple[int, ...]:
+    applied = MigrationRunner(path).apply(JAA_06_MIGRATIONS)
+    with sqlite3.connect(path) as connection:
+        verify_jaa06_installed_schema(connection)
     return applied

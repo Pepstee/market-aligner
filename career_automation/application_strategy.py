@@ -9,19 +9,30 @@ employer fact.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import sqlite3
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 from typing import Iterable, Mapping
 
+from .database import CareerDatabase
 from .evidence_matching import (
     FACTUAL_STATES,
     PROOF_CLASSES,
+    InferenceReceipt,
     MatchResult,
     Requirement,
+    candidate_graph_evidence,
     canonical_json,
     content_hash,
+    evidence_projection_hash,
 )
+from .employer_research import FRESHNESS_DAYS
+from .lifecycle import LifecycleReducer, PolicyIdentity
+from .migrations import apply_jaa_06_migrations
+from .models import IntelligenceKind, PipelineState
 
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -267,6 +278,25 @@ class ApplicationStrategy:
         }
 
 
+def verify_strategy_identity(strategy: ApplicationStrategy) -> None:
+    """Recompute both strategy hashes from the public immutable document."""
+    body = strategy.document()
+    body.pop("strategy_id")
+    body.pop("document_sha256")
+    expected_document_hash = hashlib.sha256(
+        canonical_json(body).encode("utf-8")
+    ).hexdigest()
+    expected_strategy_id = content_hash({
+        "contract": "jaa06.application-strategy.v1",
+        "document_sha256": expected_document_hash,
+    })
+    if (
+        strategy.document_sha256 != expected_document_hash
+        or strategy.strategy_id != expected_strategy_id
+    ):
+        raise ValueError("application strategy identity does not match its exact document")
+
+
 def _requirement_document(requirement: Requirement) -> dict[str, object]:
     return {
         "requirement_id": requirement.requirement_id,
@@ -509,3 +539,644 @@ def compile_application_strategy(
         policy_sha256,
         document_sha256,
     )
+
+
+class ApplicationStrategyStore:
+    """Derive, persist and route one exact strategy from JAA-02/04/05 state."""
+
+    POLICY_ID = "career.application-strategy"
+    POLICY_VERSION = "1"
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        apply_jaa_06_migrations(self.path)
+        self.lifecycle = LifecycleReducer(self.path)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    @staticmethod
+    def _requirements(
+        connection: sqlite3.Connection,
+        fit_run_id: str,
+    ) -> tuple[Requirement, ...]:
+        rows = connection.execute(
+            """SELECT * FROM vacancy_requirements
+               WHERE run_id=? ORDER BY requirement_id""",
+            (fit_run_id,),
+        ).fetchall()
+        return tuple(
+            Requirement(
+                str(row["requirement_id"]),
+                str(row["criterion"]),
+                str(row["requirement_text"]),
+                bool(row["essential"]),
+                str(row["gap_kind"]),
+                str(row["bridge_policy"]),
+                tuple(json.loads(str(row["accepted_proof_classes_json"]))),
+                int(row["opportunity_weight_bp"]),
+                str(row["source_identity"]),
+                (int(row["source_start"]), int(row["source_end"])),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _results(
+        connection: sqlite3.Connection,
+        fit_run_id: str,
+        candidate_profile_hash: str,
+    ) -> tuple[MatchResult, ...]:
+        rows = connection.execute(
+            """SELECT * FROM evidence_match_assessments
+               WHERE run_id=? ORDER BY requirement_id""",
+            (fit_run_id,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            receipt = (
+                None
+                if row["proposal_hash"] is None
+                else InferenceReceipt(
+                    str(row["provider"]),
+                    str(row["model"]),
+                    str(row["prompt_hash"]),
+                    str(row["policy_hash"]),
+                    candidate_profile_hash,
+                    str(row["input_hash"]),
+                )
+            )
+            results.append(MatchResult(
+                str(row["requirement_id"]),
+                str(row["decision"]),
+                tuple(json.loads(str(row["evidence_ids_json"]))),
+                int(row["confidence_bp"]),
+                str(row["reason"]),
+                str(row["policy_hash"]),
+                None if row["proposal_hash"] is None else str(row["proposal_hash"]),
+                receipt,
+            ))
+        return tuple(results)
+
+    @staticmethod
+    def _candidate_support(
+        connection: sqlite3.Connection,
+        requirements: tuple[Requirement, ...],
+        results: tuple[MatchResult, ...],
+        evidence_rows: tuple[object, ...],
+        as_of: date,
+    ) -> tuple[CandidateSupport, ...]:
+        requirement_by_id = {row.requirement_id: row for row in requirements}
+        evidence_by_id = {
+            str(getattr(row, "evidence_id")): row
+            for row in evidence_rows
+        }
+        supports: list[CandidateSupport] = []
+        for result in results:
+            if result.decision != "matched":
+                continue
+            requirement = requirement_by_id[result.requirement_id]
+            for evidence_id in result.evidence_ids:
+                evidence = evidence_by_id.get(evidence_id)
+                if evidence is None:
+                    raise ValueError(
+                        "fit evidence is not current in the candidate graph"
+                    )
+                claim_rows = connection.execute(
+                    """SELECT claim.claim_id,claim.version,
+                              claim.approval_state,claim.epistemic_state
+                       FROM candidate_claims claim
+                       JOIN candidate_claim_edges edge
+                         ON edge.claim_id=claim.claim_id
+                        AND edge.claim_version=claim.version
+                       WHERE claim.claim_id=?
+                         AND edge.evidence_id=? AND edge.evidence_version=?
+                         AND edge.edge_type IN ('supports','demonstrated_by')
+                         AND claim.approval_state='approved'
+                         AND claim.epistemic_state IN ('fact','evidence')
+                         AND (claim.valid_until IS NULL OR claim.valid_until>=?)
+                         AND NOT EXISTS(
+                           SELECT 1 FROM candidate_claims newer
+                           WHERE newer.claim_id=claim.claim_id
+                             AND newer.version>claim.version
+                         )""",
+                    (
+                        requirement.criterion,
+                        evidence_id,
+                        int(getattr(evidence, "version")),
+                        as_of.isoformat(),
+                    ),
+                ).fetchall()
+                if len(claim_rows) != 1:
+                    raise ValueError(
+                        "fit evidence lacks one exact current approved candidate claim"
+                    )
+                claim = claim_rows[0]
+                supports.append(CandidateSupport(
+                    result.requirement_id,
+                    str(claim["claim_id"]),
+                    int(claim["version"]),
+                    evidence_id,
+                    int(getattr(evidence, "version")),
+                    str(getattr(evidence, "proof_class")),
+                    str(claim["approval_state"]),
+                    str(claim["epistemic_state"]),
+                    str(getattr(evidence, "approval_state")),
+                    str(getattr(evidence, "epistemic_state")),
+                    str(getattr(evidence, "verification_decision")),
+                    getattr(evidence, "valid_until"),
+                ))
+        return tuple(supports)
+
+    @staticmethod
+    def _employer_facts(
+        connection: sqlite3.Connection,
+        *,
+        job_key: str,
+        dossier: Mapping[str, object],
+        as_of: date,
+    ) -> tuple[EmployerResearchFact, ...]:
+        dossier_claims = {
+            str(row.get("id")): row
+            for row in dossier.get("claims", [])
+            if isinstance(row, Mapping)
+        }
+        rows = connection.execute(
+            """SELECT claim_id,kind,classification,claim_json
+               FROM employer_intelligence
+               WHERE job_key=? AND classification='fact'
+               ORDER BY kind,claim_id""",
+            (job_key,),
+        ).fetchall()
+        facts: list[EmployerResearchFact] = []
+        for row in rows:
+            try:
+                claim = json.loads(str(row["claim_json"]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("employer fact is not valid JSON") from exc
+            claim_id = str(row["claim_id"])
+            if (
+                not isinstance(claim, dict)
+                or dossier_claims.get(claim_id) != claim
+                or claim.get("classification") != "fact"
+                or claim.get("kind") != row["kind"]
+            ):
+                raise ValueError("employer fact differs from the durable dossier")
+            source_ids = claim.get("source_ids")
+            if not isinstance(source_ids, list) or not source_ids:
+                raise ValueError("employer fact has no dossier source identity")
+            observed = claim.get("observed_at") or claim.get("source_captured_at")
+            if not isinstance(observed, str):
+                continue
+            try:
+                observed_date = datetime.fromisoformat(
+                    observed.replace("Z", "+00:00")
+                ).date()
+            except ValueError as exc:
+                raise ValueError("employer fact observation date is invalid") from exc
+            kind = IntelligenceKind(str(row["kind"]))
+            age = (as_of - observed_date).days
+            if age < 0 or age > FRESHNESS_DAYS[kind]:
+                continue
+            facts.append(EmployerResearchFact(
+                claim_id,
+                kind.value,
+                str(row["classification"]),
+                tuple(str(value) for value in source_ids),
+                content_hash(claim),
+                "current",
+            ))
+        return tuple(facts)
+
+    def compile_and_record(
+        self,
+        *,
+        fit_run_id: str,
+        as_of: date,
+    ) -> ApplicationStrategy:
+        """Compile from durable upstream authority and commit one exact result."""
+        database = CareerDatabase(self.path)
+        with self._connect() as connection:
+            fit = connection.execute(
+                """SELECT run.*,job.state AS job_state
+                   FROM fit_assessment_runs run
+                   JOIN pipeline_jobs job ON job.job_key=run.job_key
+                   WHERE run.run_id=?""",
+                (fit_run_id,),
+            ).fetchone()
+            if fit is None:
+                raise KeyError(fit_run_id)
+            if connection.execute(
+                """SELECT 1 FROM fit_assessment_runs
+                   WHERE predecessor_run_id=?""",
+                (fit_run_id,),
+            ).fetchone() is not None:
+                raise ValueError("application strategy requires the latest fit run")
+            if as_of < date.fromisoformat(str(fit["as_of"])):
+                raise ValueError("strategy date cannot predate the fit run")
+            requirements = self._requirements(connection, fit_run_id)
+            results = self._results(
+                connection,
+                fit_run_id,
+                str(fit["candidate_profile_hash"]),
+            )
+        dossier_result = database.post_research_dossier(str(fit["job_key"]))
+        if dossier_result is None:
+            raise ValueError("application strategy requires a durable employer dossier")
+        dossier, dossier_hash = dossier_result
+        opportunity = database.opportunity1_reassessment(
+            str(fit["job_key"]),
+            expected_dossier_hash=dossier_hash,
+        )
+        if opportunity is None or opportunity["decision"] != "pass":
+            raise ValueError("application strategy requires a passed Opportunity-1")
+        evidence = candidate_graph_evidence(self.path, as_of=as_of)
+        if evidence_projection_hash(evidence) != str(fit["candidate_profile_hash"]):
+            raise ValueError("candidate graph changed after the fit run")
+        with self._connect() as connection:
+            supports = self._candidate_support(
+                connection,
+                requirements,
+                results,
+                evidence,
+                as_of,
+            )
+            facts = self._employer_facts(
+                connection,
+                job_key=str(fit["job_key"]),
+                dossier=dossier,
+                as_of=as_of,
+            )
+        strategy = compile_application_strategy(
+            fit_run_id=fit_run_id,
+            dossier_hash=dossier_hash,
+            candidate_profile_hash=str(fit["candidate_profile_hash"]),
+            requirements=requirements,
+            match_results=results,
+            candidate_support=supports,
+            employer_facts=facts,
+            as_of=as_of,
+        )
+        expected_decision = {
+            "ready": "apply_now",
+            "gap_identified": "close_gap_first",
+            "blocked": "reject_candidacy",
+        }[str(fit["status"])]
+        if strategy.decision != expected_decision:
+            raise ValueError("strategy decision conflicts with durable fit status")
+        return self._record(
+            strategy,
+            job_key=str(fit["job_key"]),
+            predecessor_run_id=(
+                None
+                if fit["predecessor_run_id"] is None
+                else str(fit["predecessor_run_id"])
+            ),
+        )
+
+    def _record(
+        self,
+        strategy: ApplicationStrategy,
+        *,
+        job_key: str,
+        predecessor_run_id: str | None,
+    ) -> ApplicationStrategy:
+        verify_strategy_identity(strategy)
+        document_json = canonical_json(strategy.document())
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT run.status,run.document_hash,job.state AS job_state,
+                          dossier.dossier_hash,reassessment.decision AS opportunity_decision
+                   FROM fit_assessment_runs run
+                   JOIN pipeline_jobs job ON job.job_key=run.job_key
+                   JOIN employer_dossiers dossier ON dossier.job_key=run.job_key
+                   JOIN opportunity_reassessments reassessment
+                     ON reassessment.job_key=run.job_key
+                   WHERE run.run_id=? AND run.job_key=?""",
+                (strategy.fit_run_id, job_key),
+            ).fetchone()
+            if row is None:
+                raise ValueError("strategy upstream identities do not resolve")
+            if (
+                str(row["dossier_hash"]) != strategy.dossier_hash
+                or str(row["opportunity_decision"]) != "pass"
+            ):
+                raise ValueError("strategy upstream authority changed before commit")
+            expected_state = {
+                "apply_now": (
+                    PipelineState.FIT_REASSESSED
+                    if predecessor_run_id is not None
+                    else PipelineState.FIT_ASSESSED
+                ),
+                "close_gap_first": PipelineState.GAP_IDENTIFIED,
+                "reject_candidacy": PipelineState.CANDIDATE_REJECTED,
+            }[strategy.decision]
+            existing = connection.execute(
+                "SELECT * FROM application_strategies WHERE fit_run_id=?",
+                (strategy.fit_run_id,),
+            ).fetchone()
+            lifecycle_receipt_id = None
+            if strategy.decision == "apply_now":
+                transition = self.lifecycle.commit_in_transaction(
+                    connection,
+                    job_key=job_key,
+                    to_state=PipelineState.STRATEGY_READY,
+                    policy=PolicyIdentity(
+                        self.POLICY_ID,
+                        self.POLICY_VERSION,
+                        strategy.policy_sha256,
+                    ),
+                    inputs={
+                        "strategy_id": strategy.strategy_id,
+                        "fit_run_id": strategy.fit_run_id,
+                        "dossier_hash": strategy.dossier_hash,
+                        "candidate_profile_hash": strategy.candidate_profile_hash,
+                        "input_sha256": strategy.input_sha256,
+                        "document_sha256": strategy.document_sha256,
+                    },
+                    outputs={
+                        "decision": strategy.decision,
+                        "coverage": len(strategy.coverage),
+                        "elements": len(strategy.elements),
+                    },
+                    idempotency_key=(
+                        f"application-strategy:{job_key}:{strategy.fit_run_id}"
+                    ),
+                )
+                lifecycle_receipt_id = transition.receipt_id
+            elif existing is None and str(row["job_state"]) != expected_state.value:
+                raise ValueError("strategy decision is out of lifecycle order")
+            expected = (
+                strategy.strategy_id,
+                job_key,
+                strategy.fit_run_id,
+                strategy.dossier_hash,
+                strategy.candidate_profile_hash,
+                strategy.as_of.isoformat(),
+                strategy.decision,
+                strategy.input_sha256,
+                strategy.policy_sha256,
+                document_json,
+                strategy.document_sha256,
+                lifecycle_receipt_id,
+            )
+            if existing is not None:
+                actual = tuple(existing[key] for key in (
+                    "strategy_id",
+                    "job_key",
+                    "fit_run_id",
+                    "dossier_hash",
+                    "candidate_profile_hash",
+                    "as_of",
+                    "decision",
+                    "input_hash",
+                    "policy_hash",
+                    "document_json",
+                    "document_hash",
+                    "lifecycle_receipt_id",
+                ))
+                if actual != expected:
+                    raise ValueError("fit run already has a different application strategy")
+                stored_coverage = connection.execute(
+                    """SELECT fit_run_id,requirement_id,coverage_state,
+                              candidate_claim_ids_json,
+                              candidate_evidence_ids_json,reason_code
+                       FROM strategy_requirement_coverage
+                       WHERE strategy_id=? ORDER BY requirement_id""",
+                    (strategy.strategy_id,),
+                ).fetchall()
+                expected_coverage = tuple(
+                    (
+                        strategy.fit_run_id,
+                        row.requirement_id,
+                        row.state,
+                        canonical_json(row.candidate_claim_ids),
+                        canonical_json(row.candidate_evidence_ids),
+                        row.reason_code,
+                    )
+                    for row in strategy.coverage
+                )
+                stored_elements = connection.execute(
+                    """SELECT element_id,job_key,fit_run_id,element_kind,
+                              requirement_id,candidate_claim_id,
+                              candidate_claim_version,candidate_evidence_id,
+                              candidate_evidence_version,research_claim_id,
+                              employer_fact_hash,directive
+                       FROM strategy_elements WHERE strategy_id=?
+                       ORDER BY requirement_id,
+                         CASE element_kind
+                           WHEN 'cv_emphasis' THEN 0
+                           WHEN 'cover_letter_argument' THEN 1
+                           WHEN 'structured_answer' THEN 2
+                           WHEN 'interview_seed' THEN 3
+                           WHEN 'objection_response' THEN 4
+                           WHEN 'employer_hook' THEN 5
+                         END""",
+                    (strategy.strategy_id,),
+                ).fetchall()
+                expected_elements = tuple(
+                    (
+                        row.element_id,
+                        job_key,
+                        strategy.fit_run_id,
+                        row.kind,
+                        row.requirement_id,
+                        row.candidate_claim_id,
+                        row.candidate_claim_version,
+                        row.candidate_evidence_id,
+                        row.candidate_evidence_version,
+                        row.employer_research_claim_id,
+                        row.employer_fact_sha256,
+                        row.directive,
+                    )
+                    for row in strategy.elements
+                )
+                if (
+                    tuple(tuple(row) for row in stored_coverage)
+                    != expected_coverage
+                    or tuple(tuple(row) for row in stored_elements)
+                    != expected_elements
+                ):
+                    raise ValueError(
+                        "stored application strategy children differ from its document"
+                    )
+            else:
+                connection.execute(
+                    """INSERT INTO application_strategies(
+                         strategy_id,job_key,fit_run_id,dossier_hash,
+                         candidate_profile_hash,as_of,decision,input_hash,
+                         policy_hash,document_json,document_hash,
+                         lifecycle_receipt_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    expected,
+                )
+                for coverage in strategy.coverage:
+                    connection.execute(
+                        """INSERT INTO strategy_requirement_coverage(
+                             strategy_id,fit_run_id,requirement_id,
+                             coverage_state,candidate_claim_ids_json,
+                             candidate_evidence_ids_json,reason_code)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (
+                            strategy.strategy_id,
+                            strategy.fit_run_id,
+                            coverage.requirement_id,
+                            coverage.state,
+                            canonical_json(coverage.candidate_claim_ids),
+                            canonical_json(coverage.candidate_evidence_ids),
+                            coverage.reason_code,
+                        ),
+                    )
+                for element in strategy.elements:
+                    connection.execute(
+                        """INSERT INTO strategy_elements(
+                             element_id,strategy_id,job_key,fit_run_id,
+                             element_kind,requirement_id,candidate_claim_id,
+                             candidate_claim_version,candidate_evidence_id,
+                             candidate_evidence_version,research_claim_id,
+                             employer_fact_hash,directive)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            element.element_id,
+                            strategy.strategy_id,
+                            job_key,
+                            strategy.fit_run_id,
+                            element.kind,
+                            element.requirement_id,
+                            element.candidate_claim_id,
+                            element.candidate_claim_version,
+                            element.candidate_evidence_id,
+                            element.candidate_evidence_version,
+                            element.employer_research_claim_id,
+                            element.employer_fact_sha256,
+                            element.directive,
+                        ),
+                    )
+            connection.commit()
+            return strategy
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def load(
+        self,
+        strategy_id: str,
+        *,
+        as_of: date,
+    ) -> ApplicationStrategy:
+        """Load only a canonical strategy whose upstream authority is still current."""
+        _digest(strategy_id, "strategy ID")
+        with self._connect() as connection:
+            parent = connection.execute(
+                """SELECT strategy.*,run.candidate_profile_hash AS fit_profile_hash
+                   FROM application_strategies strategy
+                   JOIN fit_assessment_runs run
+                     ON run.run_id=strategy.fit_run_id
+                   WHERE strategy.strategy_id=?""",
+                (strategy_id,),
+            ).fetchone()
+            if parent is None:
+                raise KeyError(strategy_id)
+            coverage_rows = connection.execute(
+                """SELECT * FROM strategy_requirement_coverage
+                   WHERE strategy_id=? ORDER BY requirement_id""",
+                (strategy_id,),
+            ).fetchall()
+            element_rows = connection.execute(
+                """SELECT * FROM strategy_elements
+                   WHERE strategy_id=?""",
+                (strategy_id,),
+            ).fetchall()
+        try:
+            stored_document = json.loads(str(parent["document_json"]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("stored application strategy is not valid JSON") from exc
+        coverage = tuple(
+            RequirementCoverage(
+                str(row["requirement_id"]),
+                str(row["coverage_state"]),
+                tuple(json.loads(str(row["candidate_claim_ids_json"]))),
+                tuple(json.loads(str(row["candidate_evidence_ids_json"]))),
+                str(row["reason_code"]),
+            )
+            for row in coverage_rows
+        )
+        element_rows = sorted(
+            element_rows,
+            key=lambda row: (
+                str(row["requirement_id"]),
+                ELEMENT_KINDS.index(str(row["element_kind"])),
+            ),
+        )
+        elements = tuple(
+            StrategyElement(
+                str(row["element_id"]),
+                str(row["element_kind"]),
+                str(row["requirement_id"]),
+                str(row["candidate_claim_id"]),
+                int(row["candidate_claim_version"]),
+                str(row["candidate_evidence_id"]),
+                int(row["candidate_evidence_version"]),
+                str(row["research_claim_id"]),
+                str(row["employer_fact_hash"]),
+                str(row["directive"]),
+            )
+            for row in element_rows
+        )
+        strategy = ApplicationStrategy(
+            str(parent["strategy_id"]),
+            str(parent["fit_run_id"]),
+            str(parent["dossier_hash"]),
+            str(parent["candidate_profile_hash"]),
+            date.fromisoformat(str(parent["as_of"])),
+            str(parent["decision"]),
+            coverage,
+            elements,
+            str(parent["input_hash"]),
+            str(parent["policy_hash"]),
+            str(parent["document_hash"]),
+        )
+        verify_strategy_identity(strategy)
+        if (
+            not isinstance(stored_document, dict)
+            or canonical_json(stored_document) != str(parent["document_json"])
+            or canonical_json(stored_document)
+            != canonical_json(strategy.document())
+            or str(parent["fit_profile_hash"]) != strategy.candidate_profile_hash
+            or as_of < strategy.as_of
+        ):
+            raise ValueError("stored application strategy identity is inconsistent")
+        database = CareerDatabase(self.path)
+        dossier_result = database.post_research_dossier(str(parent["job_key"]))
+        if dossier_result is None or dossier_result[1] != strategy.dossier_hash:
+            raise ValueError("stored strategy dossier authority is unavailable")
+        evidence = candidate_graph_evidence(self.path, as_of=as_of)
+        if evidence_projection_hash(evidence) != strategy.candidate_profile_hash:
+            raise ValueError("stored strategy candidate authority is no longer current")
+        with self._connect() as connection:
+            current_facts = self._employer_facts(
+                connection,
+                job_key=str(parent["job_key"]),
+                dossier=dossier_result[0],
+                as_of=as_of,
+            )
+        fact_bindings = {
+            (row.claim_id, row.content_sha256)
+            for row in current_facts
+        }
+        if any(
+            (row.employer_research_claim_id, row.employer_fact_sha256)
+            not in fact_bindings
+            for row in strategy.elements
+        ):
+            raise ValueError("stored strategy employer authority is no longer current")
+        self.lifecycle.verify()
+        return strategy
