@@ -339,6 +339,68 @@ def test_absent_robots_is_receipted_and_ten_second_floor_is_enforced(
     assert client.calls == [("static", robots_url)]
 
 
+def test_robots_receipts_are_scoped_to_exact_origin(tmp_path: Path) -> None:
+    https_url = URL
+    http_url = URL.replace("https://", "http://")
+
+    class OriginClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def fetch(self, engine: str, url: str, **_: Any) -> dict[str, Any]:
+            self.calls.append((engine, url))
+            body = (
+                b"User-agent: *\nAllow: /\n"
+                if url.startswith("https://")
+                else b"User-agent: *\nDisallow: /jobs\n"
+            )
+            return _response(200, body, url=url)
+
+    client = OriginClient()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        RawResponseCache(tmp_path / "raw"),
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    assert controller.before_request(https_url).allowed
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(http_url)
+    assert client.calls == [
+        ("static", f"https://{HOST}/robots.txt"),
+        ("static", f"http://{HOST}/robots.txt"),
+    ]
+
+
+def test_global_ipv6_origin_uses_bracketed_robots_authority(tmp_path: Path) -> None:
+    host = "2001:4860:4860::8888"
+    url = f"https://[{host}]/jobs/engineer"
+    robots_url = f"https://[{host}]/robots.txt"
+    policy = _policy(
+        tmp_path / "ipv6-access.json",
+        hosts=(host,),
+        terms_url=f"https://[{host}]/terms",
+    )
+    client = _Client(
+        _response(200, b"User-agent: *\nAllow: /\n", url=robots_url)
+    )
+    clock = _Clock()
+    controller = PublicAccessController(
+        policy,
+        client,
+        RawResponseCache(tmp_path / "raw"),
+        clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    receipt = controller.before_request(url)
+    assert receipt.robots_url == robots_url
+    assert client.calls == [("static", robots_url)]
+    assert clock.sleeps == [10.0]
+
+
 def test_cross_host_robots_redirect_is_rejected(tmp_path: Path) -> None:
     controller, _, _, _ = _controller(
         tmp_path,

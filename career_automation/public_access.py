@@ -56,6 +56,16 @@ def _require_public_host(host: str) -> None:
         raise PublicAccessDenied("access policy accepts public hosts only")
 
 
+def _origin_netloc(host: str, port: str) -> str:
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        if ":" in host:
+            raise ValueError("access policy host is malformed")
+        return host + port
+    return f"[{host}]{port}" if literal.version == 6 else host + port
+
+
 def _public_origin(url: str) -> tuple[str, str, str]:
     parsed = urlsplit(url)
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -268,7 +278,7 @@ class PublicAccessPolicy:
                 raise ValueError("access attestation fields must be non-empty strings")
             attestation = TermsAttestation(**record)
             host = attestation.host.casefold()
-            parsed_host = urlsplit("https://" + host)
+            parsed_host = urlsplit("https://" + _origin_netloc(host, ""))
             if (host != attestation.host or host in attestations
                     or parsed_host.hostname != host or parsed_host.port is not None):
                 raise ValueError("access policy hosts must be unique lowercase names")
@@ -348,12 +358,12 @@ class PublicAccessController:
         self.clock = clock
         self.sleeper = sleeper
         self.now = now or (lambda: datetime.now(timezone.utc))
-        self._receipts: dict[str, RobotsReceipt] = {}
+        self._receipts: dict[tuple[str, str, str], RobotsReceipt] = {}
         self._last_request: dict[str, float] = {}
 
     @property
     def receipts(self) -> tuple[RobotsReceipt, ...]:
-        return tuple(self._receipts[host] for host in sorted(self._receipts))
+        return tuple(self._receipts[origin] for origin in sorted(self._receipts))
 
     def _throttle(self, host: str, delay: float) -> None:
         current = self.clock()
@@ -376,9 +386,10 @@ class PublicAccessController:
 
     def authorize(self, url: str) -> RobotsReceipt:
         scheme, host, port = _public_origin(url)
+        origin = (scheme, host, port)
         attestation = self.policy.require(url)
-        if host in self._receipts:
-            receipt = self._receipts[host]
+        if origin in self._receipts:
+            receipt = self._receipts[origin]
             body = self.cache.resolve(receipt.raw_response_ref, receipt.content_sha256)
             allowed = True
             if 200 <= receipt.status_code < 300:
@@ -386,7 +397,9 @@ class PublicAccessController:
                 if not allowed:
                     raise PublicAccessDenied(f"ROBOTS_DISALLOWED: {url}")
             return replace(receipt, requested_url=url, allowed=allowed)
-        robots_url = urlunsplit((scheme, host + port, "/robots.txt", "", ""))
+        robots_url = urlunsplit(
+            (scheme, _origin_netloc(host, port), "/robots.txt", "", "")
+        )
         self._throttle(host, self.default_delay_seconds)
         try:
             response = self.client.fetch(
@@ -442,7 +455,7 @@ class PublicAccessController:
             terms_policy_sha256=self.policy.policy_sha256,
             terms_attestation=asdict(attestation),
         )
-        self._receipts[host] = receipt
+        self._receipts[origin] = receipt
         if not allowed:
             raise PublicAccessDenied(f"ROBOTS_DISALLOWED: {url}")
         return receipt
@@ -489,7 +502,13 @@ def replay_access_receipt(
             or robots_origin != receipt_origin or final_origin != receipt_origin):
         raise ValueError("access receipt host differs from captured content")
     expected_robots = urlunsplit(
-        (receipt_origin[0], receipt_origin[1] + receipt_origin[2], "/robots.txt", "", "")
+        (
+            receipt_origin[0],
+            _origin_netloc(receipt_origin[1], receipt_origin[2]),
+            "/robots.txt",
+            "",
+            "",
+        )
     )
     final_robots = urlsplit(receipt.final_url)
     if (receipt.robots_url != expected_robots
