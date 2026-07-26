@@ -240,14 +240,39 @@ def validate_admission_evidence(
             for record in raw_records
             if isinstance(record, dict)
         }
-        if set(snapshot_records) != set(records_by_key):
+        if (len(snapshot_records) != len(raw_records)
+                or "" in snapshot_records
+                or set(snapshot_records) != set(records_by_key)):
             raise ValueError("published JSON snapshot differs from the manifest cohort")
         for key, manifest_record in records_by_key.items():
             source = snapshot_records[key]
-            if (manifest_record.get("admitted_payload_hash") != source.get("payload_hash")
+            decision = source.get("opportunity0_decision")
+            reassessment = manifest_record.get("opportunity1_reassessment")
+            if (manifest_record.get("vacancy_url") != source.get("url")
+                    or manifest_record.get("company") != source.get("company")
+                    or manifest_record.get("role") != source.get("title")
+                    or manifest_record.get("admitted_payload_hash")
+                    != source.get("payload_hash")
+                    or manifest_record.get("opportunity0_input")
+                    != source.get("opportunity0_input")
+                    or manifest_record.get("opportunity0_confidence")
+                    != source.get("confidence")
+                    or manifest_record.get("opportunity0_decision") != decision
+                    or manifest_record.get("opportunity0_source")
+                    != source.get("source")
+                    or manifest_record.get("opportunity0_observed_at")
+                    != source.get("observed_at")
                     or manifest_record.get("opportunity0_raw_response_refs")
-                    != source.get("raw_response_refs")):
-                raise ValueError("manifest admission provenance differs from its snapshot")
+                    != source.get("raw_response_refs")
+                    or not isinstance(decision, Mapping)
+                    or type(decision.get("score_bp")) is not int
+                    or not isinstance(reassessment, Mapping)
+                    or type(reassessment.get("opportunity0_score_bp")) is not int
+                    or reassessment["opportunity0_score_bp"]
+                    != decision["score_bp"]):
+                raise ValueError(
+                    "manifest Opportunity-0 authority differs from its JSON snapshot"
+                )
         raw_relative, raw_root = _safe_relative(capture, descriptor["raw_cache_root"])
         if raw_relative.as_posix() != "admission/raw" or not raw_root.is_dir():
             raise ValueError("published admission raw cache is missing")

@@ -84,7 +84,33 @@ def _json_evidence(tmp_path: Path):
     }]
     source_record = {
         "job_key": "greenhouse:example:1",
+        "url": "https://jobs.example.test/1",
+        "company": "Example",
+        "title": "Platform Engineer",
         "payload_hash": "payload-hash",
+        "opportunity0_input": {
+            "market_demand_bp": 9000,
+            "role_quality_bp": 8500,
+            "application_accessibility_bp": 9000,
+        },
+        "confidence": {
+            "vacancy_completeness_bp": 9000,
+            "market_demand_bp": 9000,
+            "role_quality_bp": 9000,
+            "application_accessibility_bp": 9000,
+        },
+        "opportunity0_decision": {
+            "score_bp": 8750,
+            "decision": "pass",
+            "reason": "viable",
+            "policy_hash": "policy-hash",
+        },
+        "source": {
+            "identity": "greenhouse:example:1",
+            "adapter": "greenhouse",
+            "authority": "official-public-employer-or-ats",
+        },
+        "observed_at": stamp,
         "raw_response_refs": raw_refs,
     }
     snapshot = tmp_path / "queue.json"
@@ -97,8 +123,17 @@ def _json_evidence(tmp_path: Path):
     snapshot.write_bytes(_canonical(snapshot_payload))
     manifest_record = {
         "job_key": source_record["job_key"],
+        "vacancy_url": source_record["url"],
+        "company": source_record["company"],
+        "role": source_record["title"],
         "admitted_payload_hash": source_record["payload_hash"],
+        "opportunity0_input": source_record["opportunity0_input"],
+        "opportunity0_confidence": source_record["confidence"],
+        "opportunity0_decision": source_record["opportunity0_decision"],
+        "opportunity0_source": source_record["source"],
+        "opportunity0_observed_at": source_record["observed_at"],
         "opportunity0_raw_response_refs": raw_refs,
+        "opportunity1_reassessment": {"opportunity0_score_bp": 8750},
     }
     return snapshot, source_record, manifest_record, {policy_hash: policy}
 
@@ -150,6 +185,83 @@ def test_json_admission_tampering_fails_closed(
     else:
         descriptor["referenced_files_hash"] = "0" * 64
     with pytest.raises(ValueError):
+        validate_admission_evidence(
+            stage,
+            descriptor,
+            [manifest],
+            expected_snapshot_sha256=descriptor["snapshot_sha256"],
+            access_policies=policies,
+        )
+
+
+@pytest.mark.parametrize(
+    "attack",
+    (
+        "vacancy",
+        "company",
+        "role",
+        "input",
+        "confidence",
+        "decision",
+        "source",
+        "observed-at",
+        "opportunity-score",
+    ),
+)
+def test_json_admission_binds_complete_opportunity0_authority(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    snapshot, source, manifest, policies = _json_evidence(tmp_path)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    descriptor = publish_admission_evidence(snapshot, [source], stage)
+    if attack == "vacancy":
+        manifest["vacancy_url"] = "https://jobs.example.test/substituted"
+    elif attack == "company":
+        manifest["company"] = "Substituted Employer"
+    elif attack == "role":
+        manifest["role"] = "Substituted Role"
+    elif attack == "input":
+        manifest["opportunity0_input"] = {"market_demand_bp": 1000}
+    elif attack == "confidence":
+        manifest["opportunity0_confidence"] = {"vacancy_completeness_bp": 1000}
+    elif attack == "decision":
+        manifest["opportunity0_decision"] = {
+            **manifest["opportunity0_decision"],
+            "reason": "substituted",
+        }
+    elif attack == "source":
+        manifest["opportunity0_source"] = {
+            **manifest["opportunity0_source"],
+            "identity": "substituted:identity",
+        }
+    elif attack == "observed-at":
+        manifest["opportunity0_observed_at"] = "2020-01-01T00:00:00+00:00"
+    else:
+        manifest["opportunity1_reassessment"]["opportunity0_score_bp"] = 1000
+    with pytest.raises(ValueError, match="JSON snapshot|admission|Opportunity-0"):
+        validate_admission_evidence(
+            stage,
+            descriptor,
+            [manifest],
+            expected_snapshot_sha256=descriptor["snapshot_sha256"],
+            access_policies=policies,
+        )
+
+
+def test_json_admission_rejects_duplicate_snapshot_job_keys(tmp_path: Path) -> None:
+    snapshot, source, manifest, policies = _json_evidence(tmp_path)
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    payload["records"].append(json.loads(json.dumps(source)))
+    payload["records_hash"] = hashlib.sha256(
+        _canonical(payload["records"])
+    ).hexdigest()
+    snapshot.write_bytes(_canonical(payload))
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    descriptor = publish_admission_evidence(snapshot, [source], stage)
+    with pytest.raises(ValueError, match="duplicate|identity|snapshot"):
         validate_admission_evidence(
             stage,
             descriptor,
