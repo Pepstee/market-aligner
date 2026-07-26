@@ -11,7 +11,6 @@ import json
 import sqlite3
 import subprocess
 import sys
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
@@ -22,19 +21,16 @@ from career_automation.database import CareerDatabase
 from career_automation.employer_research import (
     Citation,
     EmployerResearchWorker,
+    FRESHNESS_DAYS,
     RawResponseCache,
     content_hash,
-    load_frozen_dossiers,
     validate_dossier,
 )
 from career_automation.engine import OpportunityGate, scored_job_from_payload
-from career_automation.models import PipelineState
+from career_automation.models import IntelligenceKind, PipelineState
 
 
 ROOT = Path(__file__).resolve().parent
-CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
-MANIFEST = CAPTURE / "research_manifest.json"
-ACCEPTANCE = ROOT / "scripts/accept_jaa_04.py"
 
 
 def _job(job_id: str, opportunity: float = 0.9):
@@ -47,23 +43,70 @@ def _job(job_id: str, opportunity: float = 0.9):
 
 
 def _strict_dossier(cache: RawResponseCache, job_key: str) -> dict[str, object]:
-    body = f"public evidence for {job_key}".encode()
-    digest, reference = cache.store(body)
-    today = date.today().isoformat()
+    paragraphs = {
+        IntelligenceKind.COMPANY: "Example operates a documented public business serving customers.",
+        IntelligenceKind.ROLE: "The Engineer role has documented responsibilities and duties.",
+        IntelligenceKind.PRODUCT: "The product platform provides a service for customers.",
+        IntelligenceKind.HIRING: "The careers vacancy invites candidates to apply through hiring.",
+        IntelligenceKind.OPERATIONAL_HEALTH: (
+            "In 2026 Example reported operational revenue and profit performance."
+        ),
+    }
+    source_types = {
+        IntelligenceKind.COMPANY: "official_company",
+        IntelligenceKind.ROLE: "official_vacancy",
+        IntelligenceKind.PRODUCT: "official_product",
+        IntelligenceKind.HIRING: "official_careers",
+        IntelligenceKind.OPERATIONAL_HEALTH: "official_financial",
+    }
+    timestamp = f"{date.today().isoformat()}T00:00:00+00:00"
+    sources: list[dict[str, object]] = []
+    plan: list[dict[str, object]] = []
+    claims: list[dict[str, object]] = []
+    for index, kind in enumerate(IntelligenceKind):
+        excerpt = f"<p>{paragraphs[kind]}</p>"
+        digest, reference = cache.store(excerpt.encode())
+        source_id = f"source-{kind.value}"
+        plan_id = f"plan-{kind.value}"
+        sources.append({
+            "id": source_id,
+            "url": f"https://8.8.8.8/{job_key}/{index}",
+            "captured_at": timestamp,
+            "retrieved_at": timestamp,
+            "published_at": timestamp,
+            "updated_at": None,
+            "content_sha256": digest,
+            "raw_response_ref": reference,
+            "status_code": 200,
+        })
+        plan.append({
+            "id": plan_id,
+            "kind": kind.value,
+            "source_id": source_id,
+            "source_type": source_types[kind],
+            "permitted_purposes": [kind.value],
+            "freshness_days": FRESHNESS_DAYS[kind],
+            "excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest(),
+        })
+        claims.append({
+            "id": f"claim-{kind.value}",
+            "kind": kind.value,
+            "classification": "fact" if kind is IntelligenceKind.COMPANY else "inference",
+            "text": f"Example has independently evidenced {kind.value} intelligence.",
+            "observed_at": timestamp,
+            "source_captured_at": timestamp,
+            "freshness_classification": "current",
+            "source_ids": [source_id],
+            "source_plan_id": plan_id,
+            "citation_excerpt": excerpt,
+        })
     return {
-        "schema_version": "jaa04.dossier.v1", "job_key": job_key,
+        "schema_version": "jaa04.dossier.v1",
+        "job_key": job_key,
         "raw_cache_root": str(cache.root),
-        "sources": [{
-            "id": "public-source", "url": "https://8.8.8.8/public-source",
-            "captured_at": f"{today}T00:00:00+00:00",
-            "retrieved_at": f"{today}T00:00:00+00:00",
-            "content_sha256": digest, "raw_response_ref": reference, "status_code": 200,
-        }],
-        "claims": [{
-            "id": "public-claim", "kind": "company", "classification": "fact",
-            "text": "The employer has a cited public corporate page.",
-            "observed_at": f"{today}T00:00:00+00:00", "source_ids": ["public-source"],
-        }],
+        "sources": sources,
+        "source_plan": plan,
+        "claims": claims,
         "edges": [],
     }
 
@@ -81,54 +124,6 @@ def _complete(database: CareerDatabase, job_key: str, cache: RawResponseCache, w
         job_key=job_key, worker_id=worker, dossier=dossier, dossier_hash=content_hash(dossier),
     )
     return dossier
-
-
-def test_all_thirty_frozen_records_validate_against_receipt_backed_raw_corpus() -> None:
-    """Offline validation is deliberately not represented as a live retrieval."""
-    cache = RawResponseCache(CAPTURE / "raw")
-    dossiers = load_frozen_dossiers(CAPTURE / "frozen_dossiers.json", cache, strict_corpus=True)
-    assert len(dossiers) == 30
-    assert {item["job_key"] for item in dossiers} == {
-        f"jaa04-{number:03d}" for number in range(1, 31)
-    }
-    generic_texts: dict[str, set[str]] = {}
-    required_kinds = {"company", "role", "product", "hiring", "operational_health"}
-    for dossier in dossiers:
-        validate_dossier(dossier, cache)
-        company = dossier["claims"][0]["text"].split(":", 1)[0].strip()
-        assert company
-        sources = {source["id"]: source for source in dossier["sources"]}
-        assert {claim["kind"] for claim in dossier["claims"]} == required_kinds
-        for claim in dossier["claims"]:
-            # Every intelligence item, not merely the first company claim,
-            # must be traceable to actual captured response bytes.
-            assert claim["source_ids"]
-            cited_bytes = [
-                cache.resolve(sources[source_id]["raw_response_ref"], sources[source_id]["content_sha256"])
-                for source_id in claim["source_ids"]
-            ]
-            excerpt = claim.get("citation_excerpt")
-            assert isinstance(excerpt, str) and excerpt.strip()
-            assert any(excerpt.encode("utf-8") in body for body in cited_bytes)
-            assert claim["text"].strip() != company
-            assert len(claim["text"].split()) >= 8
-            # Prefixing a common template with a company name does not turn it
-            # into employer-specific intelligence.  Normalise that name out
-            # and require a distinct substantive statement for every dossier.
-            normalised = claim["text"].casefold().replace(company.casefold(), "<employer>")
-            generic_texts.setdefault(claim["kind"], set()).add(normalised)
-
-    assert {kind: len(texts) for kind, texts in generic_texts.items()} == {
-        kind: 30 for kind in required_kinds
-    }
-
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    receipt = json.loads((CAPTURE / "capture_receipt.json").read_text(encoding="utf-8"))
-    assert receipt["status"] == "SUCCESS" and receipt["captured_count"] == 30
-    assert receipt["manifest_sha256"] == hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
-    assert {row["content_sha256"] for row in manifest["records"]} == {
-        dossier["sources"][0]["content_sha256"] for dossier in dossiers
-    }
 
 
 @pytest.mark.parametrize("attack", ["uncited", "hallucinated", "stale-current", "protected", "private-person"])
@@ -192,18 +187,28 @@ def test_opportunity_one_demotes_strong_vacancy_and_retains_zero_with_sorted_rea
     _complete(database, job_key, cache, "researcher")
     # Deliberately reverse input order: persisted explanation must be deterministic.
     result = database.apply_opportunity1(job_key=job_key, signals=[
-        {"claim_id": "zeta", "reason": "Funding was withdrawn.", "delta_bp": -2_000},
-        {"claim_id": "alpha", "reason": "Role scope materially narrowed.", "delta_bp": -2_000},
+        {"claim_id": "claim-role", "reason": "Role scope materially narrowed.", "delta_bp": -2_000},
+        {
+            "claim_id": "claim-operational_health",
+            "reason": "Funding was withdrawn.",
+            "delta_bp": -2_000,
+        },
     ])
     assert result["opportunity0_score_bp"] == 9000
     assert result["score_bp"] == 5000 and result["decision"] == "reject"
-    assert [row["claim_id"] for row in result["changes"]] == ["alpha", "zeta"]
+    assert [row["claim_id"] for row in result["changes"]] == [
+        "claim-operational_health",
+        "claim-role",
+    ]
     with database.connection() as conn:
         job = conn.execute("SELECT opportunity,opportunity_decision,state FROM pipeline_jobs WHERE job_key=?", (job_key,)).fetchone()
         reassessment = conn.execute("SELECT opportunity0_score_bp,opportunity1_score_bp,decision,changes_json FROM opportunity_reassessments WHERE job_key=?", (job_key,)).fetchone()
     assert tuple(job) == (0.9, "pass", PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH.value)
     assert tuple(reassessment)[:3] == (9000, 5000, "reject")
-    assert [item["claim_id"] for item in json.loads(reassessment["changes_json"])] == ["alpha", "zeta"]
+    assert [item["claim_id"] for item in json.loads(reassessment["changes_json"])] == [
+        "claim-operational_health",
+        "claim-role",
+    ]
 
 
 def test_expired_lease_concurrent_replay_completes_exactly_one_dossier(tmp_path: Path) -> None:
@@ -237,8 +242,13 @@ def test_production_worker_consumes_real_database_queue_and_fails_closed_for_ret
 
     class PublicRetriever:
         def retrieve(self, source_id: str, url: str) -> Citation:
-            body = (b"<html><p>Example operates a documented public service with "
-                    b"products, delivery responsibilities, and current hiring context.</p></html>")
+            body = (
+                b"<p>Example operates a documented public business serving customers.</p>"
+                b"<p>The Engineer role has documented responsibilities and duties.</p>"
+                b"<p>The product platform provides a service for customers.</p>"
+                b"<p>The careers vacancy invites candidates to apply through hiring.</p>"
+                b"<p>In 2026 Example reported operational revenue and profit performance.</p>"
+            )
             digest, reference = cache.store(body)
             timestamp = date.today().isoformat() + "T00:00:00+00:00"
             return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,
@@ -278,25 +288,20 @@ def test_production_worker_consumes_real_database_queue_and_fails_closed_for_ret
             assert conn.execute("SELECT COUNT(*) FROM employer_dossiers WHERE job_key=?", (failed_key,)).fetchone()[0] == 0
 
 
-def test_jaa04_command_is_declared_and_successful_runs_create_revision_bound_receipt(tmp_path: Path) -> None:
+def test_jaa04_command_is_declared_and_refuses_missing_external_authority(tmp_path: Path) -> None:
     declaration = (ROOT / "acceptance").read_text(encoding="utf-8")
-    assert "scripts/accept_jaa_04.py" in declaration
+    assert "scripts/run_acceptance_declaration.py" in declaration
     clone = tmp_path / "certification-repository"
     copied = subprocess.run(("git", "clone", "--no-local", str(ROOT), str(clone)), text=True, capture_output=True, check=False)
     assert copied.returncode == 0, copied.stderr
-    shutil.rmtree(clone / "runtime_evidence" / "jaa04", ignore_errors=True)
-    completed = subprocess.run((sys.executable, "scripts/accept_jaa_04.py"), cwd=clone, text=True, capture_output=True, check=False)
-    assert completed.returncode == 0, completed.stderr
-    response = json.loads(completed.stdout)
-    receipt = clone / response["receipt"]
-    payload = receipt.read_bytes()
-    document = json.loads(payload)
-    assert receipt.name == f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
-    assert document["status"] == "PASS"
-    assert document["source_revision"] == subprocess.run(("git", "rev-parse", "HEAD"), cwd=clone, text=True, capture_output=True, check=True).stdout.strip()
-    revision = subprocess.run(
-        (sys.executable, "-c", "from tracked_source_revision import source_content_revision; print(source_content_revision('.'))"),
-        cwd=clone, text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    assert document["source_content_revision"] == revision
-    assert document["source_content_revision_contract"]["algorithm"] == "sha256"
+    receipt = tmp_path / "receipt"
+    completed = subprocess.run(
+        (sys.executable, "scripts/accept_jaa_04.py", "--receipt", str(receipt)),
+        cwd=clone,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "--capture" in completed.stderr and "--access-policy" in completed.stderr
+    assert not receipt.exists()

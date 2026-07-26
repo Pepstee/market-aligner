@@ -21,7 +21,6 @@ from career_automation.models import IntelligenceKind
 
 
 ROOT = Path(__file__).resolve().parent
-CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
 KINDS = tuple(IntelligenceKind)
 
 
@@ -77,6 +76,7 @@ def _authority_dossier(
             "canonical_publisher": host,
             "canonical_article": article,
             "publisher_date_evidence": metadata,
+            "retrieval_engine": "scrapling-static",
         })
         plan_id = f"plan-{kind.value}"
         plan.append({
@@ -121,31 +121,15 @@ def test_valid_authority_dossier_positive_control(tmp_path: Path) -> None:
     validate_dossier(dossier, cache, as_of=date(2026, 7, 20))
 
 
-def test_each_frozen_dossier_has_byte_resolvable_publisher_dates() -> None:
-    envelope = json.loads((CAPTURE / "frozen_dossiers.json").read_text(encoding="utf-8"))
-    dossiers = envelope["dossiers"]
-    assert len(dossiers) == 30
-    cache = RawResponseCache(CAPTURE / "raw")
-    for dossier in dossiers:
-        assert dossier["schema_version"] == "jaa04.dossier.v2"
-        sources = {source["id"]: source for source in dossier["sources"]}
-        assert len(sources) == 5
-        freshness_sensitive = {"role", "hiring", "operational_health"}
-        plans = {entry["id"]: entry for entry in dossier["source_plan"]}
-        for claim in dossier["claims"]:
-            source = sources[claim["source_ids"][0]]
-            assert source["captured_at"]
-            requires_current = plans[claim["source_plan_id"]].get("requires_current") is True
-            if claim["kind"] in freshness_sensitive or requires_current:
-                assert source.get("published_at") or source.get("updated_at")
-                assert source["publisher_date_evidence"]
-                assert claim["observed_at"] in {
-                    source.get("updated_at"), source.get("published_at"),
-                }
-                assert source["publisher_date_evidence"].encode() in cache.resolve(
-                    source["raw_response_ref"], source["content_sha256"]
-                )
-        validate_dossier(dossier, cache)
+def test_runtime_authority_evidence_is_external_and_required() -> None:
+    manifest = json.loads((ROOT / "ASSURANCE_MANIFEST.json").read_text(encoding="utf-8"))
+    evidence = manifest["components"]["JAA-04"]["evidence"]
+    assert {(row["scope"], row["required"], row["tracked"]) for row in evidence} == {
+        ("JAA-04-corpus", True, False),
+        ("JAA-04-live-canary", True, False),
+    }
+    assert not (ROOT / "career_automation/fixtures/jaa04_capture").exists()
+    assert not (ROOT / "career_automation/fixtures/jaa04_capture_plan.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -193,22 +177,30 @@ def test_alias_mirror_and_uniform_kind_relabelling_fail_closed(
         validate_dossier(dossier, cache)
 
 
-def test_unsupported_operational_health_claim_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("attack", ("divergent-assertion", "missing-employer-prefix"))
+def test_v2_authority_claim_text_must_exactly_reflect_its_excerpt(
+    tmp_path: Path,
+    attack: str,
+) -> None:
     dossier, cache = _authority_dossier(tmp_path)
     health = next(
         claim for claim in dossier["claims"]  # type: ignore[union-attr]
         if claim["kind"] == "operational_health"
     )
-    health["text"] = "Example entered insolvency proceedings and closed all operations."
-    with pytest.raises(ValueError, match="operational|claim|evidence|support"):
+    if attack == "divergent-assertion":
+        health["text"] = "Example: entered insolvency proceedings and closed all operations."
+    else:
+        health["text"] = _paragraph(IntelligenceKind.OPERATIONAL_HEALTH)
+    with pytest.raises(ValueError, match="exactly reflect"):
         validate_dossier(dossier, cache)
 
 
 def test_operator_gate_declares_zero_skip_authority_suite() -> None:
-    script = (ROOT / "scripts/accept_jaa_04.py").read_text(encoding="utf-8")
-    assert "pytest -q" in script
-    assert "test_jaa04_authority_recertification.py" in script
-    assert "skipped" in script and "require" in script
+    declaration = (ROOT / "acceptance").read_text(encoding="utf-8")
+    assert "scripts/run_acceptance_declaration.py" in declaration
+    runner = (ROOT / "scripts/run_acceptance_declaration.py").read_text(encoding="utf-8")
+    assert "JAA04_CORPUS" in runner and "JAA04_ACCESS_POLICY" in runner
+    assert "return 3" in runner
 
 
 def test_recertification_refuses_receipt_for_invalid_authority_corpus(tmp_path: Path) -> None:

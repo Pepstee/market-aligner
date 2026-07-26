@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import hashlib
-import re
 from datetime import date
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pytest
 
@@ -15,108 +11,10 @@ from career_automation.database import CareerDatabase
 from career_automation.employer_research import (
     Citation,
     EmployerResearchWorker,
-    FRESHNESS_DAYS,
     Opportunity1Coordinator,
     RawResponseCache,
 )
 from career_automation.engine import OpportunityGate, scored_job_from_payload
-from career_automation.models import IntelligenceKind
-
-
-ROOT = Path(__file__).resolve().parent
-CAPTURE = ROOT / "career_automation/fixtures/jaa04_capture"
-CAPTURE_PLAN = ROOT / "career_automation/fixtures/jaa04_capture_plan.json"
-ADMITTED_QUEUE = ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"
-
-
-def test_capture_plan_is_bound_to_the_admitted_opportunity_queue() -> None:
-    queue = json.loads(ADMITTED_QUEUE.read_text(encoding="utf-8"))
-    records = queue.get("records", [])
-    canonical = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == queue.get("records_hash")
-    assert len(records) == len({row["job_key"] for row in records}) == 30
-    admitted = {row["job_key"]: row for row in records}
-
-    plan = json.loads(CAPTURE_PLAN.read_text(encoding="utf-8"))["records"]
-    assert {row.get("job_key") for row in plan} == set(admitted)
-    for row in plan:
-        source = admitted[row["job_key"]]
-        assert row.get("company") == source["company"]
-        assert row.get("role") == source["title"]
-        assert row.get("official_vacancy_url") == source["url"]
-
-
-def test_capture_plan_uses_purpose_specific_authorities() -> None:
-    """Different URLs do not become different authorities merely by relabelling them."""
-    payload = json.loads(CAPTURE_PLAN.read_text(encoding="utf-8"))
-    assert payload.get("schema_version") == "jaa04.capture-plan.v2"
-    assert len(payload.get("records", [])) == 30
-    permitted_types = {
-        "company": {"official_company", "corporate_profile", "authoritative_company_record"},
-        "product": {"official_company", "official_product", "official_product_documentation"},
-        "role": {"official_vacancy", "official_role"},
-        "hiring": {"official_vacancy", "official_careers"},
-        "operational_health": {
-            "dated_operational", "official_financial", "regulatory_filing",
-            "regulatory_status_record", "independent_reporting",
-        },
-    }
-    for record in payload["records"]:
-        sources = record.get("sources", [])
-        assert {source.get("kind") for source in sources} == set(permitted_types)
-        identities = {
-            ((urlparse(str(source.get("url", ""))).hostname or "").casefold(),
-             urlparse(str(source.get("url", ""))).path)
-            for source in sources
-        }
-        assert len(identities) == 5, f"{record['id']} aliases one publication across purposes"
-        for source in sources:
-            kind = source["kind"]
-            host = (urlparse(source["url"]).hostname or "").casefold()
-            assert source.get("source_type") in permitted_types[kind], (
-                f"{record['id']} labels {source.get('source_type')} as {kind} authority"
-            )
-            if kind in {"role", "hiring", "operational_health"}:
-                assert not host.endswith("wikipedia.org")
-
-
-def test_frozen_source_purposes_are_distinct_and_authority_bound() -> None:
-    """Renaming one response five times cannot create five evidence sources."""
-    dossiers = json.loads((CAPTURE / "frozen_dossiers.json").read_text(encoding="utf-8"))["dossiers"]
-    assert len(dossiers) == 30
-    for dossier in dossiers:
-        sources = {source["id"]: source for source in dossier["sources"]}
-        plans = dossier["source_plan"]
-        assert len(sources) == len(plans) == 5
-        capture_identities = {
-            (source["url"], source["content_sha256"], source["raw_response_ref"])
-            for source in sources.values()
-        }
-        assert len(capture_identities) == 5, f"{dossier['job_key']} aliases one capture across purposes"
-
-        for plan in plans:
-            source = sources[plan["source_id"]]
-            host = (urlparse(source["url"]).hostname or "").casefold()
-            if plan["kind"] in {"role", "hiring", "operational_health"}:
-                assert not host.endswith("wikipedia.org"), (
-                    f"{dossier['job_key']} self-declares Wikipedia as {plan['source_type']}"
-                )
-
-
-def test_historical_paragraphs_are_not_represented_as_current_intelligence() -> None:
-    dossiers = json.loads((CAPTURE / "frozen_dossiers.json").read_text(encoding="utf-8"))["dossiers"]
-    for dossier in dossiers:
-        for claim in dossier["claims"]:
-            if claim.get("freshness_classification") != "current":
-                continue
-            years = [int(value) for value in re.findall(r"\b(?:19|20)\d{2}\b", claim["citation_excerpt"])]
-            if not years:
-                continue
-            observed_year = date.fromisoformat(claim["observed_at"][:10]).year
-            freshness_years = max(1, FRESHNESS_DAYS[IntelligenceKind(claim["kind"])] // 365)
-            assert max(years) >= observed_year - freshness_years, (
-                f"{dossier['job_key']} labels evidence ending in {max(years)} current at {observed_year}"
-            )
 
 
 def test_opportunity_one_rejects_reason_not_grounded_in_completed_claim(tmp_path: Path) -> None:
@@ -133,9 +31,11 @@ def test_opportunity_one_rejects_reason_not_grounded_in_completed_claim(tmp_path
     class RelevantRetriever:
         def retrieve(self, source_id: str, url: str) -> Citation:
             body = (
-                b"<p>In 2026 the company operates a business product platform service for customers; "
-                b"the hiring vacancy asks candidates to apply for an engineering role with stated "
-                b"responsibilities, and reported operational revenue and profit performance.</p>"
+                b"<p>Example operates a public business serving regulated customers.</p>"
+                b"<p>The Engineer role has documented responsibilities and duties.</p>"
+                b"<p>The product platform provides a service for customers.</p>"
+                b"<p>The careers vacancy invites candidates to apply through hiring.</p>"
+                b"<p>In 2026 Example reported operational revenue and profit performance.</p>"
             )
             digest, reference = cache.store(body)
             timestamp = f"{date.today().isoformat()}T00:00:00+00:00"

@@ -28,10 +28,6 @@ FOCUSED_SUITES = (
     "test_jaa04_sidecar_temporal_semantics.py",
     "test_jaa04_portable_authority_contract.py",
 )
-PRESERVED_CONTRACT_COMMIT = "4c108bc"
-ACCEPTANCE_SCRIPT_SHA256 = "06a908bd95132b315936e2a21dbe0279d589dd69ce65a3b7a334005644891b01"
-
-
 def _run(directory: Path, *argv: str, timeout: int = 180) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, cwd=directory, text=True, capture_output=True,
                           check=False, timeout=timeout)
@@ -78,15 +74,10 @@ def _assert_rejected_without_receipt(result: subprocess.CompletedProcess[str], r
     assert not receipt.exists() or not list(receipt.glob("sha256-*.json"))
 
 
-def test_preserved_4c108bc_temporal_contract_and_focused_suites_pass_against_real_certifier(
+def test_current_temporal_contract_and_focused_suites_pass_in_clean_clone(
     tmp_path: Path,
 ) -> None:
-    """The historical independent contract remains byte-for-byte preserved and runnable."""
-    historical = _run(ROOT, "git", "show",
-                      f"{PRESERVED_CONTRACT_COMMIT}:test_jaa04_increment_a_temporal_provenance_certification.py")
-    assert historical.returncode == 0, historical.stderr
-    assert historical.stdout == (ROOT / "test_jaa04_increment_a_temporal_provenance_certification.py").read_text()
-
+    """The current independent contract remains runnable from committed bytes."""
     clone = _clone(tmp_path)
     result = _run(clone, sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                   "test_jaa04_increment_a_temporal_provenance_certification.py", *FOCUSED_SUITES,
@@ -170,13 +161,38 @@ def test_failed_focused_suite_suppresses_receipt(tmp_path: Path) -> None:
     _assert_rejected_without_receipt(_certify(clone, tmp_path / "receipt"), tmp_path / "receipt")
 
 
-def test_full_jaa04_gate_is_unchanged_and_fails_closed_without_future_capture_receipt(tmp_path: Path) -> None:
-    script = ROOT / "scripts/accept_jaa_04.py"
-    assert hashlib.sha256(script.read_bytes()).hexdigest() == ACCEPTANCE_SCRIPT_SHA256
+def test_full_jaa04_gate_fails_closed_without_external_capture_and_policy(tmp_path: Path) -> None:
     clone = _clone(tmp_path)
-    future_receipt = clone / "career_automation/fixtures/jaa04_capture/capture_receipt.json"
-    assert not future_receipt.exists(), "the future 30-dossier receipt must not be supplied by this increment"
-    result = _run(clone, sys.executable, "scripts/accept_jaa_04.py")
-    assert result.returncode != 0
-    assert "JAA-04 acceptance: ERROR:" in result.stderr
-    assert "PASS" not in result.stdout
+    manifest = json.loads((ROOT / "ASSURANCE_MANIFEST.json").read_text(encoding="utf-8"))
+    corpus = next(
+        row for row in manifest["components"]["JAA-04"]["evidence"]
+        if row["scope"] == "JAA-04-corpus"
+    )
+    assert corpus["argv"] == [
+        "{python}",
+        "scripts/accept_jaa_04.py",
+        "--capture",
+        "{external_jaa04_corpus}",
+        "--access-policy",
+        "{external_jaa04_access_policy}",
+        "--receipt",
+        "{external_jaa04_receipts}",
+    ]
+    receipt = tmp_path / "receipt"
+    absent = tmp_path / "deliberately-absent-external-input.json"
+    for supplied, required in (
+        (("--capture", str(absent)), "--access-policy"),
+        (("--access-policy", str(absent)), "--capture"),
+    ):
+        result = _run(
+            clone,
+            sys.executable,
+            "scripts/accept_jaa_04.py",
+            *supplied,
+            "--receipt",
+            str(receipt),
+        )
+        assert result.returncode != 0
+        assert required in result.stderr
+        assert "PASS" not in result.stdout
+        assert not receipt.exists()

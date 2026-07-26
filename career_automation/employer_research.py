@@ -1213,6 +1213,11 @@ def validate_dossier(
             raise ValueError("claim capture time differs from its cited response")
         if not isinstance(excerpt, str) or not _kind_relevant(kind, excerpt, entry):
             raise ValueError(f"kind-irrelevant {kind.value} evidence")
+        if authority_contract:
+            prefix, separator, assertion = str(claim["text"]).partition(":")
+            if (not prefix.strip() or not separator
+                    or assertion.strip() != _plain_excerpt(excerpt)):
+                raise ValueError("authority claim must exactly reflect its cited excerpt")
         excerpt_bytes = excerpt.encode("utf-8")
         if entry.get("excerpt_sha256") != hashlib.sha256(excerpt_bytes).hexdigest():
             raise ValueError("claim excerpt differs from its source-plan selection")
@@ -1529,7 +1534,7 @@ def build_reconnaissance_dossier(
     if set(plan_by_kind) != set(IntelligenceKind) or len(source_plan) != len(plan_by_kind):
         raise ValueError("source plan must cover each intelligence kind exactly once")
     claims = []
-    for claim_id, kind, classification, label, _ in specifications:
+    for claim_id, kind, classification, _label, _ in specifications:
         entry = plan_by_kind[kind]
         if entry.get("source_id") not in paragraphs_by_source:
             raise ValueError("source plan references an uncaptured source")
@@ -1562,7 +1567,7 @@ def build_reconnaissance_dossier(
             "excerpt_byte_length": len(excerpt_bytes),
         })
         claim = {"id": claim_id, "kind": kind.value, "classification": classification,
-                 "text": f"{company}: {label} derived from the captured paragraph: {summary}",
+                 "text": f"{company}: {summary}",
                  "citation_excerpt": excerpt, "source_plan_id": entry["id"]}
         claim_observed = cited_source.updated_at or cited_source.published_at
         if claim_observed is None and kind in {IntelligenceKind.ROLE, IntelligenceKind.HIRING,

@@ -15,13 +15,10 @@ import pytest
 from career_automation.employer_research import (
     FRESHNESS_DAYS,
     RawResponseCache,
-    load_frozen_dossiers,
     validate_dossier,
 )
 
 
-ROOT = Path(__file__).resolve().parent
-CAPTURE = ROOT / "career_automation" / "fixtures" / "jaa04_capture"
 KINDS = ("company", "role", "product", "hiring", "operational_health")
 
 RELEVANT = {
@@ -55,6 +52,7 @@ def _dossier(cache: RawResponseCache, *, excerpts: dict[str, str] | None = None)
         sources.append({
             "id": source_id, "url": f"https://8.8.8.8/jaa04/{index}",
             "captured_at": timestamp, "retrieved_at": timestamp,
+            "published_at": timestamp, "updated_at": None,
             "content_sha256": digest, "raw_response_ref": reference, "status_code": 200,
         })
         plan.append({
@@ -105,25 +103,6 @@ def test_each_kind_rejects_unique_ordered_but_semantically_unrelated_evidence(tm
     assert cache.resolve(source["raw_response_ref"], source["content_sha256"])
     with pytest.raises(ValueError, match="kind-irrelevant"):
         validate_dossier(dossier, cache)
-
-
-def test_frozen_dossiers_bind_every_claim_to_declared_kind_specific_source_plan_and_exact_bytes() -> None:
-    cache = RawResponseCache(CAPTURE / "raw")
-    dossiers = load_frozen_dossiers(CAPTURE / "frozen_dossiers.json", cache, strict_corpus=True)
-    assert len(dossiers) == 30
-    for dossier in dossiers:
-        sources = {source["id"]: source for source in dossier["sources"]}
-        plans = {entry["id"]: entry for entry in dossier["source_plan"]}
-        assert {entry["kind"] for entry in plans.values()} == set(KINDS)
-        assert {claim["kind"] for claim in dossier["claims"]} == set(KINDS)
-        for claim in dossier["claims"]:
-            entry = plans[claim["source_plan_id"]]
-            source = sources[entry["source_id"]]
-            assert entry["kind"] == claim["kind"]
-            assert claim["source_ids"] == [entry["source_id"]]
-            assert claim["source_captured_at"] == source["captured_at"]
-            assert hashlib.sha256(claim["citation_excerpt"].encode()).hexdigest() == entry["excerpt_sha256"]
-            assert claim["citation_excerpt"].encode() in cache.resolve(source["raw_response_ref"], source["content_sha256"])
 
 
 @pytest.mark.parametrize("attack", ("undeclared-source", "missing-kind", "stale-current"))
