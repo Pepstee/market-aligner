@@ -1,7 +1,8 @@
 """Build an exact JAA-04 queue from live, configured official authorities.
 
-Discovery configuration is an allow-list of employer ATS accounts.  Search
-engines and aggregators are deliberately outside this command's input model.
+The canonical collector configuration supplies ``boards.enabled`` and the
+top-level board sections. This command projects its supported official ATS
+adapters; enabled discovery-only boards never become evidence authorities.
 Every HTTP response consumed by an adapter is retained byte-for-byte.
 """
 
@@ -19,8 +20,6 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
-import yaml
-
 from career_automation.employer_research import (
     FRESHNESS_DAYS, IntelligenceKind, extract_publisher_timestamps,
 )
@@ -30,6 +29,7 @@ from career_automation.opportunity_calibration import (
 )
 from scraper.adapters.base import load_adapter
 from scraper.viability import Vacancy, canonical_key, local_decision
+from skeleton.configuration import load_config
 
 COHORT_SIZE = 30
 OFFICIAL_ADAPTERS = frozenset({
@@ -152,20 +152,37 @@ def _opportunity(vacancy: Vacancy) -> tuple[Opportunity0Input, Confidence]:
 def _validate_config(payload: Any) -> tuple[list[str], dict[str, dict[str, Any]], list[str]]:
     if not isinstance(payload, dict):
         raise ValueError("configuration must be an object")
-    boards = payload.get("official_sources")
-    if not isinstance(boards, dict) or not boards:
-        raise ValueError("configuration requires non-empty official_sources mapping")
-    names = sorted(str(name) for name in boards)
-    forbidden = set(names) & AGGREGATORS
-    unsupported = set(names) - OFFICIAL_ADAPTERS
-    if forbidden:
-        raise ValueError(f"aggregators cannot be evidence sources: {sorted(forbidden)}")
-    if unsupported:
-        raise ValueError(f"non-official or unsupported adapters: {sorted(unsupported)}")
-    terms = payload.get("search_terms") or []
-    if not isinstance(terms, list):
-        raise ValueError("search_terms must be a list")
-    return names, {name: dict(boards[name] or {}) for name in names}, [str(x) for x in terms]
+    if "official_sources" in payload:
+        raise ValueError(
+            "official_sources is retired; configure boards.enabled and top-level board sections"
+        )
+    boards = payload.get("boards")
+    if not isinstance(boards, dict):
+        raise ValueError("configuration requires a boards mapping")
+    enabled = boards.get("enabled")
+    if (not isinstance(enabled, list) or not enabled
+            or any(not isinstance(name, str) or not name.strip() for name in enabled)):
+        raise ValueError("boards.enabled must be a non-empty list of board names")
+    # The collector legitimately enables aggregators and public discovery
+    # boards. JAA-04 authority acquisition projects the official ATS subset
+    # from that same list; it never turns the other entries into authorities.
+    names = sorted(set(enabled) & OFFICIAL_ADAPTERS)
+    if not names:
+        raise ValueError("boards.enabled contains no supported official adapters")
+    configs: dict[str, dict[str, Any]] = {}
+    for name in names:
+        section = payload.get(name)
+        if section is None:
+            section = {}
+        if not isinstance(section, dict):
+            raise ValueError(f"{name} configuration must be a mapping")
+        configs[name] = dict(section)
+    terms = payload.get("search_terms")
+    if not isinstance(terms, list) or not terms:
+        raise ValueError("search_terms must be a non-empty list")
+    if any(not isinstance(term, str) or not term.strip() for term in terms):
+        raise ValueError("search_terms entries must be non-empty strings")
+    return names, configs, list(terms)
 
 
 def _temporal_admission(refs: list[dict[str, Any]], raw_root: Path,
@@ -233,7 +250,7 @@ def _temporal_admission(refs: list[dict[str, Any]], raw_root: Path,
 def build(config_path: Path, output: Path, raw_root: Path) -> dict[str, Any]:
     if output.exists():
         raise RuntimeError("output snapshot already exists")
-    boards, configs, terms = _validate_config(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+    boards, configs, terms = _validate_config(load_config(config_path))
     recorder = ResponseRecorder(raw_root)
     candidates: list[dict[str, Any]] = []
     temporal_decisions: list[dict[str, Any]] = []

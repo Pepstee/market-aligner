@@ -58,6 +58,7 @@ from contracts import (  # noqa: E402
 )
 import scoring  # noqa: E402
 import reporter  # noqa: E402
+from skeleton.configuration import load_config  # noqa: E402
 
 STAGES: tuple[str, ...] = ("discover", "fetch", "extract", "score", "report")
 
@@ -65,30 +66,6 @@ STAGES: tuple[str, ...] = ("discover", "fetch", "extract", "score", "report")
 # --------------------------------------------------------------------------- #
 # Config + paths.
 # --------------------------------------------------------------------------- #
-def load_config(path: str | Path) -> dict[str, Any]:
-    import yaml
-
-    path = Path(path).resolve()
-    cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    parent = cfg.pop("extends", None)
-    if not parent:
-        return cfg
-
-    def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-        out = dict(base)
-        for key, value in override.items():
-            if isinstance(value, dict) and isinstance(out.get(key), dict):
-                out[key] = merge(out[key], value)
-            else:
-                out[key] = value
-        return out
-
-    parent_path = Path(str(parent))
-    if not parent_path.is_absolute():
-        parent_path = path.parent / parent_path
-    return merge(load_config(parent_path), cfg)
-
-
 @dataclass
 class Paths:
     """All on-disk locations, derived from config + the repo root."""
