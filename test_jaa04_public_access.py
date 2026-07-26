@@ -209,6 +209,40 @@ def test_robots_disallow_and_longest_allow_are_enforced_from_exact_bytes(
     assert receipt.content_sha256 == hashlib.sha256(body).hexdigest()
 
 
+@pytest.mark.parametrize("delay", ("nan", "inf", "-inf"))
+def test_non_finite_robots_crawl_delay_cannot_override_the_floor(
+    tmp_path: Path,
+    delay: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        "Allow: /\n"
+        f"Crawl-delay: {delay}\n"
+    ).encode()
+    controller, _, _, clock = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    receipt = controller.before_request(URL)
+    assert receipt.crawl_delay_seconds == DEFAULT_DELAY_SECONDS
+    assert clock.sleeps == [DEFAULT_DELAY_SECONDS]
+
+
+@pytest.mark.parametrize("delay", (float("nan"), float("inf"), float("-inf")))
+def test_non_finite_configured_delay_is_rejected(
+    tmp_path: Path,
+    delay: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        PublicAccessController(
+            _policy(tmp_path / "access.json"),
+            _Client(_response(404, b"", url=f"https://{HOST}/robots.txt")),
+            RawResponseCache(tmp_path / "raw"),
+            default_delay_seconds=delay,
+        )
+
+
 def test_robots_product_token_matching_is_exact_and_wildcard_is_fallback(
     tmp_path: Path,
 ) -> None:
@@ -543,7 +577,7 @@ def test_successful_citation_contains_byte_resolvable_access_receipt(
     "attack",
     (
         "missing-field", "policy-substitution", "terminal-status",
-        "delay-understatement", "robots-query",
+        "delay-understatement", "delay-nan", "delay-infinity", "robots-query",
     ),
 )
 def test_access_receipt_replay_requires_operator_policy_and_exact_robots_bytes(
@@ -568,6 +602,10 @@ def test_access_receipt_replay_requires_operator_policy_and_exact_robots_bytes(
         value["status_code"] = 429
     elif attack == "delay-understatement":
         value["crawl_delay_seconds"] = 9.0
+    elif attack == "delay-nan":
+        value["crawl_delay_seconds"] = float("nan")
+    elif attack == "delay-infinity":
+        value["crawl_delay_seconds"] = float("inf")
     else:
         value["final_url"] += "?attacker-state=1"
     with pytest.raises(ValueError):

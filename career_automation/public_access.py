@@ -12,6 +12,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import math
 import re
 import time
 from dataclasses import asdict, dataclass, fields, replace
@@ -153,7 +154,7 @@ def _robots_rules(body: bytes, url: str) -> tuple[bool, float | None]:
                 parsed_delay = float(value)
             except ValueError:
                 continue
-            if parsed_delay >= 0:
+            if math.isfinite(parsed_delay) and parsed_delay >= 0:
                 delay = parsed_delay
     finish()
 
@@ -349,8 +350,12 @@ class PublicAccessController:
         sleeper: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        if default_delay_seconds < DEFAULT_DELAY_SECONDS:
-            raise ValueError(f"public request delay must be at least {DEFAULT_DELAY_SECONDS:g} seconds")
+        if (not math.isfinite(default_delay_seconds)
+                or default_delay_seconds < DEFAULT_DELAY_SECONDS):
+            raise ValueError(
+                "public request delay must be finite and at least "
+                f"{DEFAULT_DELAY_SECONDS:g} seconds"
+            )
         self.policy = policy
         self.client = client
         self.cache = cache
@@ -529,6 +534,7 @@ def replay_access_receipt(
             raise ValueError("access receipt robots redirect history is invalid")
     if (receipt.user_agent != USER_AGENT or receipt.allowed is not True
             or type(receipt.crawl_delay_seconds) not in {int, float}
+            or not math.isfinite(float(receipt.crawl_delay_seconds))
             or float(receipt.crawl_delay_seconds) < DEFAULT_DELAY_SECONDS):
         raise ValueError("access receipt does not prove the required public policy")
     if (type(receipt.status_code) is not int or receipt.status_code <= 0
