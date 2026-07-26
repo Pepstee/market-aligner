@@ -74,11 +74,24 @@ def _revision() -> str:
 def _admitted(connection: sqlite3.Connection) -> dict[str, dict[str, str]]:
     connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        """SELECT j.job_key,j.board,j.url,j.company,j.title
-           FROM employer_research_queue q JOIN pipeline_jobs j USING(job_key)
+        """SELECT j.job_key,j.board,j.url,j.company,j.title,
+                  j.opportunity AS workspace_opportunity,
+                  j.opportunity_decision AS workspace_opportunity_decision,
+                  j.opportunity_reason AS workspace_opportunity_reason,
+                  j.payload_hash AS workspace_payload_hash,
+                  r.policy_hash AS workspace_opportunity0_policy_hash,
+                  r.input_hash AS workspace_opportunity0_input_hash,
+                  r.output_hash AS workspace_opportunity0_output_hash
+           FROM employer_research_queue q
+           JOIN pipeline_jobs j USING(job_key)
+           JOIN lifecycle_transition_receipts r
+             ON r.job_key=j.job_key
+            AND r.policy_id='career.opportunity-gate'
+            AND r.policy_version='1'
            WHERE j.opportunity_decision='pass' ORDER BY j.job_key"""
     ).fetchall()
-    if len(rows) < CORPUS_SIZE:
+    if (len(rows) < CORPUS_SIZE
+            or len({str(row["job_key"]) for row in rows}) != len(rows)):
         raise RuntimeError(f"Opportunity-0 queue must contain at least {CORPUS_SIZE} admitted vacancies")
     return {str(row["job_key"]): dict(row) for row in rows}
 
@@ -210,14 +223,15 @@ def _bootstrap_is_complete(work_db: Path, records: list[dict[str, object]],
             jobs = connection.execute(
                 """SELECT job_key,board,url,company,title,state,
                           opportunity,opportunity_decision,
-                          opportunity_reason,policy_hash
+                          opportunity_reason,policy_hash,payload_hash
                    FROM pipeline_jobs"""
             ).fetchall()
             queues = connection.execute(
                 "SELECT job_key FROM employer_research_queue"
             ).fetchall()
             receipts = connection.execute(
-                """SELECT job_key,policy_hash FROM lifecycle_transition_receipts
+                """SELECT job_key,policy_hash,input_hash,output_hash
+                   FROM lifecycle_transition_receipts
                    WHERE policy_id='career.opportunity-gate' AND policy_version='1'"""
             ).fetchall()
     except (OSError, sqlite3.DatabaseError):
@@ -226,19 +240,34 @@ def _bootstrap_is_complete(work_db: Path, records: list[dict[str, object]],
             or {str(row["job_key"]) for row in queues} != set(expected)
             or {str(row["job_key"]) for row in receipts} != set(expected)):
         return False
-    receipt_by_key = {str(row["job_key"]): str(row["policy_hash"]) for row in receipts}
+    receipt_by_key = {str(row["job_key"]): row for row in receipts}
     for row in jobs:
         record = expected[str(row["job_key"])]
         decision = record["opportunity0_decision"]
         digest = calibration_policy_digest(str(decision["policy_hash"]), policy)
+        payload_hash = canonical_hash({"official_snapshot_record": record})
+        priority = (
+            (2 if decision["score_bp"] >= 7500 else 1) * 1_000_000
+            + decision["score_bp"] * 10
+        )
+        receipt = receipt_by_key[str(row["job_key"])]
         if (any(str(row[field]) != str(record[field])
                 for field in ("board", "url", "company", "title"))
                 or int(round(float(row["opportunity"]) * 10_000)) != decision["score_bp"]
                 or row["opportunity_decision"] != decision["decision"]
                 or row["opportunity_reason"] != decision["reason"]
+                or row["payload_hash"] != payload_hash
                 or (row["state"] == "employer_research_queued"
                     and row["policy_hash"] != digest)
-                or receipt_by_key[str(row["job_key"])] != digest):
+                or receipt["policy_hash"] != digest
+                or receipt["input_hash"] != canonical_hash(
+                    {"payload_hash": payload_hash}
+                )
+                or receipt["output_hash"] != canonical_hash({
+                    "decision": decision["decision"],
+                    "reason": decision["reason"],
+                    "priority": priority,
+                })):
             return False
     return True
 
@@ -254,8 +283,18 @@ def _workspace_matches_admission(
         with sqlite3.connect(f"file:{work_db}?mode=ro", uri=True) as connection:
             connection.row_factory = sqlite3.Row
             jobs = connection.execute(
-                f"""SELECT job_key,board,url,company,title FROM pipeline_jobs
-                    WHERE job_key IN ({placeholders})""",
+                f"""SELECT j.job_key,j.board,j.url,j.company,j.title,
+                           j.opportunity,j.opportunity_decision,
+                           j.opportunity_reason,j.payload_hash,
+                           r.policy_hash AS opportunity0_policy_hash,
+                           r.input_hash AS opportunity0_input_hash,
+                           r.output_hash AS opportunity0_output_hash
+                    FROM pipeline_jobs j
+                    JOIN lifecycle_transition_receipts r
+                      ON r.job_key=j.job_key
+                     AND r.policy_id='career.opportunity-gate'
+                     AND r.policy_version='1'
+                    WHERE j.job_key IN ({placeholders})""",
                 tuple(sorted(expected)),
             ).fetchall()
             queues = connection.execute(
@@ -265,13 +304,29 @@ def _workspace_matches_admission(
             ).fetchall()
     except (OSError, sqlite3.DatabaseError):
         return False
-    if ({str(row["job_key"]) for row in jobs} != set(expected)
+    if (len(jobs) != len(expected)
+            or {str(row["job_key"]) for row in jobs} != set(expected)
             or {str(row["job_key"]) for row in queues} != set(expected)):
         return False
     for row in jobs:
         record = expected[str(row["job_key"])]
         if any(str(row[field]) != str(record[field])
                for field in ("board", "url", "company", "title")):
+            return False
+        sqlite_authority = {
+            "opportunity": "workspace_opportunity",
+            "opportunity_decision": "workspace_opportunity_decision",
+            "opportunity_reason": "workspace_opportunity_reason",
+            "payload_hash": "workspace_payload_hash",
+            "opportunity0_policy_hash": "workspace_opportunity0_policy_hash",
+            "opportunity0_input_hash": "workspace_opportunity0_input_hash",
+            "opportunity0_output_hash": "workspace_opportunity0_output_hash",
+        }
+        if any(
+            expected_field in record
+            and row[database_field] != record[expected_field]
+            for database_field, expected_field in sqlite_authority.items()
+        ):
             return False
     return True
 
@@ -486,7 +541,10 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
                 "job_key": job_key, "vacancy_url": record["url"],
                 "company": record["company"], "role": record["title"],
                 "dossier_hash": dossier_hash,
-                "admitted_payload_hash": record.get("payload_hash"),
+                "admitted_payload_hash": (
+                    record.get("payload_hash")
+                    or record.get("workspace_payload_hash")
+                ),
                 "opportunity0_input": record.get("opportunity0_input"),
                 "opportunity0_confidence": record.get("confidence"),
                 "opportunity0_decision": record.get("opportunity0_decision"),

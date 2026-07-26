@@ -175,6 +175,113 @@ def test_capture_revalidates_resumed_workspace_job_identity(
     assert not (tmp_path / "published").exists()
 
 
+@pytest.mark.parametrize(
+    ("table", "field", "replacement"),
+    (
+        ("pipeline_jobs", "opportunity", 0.1),
+        ("pipeline_jobs", "opportunity_decision", "reject"),
+        ("pipeline_jobs", "opportunity_reason", "attacker-substitution"),
+        ("pipeline_jobs", "payload_hash", "attacker-substitution"),
+        ("lifecycle_transition_receipts", "policy_hash", "0" * 64),
+        ("lifecycle_transition_receipts", "input_hash", "0" * 64),
+        ("lifecycle_transition_receipts", "output_hash", "0" * 64),
+    ),
+)
+def test_capture_revalidates_resumed_workspace_opportunity_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    table: str,
+    field: str,
+    replacement: object,
+) -> None:
+    module = _capture_module()
+    records = _snapshot(tmp_path / "generated-identities.json")
+    source_database = tmp_path / "opportunity-zero.sqlite3"
+    _bootstrap(source_database, records)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    work_queue = workspace / "queue.sqlite3"
+    _bootstrap(work_queue, records)
+    with sqlite3.connect(work_queue) as connection:
+        if table == "pipeline_jobs":
+            connection.execute(
+                f"UPDATE pipeline_jobs SET {field}=? WHERE job_key=?",
+                (replacement, "generated:01"),
+            )
+        else:
+            connection.execute(
+                "DROP TRIGGER lifecycle_transition_receipt_immutable_update"
+            )
+            connection.execute(
+                f"""UPDATE lifecycle_transition_receipts SET {field}=?
+                    WHERE job_key=? AND policy_id='career.opportunity-gate'""",
+                (replacement, "generated:01"),
+            )
+
+    class UnexpectedTransport:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("Opportunity-0 drift reached the retrieval transport")
+
+    monkeypatch.setattr(module, "ScraplingPublicRetriever", UnexpectedTransport)
+    access_policy = type(
+        "GeneratedAccessPolicy",
+        (),
+        {"policy_sha256": hashlib.sha256(b"generated-test-policy").hexdigest()},
+    )()
+    with pytest.raises(RuntimeError, match="workspace queue differs"):
+        module.capture(
+            source_database,
+            tmp_path / "published",
+            workspace=workspace,
+            timeout_seconds=1,
+            access_policy=access_policy,
+        )
+    assert not (tmp_path / "published").exists()
+
+
+@pytest.mark.parametrize("receipt_field", ("input_hash", "output_hash"))
+def test_json_bootstrap_replays_opportunity0_receipt_hashes(
+    tmp_path: Path,
+    receipt_field: str,
+) -> None:
+    module = _capture_module()
+    policy = module.CalibrationPolicy()
+    records = [
+        {
+            "job_key": f"generated:{number:02d}",
+            "board": "generated",
+            "url": f"https://jobs.generated.test/{number:02d}",
+            "company": f"Generated {number:02d}",
+            "title": "Platform Engineer",
+            "opportunity0_decision": {
+                "score_bp": 9000,
+                "decision": "pass",
+                "reason": "viable",
+                "policy_hash": policy.policy_hash,
+            },
+            "confidence": {
+                "fit": 10_000,
+                "opportunity": 10_000,
+                "extraction": 10_000,
+            },
+        }
+        for number in range(1, 31)
+    ]
+    work_queue = tmp_path / "queue.sqlite3"
+    module._bootstrap_json_database(work_queue, records, policy)
+    assert module._bootstrap_is_complete(work_queue, records, policy)
+    with sqlite3.connect(work_queue) as connection:
+        connection.execute(
+            "DROP TRIGGER lifecycle_transition_receipt_immutable_update"
+        )
+        connection.execute(
+            f"""UPDATE lifecycle_transition_receipts SET {receipt_field}=?
+                WHERE job_key=? AND policy_id='career.opportunity-gate'""",
+            ("0" * 64, "generated:01"),
+        )
+    assert not module._bootstrap_is_complete(work_queue, records, policy)
+
+
 def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_exactly_thirty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -260,6 +367,14 @@ def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_
     receipt = json.loads((destination / "capture_receipt.json").read_text(encoding="utf-8"))
     assert len(envelope["dossiers"]) == receipt["captured_count"] == 30
     assert receipt["schema_version"] == "jaa04.capture-receipt.v6"
+    first_manifest_record = next(
+        row for row in manifest["records"] if row["job_key"] == "generated:01"
+    )
+    with sqlite3.connect(source_database) as source:
+        expected_payload_hash = source.execute(
+            "SELECT payload_hash FROM pipeline_jobs WHERE job_key='generated:01'"
+        ).fetchone()[0]
+    assert first_manifest_record["admitted_payload_hash"] == expected_payload_hash
     admission = manifest["admission_evidence"]
     assert admission["mode"] == "sqlite-lifecycle-snapshot"
     published_snapshot = destination / admission["snapshot_path"]
