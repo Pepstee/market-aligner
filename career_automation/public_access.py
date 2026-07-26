@@ -91,21 +91,20 @@ def _robots_rules(body: bytes, url: str) -> tuple[bool, float | None]:
     finish()
 
     product = USER_AGENT.casefold()
-    selected: list[dict[str, Any]] = []
-    specificity = -1
-    for group in groups:
-        matches = [
-            0 if agent == "*" else len(agent)
-            for agent in group["agents"]
-            if agent == "*" or agent in product
+    # RFC 9309 section 2.2.1 matches the crawler's product token exactly,
+    # case-insensitively, and combines every group for that token.  "*" is a
+    # fallback only when no exact group exists.  Treating an arbitrary
+    # substring (for example "public") as a more-specific match for
+    # "JAA-Public-Research" can select rules meant for a different crawler.
+    selected = [
+        group for group in groups
+        if product in group["agents"]
+    ]
+    if not selected:
+        selected = [
+            group for group in groups
+            if "*" in group["agents"]
         ]
-        if not matches:
-            continue
-        score = max(matches)
-        if score > specificity:
-            selected, specificity = [group], score
-        elif score == specificity:
-            selected.append(group)
     if not selected:
         return True, None
 

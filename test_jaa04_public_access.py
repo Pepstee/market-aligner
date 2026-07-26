@@ -180,6 +180,40 @@ def test_robots_disallow_and_longest_allow_are_enforced_from_exact_bytes(
     assert receipt.content_sha256 == hashlib.sha256(body).hexdigest()
 
 
+def test_robots_product_token_matching_is_exact_and_wildcard_is_fallback(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    misleading = (
+        "User-agent: public\n"
+        "Allow: /jobs\n"
+        "User-agent: *\n"
+        "Disallow: /jobs\n"
+    ).encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, misleading, url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(URL)
+
+    exact = (
+        "User-agent: *\n"
+        "Disallow: /jobs\n"
+        f"User-agent: {USER_AGENT.upper()}\n"
+        "Allow: /jobs\n"
+        f"User-agent: {USER_AGENT.lower()}\n"
+        "Crawl-delay: 14\n"
+    ).encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, exact, url=robots_url),
+    )
+    receipt = controller.before_request(URL)
+    assert receipt.allowed
+    assert receipt.crawl_delay_seconds == 14
+
+
 def test_cached_non_200_success_replays_rules_for_each_url(tmp_path: Path) -> None:
     body = (
         f"User-agent: {USER_AGENT}\n"
