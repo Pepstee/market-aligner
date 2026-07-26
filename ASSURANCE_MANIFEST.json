@@ -229,10 +229,17 @@
     },
     "JAA-06": {
       "claim": "The application strategy compiler emits reproducible, evidence-linked positioning plans.",
-      "increment": "not_implemented",
+      "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-05"],
       "owns": ["career_automation/application_strategy.py"],
-      "inputs": ["career_automation/evidence_matching.py", "career_automation/gap_optimizer.py"],
+      "inputs": [
+        "career_automation/evidence_matching.py",
+        "career_automation/gap_optimizer.py",
+        "career_automation/candidate_graph.py",
+        "career_automation/employer_research.py",
+        "career_automation/lifecycle.py",
+        "career_automation/migrations.py"
+      ],
       "interfaces": [],
       "environment": [],
       "tests": [

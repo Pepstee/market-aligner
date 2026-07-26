@@ -25,7 +25,15 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         for relative in test["files"]:
             assert (ROOT / relative).is_file(), f"JAA-05 declared test missing: {relative}"
 
-    for number in range(6, 17):
+    jaa06 = components["JAA-06"]
+    assert jaa06["increment"] == "implementation_in_progress_dependency_blocked"
+    for relative in jaa06["owns"]:
+        assert (ROOT / relative).is_file(), f"JAA-06 materialised path missing: {relative}"
+    for test in jaa06["tests"]:
+        for relative in test["files"]:
+            assert (ROOT / relative).is_file(), f"JAA-06 declared test missing: {relative}"
+
+    for number in range(7, 17):
         slice_id = f"JAA-{number:02d}"
         component = components[slice_id]
         assert component["increment"] == "not_implemented"
