@@ -35,6 +35,11 @@ def _canonical(value: Any) -> bytes:
                       separators=(",", ":"), allow_nan=False).encode()
 
 
+def policy_records_hash(records: Any) -> str:
+    """Return the single canonical identity used by policy writers/readers."""
+    return hashlib.sha256(_canonical(records)).hexdigest()
+
+
 def _public_origin(url: str) -> tuple[str, str, str]:
     parsed = urlsplit(url)
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -186,7 +191,7 @@ class PublicAccessPolicy:
             raise ValueError(f"access policy must use {POLICY_SCHEMA}")
         if not isinstance(records, list) or not records:
             raise ValueError("access policy requires host attestations")
-        if hashlib.sha256(_canonical(records)).hexdigest() != payload.get("records_hash"):
+        if policy_records_hash(records) != payload.get("records_hash"):
             raise ValueError("access policy records hash mismatch")
         attestations: dict[str, TermsAttestation] = {}
         required = {

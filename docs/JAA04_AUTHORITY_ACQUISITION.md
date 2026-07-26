@@ -46,6 +46,44 @@ notes, and determination `public_read_only_research_permitted`. Attestations
 expire after 90 days. Missing, stale, machine-authored or non-permitting
 records block before a network call.
 
+The attestation records are human-authored; the product does not discover a
+terms URL, decide permission, choose a reviewer, or backfill a review time.
+To package exact reviewed records without hand-calculating the canonical
+records hash, create an external draft such as:
+
+```json
+{
+  "schema_version": "jaa04.public-access-policy-draft.v1",
+  "hosts": [
+    {
+      "host": "jobs.example.org",
+      "terms_url": "https://jobs.example.org/terms",
+      "determination": "public_read_only_research_permitted",
+      "reviewed_at": "2026-07-26T08:00:00+01:00",
+      "reviewed_by": "Operator name",
+      "reviewer_type": "human_operator",
+      "notes": "What was reviewed and why public read-only research is permitted."
+    }
+  ]
+}
+```
+
+Every value above is illustrative, not an attestation. After personally
+reviewing each exact host, the operator can finalize the external draft:
+
+```sh
+python3 scripts/finalize_jaa04_access_policy.py \
+  --draft /external/jaa04/public-access-policy-draft.json \
+  --output /external/jaa04/public-access-policy.json
+```
+
+The finalizer makes no network request and derives no authority fact. It
+copies the exact records, adds their canonical hash, validates the same
+human/freshness/permission contract used by acquisition, writes mode `0600`,
+refuses repository paths and refuses overwrite. Missing hosts discovered
+during acquisition still block until the operator separately reviews and adds
+them to a new draft.
+
 For every attested host, JAA-04 retrieves `robots.txt` with static HTTP before
 the first content request. Exact robots bytes and the terms-policy hash are
 retained in the raw store. Disallow, 401/403, 5xx, timeout, malformed response
