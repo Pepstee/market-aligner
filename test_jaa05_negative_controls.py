@@ -34,7 +34,7 @@ from career_automation.gap_optimizer import (
     optimise_gaps,
     validate_task_evidence,
 )
-from career_automation.lifecycle import PolicyIdentity, canonical_hash
+from career_automation.lifecycle import InvalidTransition, PolicyIdentity, canonical_hash
 from career_automation.migrations import apply_jaa_05_migrations
 from career_automation.models import PipelineState, ScoredJob
 
@@ -162,6 +162,130 @@ def _job_at_fit(path: Path, job_key: str, body: str) -> CareerDatabase:
             idempotency_key=f"test-prerequisite:{job_key}:{target.value}",
         )
     return database
+
+
+def _pending_knowledge_gap(
+    path: Path,
+    *,
+    job_key: str,
+    executor_identity: str = "test:executor",
+) -> tuple[
+    CareerDatabase,
+    FitAssessmentStore,
+    object,
+    Requirement,
+    str,
+    object,
+]:
+    text = "Demonstrate systems knowledge."
+    database = _job_at_fit(path, job_key, text)
+    with database.connect() as connection:
+        payload_hash = str(connection.execute(
+            "SELECT payload_hash FROM pipeline_jobs WHERE job_key=?",
+            (job_key,),
+        ).fetchone()[0])
+    requirement = Requirement(
+        f"{job_key}-systems", f"{job_key}-systems", text, False,
+        "knowledge", "learn_and_test", ("test_result",), 8000,
+        f"vacancy:{job_key}:{payload_hash}", (0, len(text)),
+    )
+    store = FitAssessmentStore(database.path)
+    run = store.assess(
+        job_key=job_key,
+        requirements=(requirement,),
+        proposals=(MatchProposal(
+            requirement.requirement_id, (), 9000, "none", "No evidence.",
+            _receipt(requirement, ()),
+        ),),
+        as_of=AS_OF,
+    )
+    with store._connect() as connection:
+        task_id = str(connection.execute(
+            "SELECT task_id FROM improvement_tasks WHERE run_id=?",
+            (run.run_id,),
+        ).fetchone()[0])
+    store.activate_task(
+        run.run_id,
+        task_id,
+        executor_identity=executor_identity,
+    )
+    promotion = store.record_task_evidence(
+        run.run_id,
+        TaskEvidence(
+            task_id, "test_result", "locked-assessment-pass",
+            "deterministic", DIGEST, executor_identity,
+        ),
+    )
+    return database, store, run, requirement, task_id, promotion
+
+
+def _approved_gap_material(
+    database: CareerDatabase,
+    *,
+    promotion_id: str,
+    criterion: str,
+    verifier_identity: str,
+    proof_class: str = "test_result",
+    artifact_hash: str = DIGEST,
+    valid_until: str = "2035-01-01",
+    policy_id: str = FitAssessmentStore.GAP_EVIDENCE_POLICY_ID,
+    claim_source_identity: str | None = None,
+) -> dict[str, object]:
+    graph = CandidateGraph(database.path)
+    source_identity = f"jaa05:promotion:{promotion_id}"
+    artefact_id = f"artifact-{promotion_id[:12]}"
+    evidence_id = f"evidence-{promotion_id[:12]}"
+    graph.add_artefact(
+        artefact_id,
+        artefact_type=proof_class,
+        source_identity=source_identity,
+        content_hash=artifact_hash,
+    )
+    graph.add_evidence(
+        evidence_id,
+        statement=f"Independently reviewed {criterion}.",
+        source_identity=source_identity,
+        state="evidence",
+        evidence_kind=proof_class,
+        valid_until=valid_until,
+    )
+    decision_id = graph.verify_evidence(
+        evidence_id, 1, decision="approved",
+        verifier_kind="deterministic",
+        policy_id=policy_id,
+        policy_version=FitAssessmentStore.GAP_EVIDENCE_POLICY_VERSION,
+        policy_hash=DIGEST,
+        reason="independent gap evidence review",
+        source_identity=verifier_identity,
+    )
+    graph.add_claim(
+        criterion,
+        statement=f"Verified criterion {criterion}.",
+        claim_type="capability",
+        state="evidence",
+        source_identity=claim_source_identity or source_identity,
+        valid_until="2035-01-01",
+    )
+    graph.link_claim_evidence(
+        criterion, evidence_id,
+        source_identity=source_identity,
+        edge_type="demonstrated_by",
+    )
+    graph.link_claim_artefact(
+        criterion, artefact_id,
+        source_identity=source_identity,
+        edge_type="documented_in",
+    )
+    graph.approve_claim(criterion)
+    return {
+        "evidence_id": evidence_id,
+        "evidence_version": 1,
+        "claim_id": criterion,
+        "claim_version": 1,
+        "artefact_id": artefact_id,
+        "artefact_version": 1,
+        "verification_decision_id": decision_id,
+    }
 
 
 @pytest.mark.parametrize("proof_class", ("verified_claim", "portfolio_artifact", "test_result"))
@@ -332,6 +456,7 @@ def test_generated_learning_text_or_self_assertion_cannot_close_a_gap() -> None:
         "proof_class": "test_result",
         "verification_method": "locked-assessment-pass",
         "verifier_kind": "deterministic",
+        "executor_identity": "test:executor",
     }
     with pytest.raises(ValueError, match="generated learning text"):
         validate_task_evidence(
@@ -486,7 +611,12 @@ def test_task_artifact_identity_cannot_hide_conflicting_verification(
         ).fetchone()[0])
     deterministic = TaskEvidence(
         task_id, "test_result", "locked-assessment-pass",
-        "deterministic", DIGEST,
+        "deterministic", DIGEST, "test:executor",
+    )
+    store.activate_task(
+        run.run_id,
+        task_id,
+        executor_identity="test:executor",
     )
     store.record_task_evidence(run.run_id, deterministic)
     with pytest.raises(ValueError, match="different verification evidence"):
@@ -494,13 +624,394 @@ def test_task_artifact_identity_cannot_hide_conflicting_verification(
             run.run_id,
             TaskEvidence(
                 task_id, "test_result", "locked-assessment-pass",
-                "human", DIGEST,
+                "human", DIGEST, "test:executor",
             ),
         )
     with store._connect() as connection:
         assert connection.execute(
             "SELECT verifier_kind FROM improvement_evidence_candidates"
         ).fetchone()[0] == "deterministic"
+
+
+def test_pending_promotion_cannot_verify_a_gap(tmp_path: Path) -> None:
+    database, store, run, _requirement_row, task_id, promotion = (
+        _pending_knowledge_gap(
+            tmp_path / "pending.sqlite3",
+            job_key="pending-job",
+        )
+    )
+    with pytest.raises(ValueError, match="identities do not resolve"):
+        store.verify_gap(
+            run_id=run.run_id,
+            task_id=task_id,
+            promotion_id=str(promotion.promotion_id),
+            evidence_id="not-approved",
+            evidence_version=1,
+            claim_id="not-approved",
+            claim_version=1,
+            artefact_id="not-approved",
+            artefact_version=1,
+            verification_decision_id="not-approved",
+            as_of=AS_OF,
+        )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM gap_verification_receipts"
+        ).fetchone()[0] == 0
+    assert database.lifecycle.replay()["pending-job"] is PipelineState.LEARNING
+
+
+@pytest.mark.parametrize(
+    ("attack", "material"),
+    (
+        ("self-approval", {"verifier_identity": "test:executor"}),
+        (
+            "artifact-mismatch",
+            {"verifier_identity": "test:reviewer", "artifact_hash": "0" * 64},
+        ),
+        (
+            "wrong-proof",
+            {"verifier_identity": "test:reviewer", "proof_class": "work_artifact"},
+        ),
+        (
+            "expired",
+            {"verifier_identity": "test:reviewer", "valid_until": "2029-12-31"},
+        ),
+        (
+            "wrong-policy",
+            {"verifier_identity": "test:reviewer", "policy_id": "test:wrong-policy"},
+        ),
+        (
+            "wrong-claim-source",
+            {
+                "verifier_identity": "test:reviewer",
+                "claim_source_identity": "test:unbound-claim",
+            },
+        ),
+    ),
+)
+def test_gap_verification_rejects_non_independent_or_unbound_graph_material(
+    tmp_path: Path,
+    attack: str,
+    material: dict[str, str],
+) -> None:
+    database, store, run, requirement, task_id, promotion = (
+        _pending_knowledge_gap(
+            tmp_path / f"{attack}.sqlite3",
+            job_key=f"{attack}-job",
+        )
+    )
+    identities = _approved_gap_material(
+        database,
+        promotion_id=str(promotion.promotion_id),
+        criterion=requirement.criterion,
+        **material,
+    )
+    with pytest.raises(ValueError, match="does not satisfy the task contract"):
+        store.verify_gap(
+            run_id=run.run_id,
+            task_id=task_id,
+            promotion_id=str(promotion.promotion_id),
+            as_of=AS_OF,
+            **identities,
+        )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM gap_verification_receipts"
+        ).fetchone()[0] == 0
+    assert database.lifecycle.replay()[f"{attack}-job"] is PipelineState.LEARNING
+
+
+@pytest.mark.parametrize("newer_kind", ("claim", "artefact"))
+def test_gap_verification_rejects_superseded_claim_or_artefact(
+    tmp_path: Path,
+    newer_kind: str,
+) -> None:
+    database, store, run, requirement, task_id, promotion = (
+        _pending_knowledge_gap(
+            tmp_path / f"newer-{newer_kind}.sqlite3",
+            job_key=f"newer-{newer_kind}-job",
+        )
+    )
+    promotion_id = str(promotion.promotion_id)
+    identities = _approved_gap_material(
+        database,
+        promotion_id=promotion_id,
+        criterion=requirement.criterion,
+        verifier_identity="test:reviewer",
+    )
+    graph = CandidateGraph(database.path)
+    source_identity = f"jaa05:promotion:{promotion_id}:replacement"
+    if newer_kind == "claim":
+        graph.add_claim(
+            requirement.criterion,
+            version=2,
+            statement="Replacement claim awaits independent approval.",
+            claim_type="capability",
+            state="evidence",
+            source_identity=source_identity,
+            valid_until="2035-01-01",
+        )
+    else:
+        graph.add_artefact(
+            str(identities["artefact_id"]),
+            version=2,
+            artefact_type="test_result",
+            source_identity=source_identity,
+            content_hash=DIGEST,
+        )
+    with pytest.raises(ValueError, match="binding is incomplete or ambiguous"):
+        store.verify_gap(
+            run_id=run.run_id,
+            task_id=task_id,
+            promotion_id=promotion_id,
+            as_of=AS_OF,
+            **identities,
+        )
+
+
+def test_record_boundary_rejects_generated_text_without_persisting_it(
+    tmp_path: Path,
+) -> None:
+    _database, store, run, _requirement_row, task_id, _promotion = (
+        _pending_knowledge_gap(
+            tmp_path / "generated.sqlite3",
+            job_key="generated-job",
+        )
+    )
+    with pytest.raises(ValueError, match="generated learning text"):
+        store.record_task_evidence(
+            run.run_id,
+            TaskEvidence(
+                task_id, "test_result", "locked-assessment-pass",
+                "deterministic", hashlib.sha256(b"other").hexdigest(),
+                "test:executor", generated_text="Model-authored answer.",
+            ),
+        )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM improvement_evidence_candidates"
+        ).fetchone()[0] == 1
+
+
+def test_gap_verification_time_cannot_predate_fit_assessment(
+    tmp_path: Path,
+) -> None:
+    database, store, run, requirement, task_id, promotion = (
+        _pending_knowledge_gap(
+            tmp_path / "backdated.sqlite3",
+            job_key="backdated-job",
+        )
+    )
+    promotion_id = str(promotion.promotion_id)
+    identities = _approved_gap_material(
+        database,
+        promotion_id=promotion_id,
+        criterion=requirement.criterion,
+        verifier_identity="test:reviewer",
+    )
+    with pytest.raises(ValueError, match="does not satisfy the task contract"):
+        store.verify_gap(
+            run_id=run.run_id,
+            task_id=task_id,
+            promotion_id=promotion_id,
+            as_of=date(2029, 12, 31),
+            **identities,
+        )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM gap_verification_receipts"
+        ).fetchone()[0] == 0
+
+
+def test_only_one_highest_priority_task_can_activate_per_fit_run(
+    tmp_path: Path,
+) -> None:
+    body = "Demonstrate systems knowledge. Produce a verified portfolio."
+    database = _job_at_fit(tmp_path / "priority.sqlite3", "priority-job", body)
+    with database.connect() as connection:
+        payload_hash = str(connection.execute(
+            "SELECT payload_hash FROM pipeline_jobs WHERE job_key='priority-job'"
+        ).fetchone()[0])
+    requirements = (
+        Requirement(
+            "knowledge", "systems-knowledge", body[:30], False,
+            "knowledge", "learn_and_test", ("test_result",), 9000,
+            f"vacancy:priority-job:{payload_hash}", (0, 30),
+        ),
+        Requirement(
+            "evidence", "portfolio", body[31:], False,
+            "evidence", "build_evidence", ("portfolio_artifact",), 8000,
+            f"vacancy:priority-job:{payload_hash}", (31, len(body)),
+        ),
+    )
+    store = FitAssessmentStore(database.path)
+    run = store.assess(
+        job_key="priority-job",
+        requirements=requirements,
+        proposals=tuple(
+            MatchProposal(
+                requirement.requirement_id, (), 9000, "none", "No evidence.",
+                _receipt(requirement, ()),
+            )
+            for requirement in requirements
+        ),
+        as_of=AS_OF,
+    )
+    with store._connect() as connection:
+        tasks = connection.execute(
+            """SELECT task_id FROM improvement_tasks WHERE run_id=?
+               ORDER BY priority_score DESC,cost_units,task_id""",
+            (run.run_id,),
+        ).fetchall()
+    assert len(tasks) == 2
+    store.activate_task(
+        run.run_id,
+        str(tasks[0][0]),
+        executor_identity="test:executor",
+    )
+    with pytest.raises(ValueError, match="highest-priority"):
+        store.activate_task(
+            run.run_id,
+            str(tasks[1][0]),
+            executor_identity="test:executor",
+        )
+
+
+def test_cross_run_task_and_promotion_identities_fail_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cross-run.sqlite3"
+    database, store, first_run, _first_requirement, first_task, first_promotion = (
+        _pending_knowledge_gap(path, job_key="first-job")
+    )
+    _database, _second_store, second_run, second_requirement, _second_task, _promotion = (
+        _pending_knowledge_gap(path, job_key="second-job")
+    )
+    with pytest.raises(ValueError, match="active task"):
+        store.record_task_evidence(
+            second_run.run_id,
+            TaskEvidence(
+                first_task, "test_result", "locked-assessment-pass",
+                "deterministic", DIGEST, "test:executor",
+            ),
+        )
+    identities = _approved_gap_material(
+        database,
+        promotion_id=str(first_promotion.promotion_id),
+        criterion=second_requirement.criterion,
+        verifier_identity="test:reviewer",
+    )
+    with pytest.raises(ValueError, match="identities do not resolve"):
+        store.verify_gap(
+            run_id=second_run.run_id,
+            task_id=first_task,
+            promotion_id=str(first_promotion.promotion_id),
+            as_of=AS_OF,
+            **identities,
+        )
+
+
+def test_lifecycle_cannot_skip_recovery_and_verification_states(
+    tmp_path: Path,
+) -> None:
+    database = _job_at_fit(
+        tmp_path / "skip.sqlite3",
+        "skip-job",
+        "Demonstrate systems knowledge.",
+    )
+    policy = PolicyIdentity("test:skip", "1", DIGEST)
+    database.lifecycle.commit(
+        job_key="skip-job",
+        to_state=PipelineState.GAP_IDENTIFIED,
+        policy=policy,
+        inputs={"gap": True},
+        outputs={"state": "gap_identified"},
+        idempotency_key="test:skip:gap",
+    )
+    with pytest.raises(InvalidTransition):
+        database.lifecycle.commit(
+            job_key="skip-job",
+            to_state=PipelineState.GAP_VERIFIED,
+            policy=policy,
+            inputs={"attempt": "skip"},
+            outputs={"state": "gap_verified"},
+            idempotency_key="test:skip:verified",
+        )
+
+
+def test_verified_gap_exact_replay_rejects_mutated_graph_binding(
+    tmp_path: Path,
+) -> None:
+    database, store, run, requirement, task_id, promotion = (
+        _pending_knowledge_gap(
+            tmp_path / "mutated-replay.sqlite3",
+            job_key="mutated-replay-job",
+        )
+    )
+    promotion_id = str(promotion.promotion_id)
+    first = _approved_gap_material(
+        database,
+        promotion_id=promotion_id,
+        criterion=requirement.criterion,
+        verifier_identity="test:reviewer",
+    )
+    arguments = {
+        "run_id": run.run_id,
+        "task_id": task_id,
+        "promotion_id": promotion_id,
+        "as_of": AS_OF,
+        **first,
+    }
+    receipt = store.verify_gap(**arguments)
+    assert store.verify_gap(**arguments) == receipt
+
+    graph = CandidateGraph(database.path)
+    source_identity = f"jaa05:promotion:{promotion_id}"
+    graph.add_artefact(
+        "alternate-artifact",
+        artefact_type="test_result",
+        source_identity=source_identity,
+        content_hash=DIGEST,
+    )
+    graph.add_evidence(
+        "alternate-evidence",
+        statement="A second independently reviewed systems result.",
+        source_identity=source_identity,
+        state="evidence",
+        evidence_kind="test_result",
+        valid_until="2035-01-01",
+    )
+    alternate_decision = graph.verify_evidence(
+        "alternate-evidence", 1, decision="approved",
+        verifier_kind="deterministic",
+        policy_id=FitAssessmentStore.GAP_EVIDENCE_POLICY_ID,
+        policy_version=FitAssessmentStore.GAP_EVIDENCE_POLICY_VERSION,
+        policy_hash=hashlib.sha256(b"alternate-policy").hexdigest(),
+        reason="independent alternate review",
+        source_identity="test:alternate-reviewer",
+    )
+    graph.link_claim_evidence(
+        requirement.criterion,
+        "alternate-evidence",
+        source_identity=source_identity,
+        edge_type="demonstrated_by",
+    )
+    graph.link_claim_artefact(
+        requirement.criterion,
+        "alternate-artifact",
+        source_identity=source_identity,
+        edge_type="documented_in",
+    )
+    with pytest.raises(ValueError, match="different gap verification"):
+        store.verify_gap(
+            **{
+                **arguments,
+                "evidence_id": "alternate-evidence",
+                "artefact_id": "alternate-artifact",
+                "verification_decision_id": alternate_decision,
+            }
+        )
 
 
 @pytest.mark.parametrize("attack", ("ledger", "trigger"))

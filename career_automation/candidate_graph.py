@@ -245,6 +245,46 @@ class CandidateGraph:
         finally:
             connection.close()
 
+    def add_artefact(
+        self,
+        artefact_id: str,
+        *,
+        artefact_type: str,
+        source_identity: str,
+        content_hash: str,
+        version: int = 1,
+    ) -> None:
+        """Register content-addressed artefact metadata without approving a claim."""
+        if (
+            len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
+        ):
+            raise ValueError("artefact content_hash must be a lowercase SHA-256 digest")
+        if not artefact_type.strip():
+            raise ValueError("artefact_type is required")
+        connection = self.connect()
+        try:
+            provenance = self._provenance(
+                connection,
+                source_identity=source_identity,
+                source_kind="artefact",
+                source_locator=None,
+                source_content={"artefact_id": artefact_id, "content_hash": content_hash},
+            )
+            connection.execute(
+                """INSERT INTO candidate_artefacts(
+                     artefact_id,version,artefact_type,source_identity,
+                     content_hash,provenance_id)
+                   VALUES(?,?,?,?,?,?)""",
+                (
+                    artefact_id, version, artefact_type, source_identity,
+                    content_hash, provenance,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def link_claim_evidence(
         self,
         claim_id: str,
@@ -271,6 +311,50 @@ class CandidateGraph:
                      evidence_version,provenance_id) VALUES(?,?,?,?,?,?,?)""",
                 (edge_id, claim_id, claim_version, edge_type, evidence_id,
                  evidence_version, provenance),
+            )
+            connection.commit()
+            return edge_id
+        finally:
+            connection.close()
+
+    def link_claim_artefact(
+        self,
+        claim_id: str,
+        artefact_id: str,
+        *,
+        source_identity: str,
+        edge_type: str = "documented_in",
+        claim_version: int = 1,
+        artefact_version: int = 1,
+    ) -> str:
+        """Bind an exact artefact to a claim; this never approves either."""
+        if edge_type not in {"derived_from", "demonstrated_by", "documented_in"}:
+            raise ValueError("unsupported claim-to-artefact edge type")
+        connection = self.connect()
+        try:
+            provenance = self._provenance(
+                connection,
+                source_identity=source_identity,
+                source_kind="domain_input",
+                source_locator=None,
+                source_content={
+                    "claim": claim_id,
+                    "artefact": artefact_id,
+                    "type": edge_type,
+                },
+            )
+            edge_id = _identifier(
+                "edge", claim_id, claim_version,
+                artefact_id, artefact_version, edge_type,
+            )
+            connection.execute(
+                """INSERT INTO candidate_claim_edges(
+                     edge_id,claim_id,claim_version,edge_type,artefact_id,
+                     artefact_version,provenance_id) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    edge_id, claim_id, claim_version, edge_type,
+                    artefact_id, artefact_version, provenance,
+                ),
             )
             connection.commit()
             return edge_id

@@ -6,12 +6,13 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Iterable, Mapping
 
 from .evidence_matching import (
+    EVIDENCE_KIND_PROOF_CLASS,
     PROOF_CLASSES,
     CandidateMatchBatch,
     MatchProposal,
@@ -134,8 +135,13 @@ class TaskEvidence:
     verification_method: str
     verifier_kind: str
     artifact_sha256: str | None
+    executor_identity: str
     external_outcome_id: str | None = None
     generated_text: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.executor_identity.strip():
+            raise ValueError("task executor identity is required")
 
 
 @dataclass(frozen=True)
@@ -147,6 +153,7 @@ class PendingEvidencePromotion:
     verifier_kind: str
     external_outcome_id: str | None
     approval_state: str = "pending"
+    promotion_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.approval_state != "pending":
@@ -159,6 +166,33 @@ class FitAssessmentReceipt:
     status: str
     document_hash: str
     lifecycle_receipt_id: int | None
+
+
+@dataclass(frozen=True)
+class TaskActivationReceipt:
+    activation_id: str
+    run_id: str
+    task_id: str
+    job_key: str
+    target_state: str
+    executor_identity: str
+    lifecycle_receipt_id: int
+
+
+@dataclass(frozen=True)
+class GapVerificationReceipt:
+    verification_id: str
+    run_id: str
+    task_id: str
+    promotion_id: str
+    evidence_id: str
+    evidence_version: int
+    claim_id: str
+    claim_version: int
+    artefact_id: str
+    artefact_version: int
+    verified_as_of: date
+    lifecycle_receipt_id: int
 
 
 def _hash(parts: object) -> str:
@@ -370,6 +404,21 @@ class FitAssessmentStore:
 
     POLICY_ID = "career.fit-assessment"
     POLICY_VERSION = "1"
+    GAP_EVIDENCE_POLICY_ID = "career.gap-evidence-verification"
+    GAP_EVIDENCE_POLICY_VERSION = "1"
+    ACTIVATION_POLICY_ID = "career.improvement-task-activation"
+    ACTIVATION_POLICY_VERSION = "1"
+    GAP_VERIFICATION_POLICY_ID = "career.gap-verification"
+    GAP_VERIFICATION_POLICY_VERSION = "1"
+    ACTION_STATES = {
+        "present_verified_evidence": PipelineState.GAP_RECOVERY,
+        "retrieve_existing_evidence": PipelineState.GAP_RECOVERY,
+        "learn_and_test": PipelineState.LEARNING,
+        "earn_credential": PipelineState.LEARNING,
+        "execute_and_verify": PipelineState.EVIDENCE_BUILDING,
+        "build_evidence": PipelineState.EVIDENCE_BUILDING,
+        "gain_real_experience": PipelineState.EVIDENCE_BUILDING,
+    }
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -641,6 +690,116 @@ class FitAssessmentStore:
         finally:
             connection.close()
 
+    def activate_task(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        executor_identity: str,
+    ) -> TaskActivationReceipt:
+        """Activate only the deterministic highest-priority task in one run."""
+        if not executor_identity.strip():
+            raise ValueError("task executor identity is required")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT task.*,run.job_key,run.status,job.state AS job_state
+                   FROM improvement_tasks task
+                   JOIN fit_assessment_runs run ON run.run_id=task.run_id
+                   JOIN pipeline_jobs job ON job.job_key=run.job_key
+                   WHERE task.run_id=? AND task.task_id=?""",
+                (run_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError((run_id, task_id))
+            highest = connection.execute(
+                """SELECT task_id FROM improvement_tasks
+                   WHERE run_id=?
+                   ORDER BY priority_score DESC,cost_units,task_id LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+            if highest is None or str(highest["task_id"]) != task_id:
+                raise ValueError("only the highest-priority task may be activated")
+            target = self.ACTION_STATES.get(str(row["action_kind"]))
+            if target is None:
+                raise ValueError("task action has no recovery lifecycle mapping")
+            policy_hash = content_hash({
+                "policy_id": self.ACTIVATION_POLICY_ID,
+                "version": self.ACTIVATION_POLICY_VERSION,
+                "action_states": {
+                    action: state.value
+                    for action, state in sorted(self.ACTION_STATES.items())
+                },
+                "selection": "priority_score DESC,cost_units,task_id",
+            })
+            activation_id = content_hash({
+                "run_id": run_id,
+                "task_id": task_id,
+                "job_key": str(row["job_key"]),
+                "target_state": target.value,
+                "executor_identity": executor_identity,
+                "policy_hash": policy_hash,
+            })
+            existing = connection.execute(
+                "SELECT * FROM improvement_task_activations WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if existing is not None:
+                expected = (
+                    activation_id, run_id, task_id, str(row["job_key"]),
+                    target.value, executor_identity, policy_hash,
+                )
+                actual = tuple(existing[key] for key in (
+                    "activation_id", "run_id", "task_id", "job_key",
+                    "target_state", "executor_identity", "policy_hash",
+                ))
+                if actual != expected:
+                    raise ValueError("fit run already activated a different task")
+            else:
+                if (
+                    str(row["status"]) != "gap_identified"
+                    or str(row["job_state"]) != PipelineState.GAP_IDENTIFIED.value
+                ):
+                    raise ValueError("task activation requires gap_identified state")
+                connection.execute(
+                    """INSERT INTO improvement_task_activations(
+                         activation_id,run_id,task_id,job_key,target_state,
+                         executor_identity,policy_hash)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        activation_id, run_id, task_id, str(row["job_key"]),
+                        target.value, executor_identity, policy_hash,
+                    ),
+                )
+            transition = self.lifecycle.commit_in_transaction(
+                connection,
+                job_key=str(row["job_key"]),
+                to_state=target,
+                policy=PolicyIdentity(
+                    self.ACTIVATION_POLICY_ID,
+                    self.ACTIVATION_POLICY_VERSION,
+                    policy_hash,
+                ),
+                inputs={
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "executor_identity": executor_identity,
+                },
+                outputs={"target_state": target.value},
+                idempotency_key=f"task-activation:{row['job_key']}:{run_id}",
+            )
+            connection.commit()
+            return TaskActivationReceipt(
+                activation_id, run_id, task_id, str(row["job_key"]),
+                target.value, executor_identity, transition.receipt_id,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def record_task_evidence(
         self,
         run_id: str,
@@ -651,11 +810,25 @@ class FitAssessmentStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM improvement_tasks WHERE run_id=? AND task_id=?",
+                """SELECT task.*,activation.executor_identity,
+                          activation.target_state,run.job_key,
+                          job.state AS job_state
+                   FROM improvement_tasks task
+                   JOIN improvement_task_activations activation
+                     ON activation.run_id=task.run_id
+                    AND activation.task_id=task.task_id
+                   JOIN fit_assessment_runs run ON run.run_id=task.run_id
+                   JOIN pipeline_jobs job ON job.job_key=run.job_key
+                   WHERE task.run_id=? AND task.task_id=?""",
                 (run_id, evidence.task_id),
             ).fetchone()
             if row is None:
-                raise KeyError(evidence.task_id)
+                raise ValueError("task evidence requires an active task")
+            if (
+                evidence.executor_identity != str(row["executor_identity"])
+                or str(row["job_state"]) != str(row["target_state"])
+            ):
+                raise ValueError("task evidence does not match the active executor and state")
             verification = json.loads(str(row["verification_json"]))
             task = ImprovementTask(
                 task_id=str(row["task_id"]),
@@ -682,17 +855,19 @@ class FitAssessmentStore:
                 "verification_method": promotion.verification_method,
                 "verifier_kind": promotion.verifier_kind,
                 "external_outcome_id": promotion.external_outcome_id,
+                "executor_identity": evidence.executor_identity,
             })
             expected = (
                 promotion_id, run_id, promotion.task_id,
                 promotion.proof_class, promotion.artifact_sha256,
                 promotion.verification_method, promotion.verifier_kind,
                 promotion.external_outcome_id, "pending",
+                evidence.executor_identity,
             )
             existing = connection.execute(
                 """SELECT promotion_id,run_id,task_id,proof_class,
                           artifact_sha256,verification_method,verifier_kind,
-                          external_outcome_id,approval_state
+                          external_outcome_id,approval_state,executor_identity
                    FROM improvement_evidence_candidates
                    WHERE run_id=? AND task_id=? AND artifact_sha256=?""",
                 (run_id, promotion.task_id, promotion.artifact_sha256),
@@ -707,12 +882,263 @@ class FitAssessmentStore:
                     """INSERT INTO improvement_evidence_candidates(
                          promotion_id,run_id,task_id,proof_class,artifact_sha256,
                          verification_method,verifier_kind,external_outcome_id,
-                         approval_state)
-                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                         approval_state,executor_identity)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     expected,
                 )
             connection.commit()
-            return promotion
+            return replace(promotion, promotion_id=promotion_id)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def verify_gap(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        promotion_id: str,
+        evidence_id: str,
+        evidence_version: int,
+        claim_id: str,
+        claim_version: int,
+        artefact_id: str,
+        artefact_version: int,
+        verification_decision_id: str,
+        as_of: date,
+    ) -> GapVerificationReceipt:
+        """Advance only an exact independently approved JAA-02 graph binding."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT activation.activation_id,activation.executor_identity,
+                          activation.target_state,activation.job_key,
+                          run.as_of AS assessment_as_of,
+                          task.verification_json,task.requirement_id,
+                          requirement.criterion,
+                          promotion.proof_class AS promotion_proof_class,
+                          promotion.artifact_sha256,
+                          promotion.executor_identity AS promotion_executor,
+                          evidence.evidence_kind,evidence.source_identity,
+                          evidence.epistemic_state,evidence.approval_state,
+                          evidence.negative,evidence.valid_until,
+                          claim.epistemic_state AS claim_epistemic_state,
+                          claim.approval_state AS claim_approval_state,
+                          claim.valid_until AS claim_valid_until,
+                          claim_provenance.source_identity AS claim_source_identity,
+                          artefact.content_hash AS artefact_hash,
+                          artefact.source_identity AS artefact_source_identity,
+                          decision.decision,decision.verifier_kind,
+                          decision.policy_id,decision.policy_version,
+                          verifier.source_identity AS verifier_identity,
+                          job.state AS job_state
+                   FROM improvement_task_activations activation
+                   JOIN improvement_tasks task
+                     ON task.run_id=activation.run_id
+                    AND task.task_id=activation.task_id
+                   JOIN fit_assessment_runs run
+                     ON run.run_id=task.run_id
+                   JOIN vacancy_requirements requirement
+                     ON requirement.run_id=task.run_id
+                    AND requirement.requirement_id=task.requirement_id
+                   JOIN improvement_evidence_candidates promotion
+                     ON promotion.run_id=task.run_id
+                    AND promotion.task_id=task.task_id
+                    AND promotion.promotion_id=?
+                   JOIN candidate_evidence evidence
+                     ON evidence.evidence_id=? AND evidence.version=?
+                   JOIN candidate_claims claim
+                     ON claim.claim_id=? AND claim.version=?
+                   JOIN candidate_provenance claim_provenance
+                     ON claim_provenance.provenance_id=claim.provenance_id
+                   JOIN candidate_artefacts artefact
+                     ON artefact.artefact_id=? AND artefact.version=?
+                   JOIN candidate_verification_decisions decision
+                     ON decision.decision_id=?
+                    AND decision.target_kind='evidence'
+                    AND decision.target_id=evidence.evidence_id
+                    AND decision.target_version=evidence.version
+                   JOIN candidate_provenance verifier
+                     ON verifier.provenance_id=decision.provenance_id
+                   JOIN pipeline_jobs job ON job.job_key=activation.job_key
+                   WHERE activation.run_id=? AND activation.task_id=?""",
+                (
+                    promotion_id, evidence_id, evidence_version,
+                    claim_id, claim_version, artefact_id, artefact_version,
+                    verification_decision_id, run_id, task_id,
+                ),
+            ).fetchone()
+            if row is None:
+                raise ValueError("gap verification identities do not resolve")
+            existing_gap_verification = connection.execute(
+                """SELECT verification_id,activation_id,promotion_id,
+                          evidence_id,evidence_version,claim_id,claim_version,
+                          artefact_id,artefact_version,verification_decision_id,
+                          verifier_identity,verified_as_of,policy_hash
+                   FROM gap_verification_receipts WHERE activation_id=?""",
+                (str(row["activation_id"]),),
+            ).fetchone()
+            contract = json.loads(str(row["verification_json"]))
+            promotion_source = f"jaa05:promotion:{promotion_id}"
+            proof_class = EVIDENCE_KIND_PROOF_CLASS.get(str(row["evidence_kind"]))
+            if (
+                (
+                    str(row["job_state"]) != str(row["target_state"])
+                    and not (
+                        existing_gap_verification is not None
+                        and str(row["job_state"]) == PipelineState.GAP_VERIFIED.value
+                    )
+                )
+                or as_of < date.fromisoformat(str(row["assessment_as_of"]))
+                or str(row["promotion_executor"]) != str(row["executor_identity"])
+                or str(row["criterion"]) != claim_id
+                or str(row["promotion_proof_class"]) != str(contract["proof_class"])
+                or proof_class != str(contract["proof_class"])
+                or str(row["artifact_sha256"]) != str(row["artefact_hash"])
+                or str(row["source_identity"]) != promotion_source
+                or str(row["claim_source_identity"]) != promotion_source
+                or str(row["artefact_source_identity"]) != promotion_source
+                or row["approval_state"] != "approved"
+                or row["epistemic_state"] not in {"fact", "evidence"}
+                or bool(row["negative"])
+                or row["claim_approval_state"] != "approved"
+                or row["claim_epistemic_state"] not in {"fact", "evidence"}
+                or row["decision"] != "approved"
+                or row["policy_id"] != self.GAP_EVIDENCE_POLICY_ID
+                or row["policy_version"] != self.GAP_EVIDENCE_POLICY_VERSION
+                or row["verifier_kind"] not in set(contract["verifier_kinds"])
+                or str(row["verifier_identity"]) == str(row["executor_identity"])
+                or (
+                    row["valid_until"] is not None
+                    and date.fromisoformat(str(row["valid_until"])) < as_of
+                )
+                or (
+                    row["claim_valid_until"] is not None
+                    and date.fromisoformat(str(row["claim_valid_until"])) < as_of
+                )
+            ):
+                raise ValueError("JAA-02 graph approval does not satisfy the task contract")
+            evidence_edge = connection.execute(
+                """SELECT 1 FROM candidate_claim_edges
+                   WHERE claim_id=? AND claim_version=?
+                     AND evidence_id=? AND evidence_version=?
+                     AND edge_type IN ('supports','demonstrated_by')""",
+                (claim_id, claim_version, evidence_id, evidence_version),
+            ).fetchone()
+            artefact_edge = connection.execute(
+                """SELECT 1 FROM candidate_claim_edges
+                   WHERE claim_id=? AND claim_version=?
+                     AND artefact_id=? AND artefact_version=?
+                     AND edge_type IN ('demonstrated_by','documented_in')""",
+                (claim_id, claim_version, artefact_id, artefact_version),
+            ).fetchone()
+            decision_count = int(connection.execute(
+                """SELECT COUNT(*) FROM candidate_verification_decisions
+                   WHERE target_kind='evidence' AND target_id=?
+                     AND target_version=? AND decision='approved'""",
+                (evidence_id, evidence_version),
+            ).fetchone()[0])
+            newer_evidence = connection.execute(
+                """SELECT 1 FROM candidate_evidence
+                   WHERE evidence_id=? AND version>?""",
+                (evidence_id, evidence_version),
+            ).fetchone()
+            newer_claim = connection.execute(
+                """SELECT 1 FROM candidate_claims
+                   WHERE claim_id=? AND version>?""",
+                (claim_id, claim_version),
+            ).fetchone()
+            newer_artefact = connection.execute(
+                """SELECT 1 FROM candidate_artefacts
+                   WHERE artefact_id=? AND version>?""",
+                (artefact_id, artefact_version),
+            ).fetchone()
+            if (
+                evidence_edge is None
+                or artefact_edge is None
+                or decision_count != 1
+                or newer_evidence is not None
+                or newer_claim is not None
+                or newer_artefact is not None
+            ):
+                raise ValueError("JAA-02 graph approval binding is incomplete or ambiguous")
+            policy_hash = content_hash({
+                "policy_id": self.GAP_VERIFICATION_POLICY_ID,
+                "version": self.GAP_VERIFICATION_POLICY_VERSION,
+                "requirements": [
+                    "active highest-priority task",
+                    "exact pending promotion artifact",
+                    "one independent JAA-02 evidence approval",
+                    "approved criterion claim with evidence and artefact edges",
+                ],
+            })
+            verification_id = content_hash({
+                "activation_id": str(row["activation_id"]),
+                "promotion_id": promotion_id,
+                "evidence": (evidence_id, evidence_version),
+                "claim": (claim_id, claim_version),
+                "artefact": (artefact_id, artefact_version),
+                "verification_decision_id": verification_decision_id,
+                "verifier_identity": str(row["verifier_identity"]),
+                "verified_as_of": as_of.isoformat(),
+                "policy_hash": policy_hash,
+            })
+            expected = (
+                verification_id, str(row["activation_id"]), promotion_id,
+                evidence_id, evidence_version, claim_id, claim_version,
+                artefact_id, artefact_version, verification_decision_id,
+                str(row["verifier_identity"]), as_of.isoformat(), policy_hash,
+            )
+            existing = existing_gap_verification
+            if existing is not None:
+                if tuple(existing) != expected:
+                    raise ValueError("active task already has different gap verification")
+            else:
+                connection.execute(
+                    """INSERT INTO gap_verification_receipts(
+                         verification_id,activation_id,promotion_id,
+                         evidence_id,evidence_version,claim_id,claim_version,
+                         artefact_id,artefact_version,verification_decision_id,
+                         verifier_identity,verified_as_of,policy_hash)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    expected,
+                )
+            transition = self.lifecycle.commit_in_transaction(
+                connection,
+                job_key=str(row["job_key"]),
+                to_state=PipelineState.GAP_VERIFIED,
+                policy=PolicyIdentity(
+                    self.GAP_VERIFICATION_POLICY_ID,
+                    self.GAP_VERIFICATION_POLICY_VERSION,
+                    policy_hash,
+                ),
+                inputs={
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "promotion_id": promotion_id,
+                    "artifact_sha256": str(row["artifact_sha256"]),
+                    "evidence": (evidence_id, evidence_version),
+                    "claim": (claim_id, claim_version),
+                    "artefact": (artefact_id, artefact_version),
+                    "verification_decision_id": verification_decision_id,
+                    "verifier_identity": str(row["verifier_identity"]),
+                    "verified_as_of": as_of.isoformat(),
+                },
+                outputs={
+                    "proof_class": proof_class,
+                    "approval_state": "approved",
+                },
+                idempotency_key=f"gap-verified:{row['job_key']}:{run_id}:{task_id}",
+            )
+            connection.commit()
+            return GapVerificationReceipt(
+                verification_id, run_id, task_id, promotion_id,
+                evidence_id, evidence_version, claim_id, claim_version,
+                artefact_id, artefact_version, as_of, transition.receipt_id,
+            )
         except Exception:
             connection.rollback()
             raise

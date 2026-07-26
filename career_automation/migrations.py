@@ -41,9 +41,11 @@ _JAA05_SCHEMA_TABLES = (
     "candidate_gaps",
     "improvement_tasks",
     "improvement_evidence_candidates",
+    "improvement_task_activations",
+    "gap_verification_receipts",
 )
 JAA05_INSTALLED_SCHEMA_SHA256 = (
-    "4631b04e9930e883529eebe3c4926392f877baa8ec316512f79b0e79515979e3"
+    "15c5c5617ccad85ca293155f731a8e7b817e5e03f7988592c418eaefbdbb9c42"
 )
 
 
@@ -912,6 +914,87 @@ _JAA_05_EVIDENCE_MATCHING_MIGRATION = Migration(
 )
 
 
+_JAA_05_GAP_VERIFICATION_MIGRATION = Migration(
+    5,
+    "jaa_05_gap_recovery_graph_approval",
+    (
+        """ALTER TABLE improvement_evidence_candidates
+             ADD COLUMN executor_identity TEXT
+             CHECK(executor_identity IS NULL OR length(trim(executor_identity)) > 0)""",
+        """CREATE TABLE improvement_task_activations(
+             activation_id TEXT PRIMARY KEY
+               CHECK(length(activation_id)=64
+                 AND activation_id NOT GLOB '*[^0-9a-f]*'),
+             run_id TEXT NOT NULL,
+             task_id TEXT NOT NULL,
+             job_key TEXT NOT NULL
+               REFERENCES pipeline_jobs(job_key) ON DELETE RESTRICT,
+             target_state TEXT NOT NULL CHECK(target_state IN
+               ('gap_recovery','learning','evidence_building')),
+             executor_identity TEXT NOT NULL
+               CHECK(length(trim(executor_identity)) > 0),
+             policy_hash TEXT NOT NULL
+               CHECK(length(policy_hash)=64
+                 AND policy_hash NOT GLOB '*[^0-9a-f]*'),
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             UNIQUE(run_id),
+             UNIQUE(run_id,task_id),
+             FOREIGN KEY(run_id,task_id)
+               REFERENCES improvement_tasks(run_id,task_id) ON DELETE RESTRICT
+           )""",
+        """CREATE TABLE gap_verification_receipts(
+             verification_id TEXT PRIMARY KEY
+               CHECK(length(verification_id)=64
+                 AND verification_id NOT GLOB '*[^0-9a-f]*'),
+             activation_id TEXT NOT NULL UNIQUE
+               REFERENCES improvement_task_activations(activation_id)
+               ON DELETE RESTRICT,
+             promotion_id TEXT NOT NULL UNIQUE
+               REFERENCES improvement_evidence_candidates(promotion_id)
+               ON DELETE RESTRICT,
+             evidence_id TEXT NOT NULL,
+             evidence_version INTEGER NOT NULL,
+             claim_id TEXT NOT NULL,
+             claim_version INTEGER NOT NULL,
+             artefact_id TEXT NOT NULL,
+             artefact_version INTEGER NOT NULL,
+             verification_decision_id TEXT NOT NULL UNIQUE
+               REFERENCES candidate_verification_decisions(decision_id)
+               ON DELETE RESTRICT,
+             verifier_identity TEXT NOT NULL
+               CHECK(length(trim(verifier_identity)) > 0),
+             verified_as_of TEXT NOT NULL
+               CHECK(length(verified_as_of)=10),
+             policy_hash TEXT NOT NULL
+               CHECK(length(policy_hash)=64
+                 AND policy_hash NOT GLOB '*[^0-9a-f]*'),
+             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             FOREIGN KEY(evidence_id,evidence_version)
+               REFERENCES candidate_evidence(evidence_id,version)
+               ON DELETE RESTRICT,
+             FOREIGN KEY(claim_id,claim_version)
+               REFERENCES candidate_claims(claim_id,version)
+               ON DELETE RESTRICT,
+             FOREIGN KEY(artefact_id,artefact_version)
+               REFERENCES candidate_artefacts(artefact_id,version)
+               ON DELETE RESTRICT
+           )""",
+        """CREATE TRIGGER improvement_task_activations_immutable_update
+             BEFORE UPDATE ON improvement_task_activations
+             BEGIN SELECT RAISE(ABORT,'task activations are immutable'); END""",
+        """CREATE TRIGGER improvement_task_activations_immutable_delete
+             BEFORE DELETE ON improvement_task_activations
+             BEGIN SELECT RAISE(ABORT,'task activations are immutable'); END""",
+        """CREATE TRIGGER gap_verification_receipts_immutable_update
+             BEFORE UPDATE ON gap_verification_receipts
+             BEGIN SELECT RAISE(ABORT,'gap verification receipts are immutable'); END""",
+        """CREATE TRIGGER gap_verification_receipts_immutable_delete
+             BEFORE DELETE ON gap_verification_receipts
+             BEGIN SELECT RAISE(ABORT,'gap verification receipts are immutable'); END""",
+    ),
+)
+
+
 # Migration 2 was already allocated to JAA-02 before the independent JAA-01
 # review required an immutable score-import receipt. Public sets remain ordered
 # and checksummed while each slice applies only the schema it owns.
@@ -926,6 +1009,7 @@ JAA_02_MIGRATIONS: tuple[Migration, ...] = (
 JAA_05_MIGRATIONS: tuple[Migration, ...] = (
     *JAA_02_MIGRATIONS,
     _JAA_05_EVIDENCE_MATCHING_MIGRATION,
+    _JAA_05_GAP_VERIFICATION_MIGRATION,
 )
 
 

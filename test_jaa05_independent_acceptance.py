@@ -225,11 +225,12 @@ def test_jaa05_migration_is_forward_only_and_schema_verified(tmp_path: Path) -> 
                    WHERE type='table' AND name IN (
                      'fit_assessment_runs','vacancy_requirements',
                      'evidence_match_assessments','candidate_gaps',
-                     'improvement_tasks','improvement_evidence_candidates'
+                     'improvement_tasks','improvement_evidence_candidates',
+                     'improvement_task_activations','gap_verification_receipts'
                    )"""
             )
         }
-    assert len(tables) == 6
+    assert len(tables) == 8
 
 
 def test_production_match_projection_is_derived_from_approved_jaa02_graph(
@@ -388,6 +389,7 @@ def test_improvement_task_requires_a_verifiable_artifact_and_stays_pending() -> 
             task.verification.verification_method,
             "deterministic",
             HASHES["artifact"],
+            "test:executor",
         ),
     )
     assert promotion.approval_state == "pending"
@@ -446,14 +448,80 @@ def test_fit_assessment_persists_gaps_tasks_and_lifecycle_atomically(
         "locked-assessment-pass",
         "deterministic",
         HASHES["artifact"],
+        "test:executor",
     )
+    activation = store.activate_task(
+        receipt.run_id,
+        task_id,
+        executor_identity="test:executor",
+    )
+    assert activation.target_state == "learning"
     promotion = store.record_task_evidence(receipt.run_id, task_evidence)
     assert promotion.approval_state == "pending"
+    assert promotion.promotion_id is not None
     assert store.record_task_evidence(receipt.run_id, task_evidence) == promotion
     with store._connect() as connection:
         assert connection.execute(
             "SELECT approval_state FROM improvement_evidence_candidates"
         ).fetchone()[0] == "pending"
+    graph = CandidateGraph(database.path)
+    source_identity = f"jaa05:promotion:{promotion.promotion_id}"
+    graph.add_artefact(
+        "systems-test-artifact",
+        artefact_type="test_result",
+        source_identity=source_identity,
+        content_hash=HASHES["artifact"],
+    )
+    graph.add_evidence(
+        "systems-test-evidence",
+        statement="The locked systems assessment passed.",
+        source_identity=source_identity,
+        state="evidence",
+        evidence_kind="test_result",
+        valid_until="2035-01-01",
+    )
+    decision_id = graph.verify_evidence(
+        "systems-test-evidence", 1, decision="approved",
+        verifier_kind="deterministic",
+        policy_id=FitAssessmentStore.GAP_EVIDENCE_POLICY_ID,
+        policy_version=FitAssessmentStore.GAP_EVIDENCE_POLICY_VERSION,
+        policy_hash=HASHES["artifact"],
+        reason="independent locked assessment verification",
+        source_identity="test:independent-verifier",
+    )
+    graph.add_claim(
+        "systems-knowledge",
+        statement="Passed the locked systems assessment.",
+        claim_type="capability",
+        state="evidence",
+        source_identity=source_identity,
+        valid_until="2035-01-01",
+    )
+    graph.link_claim_evidence(
+        "systems-knowledge", "systems-test-evidence",
+        source_identity=source_identity, edge_type="demonstrated_by",
+    )
+    graph.link_claim_artefact(
+        "systems-knowledge", "systems-test-artifact",
+        source_identity=source_identity, edge_type="documented_in",
+    )
+    graph.approve_claim("systems-knowledge")
+    verification_arguments = {
+        "run_id": receipt.run_id,
+        "task_id": task_id,
+        "promotion_id": str(promotion.promotion_id),
+        "evidence_id": "systems-test-evidence",
+        "evidence_version": 1,
+        "claim_id": "systems-knowledge",
+        "claim_version": 1,
+        "artefact_id": "systems-test-artifact",
+        "artefact_version": 1,
+        "verification_decision_id": decision_id,
+        "as_of": AS_OF,
+    }
+    verified = store.verify_gap(**verification_arguments)
+    assert verified.lifecycle_receipt_id
+    assert store.verify_gap(**verification_arguments) == verified
     for table in (
         "fit_assessment_runs",
         "vacancy_requirements",
@@ -461,13 +529,15 @@ def test_fit_assessment_persists_gaps_tasks_and_lifecycle_atomically(
         "candidate_gaps",
         "improvement_tasks",
         "improvement_evidence_candidates",
+        "improvement_task_activations",
+        "gap_verification_receipts",
     ):
         with store._connect() as connection, pytest.raises(
             sqlite3.IntegrityError,
             match="immutable",
         ):
             connection.execute(f"DELETE FROM {table}")
-    assert database.lifecycle.replay()["gap-job"] is PipelineState.GAP_IDENTIFIED
+    assert database.lifecycle.replay()["gap-job"] is PipelineState.GAP_VERIFIED
 
 
 def test_fully_matched_fit_run_stays_at_fit_boundary_for_jaa06(tmp_path: Path) -> None:
