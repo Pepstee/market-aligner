@@ -288,7 +288,7 @@
     },
     "JAA-09": {
       "claim": "The simulated ATS walking skeleton proves browser checkpoints, leases and receipt integrity.",
-      "increment": "not_implemented",
+      "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-08"],
       "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
       "inputs": ["career_automation/browser_workflows.py", "career_automation/release_gate.py"],
