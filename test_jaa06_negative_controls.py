@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -17,12 +20,15 @@ from career_automation.application_strategy import (
     verify_strategy_identity,
 )
 from career_automation.evidence_matching import MatchResult, MatchingPolicy, Requirement
+from career_automation.evidence_matching import content_hash
 from career_automation.migrations import apply_jaa_06_migrations
 
 
 AS_OF = date(2030, 1, 2)
 DIGEST = hashlib.sha256(b"jaa06-negative").hexdigest()
 POLICY = MatchingPolicy()
+ROOT = Path(__file__).resolve().parent
+LOCKED = ROOT / "career_automation/fixtures/jaa06_locked_strategies.json"
 REQUIREMENT = Requirement(
     "python",
     "claim-python",
@@ -199,3 +205,48 @@ def test_jaa06_installed_schema_tamper_fails_closed(tmp_path: Path) -> None:
         connection.execute("DROP TRIGGER strategy_elements_immutable_delete")
     with pytest.raises(RuntimeError, match="installed JAA-06 schema"):
         apply_jaa_06_migrations(path)
+
+
+def test_rehashed_locked_decision_tamper_fails_contract(tmp_path: Path) -> None:
+    payload = json.loads(LOCKED.read_text(encoding="utf-8"))
+    payload["examples"][0]["expected"]["decision"] = "close_gap_first"
+    payload["examples_hash"] = content_hash(payload["examples"])
+    attacked = tmp_path / "decision.json"
+    attacked.write_text(json.dumps(payload), encoding="utf-8")
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "scripts/evaluate_jaa06_locked_strategies.py",
+            "--locked-set",
+            str(attacked),
+        ),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["status"] == "SOFTWARE_CONTRACT_FAIL"
+
+
+def test_locked_evaluator_rejects_missing_noncertification_limit(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(LOCKED.read_text(encoding="utf-8"))
+    payload["limitations"].pop()
+    attacked = tmp_path / "limitations.json"
+    attacked.write_text(json.dumps(payload), encoding="utf-8")
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "scripts/evaluate_jaa06_locked_strategies.py",
+            "--locked-set",
+            str(attacked),
+        ),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "limitations are incomplete" in completed.stderr

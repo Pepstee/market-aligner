@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
+import subprocess
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -49,6 +52,7 @@ from career_automation.models import IntelligenceKind, PipelineState
 AS_OF = date(2030, 1, 2)
 DIGEST = hashlib.sha256(b"jaa06-acceptance").hexdigest()
 POLICY = MatchingPolicy()
+ROOT = Path(__file__).resolve().parent
 
 
 class _CapturedResearch:
@@ -617,3 +621,25 @@ def test_offline_strategy_element_tamper_fails_durable_read(
             fit_run_id=run.run_id,
             as_of=date.today(),
         )
+
+
+def test_synthetic_locked_strategy_evaluation_is_noncertifying() -> None:
+    completed = subprocess.run(
+        (sys.executable, "scripts/evaluate_jaa06_locked_strategies.py"),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["status"] == "SOFTWARE_CONTRACT_PASS"
+    assert result["certifies_slice"] is False
+    assert result["dependency_gate"] == "JAA-05"
+    assert result["transitive_dependency_gate"] == "JAA-04"
+    assert result["metrics"] == {
+        "exact_accuracy_bp": 10_000,
+        "linkage_completeness_bp": 10_000,
+        "reproducibility_bp": 10_000,
+        "examples": 3,
+    }

@@ -231,7 +231,11 @@
       "claim": "The application strategy compiler emits reproducible, evidence-linked positioning plans.",
       "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-05"],
-      "owns": ["career_automation/application_strategy.py"],
+      "owns": [
+        "career_automation/application_strategy.py",
+        "career_automation/fixtures/jaa06_locked_strategies.json",
+        "scripts/evaluate_jaa06_locked_strategies.py"
+      ],
       "inputs": [
         "career_automation/evidence_matching.py",
         "career_automation/gap_optimizer.py",

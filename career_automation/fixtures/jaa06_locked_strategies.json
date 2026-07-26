@@ -1,0 +1,160 @@
+{
+  "schema_version": "jaa06.synthetic-locked-strategy.v1",
+  "locked_set_id": "JAA-06-synthetic-offline-contract-2026-07-26",
+  "examples_hash": "e51d46b9aefd352c2cee438f99b31682b9689fb96cb2823fae41a16fcfa7b7f1",
+  "limitations": [
+    "synthetic software vectors are not production calibration",
+    "does not certify JAA-06 while JAA-05 and JAA-04 remain dependency-blocked",
+    "does not measure generated document quality or employer outcomes"
+  ],
+  "examples": [
+    {
+      "id": "apply-now",
+      "fit_run_id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "dossier_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "candidate_profile_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "as_of": "2030-01-02",
+      "requirements": [
+        {
+          "requirement_id": "delivery",
+          "criterion": "claim-delivery",
+          "text": "Deliver tested product capabilities.",
+          "essential": true,
+          "gap_kind": "evidence",
+          "bridge_policy": "build_evidence",
+          "accepted_proof_classes": ["portfolio_artifact"],
+          "opportunity_weight_bp": 9000,
+          "source_identity": "vacancy:locked",
+          "source_span": [0, 10]
+        }
+      ],
+      "match_results": [
+        {
+          "requirement_id": "delivery",
+          "decision": "matched",
+          "evidence_ids": ["evidence-delivery"],
+          "confidence_bp": 9000,
+          "reason": "approved exact evidence",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031"
+        }
+      ],
+      "candidate_support": [
+        {
+          "requirement_id": "delivery",
+          "claim_id": "claim-delivery",
+          "claim_version": 1,
+          "evidence_id": "evidence-delivery",
+          "evidence_version": 1,
+          "proof_class": "portfolio_artifact",
+          "claim_approval_state": "approved",
+          "claim_epistemic_state": "evidence",
+          "evidence_approval_state": "approved",
+          "evidence_epistemic_state": "evidence",
+          "verification_decision": "approved",
+          "valid_until": "2035-01-01"
+        }
+      ],
+      "employer_facts": [
+        {
+          "claim_id": "research-product",
+          "kind": "product",
+          "classification": "fact",
+          "source_ids": ["source:official-product"],
+          "content_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "freshness_classification": "current"
+        }
+      ],
+      "expected": {
+        "decision": "apply_now",
+        "coverage_states": ["covered"],
+        "element_count": 6,
+        "element_kinds": [
+          "cv_emphasis",
+          "cover_letter_argument",
+          "structured_answer",
+          "interview_seed",
+          "objection_response",
+          "employer_hook"
+        ]
+      }
+    },
+    {
+      "id": "close-gap-first",
+      "fit_run_id": "5555555555555555555555555555555555555555555555555555555555555555",
+      "dossier_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+      "candidate_profile_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "as_of": "2030-01-02",
+      "requirements": [
+        {
+          "requirement_id": "systems",
+          "criterion": "claim-systems",
+          "text": "Demonstrate systems knowledge.",
+          "essential": false,
+          "gap_kind": "knowledge",
+          "bridge_policy": "learn_and_test",
+          "accepted_proof_classes": ["test_result"],
+          "opportunity_weight_bp": 8000,
+          "source_identity": "vacancy:locked",
+          "source_span": [0, 10]
+        }
+      ],
+      "match_results": [
+        {
+          "requirement_id": "systems",
+          "decision": "no_match",
+          "evidence_ids": [],
+          "confidence_bp": 9000,
+          "reason": "knowledge is not demonstrated",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031"
+        }
+      ],
+      "candidate_support": [],
+      "employer_facts": [],
+      "expected": {
+        "decision": "close_gap_first",
+        "coverage_states": ["absent"],
+        "element_count": 0,
+        "element_kinds": []
+      }
+    },
+    {
+      "id": "reject-candidacy",
+      "fit_run_id": "8888888888888888888888888888888888888888888888888888888888888888",
+      "dossier_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+      "candidate_profile_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "as_of": "2030-01-02",
+      "requirements": [
+        {
+          "requirement_id": "work-right",
+          "criterion": "claim-work-right",
+          "text": "Existing work authorisation is mandatory.",
+          "essential": true,
+          "gap_kind": "structural",
+          "bridge_policy": "fatal",
+          "accepted_proof_classes": ["verified_claim"],
+          "opportunity_weight_bp": 10000,
+          "source_identity": "vacancy:locked",
+          "source_span": [0, 10]
+        }
+      ],
+      "match_results": [
+        {
+          "requirement_id": "work-right",
+          "decision": "no_match",
+          "evidence_ids": [],
+          "confidence_bp": 9900,
+          "reason": "mandatory right is absent",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031"
+        }
+      ],
+      "candidate_support": [],
+      "employer_facts": [],
+      "expected": {
+        "decision": "reject_candidacy",
+        "coverage_states": ["release_blocking"],
+        "element_count": 0,
+        "element_kinds": []
+      }
+    }
+  ]
+}
