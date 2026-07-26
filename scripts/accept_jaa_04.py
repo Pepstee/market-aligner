@@ -53,6 +53,11 @@ def revision() -> str:
 
 
 def _load_access_policy(capture: Path, path: Path) -> PublicAccessPolicy:
+    # Certification is a new authority decision, not merely a replay at the
+    # historical capture clock.  Load against the certifier's current UTC
+    # time so an expired attestation cannot be made fresh by an old (or
+    # attacker-future-dated) dossier timestamp.
+    policy = PublicAccessPolicy.load(path)
     envelope = json.loads((capture / "frozen_dossiers.json").read_text(encoding="utf-8"))
     retrieved: list[datetime] = []
     for dossier in envelope.get("dossiers", []):
@@ -63,7 +68,9 @@ def _load_access_policy(capture: Path, path: Path) -> PublicAccessPolicy:
             retrieved.append(value.astimezone(timezone.utc))
     if not retrieved:
         raise ValueError("capture has no retrieval time for access-policy replay")
-    return PublicAccessPolicy.load(path, now=max(retrieved))
+    if max(retrieved) > policy.now:
+        raise ValueError("capture retrieval time is future-dated")
+    return policy
 
 
 def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:

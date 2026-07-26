@@ -17,12 +17,18 @@ import pytest
 ROOT = Path(__file__).resolve().parent
 
 
-def _policy(path: Path) -> tuple[Path, str]:
+def _policy(
+    path: Path,
+    *,
+    reviewed_at: datetime | None = None,
+) -> tuple[Path, str]:
     records = [{
         "host": "jobs.example.test",
         "terms_url": "https://jobs.example.test/terms",
         "determination": "public_read_only_research_permitted",
-        "reviewed_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        "reviewed_at": (
+            reviewed_at or datetime.now(timezone.utc) - timedelta(days=1)
+        ).isoformat(),
         "reviewed_by": "Offline Test Operator",
         "reviewer_type": "human_operator",
         "notes": "Synthetic offline fixture only; not production authority.",
@@ -40,6 +46,15 @@ def _policy(path: Path) -> tuple[Path, str]:
 def _runner() -> ModuleType:
     path = ROOT / "scripts/run_acceptance_declaration.py"
     spec = importlib.util.spec_from_file_location("jaa04_acceptance_declaration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _certifier() -> ModuleType:
+    path = ROOT / "scripts/accept_jaa_04.py"
+    spec = importlib.util.spec_from_file_location("jaa04_corpus_certifier", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -227,6 +242,27 @@ def test_certifier_refuses_repository_access_policy(tmp_path: Path) -> None:
     )
     assert completed.returncode == 2
     assert "access policy must be outside the product repository" in completed.stderr
+
+
+@pytest.mark.parametrize("attack", ("stale-at-certification", "future-capture"))
+def test_certifier_uses_its_current_clock_for_policy_freshness(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    reviewed = now - timedelta(days=91) if attack == "stale-at-certification" else now
+    retrieved = now - timedelta(days=2) if attack == "stale-at-certification" else (
+        now + timedelta(days=1)
+    )
+    policy, _ = _policy(tmp_path / "access-policy.json", reviewed_at=reviewed)
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    (capture / "frozen_dossiers.json").write_text(json.dumps({
+        "dossiers": [{"sources": [{"retrieved_at": retrieved.isoformat()}]}],
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="stale|future-dated"):
+        _certifier()._load_access_policy(capture, policy)
 
 
 @pytest.mark.parametrize("attack", ("unsupported-receipt-schema", "manifest-digest-mismatch"))
