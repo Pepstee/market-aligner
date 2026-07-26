@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -83,8 +84,20 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
     venv = tmp_path / "activated-locked-cpython312"
     subprocess.run((sys.executable, "-m", "venv", "--system-site-packages", str(venv)), check=True)
     python = _venv_python(venv)
+    build_requirements = tomllib.loads(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["build-system"]["requires"]
+    assert build_requirements == ["setuptools==80.9.0"]
     subprocess.run(
-        (str(python), "-m", "pip", "install", "--requirement", str(checkout / "requirements-test.lock")),
+        (
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            *build_requirements,
+            "--requirement",
+            str(checkout / "requirements-test.lock"),
+        ),
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

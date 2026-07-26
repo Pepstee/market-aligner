@@ -103,10 +103,29 @@ def test_new_candidate_profile_is_operator_supplied_not_a_legacy_filename(tmp_pa
 def test_canonical_marker_and_cli_require_explicit_historical_roots() -> None:
     marker = json.loads((ROOT / "canonical-repository.json").read_text(encoding="utf-8"))
     assert marker["canonical_repository"] == {
-        "id": "market-aligner", "product_name": "Market Aligner", "status": "active",
         "marker": "canonical-repository.json",
+        "id": "market-aligner",
+        "product_name": "Market Aligner",
+        "status": "active",
+        "role": "neutral-versioned-successor",
+        "identity_rule": (
+            "canonical only at a checked-out revision that passes fail-closed "
+            "marker and source verification"
+        ),
     }
-    assert marker["historical_copies"] == {"canonical": False, "discovery": "operator_supplied_only"}
+    assert marker["historical_copies"] == {
+        "canonical": False,
+        "status": "historical-only",
+        "identities": [
+            "giga-user/market-aligner:historical-copy-1",
+            "giga-user/market-aligner:historical-copy-2",
+        ],
+        "discovery": "operator_supplied_only",
+        "prohibition": (
+            "not canonical and not valid for certification, publication, or "
+            "deployment"
+        ),
+    }
     assert marker["brownfield_import_contract"]["implicit_host_paths"] is False
     assert marker["brownfield_import_contract"]["required_operator_paths"] == [
         "source_root", "runtime_data_root", "repository_root",
