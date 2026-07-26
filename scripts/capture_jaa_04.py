@@ -74,7 +74,7 @@ def _revision() -> str:
 def _admitted(connection: sqlite3.Connection) -> dict[str, dict[str, str]]:
     connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        """SELECT j.job_key,j.url,j.company,j.title
+        """SELECT j.job_key,j.board,j.url,j.company,j.title
            FROM employer_research_queue q JOIN pipeline_jobs j USING(job_key)
            WHERE j.opportunity_decision='pass' ORDER BY j.job_key"""
     ).fetchall()
@@ -208,7 +208,8 @@ def _bootstrap_is_complete(work_db: Path, records: list[dict[str, object]],
         with sqlite3.connect(f"file:{work_db}?mode=ro", uri=True) as connection:
             connection.row_factory = sqlite3.Row
             jobs = connection.execute(
-                """SELECT job_key,state,opportunity,opportunity_decision,
+                """SELECT job_key,board,url,company,title,state,
+                          opportunity,opportunity_decision,
                           opportunity_reason,policy_hash
                    FROM pipeline_jobs"""
             ).fetchall()
@@ -230,12 +231,47 @@ def _bootstrap_is_complete(work_db: Path, records: list[dict[str, object]],
         record = expected[str(row["job_key"])]
         decision = record["opportunity0_decision"]
         digest = calibration_policy_digest(str(decision["policy_hash"]), policy)
-        if (int(round(float(row["opportunity"]) * 10_000)) != decision["score_bp"]
+        if (any(str(row[field]) != str(record[field])
+                for field in ("board", "url", "company", "title"))
+                or int(round(float(row["opportunity"]) * 10_000)) != decision["score_bp"]
                 or row["opportunity_decision"] != decision["decision"]
                 or row["opportunity_reason"] != decision["reason"]
                 or (row["state"] == "employer_research_queued"
                     and row["policy_hash"] != digest)
                 or receipt_by_key[str(row["job_key"])] != digest):
+            return False
+    return True
+
+
+def _workspace_matches_admission(
+    work_db: Path,
+    records: list[dict[str, object]],
+) -> bool:
+    """Bind the mutable resume queue to exact frozen admission identities."""
+    expected = {str(record["job_key"]): record for record in records}
+    placeholders = ",".join("?" for _ in expected)
+    try:
+        with sqlite3.connect(f"file:{work_db}?mode=ro", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            jobs = connection.execute(
+                f"""SELECT job_key,board,url,company,title FROM pipeline_jobs
+                    WHERE job_key IN ({placeholders})""",
+                tuple(sorted(expected)),
+            ).fetchall()
+            queues = connection.execute(
+                f"""SELECT job_key FROM employer_research_queue
+                    WHERE job_key IN ({placeholders})""",
+                tuple(sorted(expected)),
+            ).fetchall()
+    except (OSError, sqlite3.DatabaseError):
+        return False
+    if ({str(row["job_key"]) for row in jobs} != set(expected)
+            or {str(row["job_key"]) for row in queues} != set(expected)):
+        return False
+    for row in jobs:
+        record = expected[str(row["job_key"])]
+        if any(str(row[field]) != str(record[field])
+               for field in ("board", "url", "company", "title")):
             return False
     return True
 
@@ -348,6 +384,10 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
             _bootstrap_json_database(work_db, records, calibrated)
     elif not work_db.exists():
         shutil.copyfile(database_path, work_db)
+    if not _workspace_matches_admission(work_db, records):
+        raise RuntimeError(
+            "capture workspace queue differs from the frozen admission identities"
+        )
     stage: Path | None = None
     try:
         with sqlite3.connect(work_db) as connection:

@@ -134,6 +134,47 @@ def test_capture_refuses_workspace_queue_aliasing_frozen_sqlite_snapshot(
     assert not (tmp_path / "published").exists()
 
 
+@pytest.mark.parametrize("field", ("board", "url", "company", "title"))
+def test_capture_revalidates_resumed_workspace_job_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    module = _capture_module()
+    records = _snapshot(tmp_path / "generated-identities.json")
+    source_database = tmp_path / "opportunity-zero.sqlite3"
+    _bootstrap(source_database, records)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    work_queue = workspace / "queue.sqlite3"
+    _bootstrap(work_queue, records)
+    with sqlite3.connect(work_queue) as connection:
+        connection.execute(
+            f"UPDATE pipeline_jobs SET {field}=? WHERE job_key=?",
+            ("attacker-substitution", "generated:01"),
+        )
+
+    class UnexpectedTransport:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("identity drift reached the retrieval transport")
+
+    monkeypatch.setattr(module, "ScraplingPublicRetriever", UnexpectedTransport)
+    access_policy = type(
+        "GeneratedAccessPolicy",
+        (),
+        {"policy_sha256": hashlib.sha256(b"generated-test-policy").hexdigest()},
+    )()
+    with pytest.raises(RuntimeError, match="workspace queue differs"):
+        module.capture(
+            source_database,
+            tmp_path / "published",
+            workspace=workspace,
+            timeout_seconds=1,
+            access_policy=access_policy,
+        )
+    assert not (tmp_path / "published").exists()
+
+
 def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_exactly_thirty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
