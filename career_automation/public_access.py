@@ -499,7 +499,8 @@ def replay_access_receipt(
         raise ValueError("access receipt contains a non-public URL") from exc
     hosts = {origin[1] for origin in origins}
     if (hosts != {receipt.host.casefold()} or receipt_origin[1] != receipt.host.casefold()
-            or robots_origin != receipt_origin or final_origin != receipt_origin):
+            or robots_origin != receipt_origin
+            or final_origin[1] != receipt.host.casefold()):
         raise ValueError("access receipt host differs from captured content")
     expected_robots = urlunsplit(
         (

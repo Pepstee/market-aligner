@@ -411,6 +411,35 @@ def test_cross_host_robots_redirect_is_rejected(tmp_path: Path) -> None:
         controller.before_request(URL)
 
 
+def test_same_host_robots_scheme_redirect_replays_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    requested_url = URL.replace("https://", "http://")
+    initial_robots = f"http://{HOST}/robots.txt"
+    final_robots = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(
+            200,
+            b"User-agent: *\nAllow: /\n",
+            url=final_robots,
+            history=({"url": initial_robots, "status": 301},),
+        ),
+    )
+    value = asdict(controller.before_request(requested_url))
+    replayed = replay_access_receipt(
+        value,
+        cache,
+        content_urls=(requested_url,),
+        content_retrieved_at=NOW.isoformat(),
+        policies={controller.policy.policy_sha256: controller.policy},
+    )
+    assert replayed.final_url == final_robots
+    assert replayed.redirect_history == [
+        {"url": initial_robots, "status_code": 301},
+    ]
+
+
 def test_retriever_never_uses_stealth_and_challenge_is_terminal(
     tmp_path: Path,
 ) -> None:
