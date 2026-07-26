@@ -68,6 +68,7 @@ def _receipt(
     policy_hash: str | None = None,
     profile_hash: str | None = None,
     input_hash: str | None = None,
+    as_of: date = AS_OF,
 ) -> InferenceReceipt:
     candidate_profile_sha256 = profile_hash or evidence_projection_hash(evidence)
     return InferenceReceipt(
@@ -79,7 +80,7 @@ def _receipt(
         input_hash or matching_input_hash(
             requirement,
             candidate_profile_sha256=candidate_profile_sha256,
-            as_of=AS_OF,
+            as_of=as_of,
         ),
     )
 
@@ -286,6 +287,37 @@ def _approved_gap_material(
         "artefact_version": 1,
         "verification_decision_id": decision_id,
     }
+
+
+def _verified_knowledge_gap(
+    path: Path,
+    *,
+    job_key: str,
+) -> tuple[
+    CareerDatabase,
+    FitAssessmentStore,
+    object,
+    Requirement,
+    str,
+    object,
+]:
+    database, store, run, requirement, task_id, promotion = (
+        _pending_knowledge_gap(path, job_key=job_key)
+    )
+    identities = _approved_gap_material(
+        database,
+        promotion_id=str(promotion.promotion_id),
+        criterion=requirement.criterion,
+        verifier_identity="test:reviewer",
+    )
+    store.verify_gap(
+        run_id=run.run_id,
+        task_id=task_id,
+        promotion_id=str(promotion.promotion_id),
+        as_of=AS_OF,
+        **identities,
+    )
+    return database, store, run, requirement, task_id, promotion
 
 
 @pytest.mark.parametrize("proof_class", ("verified_claim", "portfolio_artifact", "test_result"))
@@ -860,7 +892,7 @@ def test_only_one_highest_priority_task_can_activate_per_fit_run(
     )
     with store._connect() as connection:
         tasks = connection.execute(
-            """SELECT task_id FROM improvement_tasks WHERE run_id=?
+            """SELECT task_id,requirement_id FROM improvement_tasks WHERE run_id=?
                ORDER BY priority_score DESC,cost_units,task_id""",
             (run.run_id,),
         ).fetchall()
@@ -876,6 +908,73 @@ def test_only_one_highest_priority_task_can_activate_per_fit_run(
             str(tasks[1][0]),
             executor_identity="test:executor",
         )
+    first_task = str(tasks[0][0])
+    promotion = store.record_task_evidence(
+        run.run_id,
+        TaskEvidence(
+            first_task, "test_result", "locked-assessment-pass",
+            "deterministic", DIGEST, "test:executor",
+        ),
+    )
+    identities = _approved_gap_material(
+        database,
+        promotion_id=str(promotion.promotion_id),
+        criterion=requirements[0].criterion,
+        verifier_identity="test:reviewer",
+    )
+    store.verify_gap(
+        run_id=run.run_id,
+        task_id=first_task,
+        promotion_id=str(promotion.promotion_id),
+        as_of=AS_OF,
+        **identities,
+    )
+    reassessment_as_of = date(2030, 1, 2)
+    evidence = candidate_graph_evidence(
+        database.path,
+        as_of=reassessment_as_of,
+    )
+    proposals = (
+        MatchProposal(
+            requirements[0].requirement_id,
+            (evidence[0].evidence_id,),
+            9000,
+            "direct",
+            "First priority gap is independently verified.",
+            _receipt(requirements[0], evidence, as_of=reassessment_as_of),
+        ),
+        MatchProposal(
+            requirements[1].requirement_id,
+            (),
+            9000,
+            "none",
+            "Second gap remains.",
+            _receipt(requirements[1], evidence, as_of=reassessment_as_of),
+        ),
+    )
+    successor = store.reassess(
+        predecessor_run_id=run.run_id,
+        requirements=requirements,
+        proposals=proposals,
+        as_of=reassessment_as_of,
+    )
+    assert successor.status == "gap_identified"
+    with store._connect() as connection:
+        remaining = connection.execute(
+            """SELECT task_id,requirement_id FROM improvement_tasks
+               WHERE run_id=?""",
+            (successor.run_id,),
+        ).fetchall()
+    assert len(remaining) == 1
+    assert str(remaining[0]["requirement_id"]) == requirements[1].requirement_id
+    store.activate_task(
+        successor.run_id,
+        str(remaining[0]["task_id"]),
+        executor_identity="test:second-executor",
+    )
+    assert database.lifecycle.replay()["priority-job"] is (
+        PipelineState.EVIDENCE_BUILDING
+    )
 
 
 def test_cross_run_task_and_promotion_identities_fail_closed(
@@ -1014,7 +1113,123 @@ def test_verified_gap_exact_replay_rejects_mutated_graph_binding(
         )
 
 
-@pytest.mark.parametrize("attack", ("ledger", "trigger"))
+def test_fit_reassessment_requires_a_verified_predecessor(
+    tmp_path: Path,
+) -> None:
+    _database, store, run, requirement, _task_id, _promotion = (
+        _pending_knowledge_gap(
+            tmp_path / "unverified-reassessment.sqlite3",
+            job_key="unverified-reassessment-job",
+        )
+    )
+    with pytest.raises(ValueError, match="verified predecessor"):
+        store.reassess(
+            predecessor_run_id=run.run_id,
+            requirements=(requirement,),
+            proposals=(),
+            as_of=date(2030, 1, 2),
+        )
+
+
+@pytest.mark.parametrize("attack", ("same-date", "changed-requirement"))
+def test_fit_reassessment_rejects_stale_time_or_requirement_drift(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    database, store, run, requirement, _task_id, _promotion = (
+        _verified_knowledge_gap(
+            tmp_path / f"reassessment-{attack}.sqlite3",
+            job_key=f"reassessment-{attack}-job",
+        )
+    )
+    as_of = AS_OF if attack == "same-date" else date(2030, 1, 2)
+    reassessment_requirement = (
+        requirement
+        if attack == "same-date"
+        else Requirement(
+            requirement.requirement_id,
+            requirement.criterion,
+            requirement.text,
+            requirement.essential,
+            requirement.gap_kind,
+            requirement.bridge_policy,
+            requirement.accepted_proof_classes,
+            requirement.opportunity_weight_bp - 1,
+            requirement.source_identity,
+            requirement.source_span,
+        )
+    )
+    evidence = candidate_graph_evidence(database.path, as_of=as_of)
+    proposal = MatchProposal(
+        reassessment_requirement.requirement_id,
+        (evidence[0].evidence_id,),
+        9000,
+        "direct",
+        "Independently reviewed reassessment.",
+        _receipt(reassessment_requirement, evidence, as_of=as_of),
+    )
+    with pytest.raises(ValueError, match="advance the exact verified predecessor"):
+        store.reassess(
+            predecessor_run_id=run.run_id,
+            requirements=(reassessment_requirement,),
+            proposals=(proposal,),
+            as_of=as_of,
+        )
+    assert database.lifecycle.replay()[f"reassessment-{attack}-job"] is (
+        PipelineState.GAP_VERIFIED
+    )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM fit_assessment_runs"
+        ).fetchone()[0] == 1
+
+
+def test_fit_reassessment_mutation_conflicts_without_advancing_to_jaa06(
+    tmp_path: Path,
+) -> None:
+    database, store, run, requirement, _task_id, _promotion = (
+        _verified_knowledge_gap(
+            tmp_path / "reassessment-conflict.sqlite3",
+            job_key="reassessment-conflict-job",
+        )
+    )
+    as_of = date(2030, 1, 2)
+    evidence = candidate_graph_evidence(database.path, as_of=as_of)
+
+    def proposal(reason: str) -> MatchProposal:
+        return MatchProposal(
+            requirement.requirement_id,
+            (evidence[0].evidence_id,),
+            9000,
+            "direct",
+            reason,
+            _receipt(requirement, evidence, as_of=as_of),
+        )
+
+    successor = store.reassess(
+        predecessor_run_id=run.run_id,
+        requirements=(requirement,),
+        proposals=(proposal("Accepted exact reassessment."),),
+        as_of=as_of,
+    )
+    assert successor.status == "ready"
+    with pytest.raises(ValueError, match="different durable result"):
+        store.reassess(
+            predecessor_run_id=run.run_id,
+            requirements=(requirement,),
+            proposals=(proposal("Mutated reassessment output."),),
+            as_of=as_of,
+        )
+    assert database.lifecycle.replay()["reassessment-conflict-job"] is (
+        PipelineState.FIT_REASSESSED
+    )
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM fit_assessment_runs"
+        ).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("attack", ("ledger", "trigger", "reassessment-index"))
 def test_jaa05_migration_rejects_ledger_or_installed_schema_tampering(
     tmp_path: Path,
     attack: str,
@@ -1028,9 +1243,13 @@ def test_jaa05_migration_rejects_ledger_or_installed_schema_tampering(
                    WHERE version=4""",
                 ("0" * 64,),
             )
-        else:
+        elif attack == "trigger":
             connection.execute(
                 "DROP TRIGGER improvement_tasks_immutable_delete"
+            )
+        else:
+            connection.execute(
+                "DROP INDEX fit_assessment_runs_one_successor"
             )
     with pytest.raises(RuntimeError, match=(
         "modified after deployment" if attack == "ledger"

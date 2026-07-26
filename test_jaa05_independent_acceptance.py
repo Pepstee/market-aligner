@@ -97,6 +97,8 @@ def _requirement(
 def _receipt(
     requirement: Requirement,
     evidence: tuple[Evidence, ...],
+    *,
+    as_of: date = AS_OF,
 ) -> InferenceReceipt:
     profile_sha256 = evidence_projection_hash(evidence)
     return InferenceReceipt(
@@ -108,7 +110,7 @@ def _receipt(
         input_sha256=matching_input_hash(
             requirement,
             candidate_profile_sha256=profile_sha256,
-            as_of=AS_OF,
+            as_of=as_of,
         ),
     )
 
@@ -120,6 +122,7 @@ def _proposal(
     *,
     confidence: int = 9000,
     basis: str | None = None,
+    as_of: date = AS_OF,
 ) -> MatchProposal:
     return MatchProposal(
         requirement.requirement_id,
@@ -127,7 +130,7 @@ def _proposal(
         confidence,
         basis or ("direct" if evidence_ids else "none"),
         "Locked independent reviewer decision.",
-        _receipt(requirement, evidence),
+        _receipt(requirement, evidence, as_of=as_of),
     )
 
 
@@ -522,6 +525,48 @@ def test_fit_assessment_persists_gaps_tasks_and_lifecycle_atomically(
     verified = store.verify_gap(**verification_arguments)
     assert verified.lifecycle_receipt_id
     assert store.verify_gap(**verification_arguments) == verified
+    reassessment_as_of = date(2030, 1, 2)
+    current_evidence = candidate_graph_evidence(
+        database.path,
+        as_of=reassessment_as_of,
+    )
+    reassessed = store.reassess(
+        predecessor_run_id=receipt.run_id,
+        requirements=(requirement,),
+        proposals=(_proposal(
+            requirement,
+            current_evidence,
+            ("systems-test-evidence",),
+            as_of=reassessment_as_of,
+        ),),
+        as_of=reassessment_as_of,
+    )
+    assert reassessed.status == "ready"
+    assert store.reassess(
+        predecessor_run_id=receipt.run_id,
+        requirements=(requirement,),
+        proposals=(_proposal(
+            requirement,
+            current_evidence,
+            ("systems-test-evidence",),
+            as_of=reassessment_as_of,
+        ),),
+        as_of=reassessment_as_of,
+    ) == reassessed
+    with store._connect() as connection:
+        successor = connection.execute(
+            """SELECT predecessor_run_id,as_of,status
+               FROM fit_assessment_runs WHERE run_id=?""",
+            (reassessed.run_id,),
+        ).fetchone()
+        assert tuple(successor) == (
+            receipt.run_id,
+            reassessment_as_of.isoformat(),
+            "ready",
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM fit_assessment_runs"
+        ).fetchone()[0] == 2
     for table in (
         "fit_assessment_runs",
         "vacancy_requirements",
@@ -537,7 +582,7 @@ def test_fit_assessment_persists_gaps_tasks_and_lifecycle_atomically(
             match="immutable",
         ):
             connection.execute(f"DELETE FROM {table}")
-    assert database.lifecycle.replay()["gap-job"] is PipelineState.GAP_VERIFIED
+    assert database.lifecycle.replay()["gap-job"] is PipelineState.FIT_REASSESSED
 
 
 def test_fully_matched_fit_run_stays_at_fit_boundary_for_jaa06(tmp_path: Path) -> None:

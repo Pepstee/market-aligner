@@ -19,9 +19,12 @@ from .evidence_matching import (
     MatchResult,
     MatchingPolicy,
     Requirement,
+    candidate_graph_evidence,
     canonical_json,
     content_hash,
+    evidence_projection_hash,
     match_candidate_graph,
+    match_requirements,
 )
 from .lifecycle import LifecycleReducer, PolicyIdentity
 from .migrations import apply_jaa_05_migrations
@@ -410,6 +413,8 @@ class FitAssessmentStore:
     ACTIVATION_POLICY_VERSION = "1"
     GAP_VERIFICATION_POLICY_ID = "career.gap-verification"
     GAP_VERIFICATION_POLICY_VERSION = "1"
+    REASSESSMENT_POLICY_ID = "career.fit-reassessment"
+    REASSESSMENT_POLICY_VERSION = "1"
     ACTION_STATES = {
         "present_verified_evidence": PipelineState.GAP_RECOVERY,
         "retrieve_existing_evidence": PipelineState.GAP_RECOVERY,
@@ -455,12 +460,75 @@ class FitAssessmentStore:
         plan = optimise_gaps(requirement_rows, batch.results)
         return self._record(job_key, requirement_rows, batch, plan)
 
+    def reassess(
+        self,
+        *,
+        predecessor_run_id: str,
+        requirements: Iterable[Requirement],
+        proposals: Iterable[MatchProposal],
+        as_of: date,
+        matching_policy: MatchingPolicy = MatchingPolicy(),
+    ) -> FitAssessmentReceipt:
+        """Create one fresh fit run after an exact verified-gap predecessor."""
+        requirement_rows = tuple(requirements)
+        if not requirement_rows:
+            raise ValueError("fit reassessment requires atomic requirements")
+        with self._connect() as connection:
+            predecessor = connection.execute(
+                """SELECT run.job_key,verification.evidence_id,
+                          verification.evidence_version
+                   FROM fit_assessment_runs run
+                   JOIN improvement_task_activations activation
+                     ON activation.run_id=run.run_id
+                   JOIN gap_verification_receipts verification
+                     ON verification.activation_id=activation.activation_id
+                   WHERE run.run_id=?""",
+                (predecessor_run_id,),
+            ).fetchone()
+        if predecessor is None:
+            raise ValueError("fit reassessment requires a verified predecessor run")
+        job_key = str(predecessor["job_key"])
+        evidence = candidate_graph_evidence(self.path, as_of=as_of)
+        if (
+            str(predecessor["evidence_id"]),
+            int(predecessor["evidence_version"]),
+        ) not in {
+            (row.evidence_id, row.version)
+            for row in evidence
+        }:
+            raise ValueError(
+                "verified gap evidence is not current in the reassessment profile"
+            )
+        results = match_requirements(
+            requirement_rows,
+            proposals,
+            evidence,
+            as_of=as_of,
+            policy=matching_policy,
+        )
+        batch = CandidateMatchBatch(
+            results,
+            evidence_projection_hash(evidence),
+            matching_policy.policy_hash,
+            as_of,
+        )
+        plan = optimise_gaps(requirement_rows, batch.results)
+        return self._record(
+            job_key,
+            requirement_rows,
+            batch,
+            plan,
+            predecessor_run_id=predecessor_run_id,
+        )
+
     def _record(
         self,
         job_key: str,
         requirements: tuple[Requirement, ...],
         batch: CandidateMatchBatch,
         plan: OptimisationPlan,
+        *,
+        predecessor_run_id: str | None = None,
     ) -> FitAssessmentReceipt:
         requirement_ids = [row.requirement_id for row in requirements]
         if len(set(requirement_ids)) != len(requirement_ids):
@@ -484,7 +552,11 @@ class FitAssessmentStore:
         results_hash = content_hash(result_document)
         plan_hash = content_hash(plan_document)
         document = {
-            "schema_version": "jaa05.fit-assessment-run.v1",
+            "schema_version": (
+                "jaa05.fit-assessment-run.v2"
+                if predecessor_run_id is not None
+                else "jaa05.fit-assessment-run.v1"
+            ),
             "job_key": job_key,
             "as_of": batch.as_of.isoformat(),
             "status": status,
@@ -498,10 +570,12 @@ class FitAssessmentStore:
             "results": result_document,
             "plan": plan_document,
         }
+        if predecessor_run_id is not None:
+            document["predecessor_run_id"] = predecessor_run_id
         document_json = canonical_json(document)
         document_hash = hashlib.sha256(document_json.encode("utf-8")).hexdigest()
         run_id = content_hash({
-            "contract": "jaa05.fit-assessment-run.v1",
+            "contract": str(document["schema_version"]),
             "document_hash": document_hash,
         })
         policy_hash = content_hash({
@@ -548,8 +622,39 @@ class FitAssessmentStore:
                     raise ValueError(
                         "atomic requirement does not resolve to the exact vacancy payload"
                     )
+            predecessor = None
+            if predecessor_run_id is not None:
+                predecessor = connection.execute(
+                    """SELECT prior.*,verification.verification_id,
+                              verification.verified_as_of
+                       FROM fit_assessment_runs prior
+                       JOIN improvement_task_activations activation
+                         ON activation.run_id=prior.run_id
+                       JOIN gap_verification_receipts verification
+                         ON verification.activation_id=activation.activation_id
+                       WHERE prior.run_id=? AND prior.job_key=?""",
+                    (predecessor_run_id, job_key),
+                ).fetchone()
+                if predecessor is None:
+                    raise ValueError(
+                        "fit reassessment requires a verified predecessor run"
+                    )
+                if (
+                    str(predecessor["status"]) != "gap_identified"
+                    or requirements_hash != str(predecessor["requirements_hash"])
+                    or batch.candidate_profile_sha256
+                    == str(predecessor["candidate_profile_hash"])
+                    or batch.as_of
+                    <= date.fromisoformat(str(predecessor["as_of"]))
+                    or batch.as_of
+                    <= date.fromisoformat(str(predecessor["verified_as_of"]))
+                ):
+                    raise ValueError(
+                        "fit reassessment must advance the exact verified predecessor"
+                    )
             existing = connection.execute(
-                "SELECT document_json FROM fit_assessment_runs WHERE run_id=?",
+                """SELECT document_json,predecessor_run_id
+                   FROM fit_assessment_runs WHERE run_id=?""",
                 (run_id,),
             ).fetchone()
             conflicting = connection.execute(
@@ -567,29 +672,78 @@ class FitAssessmentStore:
                 raise ValueError(
                     "fit assessment inputs already have a different durable result"
                 )
+            conflicting_successor = (
+                connection.execute(
+                    """SELECT run_id FROM fit_assessment_runs
+                       WHERE predecessor_run_id=? AND run_id<>?""",
+                    (predecessor_run_id, run_id),
+                ).fetchone()
+                if predecessor_run_id is not None
+                else None
+            )
+            if conflicting_successor is not None:
+                raise ValueError(
+                    "verified predecessor already has a different fit reassessment"
+                )
+            reassessment_receipt_id = None
             if existing is not None:
-                if str(existing["document_json"]) != document_json:
+                if (
+                    str(existing["document_json"]) != document_json
+                    or existing["predecessor_run_id"] != predecessor_run_id
+                ):
                     raise ValueError("fit assessment run identity conflicts with stored bytes")
             else:
-                if str(job["state"]) not in {
-                    PipelineState.FIT_ASSESSED.value,
-                    PipelineState.FIT_REASSESSED.value,
-                }:
+                required_state = (
+                    PipelineState.GAP_VERIFIED
+                    if predecessor_run_id is not None
+                    else PipelineState.FIT_ASSESSED
+                )
+                if str(job["state"]) != required_state.value:
                     raise ValueError(
                         "fit assessment requires a fit assessment lifecycle boundary"
                     )
+                if predecessor is not None:
+                    reassessment_policy_hash = content_hash({
+                        "policy_id": self.REASSESSMENT_POLICY_ID,
+                        "version": self.REASSESSMENT_POLICY_VERSION,
+                        "predecessor_run_id": predecessor_run_id,
+                        "verification_id": str(predecessor["verification_id"]),
+                    })
+                    reassessment_transition = self.lifecycle.commit_in_transaction(
+                        connection,
+                        job_key=job_key,
+                        to_state=PipelineState.FIT_REASSESSED,
+                        policy=PolicyIdentity(
+                            self.REASSESSMENT_POLICY_ID,
+                            self.REASSESSMENT_POLICY_VERSION,
+                            reassessment_policy_hash,
+                        ),
+                        inputs={
+                            "predecessor_run_id": predecessor_run_id,
+                            "verification_id": str(predecessor["verification_id"]),
+                            "successor_run_id": run_id,
+                            "requirements_hash": requirements_hash,
+                            "candidate_profile_hash": batch.candidate_profile_sha256,
+                            "as_of": batch.as_of.isoformat(),
+                        },
+                        outputs={"state": PipelineState.FIT_REASSESSED.value},
+                        idempotency_key=(
+                            f"fit-reassessment:{job_key}:{predecessor_run_id}"
+                        ),
+                    )
+                    reassessment_receipt_id = reassessment_transition.receipt_id
                 connection.execute(
                     """INSERT INTO fit_assessment_runs(
                          run_id,job_key,as_of,status,requirements_hash,candidate_profile_hash,
                          match_policy_hash,gap_policy_hash,results_hash,plan_hash,
-                         document_json,document_hash)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         document_json,document_hash,predecessor_run_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         run_id, job_key, batch.as_of.isoformat(), status,
                         requirements_hash,
                         batch.candidate_profile_sha256, batch.policy_sha256,
                         plan.policy_sha256, results_hash, plan_hash,
-                        document_json, document_hash,
+                        document_json, document_hash, predecessor_run_id,
                     ),
                 )
                 for requirement in requirements:
@@ -661,7 +815,37 @@ class FitAssessmentStore:
                             canonical_json(vars(task.verification)),
                         ),
                     )
-            lifecycle_receipt_id = None
+            lifecycle_receipt_id = reassessment_receipt_id
+            if predecessor is not None and existing is not None:
+                reassessment_policy_hash = content_hash({
+                    "policy_id": self.REASSESSMENT_POLICY_ID,
+                    "version": self.REASSESSMENT_POLICY_VERSION,
+                    "predecessor_run_id": predecessor_run_id,
+                    "verification_id": str(predecessor["verification_id"]),
+                })
+                reassessment_transition = self.lifecycle.commit_in_transaction(
+                    connection,
+                    job_key=job_key,
+                    to_state=PipelineState.FIT_REASSESSED,
+                    policy=PolicyIdentity(
+                        self.REASSESSMENT_POLICY_ID,
+                        self.REASSESSMENT_POLICY_VERSION,
+                        reassessment_policy_hash,
+                    ),
+                    inputs={
+                        "predecessor_run_id": predecessor_run_id,
+                        "verification_id": str(predecessor["verification_id"]),
+                        "successor_run_id": run_id,
+                        "requirements_hash": requirements_hash,
+                        "candidate_profile_hash": batch.candidate_profile_sha256,
+                        "as_of": batch.as_of.isoformat(),
+                    },
+                    outputs={"state": PipelineState.FIT_REASSESSED.value},
+                    idempotency_key=(
+                        f"fit-reassessment:{job_key}:{predecessor_run_id}"
+                    ),
+                )
+                lifecycle_receipt_id = reassessment_transition.receipt_id
             if transition_target is not None:
                 # Exact run replay intentionally re-enters the certified JAA-01
                 # idempotency gate.  It verifies every binding field before

@@ -45,7 +45,7 @@ _JAA05_SCHEMA_TABLES = (
     "gap_verification_receipts",
 )
 JAA05_INSTALLED_SCHEMA_SHA256 = (
-    "15c5c5617ccad85ca293155f731a8e7b817e5e03f7988592c418eaefbdbb9c42"
+    "3c4e4fe4d934b2995d8ccde907c59bfb9abc56615c193d081e6b07ca0f341dda"
 )
 
 
@@ -995,6 +995,20 @@ _JAA_05_GAP_VERIFICATION_MIGRATION = Migration(
 )
 
 
+_JAA_05_FIT_REASSESSMENT_MIGRATION = Migration(
+    6,
+    "jaa_05_fit_reassessment_lineage",
+    (
+        """ALTER TABLE fit_assessment_runs
+             ADD COLUMN predecessor_run_id TEXT
+             REFERENCES fit_assessment_runs(run_id) ON DELETE RESTRICT""",
+        """CREATE UNIQUE INDEX fit_assessment_runs_one_successor
+             ON fit_assessment_runs(predecessor_run_id)
+             WHERE predecessor_run_id IS NOT NULL""",
+    ),
+)
+
+
 # Migration 2 was already allocated to JAA-02 before the independent JAA-01
 # review required an immutable score-import receipt. Public sets remain ordered
 # and checksummed while each slice applies only the schema it owns.
@@ -1010,6 +1024,7 @@ JAA_05_MIGRATIONS: tuple[Migration, ...] = (
     *JAA_02_MIGRATIONS,
     _JAA_05_EVIDENCE_MATCHING_MIGRATION,
     _JAA_05_GAP_VERIFICATION_MIGRATION,
+    _JAA_05_FIT_REASSESSMENT_MIGRATION,
 )
 
 
