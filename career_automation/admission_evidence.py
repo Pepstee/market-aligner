@@ -185,21 +185,49 @@ def validate_admission_evidence(
     if mode == "sqlite-lifecycle-snapshot":
         if descriptor.get("raw_cache_root") is not None or descriptor.get("referenced_files") != []:
             raise ValueError("SQLite admission descriptor cannot claim a JSON raw store")
+        if descriptor.get("source_snapshot_sha256") != source_snapshot_hash(snapshot):
+            raise ValueError("published SQLite logical snapshot identity is invalid")
         uri = snapshot.resolve().as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True) as connection:
-            keys = {
-                str(row[0]) for row in connection.execute(
-                    """SELECT j.job_key
-                       FROM employer_research_queue q JOIN pipeline_jobs j USING(job_key)
-                       WHERE j.opportunity_decision='pass'"""
-                )
-            }
-        if not set(records_by_key).issubset(keys):
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """SELECT j.job_key,j.url,j.company,j.title,j.payload_hash,
+                          j.opportunity
+                   FROM employer_research_queue q
+                   JOIN pipeline_jobs j USING(job_key)
+                   WHERE j.opportunity_decision='pass'"""
+            ).fetchall()
+        snapshot_records = {str(row["job_key"]): row for row in rows}
+        if (len(snapshot_records) != len(rows)
+                or not set(records_by_key).issubset(snapshot_records)):
             raise ValueError("published SQLite snapshot does not contain the admitted cohort")
-        if any(record.get("opportunity0_raw_response_refs") not in (None, [])
-               for record in manifest_records):
-            raise ValueError("SQLite manifest invents JSON raw response references")
+        expected_selection = set(
+            sorted(snapshot_records)[:len(records_by_key)]
+        )
+        if set(records_by_key) != expected_selection:
+            raise ValueError(
+                "manifest admission does not match deterministic SQLite cohort selection"
+            )
+        for key, manifest_record in records_by_key.items():
+            source = snapshot_records[key]
+            reassessment = manifest_record.get("opportunity1_reassessment")
+            if (manifest_record.get("vacancy_url") != source["url"]
+                    or manifest_record.get("company") != source["company"]
+                    or manifest_record.get("role") != source["title"]
+                    or manifest_record.get("admitted_payload_hash")
+                    != source["payload_hash"]
+                    or manifest_record.get("opportunity0_raw_response_refs")
+                    not in (None, [])
+                    or not isinstance(reassessment, Mapping)
+                    or type(reassessment.get("opportunity0_score_bp")) is not int
+                    or reassessment["opportunity0_score_bp"]
+                    != int(round(float(source["opportunity"]) * 10_000))):
+                raise ValueError(
+                    "manifest admission differs from its published SQLite snapshot"
+                )
     elif mode == "official-json-v2":
+        if descriptor.get("source_snapshot_sha256") != descriptor.get("snapshot_sha256"):
+            raise ValueError("published JSON snapshot identity is invalid")
         payload = json.loads(snapshot.read_text(encoding="utf-8"))
         raw_records = payload.get("records")
         if (payload.get("schema_version") != "jaa04.official-admitted-queue.v2"
