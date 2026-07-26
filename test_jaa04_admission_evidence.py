@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,12 @@ from career_automation.admission_evidence import (
     raw_evidence_hash,
     source_snapshot_hash,
     validate_admission_evidence,
+)
+from career_automation.public_access import (
+    PublicAccessPolicy,
+    RobotsReceipt,
+    TermsAttestation,
+    USER_AGENT,
 )
 
 
@@ -33,18 +41,45 @@ def _json_evidence(tmp_path: Path):
         target = raw / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(body)
-    access = {
-        "allowed": True,
-        "content_sha256": robots_hash,
-        "raw_response_ref": robots_ref.as_posix(),
-    }
+    stamp = "2026-07-26T00:00:00+00:00"
+    attestation = TermsAttestation(
+        host="jobs.example.test",
+        terms_url="https://jobs.example.test/terms",
+        determination="public_read_only_research_permitted",
+        reviewed_at="2026-07-25T00:00:00+00:00",
+        reviewed_by="Offline Test Operator",
+        reviewer_type="human_operator",
+        notes="Synthetic offline fixture; not production authority.",
+    )
+    policy_hash = hashlib.sha256(b"synthetic-policy-bytes").hexdigest()
+    policy = PublicAccessPolicy(
+        {attestation.host: attestation},
+        policy_sha256=policy_hash,
+        now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+    )
+    access = asdict(RobotsReceipt(
+        host=attestation.host,
+        robots_url="https://jobs.example.test/robots.txt",
+        final_url="https://jobs.example.test/robots.txt",
+        status_code=200,
+        content_sha256=robots_hash,
+        raw_response_ref=robots_ref.as_posix(),
+        redirect_history=[],
+        retrieved_at=stamp,
+        user_agent=USER_AGENT,
+        requested_url="https://jobs.example.test/1",
+        allowed=True,
+        crawl_delay_seconds=10.0,
+        terms_policy_sha256=policy_hash,
+        terms_attestation=asdict(attestation),
+    ))
     raw_refs = [{
         "sha256": page_hash,
         "raw_response": page_ref.as_posix(),
         "requested_url": "https://jobs.example.test/1",
         "final_url": "https://jobs.example.test/1",
         "redirect_chain": ["https://jobs.example.test/1"],
-        "observed_at": "2026-07-26T00:00:00+00:00",
+        "observed_at": stamp,
         "access_receipt": access,
     }]
     source_record = {
@@ -65,13 +100,13 @@ def _json_evidence(tmp_path: Path):
         "admitted_payload_hash": source_record["payload_hash"],
         "opportunity0_raw_response_refs": raw_refs,
     }
-    return snapshot, source_record, manifest_record
+    return snapshot, source_record, manifest_record, {policy_hash: policy}
 
 
 def test_json_admission_snapshot_and_only_referenced_raw_bytes_are_portable(
     tmp_path: Path,
 ) -> None:
-    snapshot, source, manifest = _json_evidence(tmp_path)
+    snapshot, source, manifest, policies = _json_evidence(tmp_path)
     stage = tmp_path / "stage"
     stage.mkdir()
     descriptor = publish_admission_evidence(snapshot, [source], stage)
@@ -86,6 +121,7 @@ def test_json_admission_snapshot_and_only_referenced_raw_bytes_are_portable(
         descriptor,
         [manifest],
         expected_snapshot_sha256=expected_snapshot_hash,
+        access_policies=policies,
     )
     assert raw_evidence_hash(stage) != hashlib.sha256(b"").hexdigest()
 
@@ -98,7 +134,7 @@ def test_json_admission_tampering_fails_closed(
     tmp_path: Path,
     attack: str,
 ) -> None:
-    snapshot, source, manifest = _json_evidence(tmp_path)
+    snapshot, source, manifest, policies = _json_evidence(tmp_path)
     stage = tmp_path / "stage"
     stage.mkdir()
     descriptor = publish_admission_evidence(snapshot, [source], stage)
@@ -119,6 +155,7 @@ def test_json_admission_tampering_fails_closed(
             descriptor,
             [manifest],
             expected_snapshot_sha256=descriptor["snapshot_sha256"],
+            access_policies=policies,
         )
 
 
@@ -159,6 +196,7 @@ def test_sqlite_admission_uses_consistent_backup_and_replays_passed_keys(
             "opportunity0_raw_response_refs": None,
         }],
         expected_snapshot_sha256=expected_snapshot_hash,
+        access_policies={},
     )
     assert descriptor["source_snapshot_sha256"] == source_snapshot_hash(source)
 
@@ -184,7 +222,7 @@ def test_sqlite_source_identity_includes_uncheckpointed_wal_state(
 
 
 def test_raw_reference_escape_is_rejected_before_publication(tmp_path: Path) -> None:
-    snapshot, source, _ = _json_evidence(tmp_path)
+    snapshot, source, _, _ = _json_evidence(tmp_path)
     source["raw_response_refs"][0]["raw_response"] = "../outside"
     stage = tmp_path / "stage"
     stage.mkdir()

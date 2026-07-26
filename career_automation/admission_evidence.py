@@ -9,8 +9,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .public_access import PublicAccessPolicy, replay_access_receipt
 
-SCHEMA_VERSION = "jaa04.admission-evidence.v1"
+
+SCHEMA_VERSION = "jaa04.admission-evidence.v2"
 
 
 def sha256_file(path: Path) -> str:
@@ -60,13 +62,12 @@ def _raw_references(records: Iterable[Mapping[str, Any]]) -> dict[Path, str]:
                 raise ValueError("admission raw response reference is invalid")
             pairs = [(ref.get("raw_response"), ref.get("sha256"))]
             access = ref.get("access_receipt")
-            if access is not None:
-                if not isinstance(access, Mapping) or access.get("allowed") is not True:
-                    raise ValueError("admission access receipt is invalid")
-                pairs.append((
-                    access.get("raw_response_ref"),
-                    access.get("content_sha256"),
-                ))
+            if not isinstance(access, Mapping) or access.get("allowed") is not True:
+                raise ValueError("admission access receipt is required")
+            pairs.append((
+                access.get("raw_response_ref"),
+                access.get("content_sha256"),
+            ))
             for path_value, digest_value in pairs:
                 relative = Path(str(path_value))
                 digest = str(digest_value)
@@ -163,6 +164,7 @@ def validate_admission_evidence(
     manifest_records: list[Mapping[str, Any]],
     *,
     expected_snapshot_sha256: str,
+    access_policies: Mapping[str, PublicAccessPolicy],
 ) -> None:
     """Replay the published admission linkage without external paths."""
     required = {
@@ -240,12 +242,45 @@ def validate_admission_evidence(
             })
         if descriptor.get("referenced_files") != expected_rows:
             raise ValueError("admission referenced-file inventory is inconsistent")
+        for record in snapshot_records.values():
+            for ref in record["raw_response_refs"]:
+                redirect_chain = ref.get("redirect_chain")
+                if not isinstance(redirect_chain, list):
+                    raise ValueError("admission redirect provenance is invalid")
+                content_urls = tuple(dict.fromkeys((
+                    str(ref.get("requested_url", "")),
+                    *(str(url) for url in redirect_chain),
+                    str(ref.get("final_url", "")),
+                )))
+                replay_access_receipt(
+                    ref["access_receipt"],
+                    _PublishedRawCache(raw_root),
+                    content_urls=content_urls,
+                    content_retrieved_at=str(ref.get("observed_at", "")),
+                    policies=access_policies,
+                )
     else:
         raise ValueError("unsupported admission evidence mode")
     if descriptor.get("referenced_files_hash") != hashlib.sha256(
         _canonical(descriptor.get("referenced_files"))
     ).hexdigest():
         raise ValueError("admission referenced-file inventory hash mismatch")
+
+
+class _PublishedRawCache:
+    """Minimal exact-byte resolver for a published admission raw directory."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+
+    def resolve(self, reference: str, expected_sha256: str) -> bytes:
+        _, target = _safe_relative(self.root, reference)
+        if not target.is_file():
+            raise ValueError("published admission raw reference is invalid")
+        body = target.read_bytes()
+        if hashlib.sha256(body).hexdigest() != expected_sha256:
+            raise ValueError("published admission raw bytes differ from their hash")
+        return body
 
 
 def raw_evidence_hash(capture: Path) -> str:

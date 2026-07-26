@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,9 +22,10 @@ from career_automation.admission_evidence import (  # noqa: E402
 )
 from career_automation.corpus_publication import sha256_file, validate_inventory  # noqa: E402
 from career_automation.opportunity1 import reassess_opportunity1  # noqa: E402
+from career_automation.public_access import PublicAccessPolicy  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
-FORMAT = "jaa04-revision-certification/v3"
+FORMAT = "jaa04-revision-certification/v4"
 
 
 def canonical(value: object) -> bytes:
@@ -41,14 +43,32 @@ def revision() -> str:
     return result.stdout.strip()
 
 
-def certify(capture: Path, destination: Path) -> Path:
+def _load_access_policy(capture: Path, path: Path) -> PublicAccessPolicy:
+    envelope = json.loads((capture / "frozen_dossiers.json").read_text(encoding="utf-8"))
+    retrieved: list[datetime] = []
+    for dossier in envelope.get("dossiers", []):
+        for source in dossier.get("sources", []):
+            value = datetime.fromisoformat(str(source.get("retrieved_at", "")).replace("Z", "+00:00"))
+            if value.tzinfo is None:
+                raise ValueError("capture retrieval timestamps must include a timezone")
+            retrieved.append(value.astimezone(timezone.utc))
+    if not retrieved:
+        raise ValueError("capture has no retrieval time for access-policy replay")
+    return PublicAccessPolicy.load(path, now=max(retrieved))
+
+
+def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:
     receipt_path = capture / "capture_receipt.json"
     manifest_path = capture / "research_manifest.json"
     dossiers_path = capture / "frozen_dossiers.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if receipt.get("schema_version") != "jaa04.capture-receipt.v5" or receipt.get("status") != "SUCCESS":
+    if receipt.get("schema_version") != "jaa04.capture-receipt.v6" or receipt.get("status") != "SUCCESS":
         raise ValueError("capture has no authentic acquisition receipt")
+    access_policy = _load_access_policy(capture, access_policy_path)
+    if receipt.get("access_policy_sha256") != access_policy.policy_sha256:
+        raise ValueError("capture is not bound to the operator-presented access policy")
+    access_policies = {access_policy.policy_sha256: access_policy}
     if (receipt.get("manifest_sha256") != sha(manifest_path)
             or receipt.get("dossiers_sha256") != sha(dossiers_path)):
         raise ValueError("capture metadata or dossier bytes were modified")
@@ -56,7 +76,7 @@ def certify(capture: Path, destination: Path) -> Path:
     validate_inventory(capture)
     if receipt.get("inventory_sha256") != sha256_file(inventory_path):
         raise ValueError("capture inventory is not bound to the acquisition receipt")
-    if (manifest.get("schema_version") != "jaa04.research-manifest.v5"
+    if (manifest.get("schema_version") != "jaa04.research-manifest.v6"
             or manifest.get("opportunity0_queue_size", 0) < 30
             or len(manifest.get("records", [])) != 30
             or manifest.get("records_hash") != content_hash(manifest["records"])):
@@ -69,11 +89,17 @@ def certify(capture: Path, destination: Path) -> Path:
         admission,
         manifest["records"],
         expected_snapshot_sha256=str(receipt.get("queue_snapshot_sha256", "")),
+        access_policies=access_policies,
     )
     if (receipt.get("queue_input_sha256") != admission.get("source_snapshot_sha256")
             or receipt.get("queue_snapshot_sha256") != admission.get("snapshot_sha256")):
         raise ValueError("capture receipt does not bind the admission snapshot")
-    dossiers = load_frozen_dossiers(dossiers_path, RawResponseCache(capture / "raw"), strict_corpus=True)
+    dossiers = load_frozen_dossiers(
+        dossiers_path,
+        RawResponseCache(capture / "raw"),
+        strict_corpus=True,
+        access_policies=access_policies,
+    )
     dossier_by_key = {row["job_key"]: row for row in dossiers}
     record_keys = [row.get("job_key") for row in manifest["records"]]
     if (len(record_keys) != len(set(record_keys))
@@ -123,6 +149,7 @@ def certify(capture: Path, destination: Path) -> Path:
         "manifest_sha256": sha(manifest_path), "dossiers_sha256": sha(dossiers_path),
         "queue_snapshot_sha256": admission["snapshot_sha256"],
         "raw_corpus_sha256": raw_hash,
+        "access_policy_sha256": access_policy.policy_sha256,
     })
     if destination.suffix != ".json":
         destination = destination / f"sha256-{hashlib.sha256(certificate).hexdigest()}.json"
@@ -140,11 +167,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture", type=Path, required=True,
                         help="external published corpus pointer or release path")
+    parser.add_argument("--access-policy", type=Path, required=True,
+                        help="operator-presented human terms-review policy used by acquisition")
     parser.add_argument("--receipt", type=Path,
                         default=ROOT / "runtime_evidence/jaa04")
     args = parser.parse_args()
     try:
-        receipt = certify(args.capture.resolve(), args.receipt.resolve())
+        receipt = certify(
+            args.capture.resolve(),
+            args.receipt.resolve(),
+            args.access_policy.resolve(),
+        )
     except Exception as exc:
         print(f"JAA-04 acceptance: ERROR: {exc}", file=sys.stderr)
         return 2

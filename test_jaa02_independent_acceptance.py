@@ -258,11 +258,16 @@ def test_release_order_and_acceptance_declaration_are_deterministic_and_data_onl
         ("__PYTHON__", "scripts/accept_jaa02_receipt.py"),
         ("__PYTHON__", "scripts/accept_jaa03_receipt.py"),
         ("__PYTHON__", "scripts/accept_jaa04_policy_serialization.py"),
-        ("__PYTHON__", "scripts/accept_jaa04_coordination.py"),
     )
     source = (root / "scripts" / "run_acceptance_declaration.py").read_text(encoding="utf-8")
-    assert "JAA04_CORPUS" in source
-    assert '"scripts/accept_jaa_04.py", "--capture", corpus' in source
+    assert "JAA04_CORPUS" in source and "JAA04_ACCESS_POLICY" in source
+    for token in (
+        '"scripts/accept_jaa_04.py"',
+        '"scripts/accept_jaa04_coordination.py"',
+        '"--capture"',
+        '"--access-policy"',
+    ):
+        assert token in source
 
 
 def test_direct_root_acceptance_fails_closed_when_its_first_declared_gate_fails(tmp_path: Path) -> None:

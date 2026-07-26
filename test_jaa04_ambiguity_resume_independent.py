@@ -161,7 +161,18 @@ def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_
     monkeypatch.setattr(module, "load_frozen_dossiers", generated_loader)
     monkeypatch.setattr(module, "_revision", lambda: "generated-revision")
     monkeypatch.setattr(module, "source_content_revision", lambda _root: "generated-content")
-    module.capture(source_database, destination, workspace=workspace, timeout_seconds=1)
+    access_policy = type(
+        "GeneratedAccessPolicy",
+        (),
+        {"policy_sha256": hashlib.sha256(b"generated-test-policy").hexdigest()},
+    )()
+    module.capture(
+        source_database,
+        destination,
+        workspace=workspace,
+        timeout_seconds=1,
+        access_policy=access_policy,
+    )
 
     assert fetched == [f"generated:{number:02d}" for number in range(5, 31)]
     assert len(fetched) == len(set(fetched)) == 26
@@ -170,7 +181,7 @@ def test_stable_workspace_resumes_four_completed_plus_stale_lease_and_publishes_
     manifest = json.loads((destination / "research_manifest.json").read_text(encoding="utf-8"))
     receipt = json.loads((destination / "capture_receipt.json").read_text(encoding="utf-8"))
     assert len(envelope["dossiers"]) == receipt["captured_count"] == 30
-    assert receipt["schema_version"] == "jaa04.capture-receipt.v5"
+    assert receipt["schema_version"] == "jaa04.capture-receipt.v6"
     admission = manifest["admission_evidence"]
     assert admission["mode"] == "sqlite-lifecycle-snapshot"
     published_snapshot = destination / admission["snapshot_path"]

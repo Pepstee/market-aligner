@@ -83,8 +83,12 @@ def main() -> int:
                 access_policy=access_policy)
         def validate(path: Path) -> None:
             validate_inventory(path)
-            dossiers = load_frozen_dossiers(path / "frozen_dossiers.json",
-                                             RawResponseCache(path / "raw"), strict_corpus=True)
+            dossiers = load_frozen_dossiers(
+                path / "frozen_dossiers.json",
+                RawResponseCache(path / "raw"),
+                strict_corpus=True,
+                access_policies={access_policy.policy_sha256: access_policy},
+            )
             if len(dossiers) != 30:
                 raise RuntimeError("atomic publication requires exactly 30 dossiers")
         publish_by_pointer(fresh, destination, validate)

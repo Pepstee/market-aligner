@@ -107,11 +107,17 @@ source-content revision. Certify the result with:
 ```sh
 python3 scripts/accept_jaa_04.py \
   --capture /external/jaa04/certified \
+  --access-policy /external/jaa04/public-access-policy.json \
   --receipt /external/jaa04/receipts
 ```
 
 Certification rehashes every artifact and raw response and writes one
 revision-bound receipt. It refuses stale, conflicting, or tampered evidence.
+It also reloads the operator-presented access policy, requires its exact hash
+on the capture, and replays every embedded terms attestation and robots
+decision against the exact published robots bytes. A dossier with a missing
+receipt, a self-declared policy, a disallowed engine, or robots denial cannot
+certify.
 Neither live corpus bytes, in-flight state nor full-corpus receipts are stored
 in Git. A clean source clone contains the acquisition software and admitted
 queue projection only; it never fabricates a live corpus.

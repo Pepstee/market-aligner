@@ -40,7 +40,10 @@ from career_automation.opportunity_calibration import (  # noqa: E402
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
     calibration_policy_digest, calibration_policy_from_json, decide_opportunity0,
 )
-from career_automation.public_access import PublicAccessPolicy  # noqa: E402
+from career_automation.public_access import (  # noqa: E402
+    PublicAccessPolicy,
+    replay_access_receipt,
+)
 from scraper.viability import Vacancy, local_decision  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
@@ -70,7 +73,11 @@ def _admitted(connection: sqlite3.Connection) -> dict[str, dict[str, str]]:
     return {str(row["job_key"]): dict(row) for row in rows}
 
 
-def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
+def _admitted_input(
+    path: Path,
+    *,
+    access_policies: dict[str, PublicAccessPolicy] | None = None,
+) -> dict[str, dict[str, str]]:
     if path.suffix.casefold() != ".json":
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as source:
             return _admitted(source)
@@ -139,6 +146,25 @@ def _admitted_input(path: Path) -> dict[str, dict[str, str]]:
                         or not isinstance(ref.get("redirect_chain"), list)
                         or not ref.get("observed_at")):
                     raise ValueError("raw response reference or provenance is invalid")
+                if access_policies is not None:
+                    if ref.get("retrieval_engine") not in {
+                        "scrapling-static", "scrapling-dynamic",
+                    }:
+                        raise ValueError("admission evidence used a forbidden retrieval engine")
+                    redirect_chain = ref.get("redirect_chain")
+                    if not isinstance(redirect_chain, list):
+                        raise ValueError("admission redirect provenance is invalid")
+                    replay_access_receipt(
+                        ref.get("access_receipt"),
+                        RawResponseCache(raw_root),
+                        content_urls=tuple(dict.fromkeys((
+                            str(ref.get("requested_url", "")),
+                            *(str(url) for url in redirect_chain),
+                            str(ref.get("final_url", "")),
+                        ))),
+                        content_retrieved_at=str(ref.get("observed_at", "")),
+                        policies=access_policies,
+                    )
             expected_payload_hash = hashlib.sha256(json.dumps({
                 "source_identity": source["identity"],
                 "official_response_hashes": official_hashes,
@@ -268,7 +294,14 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         raise RuntimeError("capture destination already exists")
     if not database_path.is_file():
         raise RuntimeError("frozen Opportunity-0 database snapshot is missing")
-    admitted = _admitted_input(database_path)
+    if access_policy is None or not access_policy.policy_sha256:
+        raise RuntimeError("capture requires an operator-presented public access policy")
+    admitted = _admitted_input(
+        database_path,
+        access_policies={access_policy.policy_sha256: access_policy}
+        if database_path.suffix.casefold() == ".json"
+        else None,
+    )
     selected = set(sorted(admitted)[:CORPUS_SIZE])
     records = [admitted[key] for key in sorted(selected)]
     calibrated = CalibrationPolicy()
@@ -417,9 +450,9 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         ).hexdigest()
         if published_queue_hash != admission_evidence["snapshot_sha256"]:
             raise RuntimeError("portable admission snapshot hash is inconsistent")
-        envelope = {"schema_version": "jaa04.frozen-dossiers.v4", "dossiers": dossiers,
+        envelope = {"schema_version": "jaa04.frozen-dossiers.v5", "dossiers": dossiers,
                     "dossiers_hash": content_hash(dossiers)}
-        manifest = {"schema_version": "jaa04.research-manifest.v5",
+        manifest = {"schema_version": "jaa04.research-manifest.v6",
                     "opportunity0_queue_size": len(admitted),
                     "admission_evidence": admission_evidence,
                     "records": manifest_records,
@@ -428,7 +461,12 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         (stage / "research_manifest.json").write_bytes(canonical(manifest))
         shutil.copytree(workspace / "raw", stage / "raw", copy_function=os.link)
         staged_cache = RawResponseCache(stage / "raw")
-        validated = load_frozen_dossiers(stage / "frozen_dossiers.json", staged_cache, strict_corpus=True)
+        validated = load_frozen_dossiers(
+            stage / "frozen_dossiers.json",
+            staged_cache,
+            strict_corpus=True,
+            access_policies={access_policy.policy_sha256: access_policy},
+        )
         if len(validated) != CORPUS_SIZE:
             raise RuntimeError("publication requires exactly 30 validated dossiers")
         # Capture uniqueness is a corpus admission rule, not merely a retrieval
@@ -449,7 +487,7 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         corpus_hash = raw_evidence_hash(stage)
         inventory_path = write_inventory(stage)
         receipt = {
-            "schema_version": "jaa04.capture-receipt.v5", "status": "SUCCESS",
+            "schema_version": "jaa04.capture-receipt.v6", "status": "SUCCESS",
             "captured_count": CORPUS_SIZE,
             "source_count": sum(len(row["sources"]) for row in dossiers),
             "queue_input_sha256": snapshot_sha256,
@@ -460,6 +498,7 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
             "raw_corpus_sha256": corpus_hash, "source_revision": _revision(),
             "source_content_revision": source_content_revision(ROOT),
             "inventory_sha256": sha256_file(inventory_path),
+            "access_policy_sha256": access_policy.policy_sha256,
         }
         (stage / "capture_receipt.json").write_bytes(canonical(receipt))
         os.rename(stage, destination)

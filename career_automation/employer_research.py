@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from .models import ClaimClassification, IntelligenceKind
+from .public_access import PublicAccessPolicy, replay_access_receipt
 
 
 FRESHNESS_DAYS = {
@@ -1041,11 +1042,23 @@ def extract_publisher_timestamps(body: bytes) -> tuple[str | None, str | None, s
     return published, updated, evidence
 
 
-def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_of: date | None = None) -> None:
+def validate_dossier(
+    dossier: Mapping[str, Any],
+    cache: RawResponseCache,
+    *,
+    as_of: date | None = None,
+    access_policies: Mapping[str, PublicAccessPolicy] | None = None,
+) -> None:
     """Validate all provenance, typing, freshness and privacy rules or fail closed."""
     schema_version = dossier.get("schema_version")
-    if schema_version == "jaa04.dossier.v3":
-        _validate_portable_dossier(dossier, cache, as_of=as_of)
+    if schema_version in {"jaa04.dossier.v3", "jaa04.dossier.v4"}:
+        _validate_portable_dossier(
+            dossier,
+            cache,
+            as_of=as_of,
+            access_policies=access_policies,
+            require_access=schema_version == "jaa04.dossier.v4",
+        )
         return
     if schema_version not in {"jaa04.dossier.v1", "jaa04.dossier.v2"}:
         raise ValueError("unsupported dossier schema")
@@ -1250,8 +1263,14 @@ def validate_dossier(dossier: Mapping[str, Any], cache: RawResponseCache, *, as_
         raise ValueError("claims must cover every source-plan entry exactly once")
 
 
-def _validate_portable_dossier(dossier: Mapping[str, Any], cache: RawResponseCache,
-                               *, as_of: date | None = None) -> None:
+def _validate_portable_dossier(
+    dossier: Mapping[str, Any],
+    cache: RawResponseCache,
+    *,
+    as_of: date | None = None,
+    access_policies: Mapping[str, PublicAccessPolicy] | None = None,
+    require_access: bool = False,
+) -> None:
     """Validate the portable contract: five outcomes may share real captures."""
     sources = dossier.get("sources")
     claims = dossier.get("claims")
@@ -1262,6 +1281,7 @@ def _validate_portable_dossier(dossier: Mapping[str, Any], cache: RawResponseCac
     identities: set[tuple[str, str]] = set()
     hashes: set[str] = set()
     source_ids: set[str] = set()
+    access_by_host: dict[str, tuple[str, str, str]] = {}
     for row in sources:
         citation = Citation(**row)
         if not citation.id or citation.id in source_ids or not 200 <= citation.status_code < 300:
@@ -1286,6 +1306,29 @@ def _validate_portable_dossier(dossier: Mapping[str, Any], cache: RawResponseCac
         datetime.fromisoformat(citation.retrieved_at.replace("Z", "+00:00"))
         if not citation.source_kind or not citation.retrieval_engine:
             raise ValueError("capture lacks authority classification or retrieval metadata")
+        if require_access:
+            if citation.retrieval_engine not in {"scrapling-static", "scrapling-dynamic"}:
+                raise ValueError("certified capture used a forbidden retrieval engine")
+            content_urls = tuple(dict.fromkeys((
+                citation.requested_url or citation.url,
+                *(str(item["url"]) for item in citation.redirect_history),
+                citation.url,
+            )))
+            receipt = replay_access_receipt(
+                citation.access_receipt,
+                cache,
+                content_urls=content_urls,
+                content_retrieved_at=citation.retrieved_at,
+                policies=access_policies,
+            )
+            access_identity = (
+                receipt.content_sha256,
+                receipt.raw_response_ref,
+                receipt.retrieved_at,
+            )
+            prior = access_by_host.setdefault(receipt.host, access_identity)
+            if prior != access_identity:
+                raise ValueError("one host has inconsistent robots capture identities")
         host = (urlparse(citation.url).hostname or "").casefold()
         publisher = str(citation.canonical_publisher or "").casefold().strip()
         article = str(citation.canonical_article or "").strip()
@@ -1583,7 +1626,12 @@ def _build_portable_dossier(task: Any, citations: Sequence[Citation], cache: Raw
                       "temporal_semantics": ("publisher_time" if source.updated_at or source.published_at
                                              else "retrieval_snapshot")})
         claims.append(claim)
-    dossier = {"schema_version": "jaa04.dossier.v3", "job_key": task.job_key,
+    schema_version = (
+        "jaa04.dossier.v4"
+        if citations and all(item.access_receipt is not None for item in citations)
+        else "jaa04.dossier.v3"
+    )
+    dossier = {"schema_version": schema_version, "job_key": task.job_key,
                "raw_cache_root": str(cache.root), "sources": [vars(item) for item in citations],
                "source_plan": plan, "claims": claims, "edges": []}
     validate_dossier(dossier, cache)
@@ -1683,20 +1731,38 @@ class Opportunity1Coordinator:
 
 
 def load_frozen_dossiers(
-    path: str | Path, cache: RawResponseCache, *, strict_corpus: bool = False,
+    path: str | Path,
+    cache: RawResponseCache,
+    *,
+    strict_corpus: bool = False,
+    access_policies: Mapping[str, PublicAccessPolicy] | None = None,
 ) -> list[dict[str, Any]]:
     envelope = json.loads(Path(path).read_text(encoding="utf-8"))
     dossiers = envelope.get("dossiers")
-    if envelope.get("schema_version") not in {"jaa04.frozen-dossiers.v1", "jaa04.frozen-dossiers.v2", "jaa04.frozen-dossiers.v3", "jaa04.frozen-dossiers.v4"} or not isinstance(dossiers, list) or len(dossiers) < 30:
+    if envelope.get("schema_version") not in {
+        "jaa04.frozen-dossiers.v1",
+        "jaa04.frozen-dossiers.v2",
+        "jaa04.frozen-dossiers.v3",
+        "jaa04.frozen-dossiers.v4",
+        "jaa04.frozen-dossiers.v5",
+    } or not isinstance(dossiers, list) or len(dossiers) < 30:
         raise ValueError("JAA-04 frozen set requires at least 30 dossiers")
     if strict_corpus and len(dossiers) != 30:
         raise ValueError("certified JAA-04 corpus requires exactly 30 dossiers")
+    if strict_corpus and (
+        envelope.get("schema_version") != "jaa04.frozen-dossiers.v5"
+        or access_policies is None
+        or not access_policies
+    ):
+        raise ValueError("certified JAA-04 corpus requires v5 access-policy-bound evidence")
     if content_hash(dossiers) != envelope.get("dossiers_hash"):
         raise ValueError("frozen dossier-set hash mismatch")
     classifications: set[str] = set()
     required_kinds = {kind.value for kind in IntelligenceKind}
     job_keys: set[str] = set()
     normalized_claims = {kind: set() for kind in required_kinds}
+    normalized_claim_counts = {kind: 0 for kind in required_kinds}
+    corpus_access_by_host: dict[str, tuple[str, str, str]] = {}
     for dossier in dossiers:
         dossier_captures: set[tuple[str, str]] = set()
         captured_dates = [datetime.fromisoformat(
@@ -1704,10 +1770,29 @@ def load_frozen_dossiers(
         ).date() for source in dossier.get("sources", [])]
         if not captured_dates or len(set(captured_dates)) != 1:
             raise ValueError("frozen dossier requires one unambiguous capture date")
-        validate_dossier(dossier, cache, as_of=captured_dates[0])
+        if strict_corpus and dossier.get("schema_version") != "jaa04.dossier.v4":
+            raise ValueError("certified JAA-04 dossiers require v4 access receipts")
+        validate_dossier(
+            dossier,
+            cache,
+            as_of=captured_dates[0],
+            access_policies=access_policies,
+        )
+        if strict_corpus:
+            for source in dossier["sources"]:
+                access = source["access_receipt"]
+                host = str(access["host"])
+                identity = (
+                    str(access["content_sha256"]),
+                    str(access["raw_response_ref"]),
+                    str(access["retrieved_at"]),
+                )
+                prior = corpus_access_by_host.setdefault(host, identity)
+                if prior != identity:
+                    raise ValueError("certified corpus has inconsistent robots bytes for one host")
         if strict_corpus and {str(claim.get("kind")) for claim in dossier.get("claims", [])} != required_kinds:
             raise ValueError("each frozen dossier must cover every intelligence kind")
-        portable = dossier.get("schema_version") == "jaa04.dossier.v3"
+        portable = dossier.get("schema_version") in {"jaa04.dossier.v3", "jaa04.dossier.v4"}
         positive = [claim for claim in dossier.get("claims", [])
                     if claim.get("outcome", "supported") == "supported"]
         if strict_corpus and not portable and {str(claim.get("classification")) for claim in dossier.get("claims", [])} != {
@@ -1753,8 +1838,20 @@ def load_frozen_dossiers(
                 normalized_claims[str(claim["kind"])].add(
                     text.casefold().replace(company.casefold(), "<employer>")
                 )
-    if strict_corpus and not all(row.get("schema_version") == "jaa04.dossier.v3" for row in dossiers) and classifications != {"fact", "inference", "hypothesis"}:
+                normalized_claim_counts[str(claim["kind"])] += 1
+    if strict_corpus and not all(
+        row.get("schema_version") in {"jaa04.dossier.v3", "jaa04.dossier.v4"}
+        for row in dossiers
+    ) and classifications != {"fact", "inference", "hypothesis"}:
         raise ValueError("frozen corpus must distinguish facts, inferences, and hypotheses")
+    # Certification deliberately treats any employer-normalized collision as
+    # a blocker. Genuine source-specific prose must remain distinct; a corpus
+    # that cannot demonstrate that distinction requires operator correction.
+    if strict_corpus and any(
+        len(normalized_claims[kind]) != normalized_claim_counts[kind]
+        for kind in required_kinds
+    ):
+        raise ValueError("employer-normalized boilerplate cannot become certified intelligence")
     # Unknown/abstained outcomes are deliberately repetitive and do not count
     # as employer intelligence. Supported prose remains provenance-bound.
     return dossiers

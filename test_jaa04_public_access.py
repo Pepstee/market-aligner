@@ -22,6 +22,7 @@ from career_automation.public_access import (
     PublicAccessPolicy,
     RobotsReceipt,
     USER_AGENT,
+    replay_access_receipt,
 )
 
 
@@ -303,3 +304,63 @@ def test_successful_citation_contains_byte_resolvable_access_receipt(
         b"User-agent"
     )
     assert asdict(receipt) == citation.access_receipt
+
+
+@pytest.mark.parametrize(
+    "attack",
+    (
+        "missing-field", "policy-substitution", "terminal-status",
+        "delay-understatement", "robots-query",
+    ),
+)
+def test_access_receipt_replay_requires_operator_policy_and_exact_robots_bytes(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(
+            200,
+            f"User-agent: {USER_AGENT}\nAllow: /\nCrawl-delay: 10\n".encode(),
+            url=robots_url,
+        ),
+    )
+    value = asdict(controller.before_request(URL))
+    if attack == "missing-field":
+        value.pop("allowed")
+    elif attack == "policy-substitution":
+        value["terms_policy_sha256"] = "0" * 64
+    elif attack == "terminal-status":
+        value["status_code"] = 429
+    elif attack == "delay-understatement":
+        value["crawl_delay_seconds"] = 9.0
+    else:
+        value["final_url"] += "?attacker-state=1"
+    with pytest.raises(ValueError):
+        replay_access_receipt(
+            value,
+            cache,
+            content_urls=(URL,),
+            content_retrieved_at=NOW.isoformat(),
+            policies={controller.policy.policy_sha256: controller.policy},
+        )
+
+
+def test_access_receipt_replay_accepts_exact_operator_policy_and_robots_bytes(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(200, b"User-agent: *\nAllow: /\n", url=robots_url),
+    )
+    value = asdict(controller.before_request(URL))
+    replayed = replay_access_receipt(
+        value,
+        cache,
+        content_urls=(URL,),
+        content_retrieved_at=NOW.isoformat(),
+        policies={controller.policy.policy_sha256: controller.policy},
+    )
+    assert replayed == RobotsReceipt(**value)

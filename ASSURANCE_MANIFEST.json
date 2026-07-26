@@ -172,8 +172,8 @@
       "tests": [
         {
           "id": "JAA-04-software-contract",
-          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_acceptance_boundary.py", "test_jaa04_admission_evidence.py", "test_jaa04_ambiguity_resume_independent.py", "test_jaa04_increment_a_authority_canaries.py", "test_jaa04_increment_a_temporal_authority_regression.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_policy_serialization_retest.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"],
-          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_acceptance_boundary.py", "test_jaa04_admission_evidence.py", "test_jaa04_ambiguity_resume_independent.py", "test_jaa04_increment_a_authority_canaries.py", "test_jaa04_increment_a_temporal_authority_regression.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_policy_serialization_retest.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_acceptance_boundary.py", "test_jaa04_access_authenticity.py", "test_jaa04_admission_evidence.py", "test_jaa04_ambiguity_resume_independent.py", "test_jaa04_increment_a_authority_canaries.py", "test_jaa04_increment_a_temporal_authority_regression.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_policy_serialization_retest.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"],
+          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_acceptance_boundary.py", "test_jaa04_access_authenticity.py", "test_jaa04_admission_evidence.py", "test_jaa04_ambiguity_resume_independent.py", "test_jaa04_increment_a_authority_canaries.py", "test_jaa04_increment_a_temporal_authority_regression.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_policy_serialization_retest.py", "test_jaa04_portable_authority_contract.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"]
         },
         {
           "id": "JAA-04-negative-controls",
@@ -189,7 +189,7 @@
           "scope": "JAA-04-corpus",
           "required": true,
           "tracked": false,
-          "argv": ["{python}", "scripts/accept_jaa_04.py", "--capture", "{external_jaa04_corpus}", "--receipt", "{external_jaa04_receipts}"]
+          "argv": ["{python}", "scripts/accept_jaa_04.py", "--capture", "{external_jaa04_corpus}", "--access-policy", "{external_jaa04_access_policy}", "--receipt", "{external_jaa04_receipts}"]
         },
         {
           "kind": "live_canary",

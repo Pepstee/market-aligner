@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,7 @@ from career_automation.employer_research import (Opportunity1Coordinator, RawRes
 from career_automation.engine import OpportunityGate
 from career_automation.lifecycle import canonical_hash
 from career_automation.models import ScoredJob
+from career_automation.public_access import PublicAccessPolicy
 
 
 class FrozenCorpusWorker:
@@ -32,9 +35,30 @@ class FrozenCorpusWorker:
         return task.job_key
 
 
-def exercise(capture: Path) -> None:
+def _access_policy(capture: Path, path: Path) -> PublicAccessPolicy:
+    envelope = json.loads((capture / "frozen_dossiers.json").read_text(encoding="utf-8"))
+    retrieved = [
+        datetime.fromisoformat(str(source["retrieved_at"]).replace("Z", "+00:00"))
+        for dossier in envelope.get("dossiers", [])
+        for source in dossier.get("sources", [])
+    ]
+    if not retrieved or any(value.tzinfo is None for value in retrieved):
+        raise ValueError("capture has no timezone-aware retrieval identity")
+    return PublicAccessPolicy.load(
+        path,
+        now=max(value.astimezone(timezone.utc) for value in retrieved),
+    )
+
+
+def exercise(capture: Path, access_policy_path: Path) -> None:
     cache = RawResponseCache(capture / "raw")
-    dossiers = load_frozen_dossiers(capture / "frozen_dossiers.json", cache, strict_corpus=True)
+    policy = _access_policy(capture, access_policy_path)
+    dossiers = load_frozen_dossiers(
+        capture / "frozen_dossiers.json",
+        cache,
+        strict_corpus=True,
+        access_policies={policy.policy_sha256: policy},
+    )
     with tempfile.TemporaryDirectory(prefix="jaa04-opportunity1-") as temporary:
         database = CareerDatabase(Path(temporary) / "coordination.sqlite3")
         jobs = [ScoredJob(
@@ -59,10 +83,10 @@ def exercise(capture: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--capture", type=Path,
-                        default=ROOT / "career_automation/fixtures/jaa04_capture")
+    parser.add_argument("--capture", type=Path, required=True)
+    parser.add_argument("--access-policy", type=Path, required=True)
     args = parser.parse_args()
-    exercise(args.capture.resolve())
+    exercise(args.capture.resolve(), args.access_policy.resolve())
     print("JAA-04 Opportunity-1 coordination: PASS")
     return 0
 

@@ -461,7 +461,10 @@ class CareerDatabase:
             raise ValueError("dossier job identity does not match the research task")
         if canonical_hash(dossier) != dossier_hash:
             raise ValueError("dossier hash does not match canonical content")
-        strict = dossier.get("schema_version") in {"jaa04.dossier.v1", "jaa04.dossier.v2", "jaa04.dossier.v3"}
+        strict = dossier.get("schema_version") in {
+            "jaa04.dossier.v1", "jaa04.dossier.v2",
+            "jaa04.dossier.v3", "jaa04.dossier.v4",
+        }
         if strict:
             cache_root = dossier.get("raw_cache_root")
             if not isinstance(cache_root, str) or not cache_root:

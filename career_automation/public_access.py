@@ -13,7 +13,7 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -376,3 +376,120 @@ class PublicAccessController:
         receipt = self.authorize(url)
         self._throttle(receipt.host, receipt.crawl_delay_seconds)
         return receipt
+
+
+def replay_access_receipt(
+    value: Mapping[str, Any],
+    cache: Any,
+    *,
+    content_urls: tuple[str, ...],
+    content_retrieved_at: str,
+    policies: Mapping[str, PublicAccessPolicy] | None = None,
+) -> RobotsReceipt:
+    """Replay one embedded access decision against exact robots and policy bytes.
+
+    ``policies`` is optional only for the in-process dossier validation that
+    precedes publication. Certification supplies it and thereby turns the
+    embedded attestation from a self-declared claim into an exact match for an
+    operator-presented, schema-validated policy file.
+    """
+    required = {item.name for item in fields(RobotsReceipt)}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("access receipt has an invalid field set")
+    try:
+        receipt = RobotsReceipt(**dict(value))
+    except TypeError as exc:
+        raise ValueError("access receipt is malformed") from exc
+    if not content_urls or any(not isinstance(url, str) or not url for url in content_urls):
+        raise ValueError("access receipt has no content URL identity")
+    try:
+        origins = {_public_origin(url) for url in content_urls}
+        receipt_origin = _public_origin(receipt.requested_url)
+        robots_origin = _public_origin(receipt.robots_url)
+        final_origin = _public_origin(receipt.final_url)
+    except (PublicAccessDenied, ValueError) as exc:
+        raise ValueError("access receipt contains a non-public URL") from exc
+    hosts = {origin[1] for origin in origins}
+    if (hosts != {receipt.host.casefold()} or receipt_origin[1] != receipt.host.casefold()
+            or robots_origin != receipt_origin or final_origin != receipt_origin):
+        raise ValueError("access receipt host differs from captured content")
+    expected_robots = urlunsplit(
+        (receipt_origin[0], receipt_origin[1] + receipt_origin[2], "/robots.txt", "", "")
+    )
+    final_robots = urlsplit(receipt.final_url)
+    if (receipt.robots_url != expected_robots
+            or final_robots.path != "/robots.txt"
+            or final_robots.query
+            or final_robots.fragment):
+        raise ValueError("access receipt robots identity is invalid")
+    if receipt.requested_url != content_urls[0]:
+        raise ValueError("access receipt requested URL differs from the capture")
+    if not isinstance(receipt.redirect_history, list):
+        raise ValueError("access receipt redirect history is invalid")
+    for redirect in receipt.redirect_history:
+        if (not isinstance(redirect, Mapping)
+                or set(redirect) != {"url", "status_code"}
+                or not 300 <= int(redirect["status_code"]) < 400
+                or _public_origin(str(redirect["url"]))[1] != receipt.host.casefold()):
+            raise ValueError("access receipt robots redirect history is invalid")
+    if (receipt.user_agent != USER_AGENT or receipt.allowed is not True
+            or type(receipt.crawl_delay_seconds) not in {int, float}
+            or float(receipt.crawl_delay_seconds) < DEFAULT_DELAY_SECONDS):
+        raise ValueError("access receipt does not prove the required public policy")
+    if (type(receipt.status_code) is not int or receipt.status_code <= 0
+            or receipt.status_code in {401, 403, 429} or receipt.status_code >= 500
+            or not (200 <= receipt.status_code < 300 or 400 <= receipt.status_code < 500)):
+        raise ValueError("access receipt contains a terminal robots status")
+    if (not isinstance(receipt.content_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt.content_sha256)
+            or not isinstance(receipt.raw_response_ref, str)
+            or not receipt.raw_response_ref):
+        raise ValueError("access receipt robots byte identity is invalid")
+    try:
+        robots_body = cache.resolve(receipt.raw_response_ref, receipt.content_sha256)
+    except (OSError, ValueError) as exc:
+        raise ValueError("access receipt robots bytes are missing or modified") from exc
+    if 200 <= receipt.status_code < 300:
+        declared_delays: list[float] = []
+        for url in content_urls:
+            allowed, delay = _robots_rules(robots_body, url)
+            if not allowed:
+                raise ValueError("access receipt robots rules disallow captured content")
+            if delay is not None:
+                declared_delays.append(float(delay))
+        if declared_delays and max(declared_delays) > float(receipt.crawl_delay_seconds):
+            raise ValueError("access receipt understates the robots crawl delay")
+
+    try:
+        retrieved = datetime.fromisoformat(receipt.retrieved_at.replace("Z", "+00:00"))
+        content_retrieved = datetime.fromisoformat(content_retrieved_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("access receipt timestamps are invalid") from exc
+    if retrieved.tzinfo is None or content_retrieved.tzinfo is None or retrieved > content_retrieved:
+        raise ValueError("access receipt time is later than the captured content")
+    if (not isinstance(receipt.terms_policy_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt.terms_policy_sha256)):
+        raise ValueError("access receipt policy identity is invalid")
+    required_attestation = {item.name for item in fields(TermsAttestation)}
+    if (not isinstance(receipt.terms_attestation, Mapping)
+            or set(receipt.terms_attestation) != required_attestation):
+        raise ValueError("access receipt terms attestation is invalid")
+    try:
+        attestation = TermsAttestation(**dict(receipt.terms_attestation))
+        reviewed = datetime.fromisoformat(attestation.reviewed_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("access receipt terms attestation is malformed") from exc
+    if (attestation.host != receipt.host.casefold()
+            or attestation.reviewer_type != "human_operator"
+            or attestation.determination != "public_read_only_research_permitted"
+            or reviewed.tzinfo is None or reviewed > retrieved
+            or retrieved - reviewed > timedelta(days=MAX_ATTESTATION_AGE_DAYS)):
+        raise ValueError("access receipt terms authority is absent, future-dated or stale")
+    terms = urlsplit(attestation.terms_url)
+    if terms.scheme != "https" or not terms.hostname:
+        raise ValueError("access receipt terms URL is invalid")
+    if policies is not None:
+        policy = policies.get(receipt.terms_policy_sha256)
+        if policy is None or policy.attestations.get(receipt.host.casefold()) != attestation:
+            raise ValueError("access receipt does not match an operator-presented policy")
+    return receipt
