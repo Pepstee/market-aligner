@@ -1,7 +1,7 @@
 # JAA-04 authentic authority acquisition
 
 JAA-04 is generated output, not a hand-authored fixture. The repository does
-ship response caches, publisher timestamps, or certification receipts. The
+not ship response caches, publisher timestamps, or full-corpus certification receipts. The
 only acquisition input is an Opportunity-0 SQLite snapshot or the checked
 `jaa04_admitted_queue.json` projection of that queue. No authority URL
 inventory is accepted.

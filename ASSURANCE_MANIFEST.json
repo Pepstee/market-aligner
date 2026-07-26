@@ -26,7 +26,7 @@
   "components": {
     "JAA-00": {
       "claim": "The canonical baseline and source adoption are reproducible and recoverable.",
-      "increment": "complete",
+      "increment": "historical_baseline",
       "depends_on": [],
       "owns": [
         "baseline_adoption/**",
@@ -85,7 +85,7 @@
     },
     "JAA-02": {
       "claim": "Candidate facts, evidence, claim lineage, privacy projection and quarantine satisfy JAA-02.",
-      "increment": "complete",
+      "increment": "implemented_receipt_stale",
       "depends_on": ["JAA-01"],
       "owns": [
         "career_automation/candidate_graph.py",
@@ -114,7 +114,7 @@
     },
     "JAA-03": {
       "claim": "Vacancy extraction and Opportunity-0 admission are calibrated on locked evidence without fit leakage.",
-      "increment": "complete",
+      "increment": "implemented_receipt_stale",
       "depends_on": ["JAA-02"],
       "owns": [
         "career_automation/opportunity_calibration.py",
@@ -145,7 +145,7 @@
     },
     "JAA-04": {
       "claim": "Employer reconnaissance produces cited, freshness-aware dossiers and Opportunity-1 decisions.",
-      "increment": "B",
+      "increment": "increment_b_incomplete",
       "depends_on": ["JAA-03"],
       "owns": [
         "career_automation/employer_research.py",
@@ -186,7 +186,7 @@
     },
     "JAA-05": {
       "claim": "Evidence matching and gap optimisation are calibrated, abstaining and evidence-gated.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-04"],
       "owns": ["career_automation/evidence_matching.py", "career_automation/gap_optimizer.py"],
       "inputs": ["career_automation/candidate_graph.py", "career_automation/employer_research.py"],
@@ -200,7 +200,7 @@
     },
     "JAA-06": {
       "claim": "The application strategy compiler emits reproducible, evidence-linked positioning plans.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-05"],
       "owns": ["career_automation/application_strategy.py"],
       "inputs": ["career_automation/evidence_matching.py", "career_automation/gap_optimizer.py"],
@@ -214,7 +214,7 @@
     },
     "JAA-07": {
       "claim": "ATS-safe documents and answers compile only from approved claims and retain provenance.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-06"],
       "owns": ["career_automation/application_compiler.py", "career_automation/rendering.py"],
       "inputs": ["career_automation/application_strategy.py", "career_automation/documents.py"],
@@ -228,7 +228,7 @@
     },
     "JAA-08": {
       "claim": "The deterministic release gate binds every consequential input and cannot be bypassed probabilistically.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-07"],
       "owns": ["career_automation/release_gate.py"],
       "inputs": ["career_automation/application_compiler.py", "career_automation/security.py"],
@@ -242,7 +242,7 @@
     },
     "JAA-09": {
       "claim": "The simulated ATS walking skeleton proves browser checkpoints, leases and receipt integrity.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-08"],
       "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
       "inputs": ["career_automation/browser_workflows.py", "career_automation/release_gate.py"],
@@ -256,7 +256,7 @@
     },
     "JAA-10": {
       "claim": "Walking-skeleton and shadow-cohort certification retain locked evidence and negative twins.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-09"],
       "owns": ["career_automation/shadow_certification.py"],
       "inputs": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
@@ -270,7 +270,7 @@
     },
     "JAA-11": {
       "claim": "One official ATS adapter and bounded live canary preserve release and receipt invariants.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-10"],
       "owns": ["career_automation/official_ats_adapter.py"],
       "inputs": ["career_automation/browser_executor.py", "career_automation/release_gate.py"],
@@ -286,7 +286,7 @@
     },
     "JAA-12": {
       "claim": "Post-submission statuses and follow-ups are evidence-backed, deduplicated and replayable.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-11"],
       "owns": ["career_automation/status_ingestion.py"],
       "inputs": ["career_automation/official_ats_adapter.py", "career_automation/database.py"],
@@ -300,7 +300,7 @@
     },
     "JAA-13": {
       "claim": "Outcome feedback updates calibration without contaminating locked evaluation evidence.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-12"],
       "owns": ["career_automation/outcome_feedback.py"],
       "inputs": ["career_automation/status_ingestion.py", "career_automation/opportunity_calibration.py"],
@@ -314,7 +314,7 @@
     },
     "JAA-14": {
       "claim": "Source expansion remains policy-bounded, deduplicated and quality-measured.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-13"],
       "owns": ["career_automation/source_expansion.py"],
       "inputs": ["scraper/**", "career_automation/outcome_feedback.py"],
@@ -328,7 +328,7 @@
     },
     "JAA-15": {
       "claim": "Operational scheduling, budgets, observability and circuit breakers support unattended running.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-14"],
       "owns": ["career_automation/operations.py"],
       "inputs": ["career_automation/observability.py", "career_automation/source_expansion.py"],
@@ -342,7 +342,7 @@
     },
     "JAA-16": {
       "claim": "The complete product passes release, authenticity, security and end-to-end certification.",
-      "increment": "complete",
+      "increment": "not_implemented",
       "depends_on": ["JAA-15"],
       "owns": ["career_automation/release_certification.py"],
       "inputs": ["career_automation/operations.py", "acceptance", "scripts/run_acceptance_declaration.py"],
