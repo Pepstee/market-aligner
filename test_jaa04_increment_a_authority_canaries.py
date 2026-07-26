@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import subprocess
@@ -51,10 +50,10 @@ def _citation(record, cache: RawResponseCache, *, url: str | None = None,
                     if temporal else None, "scrapling-static"), body
 
 
-def test_real_production_canary_acquisition_writes_three_byte_bound_sidecars_without_touching_corpus_receipt(
+def test_production_canary_refuses_unattended_network_access_without_terms_authority(
     tmp_path: Path,
 ) -> None:
-    """The public capture command must use the sidecar and publish no corpus receipt."""
+    """No access policy means no network attempt, artifact, or corpus receipt."""
     receipts_before = {
         path.relative_to(ROOT): path.read_bytes()
         for path in ROOT.glob("**/capture_receipt.json")
@@ -62,30 +61,14 @@ def test_real_production_canary_acquisition_writes_three_byte_bound_sidecars_wit
     destination = tmp_path / "canaries"
     completed = subprocess.run((sys.executable, str(CAPTURE_SCRIPT), "--destination", str(destination)),
                                cwd=ROOT, text=True, capture_output=True, check=False, timeout=240)
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout)["artifacts"] == 3
+    assert completed.returncode != 0
+    assert "--access-policy" in completed.stderr
+    assert not destination.exists()
     receipts_after = {
         path.relative_to(ROOT): path.read_bytes()
         for path in ROOT.glob("**/capture_receipt.json")
     }
     assert receipts_after == receipts_before
-    assert not (destination / "capture_receipt.json").exists()
-
-    expected = {"greenhouse": "greenhouse:anthropic:5030244008",
-                "ashby": "ashby:lendable:36d47627-9b4e-4864-9f05-2dbbd1052380",
-                "workable": "workable:cogna:847CFBC5F4"}
-    assert {path.stem for path in destination.glob("*.json")} == set(expected)
-    for provider, job_key in expected.items():
-        artifact = json.loads((destination / f"{provider}.json").read_text(encoding="utf-8"))
-        assert artifact["schema_version"] == "jaa04.typed-authority-canary.v1"
-        assert artifact["admitted_record"]["job_key"] == job_key
-        assert artifact["captures"]
-        for capture in artifact["captures"]:
-            raw = base64.b64decode(capture["raw_response_base64"], validate=True)
-            assert hashlib.sha256(raw).hexdigest() == capture["content_sha256"]
-            assert capture["raw_response_ref"] == "embedded:raw_response_base64"
-            assert capture["sidecar_raw_response_ref"].endswith(capture["content_sha256"])
-            assert capture["retrieval_engine"].startswith("scrapling-")
 
 
 @pytest.mark.parametrize("attack", (
@@ -169,4 +152,3 @@ def test_full_containment_range_validation_rejects_every_non_exact_range(tmp_pat
         product["excerpt_byte_start"] = 10**6
     with pytest.raises(ValueError):
         validate_dossier(dossier, cache)
-

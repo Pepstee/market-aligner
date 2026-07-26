@@ -35,6 +35,7 @@ from career_automation.opportunity_calibration import (  # noqa: E402
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
     calibration_policy_digest, calibration_policy_from_json, decide_opportunity0,
 )
+from career_automation.public_access import PublicAccessPolicy  # noqa: E402
 from scraper.viability import Vacancy, local_decision  # noqa: E402
 from tracked_source_revision import source_content_revision  # noqa: E402
 
@@ -256,7 +257,8 @@ def _bootstrap_json_database(work_db: Path, records: list[dict[str, object]],
 
 
 def capture(database_path: Path, destination: Path, *, workspace: Path | None = None,
-            maximum_routes: int = 12, timeout_seconds: int = 45) -> None:
+            maximum_routes: int = 12, timeout_seconds: int = 45,
+            access_policy: PublicAccessPolicy | None = None) -> None:
     if destination.exists():
         raise RuntimeError("capture destination already exists")
     if not database_path.is_file():
@@ -309,7 +311,12 @@ def capture(database_path: Path, destination: Path, *, workspace: Path | None = 
         # Increment A keeps exact canaries as its default contract. Production
         # acquisition is queue-bound instead: all admitted records may proceed,
         # while the same byte, authority, purpose and temporal validators remain.
-        transport = ScraplingPublicRetriever(cache, timeout_seconds=timeout_seconds, root=ROOT)
+        transport = ScraplingPublicRetriever(
+            cache,
+            timeout_seconds=timeout_seconds,
+            root=ROOT,
+            access_policy=access_policy,
+        )
         retriever = PortableAuthorityRetriever(cache, retriever=transport,
                                                maximum_routes=maximum_routes,
                                                exact_canaries=False)
@@ -457,14 +464,18 @@ def main() -> int:
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--workspace", type=Path, required=True,
                         help="stable external in-flight queue and content-addressed byte store")
+    parser.add_argument("--access-policy", type=Path, required=True,
+                        help="external human terms-review attestations")
     parser.add_argument("--maximum-routes", type=int, default=12)
     parser.add_argument("--timeout-seconds", type=int, default=45)
     args = parser.parse_args()
     try:
         if args.maximum_routes < 1 or args.timeout_seconds < 1:
             raise ValueError("retrieval limits must be positive")
+        access_policy = PublicAccessPolicy.load(args.access_policy.resolve())
         capture(args.queue_snapshot.resolve(), args.destination.resolve(), workspace=args.workspace.resolve(),
-                maximum_routes=args.maximum_routes, timeout_seconds=args.timeout_seconds)
+                maximum_routes=args.maximum_routes, timeout_seconds=args.timeout_seconds,
+                access_policy=access_policy)
     except Exception as exc:
         print(f"JAA-04 capture: ERROR: {exc}", file=sys.stderr)
         return 2

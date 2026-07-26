@@ -80,7 +80,9 @@ class FetchAction(str, Enum):
 
 _TERMINAL_OUTCOMES = frozenset({
     FetchOutcome.NOT_FOUND_OR_EXPIRED,
+    FetchOutcome.ACCESS_DENIED,
     FetchOutcome.AUTHENTICATION_REQUIRED,
+    FetchOutcome.CAPTCHA_REQUIRED,
     FetchOutcome.ROBOTS_DISALLOWED,
     FetchOutcome.AUTOMATION_PROHIBITED,
     FetchOutcome.POLICY_DENIED,
@@ -91,8 +93,6 @@ _ESCALATABLE_OUTCOMES = frozenset({
     FetchOutcome.INCOMPLETE_CONTENT,
     FetchOutcome.JAVASCRIPT_REQUIRED,
     FetchOutcome.INVALID_CONTENT,
-    FetchOutcome.ACCESS_DENIED,
-    FetchOutcome.CAPTCHA_REQUIRED,
 })
 
 
@@ -179,15 +179,14 @@ class FetchPolicy:
 
 
 def default_job_fetch_policy() -> FetchPolicy:
-    """Return the full, content-addressed Scrapling vacancy fetch policy."""
+    """Return the non-evasive, content-addressed vacancy fetch policy."""
     return FetchPolicy(
         policy_id="career.job_fetch",
-        version="2.0.0",
+        version="3.0.0",
         stages=(
             FetchStage(FetchEngine.DIRECT_ADAPTER, 2, 30),
             FetchStage(FetchEngine.PUBLIC_HTTP, 2, 45),
             FetchStage(FetchEngine.DYNAMIC_BROWSER, 1, 90),
-            FetchStage(FetchEngine.STEALTH_BROWSER, 1, 180),
         ),
     )
 

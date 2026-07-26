@@ -10,6 +10,7 @@ from career_automation.official_cohort import (
     AGGREGATORS,
     OFFICIAL_ADAPTERS,
     _validate_config,
+    build,
 )
 from skeleton.configuration import load_config
 
@@ -50,6 +51,17 @@ def test_discovery_boards_are_filtered_without_becoming_authorities() -> None:
     assert names == ["greenhouse", "workable"]
     assert set(sections) == set(names)
     assert terms == ["software engineer"]
+
+
+def test_live_official_cohort_refuses_to_start_without_access_authority(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="requires public access authority"):
+        build(
+            tmp_path / "not-read-without-authority.yaml",
+            tmp_path / "output.json",
+            tmp_path / "raw",
+        )
 
 
 @pytest.mark.parametrize(

@@ -38,6 +38,7 @@ from career_automation.opportunity_calibration import (
     calibration_policy_json,
     decide_opportunity0,
 )
+from career_automation.public_access import PublicAccessPolicy
 from scraper.viability import Vacancy, canonical_key, local_decision
 
 
@@ -245,6 +246,7 @@ def _raw_reference(citation: Citation) -> dict[str, Any]:
         "redirect_chain": chain,
         "observed_at": citation.captured_at,
         "retrieval_engine": citation.retrieval_engine,
+        "access_receipt": citation.access_receipt,
     }
 
 
@@ -339,6 +341,7 @@ def hydrate_seed(
     as_of: datetime | None = None,
     authority_retriever: PortableAuthorityRetriever | None = None,
     expected_seed_records_hash: str = CHECKED_SEED_RECORDS_HASH,
+    access_policy: PublicAccessPolicy | None = None,
 ) -> dict[str, Any]:
     """Create a strict v2 queue or publish nothing."""
     if output.exists():
@@ -357,6 +360,7 @@ def hydrate_seed(
             cache,
             timeout_seconds=timeout_seconds,
             root=Path(__file__).resolve().parents[1],
+            access_policy=access_policy,
         )
         retriever = PortableAuthorityRetriever(
             cache,

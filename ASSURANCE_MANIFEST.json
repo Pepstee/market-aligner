@@ -152,6 +152,7 @@
         "career_automation/fetching.py",
         "career_automation/official_cohort.py",
         "career_automation/opportunity1.py",
+        "career_automation/public_access.py",
         "career_automation/retrieval.py",
         "career_automation/seed_cohort.py",
         "career_automation/fixtures/jaa04_admitted_queue.json",
@@ -170,8 +171,8 @@
       "tests": [
         {
           "id": "JAA-04-software-contract",
-          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_seed_cohort.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"],
-          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_seed_cohort.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"]
+          "argv": ["{python}", "-m", "pytest", "-q", "career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"],
+          "files": ["career_automation/test_fetching.py", "career_automation/test_retrieval.py", "test_jaa04_independent_acceptance.py", "test_jaa04_evidence_authority_contract.py", "test_jaa04_official_cohort_config.py", "test_jaa04_opportunity1_lifecycle_receipt_retest.py", "test_jaa04_policy_identity_bootstrap_retest.py", "test_jaa04_public_access.py", "test_jaa04_seed_cohort.py", "test_jaa04_semantic_reconnaissance_contract.py", "test_jaa04_sidecar_temporal_semantics.py", "test_jaa04_temporal_official_cohort_admission_retest.py"]
         },
         {
           "id": "JAA-04-negative-controls",

@@ -13,7 +13,7 @@ import json
 import os
 import re
 import socket
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
@@ -198,6 +198,7 @@ class Citation:
     canonical_article: str | None = None
     publisher_date_evidence: str | None = None
     retrieval_engine: str | None = None
+    access_receipt: dict[str, Any] | None = None
 
     @property
     def capture_identity(self) -> tuple[str, str]:
@@ -409,25 +410,83 @@ class RawResponseCache:
 
 
 class ScraplingPublicRetriever:
-    """Adapter over the production Scrapling sidecar; no requests fallback."""
+    """Policy-gated adapter over static and ordinary browser rendering."""
 
     def __init__(self, cache: RawResponseCache, *, timeout_seconds: int = 45,
-                 root: str | Path | None = None) -> None:
+                 root: str | Path | None = None, access_policy: Any | None = None,
+                 access_controller: Any | None = None) -> None:
+        from career_automation.public_access import (
+            DenyAllPublicAccess,
+            PublicAccessController,
+        )
         from scraper.scrapling_client import ScraplingClient
 
         self.cache, self.timeout_seconds = cache, timeout_seconds
         project_root = Path(root).resolve() if root else Path(__file__).resolve().parents[1]
         self.client = ScraplingClient(project_root, {
             "command_timeout_seconds": timeout_seconds,
-            "fallback_chain": [
-                {"engine": "static", "method": "get",
-                 "kwargs": {"timeout": timeout_seconds}},
-                {"engine": "dynamic", "kwargs": {"network_idle": True},
-                 "timeout_seconds": max(timeout_seconds, 60)},
-                {"engine": "stealth", "kwargs": {},
-                 "timeout_seconds": max(timeout_seconds, 60)},
-            ],
         })
+        if access_controller is not None and access_policy is not None:
+            raise ValueError("supply access_policy or access_controller, not both")
+        if access_controller is not None:
+            self.access = access_controller
+        elif access_policy is not None:
+            self.access = PublicAccessController(access_policy, self.client, cache)
+        else:
+            self.access = DenyAllPublicAccess()
+
+    @staticmethod
+    def _terminal_challenge(response: Mapping[str, Any]) -> str | None:
+        status = int(response.get("status", 0))
+        if status in {401, 403, 429}:
+            return f"HTTP {status}"
+        text = str(response.get("text", "")).casefold()[:100_000]
+        markers = (
+            r"\bcomplete (?:the )?captcha\b", r"\bcaptcha challenge\b",
+            r"\bg-recaptcha\b", r"\bhcaptcha\b", r"\bverify you are human\b",
+            r"<title[^>]*>\s*access denied\b", r"\bcloudflare challenge\b",
+            r"\bcf-chl-",
+        )
+        return next((marker for marker in markers if re.search(marker, text)), None)
+
+    def _fetch(self, url: str) -> Any:
+        from career_automation.public_access import PublicAccessDenied, USER_AGENT
+        from scraper.scrapling_client import ScraplingResult
+
+        attempts: list[dict[str, Any]] = []
+        requested_host = (urlparse(url).hostname or "").casefold()
+        stages = (
+            ("static", {"timeout": self.timeout_seconds,
+                        "headers": {"User-Agent": USER_AGENT}}),
+            ("dynamic", {"network_idle": True, "timeout": max(self.timeout_seconds, 60),
+                         "user_agent": USER_AGENT}),
+        )
+        for engine, kwargs in stages:
+            receipt = self.access.before_request(url)
+            try:
+                response = self.client.fetch(engine, url, **kwargs)
+            except Exception as exc:
+                attempts.append({"engine": engine, "ok": False,
+                                 "error": type(exc).__name__, "message": str(exc)})
+                continue
+            attempts.append({"engine": engine, "ok": True, "response": response})
+            final_url = str(response.get("url", url))
+            final_host = (urlparse(final_url).hostname or "").casefold()
+            redirect_hosts = {
+                (urlparse(str(item.get("url", ""))).hostname or "").casefold()
+                for item in response.get("history", ()) or ()
+            }
+            if final_host != requested_host or redirect_hosts - {requested_host}:
+                raise PublicAccessDenied("cross-host redirects are forbidden in JAA public retrieval")
+            if challenge := self._terminal_challenge(response):
+                raise PublicAccessDenied(f"ACCESS_DENIED: {challenge}")
+            status = int(response.get("status", 0))
+            size = int(response.get("body_bytes", 0))
+            if 200 <= status < 300 and size >= 128:
+                return ScraplingResult(engine, dict(response), tuple(attempts)), receipt
+            if status in {404, 410}:
+                raise RuntimeError(f"public vacancy is unavailable with HTTP {status}")
+        raise RuntimeError("static and dynamic public retrieval were exhausted")
 
     def retrieve(self, source_id: str, url: str, *, source_kind: str | None = None,
         canonical_publisher: str | None = None,
@@ -435,7 +494,7 @@ class ScraplingPublicRetriever:
         _public_url(url)
         import base64
 
-        result = self.client.fetch_with_chain(url)
+        result, access_receipt = self._fetch(url)
         response = result.response
         final_url = str(response.get("url", url))
         _public_url(final_url)
@@ -461,7 +520,8 @@ class ScraplingPublicRetriever:
         return Citation(source_id, final_url, now, now, digest, reference,
                         status, url, history, published_at, updated_at,
                         source_kind, final_publisher, final_url,
-                        date_evidence, f"scrapling-{result.engine}")
+                        date_evidence, f"scrapling-{result.engine}",
+                        asdict(access_receipt))
 
 
 class PortableAuthorityRetriever:
@@ -798,16 +858,15 @@ class SidecarAuthorityRetriever:
     """
 
     def __init__(self, records: Sequence[Mapping[str, Any]], cache: RawResponseCache,
-                 *, root: str | Path) -> None:
-        from scraper.scrapling_client import ScraplingClient
+                 *, root: str | Path, access_policy: Any | None = None) -> None:
         self.cache = cache
         self.records = {str(record["job_key"]): dict(record) for record in records}
-        self.client = ScraplingClient(Path(root), {"fallback_chain": [
-            {"engine": "static", "method": "get", "kwargs": {"timeout": 45}},
-            {"engine": "dynamic", "kwargs": {"network_idle": True}},
-            {"engine": "stealth", "kwargs": {}},
-        ]})
-        if not self.client.available:
+        self.transport = ScraplingPublicRetriever(
+            cache,
+            root=root,
+            access_policy=access_policy,
+        )
+        if not self.transport.client.available:
             raise RuntimeError("configured production Scrapling runtime is unavailable")
 
     def retrieve_plan(self, task: Any) -> tuple[list[Citation], list[dict[str, Any]]]:
@@ -847,7 +906,7 @@ class SidecarAuthorityRetriever:
             if (not publisher or (publisher != requested_host and not requested_host.endswith("." + publisher))
                     or not article or article.casefold() in seen_articles):
                 raise ValueError("source is not an independent publisher-owned authority")
-            result = self.client.fetch_with_chain(requested_url)
+            result, access_receipt = self.transport._fetch(requested_url)
             response = result.response
             status = int(response.get("status", 0))
             if not 200 <= status < 300:
@@ -881,6 +940,7 @@ class SidecarAuthorityRetriever:
                 source_id, final_url, now, now, digest, reference, status,
                 requested_url, history, published_at, updated_at, source_type,
                 publisher, article, date_evidence, result.engine,
+                asdict(access_receipt),
             )
             if specification.get("requires_current") is True and not (published_at or updated_at):
                 raise ValueError("freshness-sensitive authority has no verified publisher date")

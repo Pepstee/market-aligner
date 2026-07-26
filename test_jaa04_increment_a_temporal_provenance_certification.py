@@ -21,6 +21,7 @@ from career_automation.employer_research import (
     RawResponseCache,
     ScraplingPublicRetriever,
 )
+from career_automation.public_access import RobotsReceipt
 
 
 ROOT = Path(__file__).resolve().parent
@@ -66,13 +67,20 @@ def test_greenhouse_updated_only_response_retains_null_published_at_through_retr
     """Retrieval must not promote updated_at into a fictional published_at."""
     body = _greenhouse_body()
     cache = RawResponseCache(tmp_path / "raw")
-    retriever = ScraplingPublicRetriever(cache)
-    retriever.client = SimpleNamespace(fetch_with_chain=lambda _: SimpleNamespace(
-        engine="static",
-        response={"url": GREENHOUSE.authority_url, "status": 200,
-                  "body_base64": base64.b64encode(body).decode(),
-                  "body_bytes": len(body), "history": []},
-    ))
+    receipt = RobotsReceipt(
+        "api.greenhouse.io", "https://api.greenhouse.io/robots.txt",
+        "https://api.greenhouse.io/robots.txt", 404, hashlib.sha256(b"").hexdigest(),
+        "sha256/empty", [], "2026-07-20T00:00:00+00:00",
+        "JAA-Public-Research", GREENHOUSE.authority_url, True, 10.0,
+        "policy-hash", {"reviewer_type": "human_operator"},
+    )
+    access = SimpleNamespace(before_request=lambda _: receipt)
+    retriever = ScraplingPublicRetriever(cache, access_controller=access)
+    retriever.client = SimpleNamespace(fetch=lambda *_args, **_kwargs: {
+        "url": GREENHOUSE.authority_url, "status": 200,
+        "body_base64": base64.b64encode(body).decode(),
+        "body_bytes": len(body), "history": [], "text": body.decode(),
+    })
     monkeypatch.setattr(research, "_public_url", lambda _: None)
 
     citation = retriever.retrieve("greenhouse-updated-only", GREENHOUSE.authority_url)
@@ -132,4 +140,3 @@ def test_real_passing_certification_runtime_emits_content_addressed_revision_bou
     assert receipt["source_revision"]
     assert receipt["source_content_revision"]
     assert "JAA-04 Increment A certification: PASS" in completed.stdout
-

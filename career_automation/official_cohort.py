@@ -21,12 +21,19 @@ from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 from career_automation.employer_research import (
-    FRESHNESS_DAYS, IntelligenceKind, extract_publisher_timestamps,
+    FRESHNESS_DAYS, IntelligenceKind, RawResponseCache,
+    _public_url, extract_publisher_timestamps,
 )
 from career_automation.opportunity_calibration import (
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
     calibration_policy_json, decide_opportunity0,
 )
+from career_automation.public_access import (
+    PublicAccessController,
+    PublicAccessPolicy,
+    USER_AGENT,
+)
+from scraper.scrapling_client import ScraplingClient
 from scraper.adapters.base import load_adapter
 from scraper.viability import Vacancy, canonical_key, local_decision
 from skeleton.configuration import load_config
@@ -59,8 +66,9 @@ def _normal_url(value: str) -> str:
 class ResponseRecorder:
     """Record response bodies and redirect chains without changing adapters."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, access_controller: PublicAccessController) -> None:
         self.root = root
+        self.access_controller = access_controller
         self.root.mkdir(parents=True, exist_ok=True)
         self.records: list[dict[str, Any]] = []
 
@@ -93,8 +101,12 @@ class ResponseRecorder:
         recorder = self
 
         def send(session: Any, request: Any, **kwargs: Any) -> Any:
+            _public_url(str(request.url))
+            receipt = recorder.access_controller.before_request(str(request.url))
+            request.headers["User-Agent"] = USER_AGENT
             response = original(session, request, **kwargs)
             recorder.record(response, datetime.now(timezone.utc).isoformat())
+            recorder.records[-1]["access_receipt"] = asdict(receipt)
             return response
 
         requests.sessions.Session.send = send
@@ -247,11 +259,19 @@ def _temporal_admission(refs: list[dict[str, Any]], raw_root: Path,
     }
 
 
-def build(config_path: Path, output: Path, raw_root: Path) -> dict[str, Any]:
+def build(
+    config_path: Path,
+    output: Path,
+    raw_root: Path,
+    *,
+    access_controller: PublicAccessController | None = None,
+) -> dict[str, Any]:
     if output.exists():
         raise RuntimeError("output snapshot already exists")
+    if access_controller is None:
+        raise RuntimeError("official cohort acquisition requires public access authority")
     boards, configs, terms = _validate_config(load_config(config_path))
-    recorder = ResponseRecorder(raw_root)
+    recorder = ResponseRecorder(raw_root, access_controller)
     candidates: list[dict[str, Any]] = []
     temporal_decisions: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -364,9 +384,26 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--raw-root", type=Path, required=True,
                         help="external runtime directory for exact official response bytes")
+    parser.add_argument("--access-policy", type=Path, required=True,
+                        help="external human terms-review attestations")
     args = parser.parse_args()
     try:
-        envelope = build(args.config.resolve(), args.output.resolve(), args.raw_root.resolve())
+        raw_root = args.raw_root.resolve()
+        policy = PublicAccessPolicy.load(args.access_policy.resolve())
+        client = ScraplingClient(Path(__file__).resolve().parents[1], {
+            "command_timeout_seconds": 45,
+        })
+        controller = PublicAccessController(
+            policy,
+            client,
+            RawResponseCache(raw_root),
+        )
+        envelope = build(
+            args.config.resolve(),
+            args.output.resolve(),
+            raw_root,
+            access_controller=controller,
+        )
     except Exception as exc:
         print(f"JAA-04 official cohort: ERROR: {exc}", file=sys.stderr)
         return 2

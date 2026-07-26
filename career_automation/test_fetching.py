@@ -86,16 +86,18 @@ class FetchEscalationTests(unittest.TestCase):
             FetchAction.ESCALATE, FetchEngine.DYNAMIC_BROWSER
         ))
 
-    def test_challenges_escalate_to_the_full_stealth_engine(self) -> None:
-        machine = FetchEscalationMachine(default_job_fetch_policy())
+    def test_challenges_block_without_stealth_escalation(self) -> None:
+        policy = default_job_fetch_policy()
+        self.assertNotIn(FetchEngine.STEALTH_BROWSER, {
+            stage.engine for stage in policy.stages
+        })
+        machine = FetchEscalationMachine(policy)
         history = (
             attempt(1, 0, FetchOutcome.CAPTCHA_REQUIRED),
-            attempt(2, 1, FetchOutcome.CAPTCHA_REQUIRED),
-            attempt(3, 2, FetchOutcome.CAPTCHA_REQUIRED),
         )
         decision = machine.decide(history)
-        self.assertEqual(decision.action, FetchAction.ESCALATE)
-        self.assertEqual(decision.engine, FetchEngine.STEALTH_BROWSER)
+        self.assertEqual(decision.action, FetchAction.BLOCK)
+        self.assertIsNone(decision.engine)
 
     def test_policy_still_honours_explicit_non_fetch_boundaries(self) -> None:
         machine = FetchEscalationMachine(default_job_fetch_policy())
@@ -119,7 +121,6 @@ class FetchEscalationTests(unittest.TestCase):
             attempt(1, 0, FetchOutcome.INCOMPLETE_CONTENT),
             attempt(2, 1, FetchOutcome.INCOMPLETE_CONTENT),
             attempt(3, 2, FetchOutcome.INVALID_CONTENT),
-            attempt(4, 3, FetchOutcome.INVALID_CONTENT),
         ))
         self.assertEqual(exhausted.action, FetchAction.EXHAUST)
 

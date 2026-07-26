@@ -18,7 +18,9 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import (  # noqa: E402
     ATS_AUTHORITY_CANARIES, PortableAuthorityRetriever, RawResponseCache,
+    ScraplingPublicRetriever,
 )
+from career_automation.public_access import PublicAccessPolicy  # noqa: E402
 
 
 def _canonical(value: object) -> bytes:
@@ -26,7 +28,7 @@ def _canonical(value: object) -> bytes:
                        separators=(",", ":"), allow_nan=False) + "\n").encode()
 
 
-def capture(destination: Path) -> None:
+def capture(destination: Path, access_policy: PublicAccessPolicy) -> None:
     """Publish three self-contained canaries, never a dossier corpus or receipt."""
     if destination.exists():
         raise RuntimeError("canary destination already exists")
@@ -34,7 +36,12 @@ def capture(destination: Path) -> None:
     stage = Path(tempfile.mkdtemp(prefix="jaa04-canaries-", dir=destination.parent))
     cache = RawResponseCache(stage / ".raw")
     try:
-        retriever = PortableAuthorityRetriever(cache)
+        transport = ScraplingPublicRetriever(
+            cache,
+            root=ROOT,
+            access_policy=access_policy,
+        )
+        retriever = PortableAuthorityRetriever(cache, retriever=transport)
         for record in ATS_AUTHORITY_CANARIES:
             task = SimpleNamespace(job_key=record.job_key, company=record.company,
                                    title=record.title, url=record.admitted_url)
@@ -71,9 +78,11 @@ def capture(destination: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--access-policy", type=Path, required=True)
     args = parser.parse_args()
     try:
-        capture(args.destination.resolve())
+        access_policy = PublicAccessPolicy.load(args.access_policy.resolve())
+        capture(args.destination.resolve(), access_policy)
     except Exception as exc:
         print(f"JAA-04 authority canaries: ERROR: {exc}", file=sys.stderr)
         return 2
