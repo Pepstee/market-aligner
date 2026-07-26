@@ -90,9 +90,21 @@
           "argv": ["{python}", "-m", "pytest", "-q", "test_jaa01_adversarial_runtime.py", "test_durable_live_evidence_separation.py::test_recertification_records_two_live_originals_with_utc_and_read_only_semantics", "test_durable_live_evidence_separation.py::test_recertification_fails_closed_when_a_main_or_wal_read_drifts"],
           "files": ["test_jaa01_adversarial_runtime.py", "test_durable_live_evidence_separation.py"],
           "negative_control": true
+        },
+        {
+          "id": "JAA-01-current-receipt",
+          "argv": ["{python}", "-m", "pytest", "-q", "test_jaa01_checked_receipt_current_revision.py"],
+          "files": ["test_jaa01_checked_receipt_current_revision.py"]
         }
       ],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "frozen_runtime",
+          "scope": "JAA-01-current-runtime",
+          "required": true,
+          "tracked": false
+        }
+      ]
     },
     "JAA-02": {
       "claim": "Candidate facts, evidence, claim lineage, privacy projection and quarantine satisfy JAA-02.",

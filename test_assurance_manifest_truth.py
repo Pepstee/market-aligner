@@ -158,6 +158,31 @@ def test_stale_and_incomplete_slice_states_are_explicit() -> None:
         == jaa01["certification"]["historical_source_git_revision"]
     )
     assert historical_document["source_git_revision"] != source_git_revision(ROOT)
+    current_receipt_tests = [
+        test for test in jaa01["tests"]
+        if test["id"] == "JAA-01-current-receipt"
+    ]
+    assert current_receipt_tests == [
+        {
+            "id": "JAA-01-current-receipt",
+            "argv": [
+                "{python}",
+                "-m",
+                "pytest",
+                "-q",
+                "test_jaa01_checked_receipt_current_revision.py",
+            ],
+            "files": ["test_jaa01_checked_receipt_current_revision.py"],
+        }
+    ]
+    assert jaa01["evidence"] == [
+        {
+            "kind": "frozen_runtime",
+            "scope": "JAA-01-current-runtime",
+            "required": True,
+            "tracked": False,
+        }
+    ]
     assert components["JAA-02"]["increment"] == "complete"
     assert components["JAA-03"]["increment"] == "complete"
     assert components["JAA-04"]["increment"] == "increment_b_incomplete"
