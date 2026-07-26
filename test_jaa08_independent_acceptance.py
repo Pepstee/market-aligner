@@ -24,8 +24,10 @@ from career_automation.migrations import (
 from career_automation.release_gate import (
     REQUIRED_VALIDATORS,
     ApplicationCompilationStore,
+    IssuedRelease,
     OfficialRouteBinding,
     ReleaseBinding,
+    ReleaseGateStore,
     ValidationReceipt,
     WorkRightBinding,
     compile_release_manifest,
@@ -184,6 +186,79 @@ def _compilation_inputs(tmp_path: Path):
     )
 
 
+def _authorized_release_inputs(
+    tmp_path: Path,
+    *,
+    route_allowed: bool = True,
+    route_verified_at: date | None = None,
+    route_valid_until: date | None = None,
+    work_right_valid_until: date | None = None,
+):
+    values = _compilation_inputs(tmp_path)
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _receipt,
+    ) = values
+    today = date.today()
+    graph = CandidateGraph(database.path)
+    graph.add_record(
+        "work-right-gb",
+        kind="work_right",
+        subject="permission",
+        value={"permitted": True},
+        state="fact",
+        source_identity="test:operator-work-right",
+        jurisdiction="GB",
+        contract_type="employee",
+        valid_from=today.replace(year=today.year - 1).isoformat(),
+        valid_until=(
+            work_right_valid_until
+            or today.replace(year=today.year + 1)
+        ).isoformat(),
+    )
+    graph.verify_record(
+        "work-right-gb",
+        1,
+        decision="approved",
+        verifier_kind="configured",
+        policy_id="test.work-right",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="operator-verified work-right authority",
+        source_identity="test:work-right-verifier",
+    )
+    compilation = ApplicationCompilationStore(database.path).register(
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        as_of=today,
+    )
+    gate = ReleaseGateStore(database.path)
+    route = gate.register_official_route(
+        job_key=source.job_key,
+        route=OfficialRouteBinding(
+            "route:official-test",
+            "offline-test-adapter",
+            "1",
+            "test:official-route-policy",
+            DIGEST,
+            route_verified_at or today,
+            route_valid_until or today.replace(year=today.year + 1),
+            route_allowed,
+        ),
+    )
+    return (*values, compilation, gate, route)
+
+
 def test_release_manifest_binds_every_consequential_input_and_validator() -> None:
     binding = _binding()
     manifest = compile_release_manifest(binding, _validations(binding))
@@ -290,3 +365,70 @@ def test_jaa08_migration_is_forward_only_and_exact_schema_checked(
         assert jaa08_installed_schema_digest(
             connection
         ) == JAA08_INSTALLED_SCHEMA_SHA256
+
+
+def test_release_gate_reresolves_authority_and_issues_hash_only_token_atomically(
+    tmp_path: Path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    issued = gate.evaluate_and_issue(
+        compilation_id=compilation.compilation_id,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        evaluated_at=date.today(),
+    )
+    assert isinstance(issued, IssuedRelease)
+    verify_release_manifest(issued.manifest)
+    assert issued.manifest.binding.work_right.permitted is True
+    assert issued.manifest.binding.official_route.allowed is True
+    assert tuple(
+        row.validator_id for row in issued.manifest.validations
+    ) == REQUIRED_VALIDATORS
+    with database.connection() as connection:
+        state = connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0]
+        attempt = connection.execute(
+            "SELECT verdict,finding_codes_json FROM release_gate_attempts"
+        ).fetchone()
+        stored = connection.execute(
+            "SELECT token_hash,consumed_at FROM release_tokens"
+        ).fetchone()
+        validation_count = connection.execute(
+            "SELECT COUNT(*) FROM release_validation_receipts"
+        ).fetchone()[0]
+        all_text = "\n".join(
+            str(value)
+            for table in (
+                "release_gate_attempts",
+                "release_manifests",
+                "release_validation_receipts",
+                "release_tokens",
+            )
+            for row in connection.execute(f"SELECT * FROM {table}").fetchall()
+            for value in row
+        )
+    assert state == "released"
+    assert tuple(attempt) == ("pass", "[]")
+    assert tuple(stored) == (issued.token_sha256, None)
+    assert validation_count == len(REQUIRED_VALIDATORS)
+    assert issued.release_token not in all_text

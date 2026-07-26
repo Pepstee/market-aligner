@@ -12,6 +12,7 @@ import pytest
 from career_automation.release_gate import (
     REQUIRED_VALIDATORS,
     ApplicationCompilationStore,
+    ReleaseGateStore,
     ValidationReceipt,
     compile_release_manifest,
     verify_release_manifest,
@@ -19,6 +20,7 @@ from career_automation.release_gate import (
 from test_jaa08_independent_acceptance import (
     AS_OF,
     ROOT,
+    _authorized_release_inputs,
     _binding,
     _compilation_inputs,
     _validations,
@@ -278,3 +280,275 @@ def test_publication_verification_never_creates_missing_root(tmp_path) -> None:
             as_of=date.today(),
         )
     assert not missing.exists()
+
+
+def test_release_gate_rejects_external_tamper_without_token_or_release(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    target = artifact_root / publication.relative_directory / "cover-letter.txt"
+    target.write_text("tampered after compilation", encoding="utf-8")
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "application_compiled"
+
+
+def test_release_gate_rejects_missing_work_right_without_token(tmp_path) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+    ) = _compilation_inputs(tmp_path)
+    compilation = ApplicationCompilationStore(database.path).register(
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        as_of=date.today(),
+    )
+    gate = ReleaseGateStore(database.path)
+    today = date.today()
+    gate.register_official_route(
+        job_key=source.job_key,
+        route=replace(
+            _binding().official_route,
+            verified_at=today,
+            valid_until=today.replace(year=today.year + 1),
+        ),
+    )
+    with pytest.raises(ValueError, match="work-right authority"):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
+
+
+def test_release_insert_failure_rolls_back_release_transition(tmp_path) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            """CREATE TRIGGER test_block_release_token
+               BEFORE INSERT ON release_tokens
+               BEGIN SELECT RAISE(ABORT,'blocked test token'); END"""
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="blocked test token"):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "application_compiled"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_gate_attempts"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_manifests"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
+
+
+def test_second_release_for_same_candidate_and_job_cannot_mint_token(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    arguments = {
+        "compilation_id": compilation.compilation_id,
+        "source": source,
+        "artifacts": artifacts,
+        "contact": contact,
+        "questions": questions,
+        "artifact_root": artifact_root,
+        "repository_root": ROOT,
+        "jurisdiction": "GB",
+        "contract_type": "employee",
+        "evaluated_at": date.today(),
+    }
+    gate.evaluate_and_issue(**arguments)
+    with pytest.raises(ValueError):
+        gate.evaluate_and_issue(**arguments)
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "authority_failure",
+    ("disallowed_route", "expired_route", "expired_work_right"),
+)
+def test_release_gate_rejects_expired_or_disallowed_authority(
+    tmp_path,
+    authority_failure: str,
+) -> None:
+    today = date.today()
+    options = {
+        "route_allowed": authority_failure != "disallowed_route",
+        "route_verified_at": (
+            today
+            if authority_failure != "expired_route"
+            else today.replace(year=today.year - 2)
+        ),
+        "route_valid_until": (
+            today
+            if authority_failure != "expired_route"
+            else today.replace(year=today.year - 1)
+        ),
+        "work_right_valid_until": (
+            today
+            if authority_failure != "expired_work_right"
+            else today.replace(year=today.year - 1)
+        ),
+    }
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path, **options)
+    with pytest.raises(ValueError):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=today,
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "application_compiled"
+
+
+def test_release_gate_rejects_mismatched_compilation_identity(tmp_path) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        _compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    with pytest.raises(ValueError, match="different compilation identity"):
+        gate.evaluate_and_issue(
+            compilation_id="0" * 64,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
