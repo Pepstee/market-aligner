@@ -155,7 +155,7 @@ def _robots_rules(body: bytes, url: str) -> tuple[bool, float | None]:
             except ValueError:
                 continue
             if math.isfinite(parsed_delay) and parsed_delay >= 0:
-                delay = parsed_delay
+                delay = parsed_delay if delay is None else max(delay, parsed_delay)
     finish()
 
     product = USER_AGENT.casefold()

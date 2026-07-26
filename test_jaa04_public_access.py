@@ -229,6 +229,25 @@ def test_non_finite_robots_crawl_delay_cannot_override_the_floor(
     assert clock.sleeps == [DEFAULT_DELAY_SECONDS]
 
 
+def test_multiple_robots_crawl_delays_use_the_conservative_maximum(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        "Allow: /\n"
+        "Crawl-delay: 25\n"
+        "Crawl-delay: 1\n"
+    ).encode()
+    controller, _, _, clock = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    receipt = controller.before_request(URL)
+    assert receipt.crawl_delay_seconds == 25
+    assert clock.sleeps == [25]
+
+
 @pytest.mark.parametrize("delay", (float("nan"), float("inf"), float("-inf")))
 def test_non_finite_configured_delay_is_rejected(
     tmp_path: Path,
