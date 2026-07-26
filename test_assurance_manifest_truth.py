@@ -63,7 +63,21 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 f"JAA-09 declared test missing: {relative}"
             )
 
-    for number in range(10, 17):
+    jaa10 = components["JAA-10"]
+    assert jaa10["increment"] == "implementation_in_progress_dependency_blocked"
+    assert jaa10["evidence"] == []
+    assert "withholds production certification" in jaa10["claim"]
+    for relative in jaa10["owns"]:
+        assert (ROOT / relative).is_file(), (
+            f"JAA-10 materialised path missing: {relative}"
+        )
+    for test in jaa10["tests"]:
+        for relative in test["files"]:
+            assert (ROOT / relative).is_file(), (
+                f"JAA-10 declared test missing: {relative}"
+            )
+
+    for number in range(11, 17):
         slice_id = f"JAA-{number:02d}"
         component = components[slice_id]
         assert component["increment"] == "not_implemented"

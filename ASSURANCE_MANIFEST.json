@@ -301,8 +301,8 @@
       "evidence": []
     },
     "JAA-10": {
-      "claim": "Walking-skeleton and shadow-cohort certification retain locked evidence and negative twins.",
-      "increment": "not_implemented",
+      "claim": "A frozen synthetic shadow contract pins the accepted JAA-09 golden identities and structurally withholds production certification; executable interruption and mutation cohort evidence remains incomplete.",
+      "increment": "implementation_in_progress_dependency_blocked",
       "depends_on": ["JAA-09"],
       "owns": ["career_automation/shadow_certification.py"],
       "inputs": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
