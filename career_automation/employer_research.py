@@ -365,7 +365,11 @@ class ATSRouteAdapter:
         if self.family == "workable":
             if path.casefold() != f"/j/{vacancy}".casefold():
                 raise ValueError("Workable admitted path does not match its typed identity")
-            return str(task.url)
+            # Workable's admitted rendering route publishes this exact
+            # tenant-bound Markdown representation. Use the official vacancy
+            # representation so semantic evidence and publisher time remain
+            # byte-resolvable, as they are for the declared Workable canary.
+            return f"https://apply.workable.com/{tenant}/jobs/view/{vacancy}.md"
         raise ValueError("unsupported ATS family")
 
     def validate_capture(self, task: Any, citation: Citation, cache: "RawResponseCache") -> None:

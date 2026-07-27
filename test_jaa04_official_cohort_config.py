@@ -8,6 +8,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -105,6 +106,34 @@ def test_live_greenhouse_authority_uses_current_public_job_board_api_host() -> N
     assert DEFAULT_ATS_ROUTE_ADAPTERS["greenhouse"].authority_hosts == (
         "boards-api.greenhouse.io",
     )
+
+
+def test_live_workable_authority_uses_tenant_bound_markdown_route() -> None:
+    task = SimpleNamespace(
+        job_key="workable:suade:67D795D3DE",
+        url="https://apply.workable.com/j/67D795D3DE",
+    )
+    adapter = DEFAULT_ATS_ROUTE_ADAPTERS["workable"]
+    assert adapter.authority_url(task) == (
+        "https://apply.workable.com/suade/jobs/view/67D795D3DE.md"
+    )
+    adapter._validate_route(task, adapter.authority_url(task), final=True)
+
+
+@pytest.mark.parametrize(
+    ("job_key", "url"),
+    (
+        ("workable:suade:OTHER", "https://apply.workable.com/j/67D795D3DE"),
+        ("workable:suade:67D795D3DE", "https://apply.workable.com/suade/jobs/view/67D795D3DE.md"),
+    ),
+)
+def test_live_workable_authority_rejects_noncanonical_admitted_identity(
+    job_key: str,
+    url: str,
+) -> None:
+    task = SimpleNamespace(job_key=job_key, url=url)
+    with pytest.raises(ValueError, match="admitted path"):
+        DEFAULT_ATS_ROUTE_ADAPTERS["workable"].authority_url(task)
 
 
 @pytest.mark.parametrize("attack", (None, "wrong-policy"))
