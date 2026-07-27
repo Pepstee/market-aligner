@@ -460,6 +460,64 @@ def test_candidate_graph_projection_rejects_caller_self_approval_and_newer_drift
     assert candidate_graph_evidence(graph.path, as_of=AS_OF) == ()
 
 
+def test_candidate_graph_projection_rejects_multiple_approval_authorities(
+    tmp_path: Path,
+) -> None:
+    graph = CandidateGraph(tmp_path / "ambiguous-approval.sqlite3")
+    graph.add_evidence(
+        "employment",
+        statement="An externally recorded employment outcome.",
+        source_identity="test:employer",
+        state="evidence",
+        evidence_kind="employment_record",
+        valid_until="2035-01-01",
+    )
+    graph.verify_evidence(
+        "employment",
+        1,
+        decision="approved",
+        verifier_kind="human",
+        policy_id="employment-check",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="employer record checked",
+        source_identity="test:first-verifier",
+    )
+    graph.add_claim(
+        "professional-python",
+        statement="Professional Python delivery is externally evidenced.",
+        claim_type="experience",
+        state="evidence",
+        source_identity="test:claim",
+        valid_until="2035-01-01",
+    )
+    graph.link_claim_evidence(
+        "professional-python",
+        "employment",
+        source_identity="test:edge",
+    )
+    graph.approve_claim("professional-python")
+    with sqlite3.connect(graph.path) as connection:
+        original = connection.execute(
+            """SELECT target_kind,target_id,target_version,decision,
+                      verifier_kind,policy_id,policy_version,policy_hash,
+                      reason,provenance_id
+               FROM candidate_verification_decisions
+               WHERE target_kind='evidence' AND target_id='employment'
+                 AND target_version=1"""
+        ).fetchone()
+        connection.execute(
+            """INSERT INTO candidate_verification_decisions(
+                 decision_id,target_kind,target_id,target_version,decision,
+                 verifier_kind,policy_id,policy_version,policy_hash,reason,
+                 provenance_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            ("test:second-approval", *original),
+        )
+    with pytest.raises(ValueError, match="ambiguous approval decisions"):
+        candidate_graph_evidence(graph.path, as_of=AS_OF)
+
+
 def test_generated_learning_text_or_self_assertion_cannot_close_a_gap() -> None:
     requirement = Requirement(
         "knowledge",
@@ -515,6 +573,36 @@ def test_generated_learning_text_or_self_assertion_cannot_close_a_gap() -> None:
     )
     with pytest.raises(ValueError, match="unsupported proof class"):
         optimise_gaps((requirement,), (no_match,), templates=unsafe_templates)
+
+
+def test_improvement_task_must_be_capable_of_satisfying_requirement_proof() -> None:
+    requirement = Requirement(
+        "impossible-knowledge-task",
+        "systems-knowledge",
+        "Demonstrate systems knowledge.",
+        False,
+        "knowledge",
+        "learn_and_test",
+        ("employment_record",),
+        7000,
+        "vacancy:negative-control",
+        (0, 30),
+    )
+    no_match = evaluate_match(
+        requirement,
+        MatchProposal(
+            requirement.requirement_id,
+            (),
+            9000,
+            "none",
+            "No verified evidence.",
+            _receipt(requirement, ()),
+        ),
+        {},
+        as_of=AS_OF,
+    )
+    with pytest.raises(ValueError, match="cannot satisfy"):
+        optimise_gaps((requirement,), (no_match,))
 
 
 def test_structural_gap_blocks_without_creating_a_task() -> None:

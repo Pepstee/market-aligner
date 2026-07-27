@@ -270,15 +270,19 @@ def optimise_gaps(
             or not template.action_kind.strip()
         ):
             raise ValueError("task template cost and value must be positive")
-        priority = (
-            requirement.opportunity_weight_bp
-            * template.reuse_value_bp
-            // (template.cost_units * 10_000)
-        )
         contract = ResultingEvidenceContract(
             template.resulting_proof_class,
             template.verification_method,
             template.verifier_kinds,
+        )
+        if contract.proof_class not in requirement.accepted_proof_classes:
+            raise ValueError(
+                "task resulting evidence cannot satisfy the requirement proof contract"
+            )
+        priority = (
+            requirement.opportunity_weight_bp
+            * template.reuse_value_bp
+            // (template.cost_units * 10_000)
         )
         tasks.append(ImprovementTask(
             f"task-{_hash((gap_id, template.action_kind, gap_policy_hash(templates)))}",

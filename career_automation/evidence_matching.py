@@ -568,7 +568,7 @@ def candidate_graph_evidence(
                       evidence.epistemic_state,evidence.negative,
                       evidence.valid_until,evidence.content_hash,
                       claim.claim_id,
-                      decision.verifier_kind,decision.policy_id,
+                      decision.decision_id,decision.verifier_kind,decision.policy_id,
                       decision.policy_version,decision.policy_hash
                FROM candidate_evidence evidence
                JOIN candidate_claim_edges edge
@@ -612,6 +612,7 @@ def candidate_graph_evidence(
             continue
         decisions = {
             (
+                str(row["decision_id"]),
                 str(row["verifier_kind"]),
                 str(row["policy_id"]),
                 str(row["policy_version"]),
@@ -621,7 +622,9 @@ def candidate_graph_evidence(
         }
         if len(decisions) != 1:
             raise ValueError("candidate evidence has ambiguous approval decisions")
-        verifier_kind, policy_id, policy_version, policy_hash = decisions.pop()
+        decision_id, verifier_kind, policy_id, policy_version, policy_hash = (
+            decisions.pop()
+        )
         _digest("candidate verification policy hash", policy_hash)
         valid_until = group[0]["valid_until"]
         result.append(Evidence(
@@ -634,7 +637,8 @@ def candidate_graph_evidence(
             epistemic_state=str(group[0]["epistemic_state"]),
             verification_decision="approved",
             verification_method=(
-                f"{verifier_kind}:{policy_id}:{policy_version}:{policy_hash}"
+                f"{decision_id}:{verifier_kind}:{policy_id}:"
+                f"{policy_version}:{policy_hash}"
             ),
             content_sha256=str(group[0]["content_hash"]),
             valid_until=date.fromisoformat(str(valid_until)) if valid_until else None,
