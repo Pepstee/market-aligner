@@ -167,6 +167,49 @@ def test_strict_corpus_accepts_same_robots_bytes_from_two_valid_observations(
     } == {STAMP, "2026-06-30T23:59:59+00:00"}
 
 
+def test_strict_corpus_accepts_same_employer_repeated_intelligence(
+    tmp_path: Path,
+) -> None:
+    cache, dossiers, policies = _strict_corpus(tmp_path)
+    repeated = deepcopy(dossiers[0])
+    repeated["job_key"] = dossiers[1]["job_key"]
+    dossiers[1] = repeated
+    path = tmp_path / "same-employer-repeat.json"
+    _write_strict_corpus(path, dossiers)
+
+    loaded = load_frozen_dossiers(
+        path,
+        cache,
+        strict_corpus=True,
+        access_policies=policies,
+    )
+
+    assert len(loaded) == 30
+    assert loaded[0]["claims"][0]["text"] == loaded[1]["claims"][0]["text"]
+
+
+def test_strict_corpus_rejects_supported_claim_without_employer_prefix(
+    tmp_path: Path,
+) -> None:
+    cache, dossiers, policies = _strict_corpus(tmp_path)
+    dossiers[-1]["claims"][0]["text"] = (
+        "Supported intelligence without the required employer prefix delimiter"
+    )
+    path = tmp_path / "missing-employer-prefix.json"
+    _write_strict_corpus(path, dossiers)
+
+    with pytest.raises(
+        ValueError,
+        match="supported assertion|employer-prefixed text",
+    ):
+        load_frozen_dossiers(
+            path,
+            cache,
+            strict_corpus=True,
+            access_policies=policies,
+        )
+
+
 @pytest.mark.parametrize("attack", ("different-content", "different-reference"))
 def test_strict_corpus_rejects_inconsistent_robots_byte_identity(
     tmp_path: Path,
@@ -283,21 +326,25 @@ def test_strict_corpus_refuses_legacy_or_self_declared_authority(
 def test_strict_corpus_rejects_cross_employer_normalized_boilerplate(
     tmp_path: Path,
 ) -> None:
-    cache = RawResponseCache(tmp_path / "raw")
-    template = _dossier(cache)
-    policies = _access_bound(template, cache)
-    dossiers = []
-    for number in range(30):
-        dossier = deepcopy(template)
-        dossier["job_key"] = f"synthetic:{number:02d}"
-        dossiers.append(dossier)
-    envelope = {
-        "schema_version": "jaa04.frozen-dossiers.v5",
-        "dossiers": dossiers,
-        "dossiers_hash": content_hash(dossiers),
-    }
-    path = tmp_path / "synthetic-boilerplate.json"
-    path.write_text(json.dumps(envelope), encoding="utf-8")
+    cache, dossiers, policies = _strict_corpus(tmp_path)
+    company = (
+        "<p>Contoso company operates a documented public business serving "
+        "regulated customers with cohort marker 00.</p>"
+    )
+    substituted = _portable(
+        cache,
+        company.encode(),
+        {"company": (company, "official_company")},
+    )
+    _access_bound(substituted, cache)
+    substituted["claims"][0]["text"] = substituted["claims"][0]["text"].replace(
+        "Acme:", "Contoso:", 1
+    )
+    substituted["job_key"] = dossiers[1]["job_key"]
+    dossiers[1] = substituted
+    path = tmp_path / "cross-employer-boilerplate.json"
+    _write_strict_corpus(path, dossiers)
+
     with pytest.raises(ValueError, match="employer-normalized boilerplate"):
         load_frozen_dossiers(
             path,

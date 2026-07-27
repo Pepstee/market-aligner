@@ -2082,8 +2082,9 @@ def load_frozen_dossiers(
     classifications: set[str] = set()
     required_kinds = {kind.value for kind in IntelligenceKind}
     job_keys: set[str] = set()
-    normalized_claims = {kind: set() for kind in required_kinds}
-    normalized_claim_counts = {kind: 0 for kind in required_kinds}
+    normalized_claim_employers: dict[str, dict[str, set[str]]] = {
+        kind: {} for kind in required_kinds
+    }
     corpus_access_by_host: dict[str, tuple[str, str]] = {}
     for dossier in dossiers:
         dossier_captures: set[tuple[str, str]] = set()
@@ -2137,7 +2138,6 @@ def load_frozen_dossiers(
             if not body:
                 raise ValueError("frozen source bytes must be non-empty")
         source_by_id = {source["id"]: source for source in dossier["sources"]}
-        company = str(dossier["claims"][0].get("text", "")).split(":", 1)[0].strip()
         for claim in dossier["claims"]:
             if claim.get("classification") is not None:
                 classifications.add(str(claim["classification"]))
@@ -2154,23 +2154,32 @@ def load_frozen_dossiers(
                 raise ValueError("frozen claims require freshness classification")
             if strict_corpus and supported:
                 text = str(claim.get("text", "")).strip()
-                if not company or len(text.split()) < 8:
+                employer, delimiter, intelligence = text.partition(":")
+                employer = employer.strip()
+                if not delimiter or not employer or not intelligence.strip():
+                    raise ValueError(
+                        "frozen supported claim requires an employer-prefixed text"
+                    )
+                if len(text.split()) < 8:
                     raise ValueError("frozen claims must contain substantive employer intelligence")
-                normalized_claims[str(claim["kind"])].add(
-                    text.casefold().replace(company.casefold(), "<employer>")
+                normalized = text.casefold().replace(
+                    employer.casefold(), "<employer>"
                 )
-                normalized_claim_counts[str(claim["kind"])] += 1
+                normalized_claim_employers[str(claim["kind"])].setdefault(
+                    normalized, set()
+                ).add(employer.casefold())
     if strict_corpus and not all(
         row.get("schema_version") in {"jaa04.dossier.v3", "jaa04.dossier.v4"}
         for row in dossiers
     ) and classifications != {"fact", "inference", "hypothesis"}:
         raise ValueError("frozen corpus must distinguish facts, inferences, and hypotheses")
-    # Certification deliberately treats any employer-normalized collision as
-    # a blocker. Genuine source-specific prose must remain distinct; a corpus
-    # that cannot demonstrate that distinction requires operator correction.
+    # Repeated byte-bound intelligence for the same employer is valid across
+    # distinct vacancies, but never counts as independent corroboration.
+    # Employer-substituted boilerplate spanning employers remains a blocker.
     if strict_corpus and any(
-        len(normalized_claims[kind]) != normalized_claim_counts[kind]
+        len(employers) > 1
         for kind in required_kinds
+        for employers in normalized_claim_employers[kind].values()
     ):
         raise ValueError("employer-normalized boilerplate cannot become certified intelligence")
     # Unknown/abstained outcomes are deliberately repetitive and do not count
