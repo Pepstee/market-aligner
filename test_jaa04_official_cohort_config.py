@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from career_automation.employer_research import (
+    ATS_AUTHORITY_CANARIES,
+    DEFAULT_ATS_ROUTE_ADAPTERS,
+    LIVE_ATS_AUTHORITY_CANARIES,
+)
 from career_automation.official_cohort import (
     AGGREGATORS,
     OFFICIAL_ADAPTERS,
@@ -62,6 +67,28 @@ def test_live_official_cohort_refuses_to_start_without_access_authority(
             tmp_path / "output.json",
             tmp_path / "raw",
         )
+
+
+def test_live_greenhouse_authority_uses_current_public_job_board_api_host() -> None:
+    frozen = next(
+        row for row in ATS_AUTHORITY_CANARIES
+        if row.job_key.startswith("greenhouse:")
+    )
+    live = next(
+        row for row in LIVE_ATS_AUTHORITY_CANARIES
+        if row.job_key == frozen.job_key
+    )
+    assert frozen.authority_url.startswith("https://api.greenhouse.io/")
+    assert live.authority_url == (
+        "https://boards-api.greenhouse.io/v1/boards/anthropic/jobs/5030244008"
+    )
+    assert live.authority_hosts == (
+        "job-boards.greenhouse.io",
+        "boards-api.greenhouse.io",
+    )
+    assert DEFAULT_ATS_ROUTE_ADAPTERS["greenhouse"].authority_hosts == (
+        "boards-api.greenhouse.io",
+    )
 
 
 @pytest.mark.parametrize(

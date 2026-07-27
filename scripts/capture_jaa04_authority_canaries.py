@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import (  # noqa: E402
-    ATS_AUTHORITY_CANARIES, PortableAuthorityRetriever, RawResponseCache,
+    LIVE_ATS_AUTHORITY_CANARIES, PortableAuthorityRetriever, RawResponseCache,
     ScraplingPublicRetriever,
 )
 from career_automation.public_access import PublicAccessPolicy  # noqa: E402
@@ -42,7 +42,7 @@ def capture(destination: Path, access_policy: PublicAccessPolicy) -> None:
             access_policy=access_policy,
         )
         retriever = PortableAuthorityRetriever(cache, retriever=transport)
-        for record in ATS_AUTHORITY_CANARIES:
+        for record in LIVE_ATS_AUTHORITY_CANARIES:
             task = SimpleNamespace(job_key=record.job_key, company=record.company,
                                    title=record.title, url=record.admitted_url)
             citations, plan = retriever.retrieve_plan(task)

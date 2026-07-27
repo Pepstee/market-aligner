@@ -218,6 +218,9 @@ class ATSAuthorityCanary:
     final_paths: tuple[str, ...]
 
 
+# Historical Increment-A fixtures remain bound to the exact routes captured on
+# 20 July 2026. Production acquisition uses the separate live route set below
+# so a provider host migration does not rewrite or fabricate old provenance.
 ATS_AUTHORITY_CANARIES = (
     ATSAuthorityCanary("greenhouse:anthropic:5030244008", "Anthropic",
         "Anthropic Fellows Program, AI Security",
@@ -238,10 +241,22 @@ ATS_AUTHORITY_CANARIES = (
         ("/j/847CFBC5F4", "/cogna/j/847CFBC5F4", "/cogna/j/847CFBC5F4/",
          "/cogna/jobs/view/847CFBC5F4.md")),
 )
-_ATS_CANARY_BY_KEY = {record.job_key: record for record in ATS_AUTHORITY_CANARIES}
-_TYPED_ATS_HOSTS = frozenset(host for record in ATS_AUTHORITY_CANARIES for host in record.authority_hosts)
+LIVE_ATS_AUTHORITY_CANARIES = (
+    ATSAuthorityCanary("greenhouse:anthropic:5030244008", "Anthropic",
+        "Anthropic Fellows Program, AI Security",
+        "https://job-boards.greenhouse.io/anthropic/jobs/5030244008",
+        "https://boards-api.greenhouse.io/v1/boards/anthropic/jobs/5030244008",
+        ("job-boards.greenhouse.io", "boards-api.greenhouse.io"),
+        ("/anthropic/jobs/5030244008", "/v1/boards/anthropic/jobs/5030244008")),
+    ATS_AUTHORITY_CANARIES[1],
+    ATS_AUTHORITY_CANARIES[2],
+)
+_ATS_CANARY_BY_KEY = {record.job_key: record for record in LIVE_ATS_AUTHORITY_CANARIES}
+_TYPED_ATS_HOSTS = frozenset(
+    host for record in LIVE_ATS_AUTHORITY_CANARIES for host in record.authority_hosts
+)
 _OFFICIAL_ATS_HOSTS = frozenset({
-    "job-boards.greenhouse.io", "api.greenhouse.io", "apply.workable.com",
+    "job-boards.greenhouse.io", "boards-api.greenhouse.io", "apply.workable.com",
     "jobs.ashbyhq.com", "jobs.lever.co", "jobs.smartrecruiters.com",
     "api.smartrecruiters.com",
 })
@@ -326,7 +341,7 @@ class ATSRouteAdapter:
             expected = f"/{tenant}/jobs/{vacancy}"
             if path != expected:
                 raise ValueError("Greenhouse admitted path does not match its typed identity")
-            return f"https://api.greenhouse.io/v1/boards/{tenant}/jobs/{vacancy}"
+            return f"https://boards-api.greenhouse.io/v1/boards/{tenant}/jobs/{vacancy}"
         if self.family == "ashby":
             if path != f"/{tenant}/{vacancy}":
                 raise ValueError("Ashby admitted path does not match its typed identity")
@@ -369,7 +384,7 @@ class ATSRouteAdapter:
 
 DEFAULT_ATS_ROUTE_ADAPTERS = {
     row.family: row for row in (
-        ATSRouteAdapter("greenhouse", ("job-boards.greenhouse.io",), ("api.greenhouse.io",)),
+        ATSRouteAdapter("greenhouse", ("job-boards.greenhouse.io",), ("boards-api.greenhouse.io",)),
         ATSRouteAdapter("workable", ("apply.workable.com",), ("apply.workable.com",)),
         ATSRouteAdapter("ashby", ("jobs.ashbyhq.com",), ("jobs.ashbyhq.com",)),
         ATSRouteAdapter("lever", ("jobs.lever.co",), ("jobs.lever.co",)),
