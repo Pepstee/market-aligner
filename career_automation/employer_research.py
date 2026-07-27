@@ -361,7 +361,11 @@ class ATSRouteAdapter:
             if (len(segments) != 2 or segments[0] != tenant or
                     not (segments[1] == vacancy or segments[1].startswith(vacancy + "-"))):
                 raise ValueError("SmartRecruiters admitted path does not match its typed identity")
-            return f"https://api.smartrecruiters.com/v1/companies/{tenant}/postings/{vacancy}"
+            # The public job representation carries byte-resolvable structured
+            # vacancy metadata. The API robots policy disallows this product's
+            # user agent, so acquisition must remain on the admitted official
+            # page instead of treating an API terms grant as a robots bypass.
+            return str(task.url)
         if self.family == "workable":
             if path.casefold() != f"/j/{vacancy}".casefold():
                 raise ValueError("Workable admitted path does not match its typed identity")

@@ -120,6 +120,22 @@ def test_live_workable_authority_uses_tenant_bound_markdown_route() -> None:
     adapter._validate_route(task, adapter.authority_url(task), final=True)
 
 
+def test_live_smartrecruiters_authority_remains_on_public_job_page() -> None:
+    task = SimpleNamespace(
+        job_key="smartrecruiters:Entain:744000133551599",
+        url=(
+            "https://jobs.smartrecruiters.com/Entain/"
+            "744000133551599-platform-engineer-i"
+        ),
+    )
+    adapter = DEFAULT_ATS_ROUTE_ADAPTERS["smartrecruiters"]
+    assert adapter.authority_url(task) == task.url
+    assert urlsplit(adapter.authority_url(task)).hostname == (
+        "jobs.smartrecruiters.com"
+    )
+    adapter._validate_route(task, adapter.authority_url(task), final=True)
+
+
 @pytest.mark.parametrize(
     ("job_key", "url"),
     (
