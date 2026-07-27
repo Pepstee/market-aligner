@@ -403,11 +403,12 @@ class PublicAccessController:
         self.sleeper = sleeper
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.wall_clock = wall_clock
+        policy_source_path = getattr(policy, "source_path", None)
         if rate_ledger_path is not None:
             self.rate_ledger_path = rate_ledger_path.resolve()
-        elif policy.source_path is not None:
+        elif policy_source_path is not None:
             self.rate_ledger_path = (
-                policy.source_path.parent
+                policy_source_path.parent
                 / f".jaa04-public-rate-{policy.policy_sha256}.json"
             ).resolve()
         else:
