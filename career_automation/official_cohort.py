@@ -16,12 +16,13 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 from career_automation.employer_research import (
@@ -70,13 +71,24 @@ def _normal_url(value: str) -> str:
 class ResponseRecorder:
     """Record response bodies and redirect chains without changing adapters."""
 
-    def __init__(self, root: Path, access_controller: Any) -> None:
+    def __init__(
+        self,
+        root: Path,
+        access_controller: Any,
+        *,
+        clock_ns: Callable[[], int] = time.monotonic_ns,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.root = root
         self.access_controller = access_controller
+        self.clock_ns = clock_ns
+        self.sleeper = sleeper
         self.root.mkdir(parents=True, exist_ok=True)
         self.records: list[dict[str, Any]] = []
         self.send_events: list[dict[str, Any]] = []
         self._send_context_by_url: dict[str, dict[str, Any]] = {}
+        self._last_actual_send_ns: dict[str, int] = {}
+        self._send_lock = threading.Lock()
 
     def record(
         self,
@@ -142,6 +154,7 @@ class ResponseRecorder:
 
         def send(session: Any, request: Any, **kwargs: Any) -> Any:
             requested_url = str(request.url)
+            host = str(urlsplit(requested_url).hostname)
             if urlsplit(requested_url).query:
                 initial_addresses = _public_transport_url(requested_url)
             else:
@@ -156,27 +169,67 @@ class ResponseRecorder:
                 raise ValueError(
                     "transport DNS changed between initial validation and send"
                 )
-            send_sequence = len(recorder.send_events)
-            event: dict[str, Any] = {
-                "send_sequence": send_sequence,
-                "host": urlsplit(requested_url).hostname,
-                "requested_url": requested_url,
-                "initial_dns_addresses": list(initial_addresses),
-                "validated_dns_addresses": list(addresses),
-                "validation_started_at": started_at,
-                "sent_at": datetime.now(timezone.utc).isoformat(),
-                "sent_monotonic_ns": time.monotonic_ns(),
-                "required_interval_seconds": float(
-                    receipt.crawl_delay_seconds
-                ),
-                "outcome": "pending",
-            }
-            recorder.send_events.append(event)
-            recorder._send_context_by_url[requested_url] = {
-                "send_sequence": send_sequence,
-                "dns_addresses": addresses,
-                "access_receipt": receipt,
-            }
+            required_interval = float(receipt.crawl_delay_seconds)
+            with recorder._send_lock:
+                prior_send_ns = recorder._last_actual_send_ns.get(host)
+                top_up_seconds = 0.0
+                if prior_send_ns is not None:
+                    while True:
+                        current_ns = recorder.clock_ns()
+                        remaining = (
+                            required_interval
+                            - (current_ns - prior_send_ns) / 1_000_000_000
+                        )
+                        if remaining <= 0:
+                            break
+                        recorder.sleeper(remaining)
+                        advanced_ns = recorder.clock_ns()
+                        if advanced_ns <= current_ns:
+                            raise RuntimeError(
+                                "immediate-send rate clock did not advance"
+                            )
+                        top_up_seconds += remaining
+                    if top_up_seconds > 0:
+                        if urlsplit(requested_url).query:
+                            final_addresses = _public_transport_url(requested_url)
+                        else:
+                            final_addresses = _public_url(requested_url)
+                        if final_addresses != initial_addresses:
+                            raise ValueError(
+                                "transport DNS changed after immediate-send rate top-up"
+                            )
+                        addresses = final_addresses
+                sent_monotonic_ns = recorder.clock_ns()
+                if (
+                    prior_send_ns is not None
+                    and sent_monotonic_ns - prior_send_ns
+                    < int(required_interval * 1_000_000_000)
+                ):
+                    raise RuntimeError(
+                        "immediate-send rate interval remains below policy"
+                    )
+                recorder._last_actual_send_ns[host] = sent_monotonic_ns
+                send_sequence = len(recorder.send_events)
+                event: dict[str, Any] = {
+                    "send_sequence": send_sequence,
+                    "host": host,
+                    "requested_url": requested_url,
+                    "initial_dns_addresses": list(initial_addresses),
+                    "post_controller_dns_addresses": list(addresses),
+                    "validated_dns_addresses": list(addresses),
+                    "validation_started_at": started_at,
+                    "sent_at": datetime.now(timezone.utc).isoformat(),
+                    "sent_monotonic_ns": sent_monotonic_ns,
+                    "required_interval_seconds": required_interval,
+                    "immediate_send_top_up_seconds": top_up_seconds,
+                    "outcome": "pending",
+                }
+                recorder.send_events.append(event)
+                recorder._send_context_by_url[requested_url] = {
+                    "send_sequence": send_sequence,
+                    "dns_addresses": addresses,
+                    "access_receipt": receipt,
+                }
             request.headers["User-Agent"] = USER_AGENT
             try:
                 response = original(session, request, **kwargs)

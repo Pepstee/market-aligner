@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Callable
 from urllib.parse import urlsplit
 
 import pytest
@@ -332,6 +333,165 @@ def test_content_send_stops_if_dns_changes_during_authority_throttle(
         requests.Session().send(requests.Request("GET", url).prepare())
     assert content_calls == []
     assert recorder.send_events == []
+
+
+class _ImmediateSendClock:
+    def __init__(self) -> None:
+        self.nanoseconds = 0
+        self.sleeps: list[float] = []
+
+    def monotonic_ns(self) -> int:
+        return self.nanoseconds
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.nanoseconds += round(seconds * 1_000_000_000)
+
+
+def _successful_content_send(
+    calls: list[str],
+) -> Callable[..., requests.Response]:
+    def send(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: object,
+    ) -> requests.Response:
+        calls.append(str(request.url))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"publishedAt":"2026-07-27T10:00:00Z"}'
+        response.url = str(request.url)
+        response.request = request
+        response.history = []
+        return response
+
+    return send
+
+
+def test_immediate_send_tops_up_only_the_residual_same_host_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _successful_content_send(calls),
+    )
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    clock = _ImmediateSendClock()
+    recorder = ResponseRecorder(
+        tmp_path / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+        clock_ns=clock.monotonic_ns,
+        sleeper=clock.sleep,
+    )
+    first = "https://api.lever.co/v0/postings/acme?mode=json"
+    second = "https://api.lever.co/v0/postings/other?mode=json"
+    with recorder.installed():
+        requests.Session().send(requests.Request("GET", first).prepare())
+        clock.nanoseconds = 9_750_000_000
+        requests.Session().send(requests.Request("GET", second).prepare())
+    assert calls == [first, second]
+    assert clock.sleeps == [0.25]
+    assert recorder.send_events[1]["immediate_send_top_up_seconds"] == 0.25
+    timing = _timing_evidence(recorder.send_events, [])
+    assert timing[1]["elapsed_seconds"] == 10.0
+    assert timing[1]["compliant"] is True
+
+
+def test_immediate_send_does_not_sleep_when_actual_interval_is_compliant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _successful_content_send(calls),
+    )
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    clock = _ImmediateSendClock()
+    recorder = ResponseRecorder(
+        tmp_path / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+        clock_ns=clock.monotonic_ns,
+        sleeper=clock.sleep,
+    )
+    first = "https://api.lever.co/v0/postings/acme?mode=json"
+    second = "https://api.lever.co/v0/postings/other?mode=json"
+    with recorder.installed():
+        requests.Session().send(requests.Request("GET", first).prepare())
+        clock.nanoseconds = 10_500_000_000
+        requests.Session().send(requests.Request("GET", second).prepare())
+    assert calls == [first, second]
+    assert clock.sleeps == []
+    assert recorder.send_events[1]["immediate_send_top_up_seconds"] == 0.0
+
+
+def test_immediate_send_dns_drift_after_top_up_stops_before_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver_calls = 0
+
+    def changing_resolver(
+        _host: str,
+        port: int,
+    ) -> tuple[tuple[object, ...], ...]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        address = "93.184.216.34" if resolver_calls <= 4 else "93.184.216.35"
+        return ((None, None, None, None, (address, port)),)
+
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        changing_resolver,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _successful_content_send(calls),
+    )
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    clock = _ImmediateSendClock()
+    recorder = ResponseRecorder(
+        tmp_path / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+        clock_ns=clock.monotonic_ns,
+        sleeper=clock.sleep,
+    )
+    first = "https://api.lever.co/v0/postings/acme?mode=json"
+    second = "https://api.lever.co/v0/postings/other?mode=json"
+    with recorder.installed():
+        requests.Session().send(requests.Request("GET", first).prepare())
+        clock.nanoseconds = 9_750_000_000
+        with pytest.raises(ValueError, match="DNS changed after immediate-send"):
+            requests.Session().send(requests.Request("GET", second).prepare())
+    assert calls == [first]
+    assert clock.sleeps == [0.25]
+    assert len(recorder.send_events) == 1
 
 
 def test_denied_robots_response_is_preserved_before_content_stops(
