@@ -29,6 +29,7 @@ from career_automation.official_cohort import (
     OFFICIAL_ADAPTERS,
     AuditedAccessController,
     AuditedRobotsClient,
+    DurableRequestJournal,
     ResponseRecorder,
     _canonical,
     _select_candidates,
@@ -293,6 +294,326 @@ def test_response_recorder_preserves_query_transport_url_and_exact_bytes(
     ]
 
 
+def _request_journal(
+    run_root: Path,
+    *,
+    resume: bool,
+    policy_sha256: str = "3" * 64,
+    source_head: str = "a" * 40,
+) -> DurableRequestJournal:
+    config = run_root.parent / f"{run_root.name}-config.yaml"
+    if not config.exists():
+        config.write_text("exact fixture configuration\n", encoding="utf-8")
+    return DurableRequestJournal.open(
+        config_path=config,
+        policy_sha256=policy_sha256,
+        source_head=source_head,
+        raw_root=run_root / "raw",
+        resume=resume,
+    )
+
+
+def _journalled_fixture_response(
+    calls: list[str],
+    bodies: dict[str, bytes],
+) -> Callable[..., requests.Response]:
+    def send(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: object,
+    ) -> requests.Response:
+        url = str(request.url)
+        calls.append(url)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = bodies[url]
+        response.url = url
+        response.request = request
+        response.history = []
+        return response
+
+    return send
+
+
+def test_durable_request_journal_resumes_without_duplicate_issuance_and_matches_uninterrupted_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    first = "https://api.lever.co/v0/postings/acme?mode=json"
+    second = "https://api.lever.co/v0/postings/other?mode=json"
+    bodies = {
+        first: b'{"publishedAt":"2026-07-27T10:00:00Z","id":"first"}',
+        second: b'{"publishedAt":"2026-07-27T10:00:00Z","id":"second"}',
+    }
+    interrupted_root = tmp_path / "interrupted"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _journalled_fixture_response(calls, bodies),
+    )
+    first_journal = _request_journal(interrupted_root, resume=False)
+    first_recorder = ResponseRecorder(
+        interrupted_root / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+        journal=first_journal,
+    )
+    with first_recorder.installed():
+        requests.Session().send(requests.Request("GET", first).prepare())
+
+    resumed_journal = _request_journal(interrupted_root, resume=True)
+    resumed_recorder = ResponseRecorder(
+        interrupted_root / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+        journal=resumed_journal,
+    )
+    with resumed_recorder.installed():
+        assert (
+            requests.Session().send(
+                requests.Request("GET", first).prepare()
+            ).content
+            == bodies[first]
+        )
+        requests.Session().send(requests.Request("GET", second).prepare())
+    resumed_journal.assert_replay_consumed()
+    assert calls == [first, second]
+
+    uninterrupted_root = tmp_path / "uninterrupted"
+    uninterrupted_journal = _request_journal(
+        uninterrupted_root,
+        resume=False,
+    )
+    uninterrupted_clock = _ImmediateSendClock()
+    uninterrupted_recorder = ResponseRecorder(
+        uninterrupted_root / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+        journal=uninterrupted_journal,
+        clock_ns=uninterrupted_clock.monotonic_ns,
+        sleeper=uninterrupted_clock.sleep,
+    )
+    uninterrupted_calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _journalled_fixture_response(uninterrupted_calls, bodies),
+    )
+    with uninterrupted_recorder.installed():
+        requests.Session().send(requests.Request("GET", first).prepare())
+        requests.Session().send(requests.Request("GET", second).prepare())
+    assert uninterrupted_calls == [first, second]
+    assert (
+        resumed_journal.evidence()["raw_inventory_sha256"]
+        == uninterrupted_journal.evidence()["raw_inventory_sha256"]
+    )
+
+
+def test_build_resume_after_simulated_kill_matches_uninterrupted_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    first = "https://api.lever.co/v0/postings/acme?mode=json"
+    second = (
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs"
+        "?content=true"
+    )
+    bodies = {
+        first: b'{"publishedAt":"2026-07-27T10:00:00Z","id":"first"}',
+        second: b'{"updated_at":"2026-07-27T10:00:00Z","id":"second"}',
+    }
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _journalled_fixture_response(calls, bodies),
+    )
+    monkeypatch.setattr(
+        "career_automation.official_cohort.load_config",
+        lambda _path: {
+            "boards": {"enabled": ["greenhouse"]},
+            "greenhouse": {"companies": {}},
+            "search_terms": ["software"],
+        },
+    )
+    phase = {"interrupt": True}
+
+    class InterruptibleAdapter:
+        def discover(self, _terms: list[str], *, live: bool) -> list[object]:
+            assert live is True
+            requests.Session().send(
+                requests.Request("GET", first).prepare()
+            )
+            if phase["interrupt"]:
+                raise KeyboardInterrupt("simulated supervisor boundary")
+            requests.Session().send(
+                requests.Request("GET", second).prepare()
+            )
+            return []
+
+    monkeypatch.setattr(
+        "career_automation.official_cohort.load_adapter",
+        lambda _board, config: InterruptibleAdapter(),
+    )
+
+    class AllowingController:
+        policy = SimpleNamespace(
+            source_path=tmp_path / "policy.json",
+            policy_sha256="3" * 64,
+        )
+        robots_events: tuple[object, ...] = ()
+
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    config = tmp_path / "interrupted-config.yaml"
+    config.write_text("exact build fixture\n", encoding="utf-8")
+    interrupted = tmp_path / "interrupted-build"
+    with pytest.raises(KeyboardInterrupt, match="supervisor boundary"):
+        build(
+            config,
+            interrupted / "queue.json",
+            interrupted / "raw",
+            access_controller=AllowingController(),
+            evidence_output=interrupted / "capture-evidence.json",
+            source_head="a" * 40,
+        )
+    assert calls == [first]
+    assert not (interrupted / "capture-evidence.json").exists()
+
+    phase["interrupt"] = False
+    with pytest.raises(RuntimeError, match="only 0 current unique"):
+        build(
+            config,
+            interrupted / "queue.json",
+            interrupted / "raw",
+            access_controller=AllowingController(),
+            evidence_output=interrupted / "capture-evidence.json",
+            resume=True,
+            source_head="a" * 40,
+        )
+    assert calls == [first, second]
+
+    uninterrupted = tmp_path / "uninterrupted-build"
+    uninterrupted_calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _journalled_fixture_response(uninterrupted_calls, bodies),
+    )
+    uninterrupted_config = tmp_path / "uninterrupted-config.yaml"
+    uninterrupted_config.write_text(
+        "exact build fixture\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="only 0 current unique"):
+        build(
+            uninterrupted_config,
+            uninterrupted / "queue.json",
+            uninterrupted / "raw",
+            access_controller=AllowingController(),
+            evidence_output=uninterrupted / "capture-evidence.json",
+            source_head="a" * 40,
+        )
+    assert uninterrupted_calls == [first, second]
+    resumed_evidence = json.loads(
+        (interrupted / "capture-evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    uninterrupted_evidence = json.loads(
+        (uninterrupted / "capture-evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        resumed_evidence["raw_store"]["inventory_sha256"]
+        == uninterrupted_evidence["raw_store"]["inventory_sha256"]
+    )
+    assert resumed_evidence["request_journal"]["journal_sha256"]
+    assert resumed_evidence["request_journal"]["identity_sha256"]
+
+
+@pytest.mark.parametrize("tamper", ("raw", "journal"))
+def test_durable_request_journal_refuses_raw_or_journal_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    url = "https://api.lever.co/v0/postings/acme?mode=json"
+    body = b'{"publishedAt":"2026-07-27T10:00:00Z"}'
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    run_root = tmp_path / f"tamper-{tamper}"
+    journal = _request_journal(run_root, resume=False)
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _journalled_fixture_response([], {url: body}),
+    )
+    recorder = ResponseRecorder(
+        run_root / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+        journal=journal,
+    )
+    with recorder.installed():
+        requests.Session().send(requests.Request("GET", url).prepare())
+    if tamper == "raw":
+        target = next((run_root / "raw").rglob("*.response"))
+        target.chmod(0o600)
+        target.write_bytes(body + b"tampered")
+        expected = "raw inventory hash mismatch"
+    else:
+        path = run_root / "request-journal.jsonl"
+        payload = path.read_bytes().replace(b"api.lever.co", b"api.xever.co", 1)
+        path.write_bytes(payload)
+        expected = "hash chain"
+    with pytest.raises(RuntimeError, match=expected):
+        _request_journal(run_root, resume=True)
+
+
+@pytest.mark.parametrize("mismatch", ("configuration", "policy", "head"))
+def test_durable_request_journal_refuses_run_identity_mismatch(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    run_root = tmp_path / f"identity-{mismatch}"
+    _request_journal(run_root, resume=False)
+    if mismatch == "configuration":
+        config = run_root.parent / f"{run_root.name}-config.yaml"
+        config.write_text("changed fixture configuration\n", encoding="utf-8")
+        policy, head = "3" * 64, "a" * 40
+    elif mismatch == "policy":
+        policy, head = "4" * 64, "a" * 40
+    else:
+        policy, head = "3" * 64, "b" * 40
+    with pytest.raises(RuntimeError, match="configuration, policy, HEAD"):
+        _request_journal(
+            run_root,
+            resume=True,
+            policy_sha256=policy,
+            source_head=head,
+        )
+
+
 def test_content_send_stops_if_dns_changes_during_authority_throttle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -545,6 +866,135 @@ def test_denied_robots_response_is_preserved_before_content_stops(
     assert event["status"] == 401
     assert event["byte_count"] == len(robots)
     assert cache.resolve(str(event["raw_response"]), str(event["sha256"])) == robots
+
+
+def test_resume_revalidates_journalled_robots_without_reissuing_robots_or_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    host = "api.lever.co"
+    content_url = f"https://{host}/v0/postings/acme?mode=json"
+    robots_body = b"User-agent: *\nAllow: /\n"
+    content_body = b'{"publishedAt":"2026-07-27T10:00:00Z"}'
+    calls = {"robots": 0, "content": 0}
+
+    class AllowedRobots:
+        def fetch(
+            self,
+            _engine: str,
+            url: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            calls["robots"] += 1
+            return {
+                "url": url,
+                "status": 200,
+                "body_base64": base64.b64encode(robots_body).decode(),
+                "body_bytes": len(robots_body),
+                "history": [],
+                "text": robots_body.decode(),
+            }
+
+    def content_send(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: object,
+    ) -> requests.Response:
+        calls["content"] += 1
+        response = requests.Response()
+        response.status_code = 200
+        response._content = content_body
+        response.url = str(request.url)
+        response.request = request
+        response.history = []
+        return response
+
+    monkeypatch.setattr(requests.sessions.Session, "send", content_send)
+    attestation = TermsAttestation(
+        host=host,
+        terms_url="https://www.lever.co/legal/terms-of-service",
+        determination="public_read_only_research_permitted",
+        reviewed_at="2026-07-26T18:00:00+00:00",
+        reviewed_by="Test Operator",
+        reviewer_type="human_operator",
+        notes="Offline exact-host resume test.",
+    )
+    policy = PublicAccessPolicy(
+        {host: attestation},
+        policy_sha256="3" * 64,
+        now=datetime(2026, 7, 27, 12, tzinfo=timezone.utc),
+    )
+    run_root = tmp_path / "robots-resume"
+    journal = _request_journal(run_root, resume=False)
+    cache = RawResponseCache(run_root / "raw")
+    robots = AuditedRobotsClient(
+        AllowedRobots(),
+        cache,
+        journal=journal,
+    )
+    elapsed = {"seconds": 0.0}
+
+    def clock() -> float:
+        return elapsed["seconds"]
+
+    def sleep(seconds: float) -> None:
+        elapsed["seconds"] += seconds
+
+    controller = AuditedAccessController(
+        PublicAccessController(
+            policy,
+            robots,
+            cache,
+            clock=clock,
+            sleeper=sleep,
+        ),
+        robots,
+    )
+    recorder = ResponseRecorder(
+        run_root / "raw",
+        controller,
+        journal=journal,
+    )
+    with recorder.installed():
+        requests.Session().send(
+            requests.Request("GET", content_url).prepare()
+        )
+    assert calls == {"robots": 1, "content": 1}
+
+    resumed_journal = _request_journal(run_root, resume=True)
+    resumed_cache = RawResponseCache(run_root / "raw")
+    resumed_robots = AuditedRobotsClient(
+        AllowedRobots(),
+        resumed_cache,
+        journal=resumed_journal,
+    )
+    resumed_controller = AuditedAccessController(
+        PublicAccessController(
+            policy,
+            resumed_robots,
+            resumed_cache,
+            clock=clock,
+            sleeper=sleep,
+        ),
+        resumed_robots,
+    )
+    resumed_recorder = ResponseRecorder(
+        run_root / "raw",
+        resumed_controller,
+        journal=resumed_journal,
+    )
+    with resumed_recorder.installed():
+        response = requests.Session().send(
+            requests.Request("GET", content_url).prepare()
+        )
+    assert response.content == content_body
+    assert calls == {"robots": 1, "content": 1}
+    assert resumed_robots.events[0]["decision"] == "allowed"
+    resumed_journal.assert_replay_consumed()
 
 
 def test_timing_evidence_binds_robots_and_content_to_ten_second_floor() -> None:

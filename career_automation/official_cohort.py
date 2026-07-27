@@ -42,6 +42,7 @@ from scraper.scrapling_client import ScraplingClient
 from scraper.adapters.base import load_adapter
 from scraper.viability import Vacancy, canonical_key, local_decision
 from skeleton.configuration import load_config
+from tracked_source_revision import source_git_revision
 
 COHORT_SIZE = 30
 OFFICIAL_ADAPTERS = frozenset({
@@ -68,6 +69,479 @@ def _normal_url(value: str) -> str:
                        parts.path.rstrip("/"), "", ""))
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write(path: Path, body: bytes, *, mode: int = 0o600) -> None:
+    """Write one non-existing artifact through fsynced temp-file replacement."""
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"output already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+class JournalReplayFailure(RuntimeError):
+    """A response-less failure retained by a durable request journal."""
+
+
+class DurableRequestJournal:
+    """Append-only request/response checkpoint for official discovery.
+
+    Each external request receives a stable request sequence before transport.
+    A second fsynced record binds a successful response to its exact raw bytes
+    (or retains the transport failure). Resume validates the event hash chain,
+    run identity and the complete raw inventory before replaying preserved
+    responses through the normal adapter code.
+    """
+
+    SCHEMA_VERSION = "jaa04.request-journal.v1"
+    IDENTITY_SCHEMA_VERSION = "jaa04.request-journal-identity.v1"
+
+    def __init__(
+        self,
+        run_root: Path,
+        raw_root: Path,
+        identity: dict[str, Any],
+        *,
+        resume: bool,
+    ) -> None:
+        self.run_root = run_root
+        self.raw_root = raw_root
+        self.identity_path = run_root / "request-journal-identity.json"
+        self.path = run_root / "request-journal.jsonl"
+        self.identity = identity
+        self.resume = resume
+        self._lock = threading.RLock()
+        self._events: list[dict[str, Any]] = []
+        self._starts: list[dict[str, Any]] = []
+        self._outcomes: dict[int, dict[str, Any]] = {}
+        self._consumed: set[int] = set()
+        self._replay_cursor = 0
+        self._next_request_sequence = 0
+        self._previous_entry_sha256: str | None = None
+        if resume:
+            self._load_and_validate()
+        else:
+            self._create()
+
+    @classmethod
+    def open(
+        cls,
+        *,
+        config_path: Path,
+        policy_sha256: str,
+        source_head: str,
+        raw_root: Path,
+        resume: bool,
+    ) -> "DurableRequestJournal":
+        run_root = raw_root.parent
+        identity = {
+            "schema_version": cls.IDENTITY_SCHEMA_VERSION,
+            "configuration_sha256": hashlib.sha256(
+                config_path.read_bytes()
+            ).hexdigest(),
+            "access_policy_sha256": policy_sha256,
+            "source_head": source_head,
+            "raw_root": raw_root.name,
+        }
+        return cls(run_root, raw_root, identity, resume=resume)
+
+    @property
+    def identity_sha256(self) -> str:
+        return hashlib.sha256(_canonical(self.identity)).hexdigest()
+
+    @property
+    def journal_sha256(self) -> str:
+        return hashlib.sha256(self.path.read_bytes()).hexdigest()
+
+    @property
+    def event_count(self) -> int:
+        return len(self._events)
+
+    @property
+    def preserved_response_count(self) -> int:
+        return sum(
+            row.get("event") == "response_preserved"
+            for row in self._events
+        )
+
+    def _create(self) -> None:
+        self.run_root.mkdir(parents=True, exist_ok=True)
+        existing_inventory, _ = _raw_inventory(self.raw_root)
+        if existing_inventory:
+            raise RuntimeError(
+                "new request journal refuses a non-empty raw store"
+            )
+        if self.identity_path.exists() or self.identity_path.is_symlink():
+            raise RuntimeError("request journal identity already exists")
+        if self.path.exists() or self.path.is_symlink():
+            raise RuntimeError("request journal already exists")
+        _atomic_write(
+            self.identity_path,
+            _canonical(self.identity) + b"\n",
+        )
+        descriptor = os.open(
+            self.path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(self.path.parent)
+
+    @staticmethod
+    def _entry_hash(row: dict[str, Any]) -> str:
+        hashed = dict(row)
+        hashed.pop("entry_sha256", None)
+        return hashlib.sha256(_canonical(hashed)).hexdigest()
+
+    def _load_and_validate(self) -> None:
+        if not self.identity_path.is_file() or not self.path.is_file():
+            raise RuntimeError(
+                "resume requires the request journal and identity"
+            )
+        try:
+            actual_identity = json.loads(
+                self.identity_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("request journal identity is invalid") from exc
+        if actual_identity != self.identity:
+            raise RuntimeError(
+                "request journal configuration, policy, HEAD or raw root mismatch"
+            )
+        previous: str | None = None
+        starts: dict[int, dict[str, Any]] = {}
+        outcomes: dict[int, dict[str, Any]] = {}
+        raw_lines = self.path.read_bytes().splitlines()
+        for expected_event_sequence, raw_line in enumerate(raw_lines):
+            try:
+                row = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("request journal row is invalid") from exc
+            if (
+                not isinstance(row, dict)
+                or row.get("schema_version") != self.SCHEMA_VERSION
+                or row.get("event_sequence") != expected_event_sequence
+                or row.get("previous_entry_sha256") != previous
+                or row.get("entry_sha256") != self._entry_hash(row)
+            ):
+                raise RuntimeError("request journal hash chain is invalid")
+            request_sequence = row.get("request_sequence")
+            if not isinstance(request_sequence, int) or request_sequence < 0:
+                raise RuntimeError("request journal sequence is invalid")
+            event = row.get("event")
+            if event == "request_started":
+                if request_sequence in starts or request_sequence != len(starts):
+                    raise RuntimeError(
+                        "request journal request sequence is not monotonic"
+                    )
+                starts[request_sequence] = row
+            elif event in {
+                "response_preserved",
+                "request_failed",
+                "request_abandoned_on_resume",
+            }:
+                if request_sequence not in starts:
+                    raise RuntimeError(
+                        "request journal outcome has no start record"
+                    )
+                prior = outcomes.get(request_sequence)
+                if prior is not None and prior.get("event") != "request_failed":
+                    raise RuntimeError(
+                        "request journal has duplicate terminal outcomes"
+                    )
+                outcomes[request_sequence] = row
+            else:
+                raise RuntimeError("request journal event type is invalid")
+            self._events.append(row)
+            previous = str(row["entry_sha256"])
+        self._starts = [starts[index] for index in sorted(starts)]
+        self._outcomes = outcomes
+        self._next_request_sequence = len(self._starts)
+        self._previous_entry_sha256 = previous
+        self._validate_raw_inventory()
+
+    def _validate_raw_inventory(self) -> None:
+        expected: dict[str, dict[str, Any]] = {}
+        for outcome in self._outcomes.values():
+            if outcome.get("event") != "response_preserved":
+                continue
+            raw_files = outcome.get("raw_files")
+            if not isinstance(raw_files, list) or not raw_files:
+                raise RuntimeError(
+                    "preserved journal response has no raw files"
+                )
+            for row in raw_files:
+                if (
+                    not isinstance(row, dict)
+                    or not isinstance(row.get("path"), str)
+                    or not isinstance(row.get("byte_count"), int)
+                    or not isinstance(row.get("sha256"), str)
+                ):
+                    raise RuntimeError(
+                        "request journal raw inventory row is invalid"
+                    )
+                prior = expected.get(row["path"])
+                if prior is not None and prior != row:
+                    raise RuntimeError(
+                        "request journal aliases conflicting raw bytes"
+                    )
+                expected[row["path"]] = row
+        actual, actual_hash = _raw_inventory(self.raw_root)
+        expected_rows = [expected[path] for path in sorted(expected)]
+        expected_hash = hashlib.sha256(_canonical(expected_rows)).hexdigest()
+        if actual != expected_rows or actual_hash != expected_hash:
+            raise RuntimeError(
+                "request journal raw inventory hash mismatch"
+            )
+
+    def _append(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            row = {
+                "schema_version": self.SCHEMA_VERSION,
+                "event_sequence": len(self._events),
+                "previous_entry_sha256": self._previous_entry_sha256,
+                **payload,
+            }
+            row["entry_sha256"] = self._entry_hash(row)
+            encoded = _canonical(row) + b"\n"
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND)
+            with os.fdopen(descriptor, "ab") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._events.append(row)
+            self._previous_entry_sha256 = row["entry_sha256"]
+            return row
+
+    def start_request(
+        self,
+        kind: str,
+        requested_url: str,
+        *,
+        requested_at: str,
+    ) -> int:
+        if kind not in {"content", "robots"}:
+            raise ValueError("journal request kind is invalid")
+        with self._lock:
+            sequence = self._next_request_sequence
+            self._next_request_sequence += 1
+            row = self._append({
+                "event": "request_started",
+                "request_sequence": sequence,
+                "request_kind": kind,
+                "requested_url": requested_url,
+                "requested_at": requested_at,
+            })
+            self._starts.append(row)
+            return sequence
+
+    def preserve_response(
+        self,
+        request_sequence: int,
+        *,
+        status: int,
+        observed_at: str,
+        final_url: str,
+        raw_files: list[dict[str, Any]],
+        replay_payload: dict[str, Any],
+        consumed_request_sequences: list[int] | None = None,
+    ) -> dict[str, Any]:
+        if request_sequence in self._outcomes:
+            raise RuntimeError("journal request already has an outcome")
+        row = self._append({
+            "event": "response_preserved",
+            "request_sequence": request_sequence,
+            "status": status,
+            "observed_at": observed_at,
+            "final_url": final_url,
+            "raw_files": raw_files,
+            "consumed_request_sequences": (
+                consumed_request_sequences or [request_sequence]
+            ),
+            "replay_payload": replay_payload,
+        })
+        self._outcomes[request_sequence] = row
+        if self.resume:
+            self._consumed.add(request_sequence)
+        return row
+
+    def preserve_failure(
+        self,
+        request_sequence: int,
+        *,
+        observed_at: str,
+        error_type: str,
+        error_message: str,
+    ) -> None:
+        if request_sequence in self._outcomes:
+            raise RuntimeError("journal request already has an outcome")
+        row = self._append({
+            "event": "request_failed",
+            "request_sequence": request_sequence,
+            "observed_at": observed_at,
+            "error_type": error_type,
+            "error_message": error_message,
+        })
+        self._outcomes[request_sequence] = row
+        if self.resume:
+            self._consumed.add(request_sequence)
+
+    def _advance_cursor(self) -> None:
+        while (
+            self._replay_cursor < len(self._starts)
+            and int(
+                self._starts[self._replay_cursor]["request_sequence"]
+            ) in self._consumed
+        ):
+            self._replay_cursor += 1
+
+    def next_replay_kind(self) -> str | None:
+        if not self.resume:
+            return None
+        with self._lock:
+            self._advance_cursor()
+            if self._replay_cursor >= len(self._starts):
+                return None
+            value = self._starts[self._replay_cursor].get("request_kind")
+            return str(value) if value is not None else None
+
+    def replay(
+        self,
+        kind: str,
+        requested_url: str,
+    ) -> dict[str, Any] | None:
+        """Return a preserved completion, or None for a crashed request."""
+        if not self.resume:
+            return None
+        with self._lock:
+            self._advance_cursor()
+            if self._replay_cursor >= len(self._starts):
+                return None
+            start = self._starts[self._replay_cursor]
+            sequence = int(start["request_sequence"])
+            if (
+                start.get("request_kind") != kind
+                or start.get("requested_url") != requested_url
+            ):
+                raise RuntimeError(
+                    "resume request diverges from the durable journal"
+                )
+            outcome = self._outcomes.get(sequence)
+            if outcome is None:
+                row = self._append({
+                    "event": "request_abandoned_on_resume",
+                    "request_sequence": sequence,
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": "no_preserved_response",
+                })
+                self._outcomes[sequence] = row
+                self._consumed.add(sequence)
+                self._advance_cursor()
+                return None
+            event = outcome.get("event")
+            if event == "request_failed":
+                self._consumed.add(sequence)
+                self._advance_cursor()
+                raise JournalReplayFailure(
+                    "journalled request failure: "
+                    f"{outcome.get('error_type')}: "
+                    f"{outcome.get('error_message')}"
+                )
+            if event == "request_abandoned_on_resume":
+                self._consumed.add(sequence)
+                self._advance_cursor()
+                return None
+            consumed = outcome.get("consumed_request_sequences")
+            if (
+                event != "response_preserved"
+                or not isinstance(consumed, list)
+                or sequence not in consumed
+                or any(
+                    not isinstance(value, int) or value < 0
+                    for value in consumed
+                )
+            ):
+                raise RuntimeError("journal replay outcome is invalid")
+            for value in consumed:
+                if value >= len(self._starts):
+                    raise RuntimeError(
+                        "journal replay consumes an unknown request"
+                    )
+                self._consumed.add(value)
+            self._advance_cursor()
+            return outcome
+
+    def completions_for(
+        self,
+        request_sequences: list[int],
+    ) -> list[dict[str, Any]]:
+        selected = {
+            sequence: self._outcomes[sequence]
+            for sequence in request_sequences
+            if (
+                sequence in self._outcomes
+                and self._outcomes[sequence].get("event")
+                == "response_preserved"
+            )
+        }
+        return sorted(
+            selected.values(),
+            key=lambda row: int(row["event_sequence"]),
+        )
+
+    def assert_replay_consumed(self) -> None:
+        if not self.resume:
+            return
+        unconsumed = [
+            int(row["request_sequence"])
+            for row in self._starts
+            if int(row["request_sequence"]) not in self._consumed
+        ]
+        if unconsumed:
+            raise RuntimeError(
+                "resume completed before consuming the durable journal"
+            )
+
+    def evidence(self) -> dict[str, Any]:
+        self._validate_raw_inventory()
+        inventory, inventory_hash = _raw_inventory(self.raw_root)
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "identity_path": str(self.identity_path),
+            "identity_sha256": self.identity_sha256,
+            "journal_path": str(self.path),
+            "journal_sha256": self.journal_sha256,
+            "event_count": self.event_count,
+            "preserved_response_count": self.preserved_response_count,
+            "raw_inventory_sha256": inventory_hash,
+            "raw_file_count": len(inventory),
+        }
+
+
 class ResponseRecorder:
     """Record response bodies and redirect chains without changing adapters."""
 
@@ -76,11 +550,13 @@ class ResponseRecorder:
         root: Path,
         access_controller: Any,
         *,
+        journal: DurableRequestJournal | None = None,
         clock_ns: Callable[[], int] = time.monotonic_ns,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.root = root
         self.access_controller = access_controller
+        self.journal = journal
         self.clock_ns = clock_ns
         self.sleeper = sleeper
         self.root.mkdir(parents=True, exist_ok=True)
@@ -98,9 +574,12 @@ class ResponseRecorder:
         access_receipt: Any,
         send_sequence: int,
         dns_addresses: tuple[str, ...],
-    ) -> None:
+        journal_request_sequence: int | None = None,
+    ) -> tuple[list[dict[str, Any]], list[int]]:
         chain = [*response.history, response]
         redirect_chain = [str(item.url) for item in chain]
+        added: list[dict[str, Any]] = []
+        consumed_journal_sequences: set[int] = set()
         for sequence, item in enumerate(chain):
             item_requested_url = str(item.request.url)
             context = self._send_context_by_url.get(item_requested_url)
@@ -116,6 +595,13 @@ class ResponseRecorder:
                 tuple(context["dns_addresses"]) if context is not None
                 else dns_addresses
             )
+            item_journal_sequence = (
+                context.get("journal_request_sequence")
+                if context is not None
+                else journal_request_sequence
+            )
+            if isinstance(item_journal_sequence, int):
+                consumed_journal_sequences.add(item_journal_sequence)
             body = bytes(item.content)
             digest = hashlib.sha256(body).hexdigest()
             relative = Path(digest[:2]) / f"{digest}.response"
@@ -124,11 +610,11 @@ class ResponseRecorder:
             if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 raise RuntimeError("raw response hash collision")
             if not path.exists():
-                path.write_bytes(body)
+                _atomic_write(path, body, mode=0o444)
             published_at, updated_at, publisher_evidence = (
                 extract_publisher_timestamps(body)
             )
-            self.records.append({
+            record = {
                 "sha256": digest, "raw_response": relative.as_posix(),
                 "requested_url": item_requested_url, "final_url": str(response.url),
                 "response_url": str(item.url), "status": int(item.status_code),
@@ -143,7 +629,75 @@ class ResponseRecorder:
                 "publisher_date_evidence": publisher_evidence,
                 "retrieval_engine": "requests-static",
                 "access_receipt": asdict(item_receipt),
-            })
+            }
+            self.records.append(record)
+            added.append(record)
+        return added, sorted(consumed_journal_sequences)
+
+    def _restore_completion(self, completion: dict[str, Any]) -> None:
+        payload = completion.get("replay_payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("journal content replay payload is invalid")
+        records = payload.get("raw_response_records")
+        send_event = payload.get("send_event")
+        if (
+            not isinstance(records, list)
+            or not all(isinstance(row, dict) for row in records)
+            or not isinstance(send_event, dict)
+        ):
+            raise RuntimeError("journal content replay evidence is invalid")
+        self.records.extend(dict(row) for row in records)
+        sequence = send_event.get("send_sequence")
+        if (
+            not isinstance(sequence, int)
+            or any(
+                row.get("send_sequence") == sequence
+                for row in self.send_events
+            )
+        ):
+            raise RuntimeError("journal content send sequence is invalid")
+        self.send_events.append(dict(send_event))
+        self.send_events.sort(key=lambda row: int(row["send_sequence"]))
+
+    def _response_from_completion(
+        self,
+        completion: dict[str, Any],
+        request: Any,
+    ) -> Any:
+        import requests
+
+        payload = completion.get("replay_payload")
+        chain = payload.get("response_chain") if isinstance(payload, dict) else None
+        if not isinstance(chain, list) or not chain:
+            raise RuntimeError("journal response chain is invalid")
+        responses: list[Any] = []
+        for index, row in enumerate(chain):
+            if not isinstance(row, dict):
+                raise RuntimeError("journal response chain row is invalid")
+            reference = Path(str(row.get("raw_response", "")))
+            target = (self.root / reference).resolve()
+            if self.root.resolve() not in target.parents or not target.is_file():
+                raise RuntimeError("journal response bytes are unavailable")
+            body = target.read_bytes()
+            if hashlib.sha256(body).hexdigest() != row.get("sha256"):
+                raise RuntimeError("journal response bytes changed")
+            restored = requests.Response()
+            restored.status_code = int(row["status"])
+            restored._content = body
+            restored.url = str(row["response_url"])
+            restored.headers.update(
+                dict(row.get("headers") or {})
+            )
+            if index == len(chain) - 1:
+                restored.request = request
+            else:
+                restored.request = requests.Request(
+                    str(row.get("method") or "GET"),
+                    str(row["requested_url"]),
+                ).prepare()
+            restored.history = list(responses)
+            responses.append(restored)
+        return responses[-1]
 
     @contextmanager
     def installed(self) -> Iterator[None]:
@@ -154,6 +708,34 @@ class ResponseRecorder:
 
         def send(session: Any, request: Any, **kwargs: Any) -> Any:
             requested_url = str(request.url)
+            if recorder.journal is not None:
+                if recorder.journal.next_replay_kind() == "robots":
+                    authorize_replay = getattr(
+                        recorder.access_controller,
+                        "authorize_replay",
+                        None,
+                    )
+                    if authorize_replay is None:
+                        raise RuntimeError(
+                            "resume requires audited robots replay"
+                        )
+                    authorize_replay(requested_url)
+                completion = recorder.journal.replay(
+                    "content",
+                    requested_url,
+                )
+                if completion is not None:
+                    consumed = list(
+                        completion["consumed_request_sequences"]
+                    )
+                    for preserved in recorder.journal.completions_for(
+                        consumed
+                    ):
+                        recorder._restore_completion(preserved)
+                    return recorder._response_from_completion(
+                        completion,
+                        request,
+                    )
             host = str(urlsplit(requested_url).hostname)
             if urlsplit(requested_url).query:
                 initial_addresses = _public_transport_url(requested_url)
@@ -209,7 +791,27 @@ class ResponseRecorder:
                         "immediate-send rate interval remains below policy"
                     )
                 recorder._last_actual_send_ns[host] = sent_monotonic_ns
-                send_sequence = len(recorder.send_events)
+                send_sequence = (
+                    max(
+                        (
+                            int(row["send_sequence"])
+                            for row in recorder.send_events
+                        ),
+                        default=-1,
+                    )
+                    + 1
+                )
+                journal_request_sequence = (
+                    recorder.journal.start_request(
+                        "content",
+                        requested_url,
+                        requested_at=datetime.now(
+                            timezone.utc
+                        ).isoformat(),
+                    )
+                    if recorder.journal is not None
+                    else None
+                )
                 event: dict[str, Any] = {
                     "send_sequence": send_sequence,
                     "host": host,
@@ -229,6 +831,7 @@ class ResponseRecorder:
                     "send_sequence": send_sequence,
                     "dns_addresses": addresses,
                     "access_receipt": receipt,
+                    "journal_request_sequence": journal_request_sequence,
                 }
             request.headers["User-Agent"] = USER_AGENT
             try:
@@ -237,6 +840,16 @@ class ResponseRecorder:
                 event["outcome"] = "transport_error"
                 event["error_type"] = type(exc).__name__
                 event["observed_at"] = datetime.now(timezone.utc).isoformat()
+                if (
+                    recorder.journal is not None
+                    and journal_request_sequence is not None
+                ):
+                    recorder.journal.preserve_failure(
+                        journal_request_sequence,
+                        observed_at=event["observed_at"],
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
                 raise
             observed_at = datetime.now(timezone.utc).isoformat()
             body = bytes(response.content)
@@ -259,13 +872,60 @@ class ResponseRecorder:
                 "publisher_time": updated_at or published_at,
                 "publisher_date_evidence": publisher_evidence,
             })
-            recorder.record(
+            added, consumed_journal_sequences = recorder.record(
                 response,
                 observed_at,
                 access_receipt=receipt,
                 send_sequence=send_sequence,
                 dns_addresses=addresses,
+                journal_request_sequence=journal_request_sequence,
             )
+            if (
+                recorder.journal is not None
+                and journal_request_sequence is not None
+            ):
+                raw_files_by_path: dict[str, dict[str, Any]] = {}
+                chain = [*response.history, response]
+                response_chain: list[dict[str, Any]] = []
+                for item, record in zip(chain, added, strict=True):
+                    raw_row = {
+                        "path": record["raw_response"],
+                        "byte_count": record["byte_count"],
+                        "sha256": record["sha256"],
+                    }
+                    raw_files_by_path[raw_row["path"]] = raw_row
+                    response_chain.append({
+                        "method": str(
+                            getattr(item.request, "method", "GET")
+                        ),
+                        "requested_url": record["requested_url"],
+                        "response_url": record["response_url"],
+                        "status": record["status"],
+                        "headers": dict(item.headers),
+                        "raw_response": record["raw_response"],
+                        "sha256": record["sha256"],
+                    })
+                recorder.journal.preserve_response(
+                    journal_request_sequence,
+                    status=int(response.status_code),
+                    observed_at=observed_at,
+                    final_url=str(response.url),
+                    raw_files=[
+                        raw_files_by_path[path]
+                        for path in sorted(raw_files_by_path)
+                    ],
+                    replay_payload={
+                        "send_event": dict(event),
+                        "raw_response_records": [
+                            dict(row) for row in added
+                        ],
+                        "response_chain": response_chain,
+                    },
+                    consumed_request_sequences=(
+                        consumed_journal_sequences
+                        or [journal_request_sequence]
+                    ),
+                )
             return response
 
         requests.sessions.Session.send = send
@@ -278,28 +938,82 @@ class ResponseRecorder:
 class AuditedRobotsClient:
     """Preserve every robots response before the policy decides its meaning."""
 
-    def __init__(self, client: Any, cache: RawResponseCache) -> None:
+    def __init__(
+        self,
+        client: Any,
+        cache: RawResponseCache,
+        *,
+        journal: DurableRequestJournal | None = None,
+    ) -> None:
         self.client = client
         self.cache = cache
+        self.journal = journal
         self.events: list[dict[str, Any]] = []
 
     def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        if self.journal is not None:
+            completion = self.journal.replay("robots", url)
+            if completion is not None:
+                payload = completion.get("replay_payload")
+                if not isinstance(payload, dict):
+                    raise RuntimeError(
+                        "journal robots replay payload is invalid"
+                    )
+                event = payload.get("audit_event")
+                metadata = payload.get("response")
+                if not isinstance(event, dict) or not isinstance(
+                    metadata,
+                    dict,
+                ):
+                    raise RuntimeError(
+                        "journal robots replay evidence is invalid"
+                    )
+                reference = str(event.get("raw_response", ""))
+                digest = str(event.get("sha256", ""))
+                body = self.cache.resolve(reference, digest)
+                restored = dict(metadata)
+                restored["body_base64"] = base64.b64encode(
+                    body
+                ).decode("ascii")
+                restored["body_bytes"] = len(body)
+                self.events.append(dict(event))
+                return restored
         addresses = _public_url(url)
         requested_at = datetime.now(timezone.utc).isoformat()
         requested_monotonic_ns = time.monotonic_ns()
+        journal_request_sequence = (
+            self.journal.start_request(
+                "robots",
+                url,
+                requested_at=requested_at,
+            )
+            if self.journal is not None
+            else None
+        )
         try:
             response = self.client.fetch(engine, url, **kwargs)
         except Exception as exc:
+            observed_at = datetime.now(timezone.utc).isoformat()
             self.events.append({
                 "host": urlsplit(url).hostname,
                 "requested_url": url,
                 "validated_dns_addresses": list(addresses),
                 "requested_at": requested_at,
                 "requested_monotonic_ns": requested_monotonic_ns,
-                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "observed_at": observed_at,
                 "decision": "unavailable",
                 "reason": type(exc).__name__,
             })
+            if (
+                self.journal is not None
+                and journal_request_sequence is not None
+            ):
+                self.journal.preserve_failure(
+                    journal_request_sequence,
+                    observed_at=observed_at,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
             raise
         try:
             body = base64.b64decode(
@@ -328,7 +1042,7 @@ class AuditedRobotsClient:
             }
             for item in response.get("history", ()) or ()
         ]
-        self.events.append({
+        event = {
             "host": urlsplit(url).hostname,
             "requested_url": url,
             "final_url": str(response.get("url", url)),
@@ -343,7 +1057,34 @@ class AuditedRobotsClient:
             "redirect_history": history,
             "decision": "pending",
             "reason": "awaiting_public_access_decision",
-        })
+        }
+        self.events.append(event)
+        if (
+            self.journal is not None
+            and journal_request_sequence is not None
+        ):
+            target = (self.cache.root / reference).resolve()
+            relative = target.relative_to(self.cache.root.resolve()).as_posix()
+            self.journal.preserve_response(
+                journal_request_sequence,
+                status=int(response.get("status", 0)),
+                observed_at=str(event["observed_at"]),
+                final_url=str(response.get("url", url)),
+                raw_files=[{
+                    "path": relative,
+                    "byte_count": len(body),
+                    "sha256": digest,
+                }],
+                replay_payload={
+                    "audit_event": dict(event),
+                    "response": {
+                        "url": str(response.get("url", url)),
+                        "status": int(response.get("status", 0)),
+                        "history": history,
+                        "text": str(response.get("text", "")),
+                    },
+                },
+            )
         return response
 
     def mark_decision(self, content_url: str, *, allowed: bool, reason: str) -> None:
@@ -379,6 +1120,24 @@ class AuditedAccessController:
     def before_request(self, url: str) -> Any:
         try:
             receipt = self.controller.before_request(url)
+        except Exception as exc:
+            self.robots_client.mark_decision(
+                url,
+                allowed=False,
+                reason=str(exc),
+            )
+            raise
+        self.robots_client.mark_decision(
+            url,
+            allowed=True,
+            reason="public_access_allowed",
+        )
+        return receipt
+
+    def authorize_replay(self, url: str) -> Any:
+        """Revalidate terms and robots without reserving a nonexistent send."""
+        try:
+            receipt = self.controller.authorize(url)
         except Exception as exc:
             self.robots_client.mark_decision(
                 url,
@@ -641,6 +1400,7 @@ def _write_run_evidence(
     temporal_decisions: list[dict[str, Any]],
     errors: list[str],
     selected_count: int,
+    journal: DurableRequestJournal,
 ) -> dict[str, Any]:
     if path.exists() or path.is_symlink():
         raise RuntimeError("capture evidence output already exists")
@@ -679,6 +1439,7 @@ def _write_run_evidence(
             "inventory": inventory,
             "inventory_sha256": inventory_hash,
         },
+        "request_journal": journal.evidence(),
         "observation_window": {
             "first": min(observations) if observations else None,
             "last": max(observations) if observations else None,
@@ -695,28 +1456,7 @@ def _write_run_evidence(
         "errors": errors,
     }
     payload["evidence_sha256"] = hashlib.sha256(_canonical(payload)).hexdigest()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        dir=path.parent,
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(_canonical(payload) + b"\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.link(temporary, path)
-        temporary.unlink()
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    _atomic_write(path, _canonical(payload) + b"\n")
     return payload
 
 
@@ -727,6 +1467,8 @@ def build(
     *,
     access_controller: Any | None = None,
     evidence_output: Path | None = None,
+    resume: bool = False,
+    source_head: str | None = None,
 ) -> dict[str, Any]:
     if output.exists():
         raise RuntimeError("output snapshot already exists")
@@ -736,8 +1478,25 @@ def build(
         raise RuntimeError("capture evidence output already exists")
     if access_controller is None:
         raise RuntimeError("official cohort acquisition requires public access authority")
+    policy_sha256 = str(access_controller.policy.policy_sha256)
+    journal = DurableRequestJournal.open(
+        config_path=config_path,
+        policy_sha256=policy_sha256,
+        source_head=source_head or source_git_revision(
+            Path(__file__).resolve().parents[1]
+        ),
+        raw_root=raw_root,
+        resume=resume,
+    )
+    robots_client = getattr(access_controller, "robots_client", None)
+    if isinstance(robots_client, AuditedRobotsClient):
+        robots_client.journal = journal
     boards, configs, terms = _validate_config(load_config(config_path))
-    recorder = ResponseRecorder(raw_root, access_controller)
+    recorder = ResponseRecorder(
+        raw_root,
+        access_controller,
+        journal=journal,
+    )
     candidates: list[dict[str, Any]] = []
     temporal_decisions: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -804,6 +1563,7 @@ def build(
     candidates.sort(key=lambda row: (-row["opportunity0_decision"]["score_bp"], row["job_key"]))
     records, selection_trace = _select_candidates(candidates)
     temporal_decisions.sort(key=lambda row: (row["job_key"], str(row["authority_response_sha256"])))
+    journal.assert_replay_consumed()
     if evidence_output is not None:
         _write_run_evidence(
             evidence_output,
@@ -815,6 +1575,7 @@ def build(
             temporal_decisions=temporal_decisions,
             errors=errors,
             selected_count=len(records),
+            journal=journal,
         )
     if len(records) < COHORT_SIZE:
         raise RuntimeError(f"only {len(records)} current unique official vacancies survived; need exactly 30; "
@@ -839,7 +1600,7 @@ def build(
         "records_hash": hashlib.sha256(_canonical(records)).hexdigest(),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(_canonical(envelope) + b"\n")
+    _atomic_write(output, _canonical(envelope) + b"\n")
     return envelope
 
 
@@ -853,6 +1614,11 @@ def main() -> int:
                         help="external immutable all-capture evidence manifest")
     parser.add_argument("--access-policy", type=Path, required=True,
                         help="external human terms-review attestations")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume only after validating the durable request journal",
+    )
     args = parser.parse_args()
     try:
         raw_root = args.raw_root.resolve()
@@ -873,6 +1639,7 @@ def main() -> int:
             raw_root,
             access_controller=controller,
             evidence_output=args.evidence_output.resolve(),
+            resume=args.resume,
         )
     except Exception as exc:
         print(f"JAA-04 official cohort: ERROR: {exc}", file=sys.stderr)
