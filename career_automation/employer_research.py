@@ -534,6 +534,62 @@ class ScraplingPublicRetriever:
         )
         return next((marker for marker in markers if re.search(marker, text)), None)
 
+    @staticmethod
+    def _renderer_shell(response: Mapping[str, Any]) -> bool:
+        """Recognise an ordinary HTML renderer shell with no useful content."""
+        text = str(response.get("text", ""))
+        if not re.search(
+            r"(?i)<(?:!doctype\s+html|html|body|noscript|div|main)\b",
+            text,
+        ):
+            return False
+        renderer_required = bool(
+            re.search(
+                r"(?is)<noscript\b[^>]*>.*?"
+                r"(?:enable|require|support).*?javascript.*?</noscript>",
+                text,
+            )
+            or re.search(
+                r"(?i)\b(?:(?:you\s+need\s+to\s+enable|please\s+enable)\s+"
+                r"javascript|javascript\s+(?:is\s+)?required)\b",
+                text,
+            )
+            or (
+                re.search(
+                    r"(?is)<(?:div|main)\b[^>]*\bid=[\"']"
+                    r"(?:root|app|application)[\"'][^>]*>\s*</(?:div|main)>",
+                    text,
+                )
+                and re.search(r"(?i)<script\b", text)
+            )
+        )
+        if not renderer_required:
+            return False
+        without_programs = re.sub(
+            r"(?is)<(?:script|style|template)\b[^>]*>.*?</(?:script|style|template)>",
+            " ",
+            text,
+        )
+        visible = _plain_excerpt(without_programs).casefold()
+        visible = re.sub(
+            r"(?i)\b(?:you\s+need\s+to\s+enable|please\s+enable)\s+"
+            r"javascript(?:\s+to\s+(?:run|use)\s+(?:this\s+)?(?:app|site|website))?\b"
+            r"|\bjavascript\s+(?:is\s+)?required\b",
+            " ",
+            visible,
+        )
+        generic = {
+            "app", "application", "applications", "browser", "career", "careers",
+            "job", "jobs", "loading", "please", "run", "site", "this", "use",
+            "website",
+        }
+        meaningful = [
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9+#.-]*", visible)
+            if token not in generic
+        ]
+        return len(meaningful) <= 1
+
     def _fetch(self, url: str) -> Any:
         from career_automation.public_access import PublicAccessDenied, USER_AGENT
         from scraper.scrapling_client import ScraplingResult
@@ -552,9 +608,15 @@ class ScraplingPublicRetriever:
                 response = self.client.fetch(engine, url, **kwargs)
             except Exception as exc:
                 attempts.append({"engine": engine, "ok": False,
-                                 "error": type(exc).__name__, "message": str(exc)})
+                                 "error": type(exc).__name__, "message": str(exc),
+                                 "access_receipt": asdict(receipt)})
                 continue
-            attempts.append({"engine": engine, "ok": True, "response": response})
+            attempts.append({
+                "engine": engine,
+                "ok": True,
+                "response": response,
+                "access_receipt": asdict(receipt),
+            })
             final_url = str(response.get("url", url))
             final_host = (urlparse(final_url).hostname or "").casefold()
             redirect_hosts = {
@@ -567,7 +629,11 @@ class ScraplingPublicRetriever:
                 raise PublicAccessDenied(f"ACCESS_DENIED: {challenge}")
             status = int(response.get("status", 0))
             size = int(response.get("body_bytes", 0))
-            if 200 <= status < 300 and size >= 128:
+            if (
+                200 <= status < 300
+                and size >= 128
+                and not self._renderer_shell(response)
+            ):
                 return ScraplingResult(engine, dict(response), tuple(attempts)), receipt
             if status in {404, 410}:
                 raise RuntimeError(f"public vacancy is unavailable with HTTP {status}")

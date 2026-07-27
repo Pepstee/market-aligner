@@ -657,6 +657,193 @@ def test_static_to_dynamic_fallback_throttles_every_stage_without_stealth(
     assert clock.sleeps == [10.0, 10.0]
 
 
+def test_content_bearing_static_response_never_invokes_dynamic(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    static = (
+        b"<html><body><noscript>Please enable JavaScript.</noscript>"
+        b"<main>Example Ltd is hiring a Software Engineer to build public "
+        b"platform services for customers.</main></body></html>"
+    )
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=_response(200, static, url=URL),
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    result, receipt = retriever._fetch(URL)
+    assert result.engine == "static"
+    assert [engine for engine, _ in client.calls] == ["static", "static"]
+    assert len(result.attempts) == 1
+    assert result.attempts[0]["access_receipt"] == asdict(receipt)
+
+
+def test_renderer_shell_falls_through_to_policy_gated_dynamic(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<!doctype html><html><head><title>Jobs</title></head><body>"
+        b"<noscript>You need to enable JavaScript to run this app.</noscript>"
+        b'<div id="root"></div><script src="/app.js"></script></body></html>'
+    )
+    rendered = (
+        b"<html><main>Example Ltd is recruiting a Software Engineer for its "
+        b"public platform engineering team. The role builds reliable customer "
+        b"services with Python and cloud infrastructure.</main></html>"
+    )
+
+    class ShellClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            return _response(
+                200,
+                shell if engine == "static" else rendered,
+                url=url,
+            )
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = ShellClient(_response(404, b"not found", url=robots_url))
+    clock = _Clock()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    result, receipt = retriever._fetch(URL)
+    assert result.engine == "dynamic"
+    assert [engine for engine, _ in client.calls] == [
+        "static", "static", "dynamic",
+    ]
+    assert [row["engine"] for row in result.attempts] == ["static", "dynamic"]
+    assert all(row["ok"] is True for row in result.attempts)
+    assert base64.b64decode(
+        result.attempts[0]["response"]["body_base64"],
+        validate=True,
+    ) == shell
+    assert base64.b64decode(
+        result.attempts[1]["response"]["body_base64"],
+        validate=True,
+    ) == rendered
+    assert all(row["access_receipt"] == asdict(receipt) for row in result.attempts)
+    assert clock.sleeps == [10.0, 10.0]
+
+
+def test_renderer_shell_on_both_stages_exhausts_without_stealth(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<html><body><noscript>Please enable JavaScript to use this site."
+        b"</noscript><main id=\"app\"></main><script src=\"/app.js\"></script>"
+        b"</body></html>"
+    )
+
+    class ShellClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            return _response(200, shell, url=url)
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = ShellClient(_response(404, b"not found", url=robots_url))
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(RuntimeError, match="static and dynamic"):
+        retriever._fetch(URL)
+    assert [engine for engine, _ in client.calls] == [
+        "static", "static", "dynamic",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    (
+        (401, b"authentication required"),
+        (403, b"access denied"),
+        (429, b"rate limited"),
+        (200, b"<html><title>Verify you are human</title>captcha challenge</html>" * 3),
+    ),
+)
+def test_static_terminal_denial_never_reaches_dynamic(
+    tmp_path: Path,
+    status: int,
+    body: bytes,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=_response(status, body, url=URL),
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicAccessDenied, match="ACCESS_DENIED"):
+        retriever._fetch(URL)
+    assert [engine for engine, _ in client.calls] == ["static", "static"]
+
+
+def test_dynamic_challenge_is_terminal_after_static_shell(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<html><body><noscript>You need to enable JavaScript to run this app."
+        b"</noscript><div id=\"root\"></div></body></html>"
+    )
+    challenge = (
+        b"<html><title>Verify you are human</title>"
+        b"<p>captcha challenge</p></html>" * 3
+    )
+
+    class ChallengeClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            return _response(
+                200,
+                shell if engine == "static" else challenge,
+                url=url,
+            )
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = ChallengeClient(_response(404, b"not found", url=robots_url))
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicAccessDenied, match="ACCESS_DENIED"):
+        retriever._fetch(URL)
+    assert [engine for engine, _ in client.calls] == [
+        "static", "static", "dynamic",
+    ]
+
+
 def test_page_redirect_to_unattested_host_is_rejected(tmp_path: Path) -> None:
     robots_url = f"https://{HOST}/robots.txt"
     controller, client, cache, _ = _controller(
