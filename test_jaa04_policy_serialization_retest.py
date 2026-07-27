@@ -6,7 +6,8 @@ import hashlib
 import importlib.util
 import json
 import shutil
-from datetime import date
+from dataclasses import asdict
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,12 @@ from career_automation.opportunity_calibration import (
     Opportunity0Input,
     calibration_policy_json,
     decide_opportunity0,
+)
+from career_automation.public_access import (
+    PublicAccessPolicy,
+    RobotsReceipt,
+    TermsAttestation,
+    USER_AGENT,
 )
 from scraper.viability import Vacancy
 
@@ -112,6 +119,67 @@ def _cohort(tmp_path: Path) -> tuple[Path, dict[str, dict[str, object]]]:
     return snapshot, original
 
 
+def _policy_bound_cohort(
+    tmp_path: Path,
+    retrieval_engine: str,
+) -> tuple[Path, dict[str, PublicAccessPolicy]]:
+    snapshot, _ = _cohort(tmp_path)
+    envelope = json.loads(snapshot.read_text(encoding="utf-8"))
+    raw_root = Path(envelope["raw_store"]["root"])
+    stamp = str(envelope["created_at"])
+    hosts = {
+        str(record["url"]).split("/", 3)[2]
+        for record in envelope["records"]
+    }
+    attestations = {
+        host: TermsAttestation(
+            host=host,
+            terms_url=f"https://{host}/terms",
+            determination="public_read_only_research_permitted",
+            reviewed_at=stamp,
+            reviewed_by="Offline Test Operator",
+            reviewer_type="human_operator",
+            notes="Synthetic offline fixture; not production authority.",
+        )
+        for host in hosts
+    }
+    policy_hash = hashlib.sha256(b"admission-engine-policy").hexdigest()
+    policy = PublicAccessPolicy(
+        attestations,
+        policy_sha256=policy_hash,
+        now=datetime.fromisoformat(stamp).astimezone(timezone.utc),
+    )
+    robots = b"User-agent: *\nAllow: /\n"
+    robots_hash = hashlib.sha256(robots).hexdigest()
+    robots_ref = f"{robots_hash[:2]}/{robots_hash}.response"
+    robots_path = raw_root / robots_ref
+    robots_path.parent.mkdir(parents=True, exist_ok=True)
+    robots_path.write_bytes(robots)
+    for record in envelope["records"]:
+        reference = record["raw_response_refs"][0]
+        requested_url = str(reference["requested_url"])
+        host = requested_url.split("/", 3)[2]
+        reference["retrieval_engine"] = retrieval_engine
+        reference["access_receipt"] = asdict(RobotsReceipt(
+            host=host,
+            robots_url=f"https://{host}/robots.txt",
+            final_url=f"https://{host}/robots.txt",
+            status_code=200,
+            content_sha256=robots_hash,
+            raw_response_ref=robots_ref,
+            redirect_history=[],
+            retrieved_at=stamp,
+            user_agent=USER_AGENT,
+            requested_url=requested_url,
+            allowed=True,
+            crawl_delay_seconds=10.0,
+            terms_policy_sha256=policy_hash,
+            terms_attestation=asdict(attestations[host]),
+        ))
+    snapshot.write_bytes(_canonical(_rehash(envelope)) + b"\n")
+    return snapshot, {policy_hash: policy}
+
+
 def _mutated_snapshot(tmp_path: Path, attack: str) -> Path:
     source, _ = _cohort(tmp_path / attack)
     envelope = json.loads(source.read_text(encoding="utf-8"))
@@ -174,6 +242,26 @@ def test_exact_local_four_ats_cohort_is_accepted_with_original_opportunity_zero_
     assert len(admitted) == 30
     assert {record["board"] for record in admitted.values()} == set(ATS)
     assert {key: value["opportunity0_decision"] for key, value in admitted.items()} == original
+
+
+def test_policy_replay_accepts_requests_static_admission_evidence(
+    tmp_path: Path,
+) -> None:
+    snapshot, policies = _policy_bound_cohort(tmp_path, "requests-static")
+    admitted = _capture_module().load_admitted_input(
+        snapshot,
+        access_policies=policies,
+    )
+    assert len(admitted) == 30
+
+
+def test_policy_replay_rejects_unknown_admission_engine(tmp_path: Path) -> None:
+    snapshot, policies = _policy_bound_cohort(tmp_path, "browser")
+    with pytest.raises(RuntimeError, match="invalid authentic decision material"):
+        _capture_module().load_admitted_input(
+            snapshot,
+            access_policies=policies,
+        )
 
 
 @pytest.mark.parametrize("attack", (

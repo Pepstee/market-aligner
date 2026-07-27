@@ -176,7 +176,7 @@ def load_admitted_input(
                     raise ValueError("raw response reference or provenance is invalid")
                 if access_policies is not None:
                     if ref.get("retrieval_engine") not in {
-                        "scrapling-static", "scrapling-dynamic",
+                        "scrapling-static", "scrapling-dynamic", "requests-static",
                     }:
                         raise ValueError("admission evidence used a forbidden retrieval engine")
                     redirect_chain = ref.get("redirect_chain")

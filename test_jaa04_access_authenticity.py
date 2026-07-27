@@ -93,6 +93,18 @@ def test_v4_dossier_replays_operator_policy_and_exact_robots_bytes(
     validate_dossier(dossier, cache, access_policies=policies)
 
 
+def test_dossier_citation_gate_still_rejects_requests_static(
+    tmp_path: Path,
+) -> None:
+    cache = RawResponseCache(tmp_path / "raw")
+    dossier = _dossier(cache)
+    policies = _access_bound(dossier, cache)
+    source = dossier["sources"][0]  # type: ignore[index]
+    source["retrieval_engine"] = "requests-static"
+    with pytest.raises(ValueError, match="forbidden retrieval engine"):
+        validate_dossier(dossier, cache, access_policies=policies)
+
+
 @pytest.mark.parametrize("attack", ("missing-receipt", "fake-engine", "policy-substitution"))
 def test_v4_dossier_rejects_self_declared_acquisition_authority(
     tmp_path: Path,
