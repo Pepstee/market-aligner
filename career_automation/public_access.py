@@ -9,23 +9,30 @@ ordinary public requests.
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import ipaddress
 import json
 import math
+import os
 import re
+import tempfile
 import time
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 
 POLICY_SCHEMA = "jaa04.public-access-policy.v1"
 USER_AGENT = "JAA-Public-Research"
 DEFAULT_DELAY_SECONDS = 10.0
 MAX_ATTESTATION_AGE_DAYS = 90
+JOBICY_HOST = "jobicy.com"
+JOBICY_API_PATH = "/api/v2/remote-jobs"
+JOBICY_MINIMUM_INTERVAL_SECONDS = 60.0 * 60.0
+JOBICY_API_QUERY_FIELDS = frozenset({"count", "geo", "industry", "tag"})
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _UNRESERVED_OCTETS = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
@@ -76,6 +83,32 @@ def _public_origin(url: str) -> tuple[str, str, str]:
     _require_public_host(host)
     port = f":{parsed.port}" if parsed.port else ""
     return parsed.scheme.casefold(), host, port
+
+
+def _route_minimum_interval(url: str) -> float | None:
+    """Return a binding route-specific interval or deny an unsafe route.
+
+    Jobicy's operator-reviewed terms permit automation only through official
+    API, RSS, or MCP routes and no more than once per hour.  The product
+    currently implements and tests only the documented v2 API route, so every
+    other Jobicy path remains denied until an exact official route is added.
+    In particular, checked ``/jobs/...`` identities are discovery metadata,
+    never harvestable pages.
+    """
+    scheme, host, port = _public_origin(url)
+    if host != JOBICY_HOST:
+        return None
+    parsed = urlsplit(url)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if (scheme != "https" or port or parsed.path != JOBICY_API_PATH
+            or parsed.fragment
+            or any(not key or key not in JOBICY_API_QUERY_FIELDS for key, _ in query)
+            or len({key for key, _ in query}) != len(query)):
+        raise PublicAccessDenied(
+            "ROUTE_DENIED: Jobicy automation requires an implemented official "
+            "API, RSS, or MCP route; listing-page retrieval is prohibited"
+        )
+    return JOBICY_MINIMUM_INTERVAL_SECONDS
 
 
 def _canonical_robots_octets(value: str) -> str:
@@ -244,10 +277,12 @@ class PublicAccessPolicy:
         *,
         policy_sha256: str,
         now: datetime | None = None,
+        source_path: Path | None = None,
     ) -> None:
         self.attestations = dict(attestations)
         self.policy_sha256 = policy_sha256
         self.now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        self.source_path = source_path.resolve() if source_path is not None else None
 
     @classmethod
     def load(
@@ -310,6 +345,7 @@ class PublicAccessPolicy:
             attestations,
             policy_sha256=hashlib.sha256(raw).hexdigest(),
             now=current,
+            source_path=path,
         )
 
     def require(self, url: str) -> TermsAttestation:
@@ -319,6 +355,7 @@ class PublicAccessPolicy:
             raise PublicAccessDenied(
                 f"POLICY_DENIED: no human terms-review attestation for {host}"
             )
+        _route_minimum_interval(url)
         return attestation
 
 
@@ -349,6 +386,8 @@ class PublicAccessController:
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] | None = None,
+        wall_clock: Callable[[], float] = time.time,
+        rate_ledger_path: Path | None = None,
     ) -> None:
         if (not math.isfinite(default_delay_seconds)
                 or default_delay_seconds < DEFAULT_DELAY_SECONDS):
@@ -363,6 +402,16 @@ class PublicAccessController:
         self.clock = clock
         self.sleeper = sleeper
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.wall_clock = wall_clock
+        if rate_ledger_path is not None:
+            self.rate_ledger_path = rate_ledger_path.resolve()
+        elif policy.source_path is not None:
+            self.rate_ledger_path = (
+                policy.source_path.parent
+                / f".jaa04-public-rate-{policy.policy_sha256}.json"
+            ).resolve()
+        else:
+            self.rate_ledger_path = None
         self._receipts: dict[tuple[str, str, str], RobotsReceipt] = {}
         self._last_request: dict[str, float] = {}
 
@@ -379,6 +428,79 @@ class PublicAccessController:
                 current = self.clock()
         self._last_request[host] = current
 
+    def _persistent_route_throttle(self, route: str, delay: float) -> None:
+        """Reserve one route request durably before external bytes are sent."""
+        if self.rate_ledger_path is None:
+            self._throttle(f"route:{route}", delay)
+            return
+        path = self.rate_ledger_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(path.name + ".lock")
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "r+b", closefd=False) as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                ledger: dict[str, Any] = {
+                    "schema_version": "jaa04.public-rate-ledger.v1",
+                    "routes": {},
+                }
+                if path.exists():
+                    try:
+                        loaded = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                        raise PublicAccessDenied(
+                            "RATE_DENIED: persistent public-rate ledger is unreadable"
+                        ) from exc
+                    if (not isinstance(loaded, dict)
+                            or loaded.get("schema_version")
+                            != "jaa04.public-rate-ledger.v1"
+                            or not isinstance(loaded.get("routes"), dict)):
+                        raise PublicAccessDenied(
+                            "RATE_DENIED: persistent public-rate ledger is malformed"
+                        )
+                    ledger = loaded
+                current = float(self.wall_clock())
+                if not math.isfinite(current):
+                    raise PublicAccessDenied("RATE_DENIED: public-rate clock is invalid")
+                prior = ledger["routes"].get(route)
+                if prior is not None:
+                    if type(prior) not in {int, float} or not math.isfinite(float(prior)):
+                        raise PublicAccessDenied(
+                            "RATE_DENIED: persistent public-rate timestamp is invalid"
+                        )
+                    elapsed = current - float(prior)
+                    remaining = delay if elapsed < 0 else delay - elapsed
+                    if remaining > 0:
+                        self.sleeper(remaining)
+                        current = float(self.wall_clock())
+                        if (not math.isfinite(current)
+                                or current + 1e-6 < float(prior) + delay):
+                            raise PublicAccessDenied(
+                                "RATE_DENIED: public-rate clock did not advance"
+                            )
+                ledger["routes"][route] = current
+                encoded = _canonical(ledger) + b"\n"
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{path.name}.",
+                    dir=path.parent,
+                    delete=False,
+                ) as temporary:
+                    temporary.write(encoded)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                    temporary_path = Path(temporary.name)
+                temporary_path.chmod(0o600)
+                os.replace(temporary_path, path)
+                directory = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        finally:
+            os.close(descriptor)
+
     @staticmethod
     def _response_body(response: Mapping[str, Any]) -> bytes:
         try:
@@ -393,6 +515,7 @@ class PublicAccessController:
         scheme, host, port = _public_origin(url)
         origin = (scheme, host, port)
         attestation = self.policy.require(url)
+        route_delay = _route_minimum_interval(url)
         if origin in self._receipts:
             receipt = self._receipts[origin]
             body = self.cache.resolve(receipt.raw_response_ref, receipt.content_sha256)
@@ -405,7 +528,11 @@ class PublicAccessController:
         robots_url = urlunsplit(
             (scheme, _origin_netloc(host, port), "/robots.txt", "", "")
         )
-        self._throttle(host, self.default_delay_seconds)
+        # Jobicy's robots request is the mandatory compliance check, not an API
+        # content poll.  Keep its short robots throttle separate so the first
+        # official API call does not require a ceremonial one-hour wait.
+        robots_throttle_key = f"robots:{host}" if route_delay else host
+        self._throttle(robots_throttle_key, self.default_delay_seconds)
         try:
             response = self.client.fetch(
                 "static",
@@ -433,7 +560,7 @@ class PublicAccessController:
         body = self._response_body(response)
         digest, reference = self.cache.store(body)
         allowed = True
-        delay = self.default_delay_seconds
+        delay = max(self.default_delay_seconds, route_delay or 0.0)
         if 200 <= status < 300:
             allowed, declared = _robots_rules(body, url)
             if declared is not None:
@@ -467,7 +594,14 @@ class PublicAccessController:
 
     def before_request(self, url: str) -> RobotsReceipt:
         receipt = self.authorize(url)
-        self._throttle(receipt.host, receipt.crawl_delay_seconds)
+        route_delay = _route_minimum_interval(url)
+        if route_delay is not None:
+            self._persistent_route_throttle(
+                f"{receipt.host}:{JOBICY_API_PATH}",
+                route_delay,
+            )
+        else:
+            self._throttle(receipt.host, receipt.crawl_delay_seconds)
         return receipt
 
 
@@ -497,6 +631,7 @@ def replay_access_receipt(
         raise ValueError("access receipt has no content URL identity")
     try:
         origins = {_public_origin(url) for url in content_urls}
+        route_delays = [_route_minimum_interval(url) for url in content_urls]
         receipt_origin = _public_origin(receipt.requested_url)
         robots_origin = _public_origin(receipt.robots_url)
         final_origin = _public_origin(receipt.final_url)
@@ -537,6 +672,9 @@ def replay_access_receipt(
             or not math.isfinite(float(receipt.crawl_delay_seconds))
             or float(receipt.crawl_delay_seconds) < DEFAULT_DELAY_SECONDS):
         raise ValueError("access receipt does not prove the required public policy")
+    required_route_delay = max((value or 0.0 for value in route_delays), default=0.0)
+    if float(receipt.crawl_delay_seconds) < required_route_delay:
+        raise ValueError("access receipt understates a route-specific request interval")
     if (type(receipt.status_code) is not int or receipt.status_code <= 0
             or receipt.status_code in {401, 403, 429} or receipt.status_code >= 500
             or not (200 <= receipt.status_code < 300 or 400 <= receipt.status_code < 500)):

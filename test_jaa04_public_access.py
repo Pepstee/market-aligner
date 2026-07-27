@@ -17,6 +17,8 @@ from career_automation.employer_research import RawResponseCache, ScraplingPubli
 from career_automation.public_access import (
     DEFAULT_DELAY_SECONDS,
     DenyAllPublicAccess,
+    JOBICY_API_PATH,
+    JOBICY_MINIMUM_INTERVAL_SECONDS,
     PublicAccessController,
     PublicAccessDenied,
     PublicAccessPolicy,
@@ -126,6 +128,115 @@ def test_missing_or_nonhuman_terms_attestation_denies_before_network(
         DenyAllPublicAccess().before_request(URL)
     with pytest.raises(ValueError, match="stale"):
         _policy(tmp_path / "stale.json", age_days=91)
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://jobicy.com/jobs/147647-ai-engineer-5",
+        "https://jobicy.com/",
+        "https://jobicy.com/jobs-rss-feed",
+        "https://jobicy.com/api/v1/remote-jobs",
+        "https://jobicy.com/api/v2/remote-jobs?unknown=value",
+        "https://jobicy.com/api/v2/remote-jobs?geo=uk&geo=europe",
+    ),
+)
+def test_jobicy_nonimplemented_or_listing_routes_are_denied_before_network(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    policy = _policy(tmp_path / "jobicy-policy.json", hosts=("jobicy.com",))
+    client = _Client(_response(
+        200,
+        b"User-agent: *\nAllow: /\n",
+        url="https://jobicy.com/robots.txt",
+    ))
+    controller = PublicAccessController(
+        policy,
+        client,
+        RawResponseCache(tmp_path / "raw"),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROUTE_DENIED"):
+        controller.before_request(url)
+    assert client.calls == []
+
+
+def test_jobicy_official_api_is_hourly_and_persists_across_controller_resume(
+    tmp_path: Path,
+) -> None:
+    policy_path = tmp_path / "jobicy-policy.json"
+    policy = _policy(policy_path, hosts=("jobicy.com",))
+    robots_url = "https://jobicy.com/robots.txt"
+    robots = _response(200, b"User-agent: *\nAllow: /\n", url=robots_url)
+    cache = RawResponseCache(tmp_path / "raw")
+    clock = _Clock()
+    api_url = (
+        f"https://jobicy.com{JOBICY_API_PATH}"
+        "?count=100&geo=uk&industry=engineering"
+    )
+    first_client = _Client(robots)
+    first = PublicAccessController(
+        policy,
+        first_client,
+        cache,
+        clock=clock.monotonic,
+        wall_clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    receipt = first.before_request(api_url)
+    assert receipt.crawl_delay_seconds == JOBICY_MINIMUM_INTERVAL_SECONDS
+    assert clock.sleeps == []
+    assert first_client.calls == [("static", robots_url)]
+
+    second_client = _Client(robots)
+    resumed = PublicAccessController(
+        PublicAccessPolicy.load(policy_path, now=NOW),
+        second_client,
+        cache,
+        clock=clock.monotonic,
+        wall_clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    resumed.before_request(api_url)
+    assert clock.sleeps == [JOBICY_MINIMUM_INTERVAL_SECONDS]
+    assert second_client.calls == [("static", robots_url)]
+    ledger = json.loads(next(tmp_path.glob(".jaa04-public-rate-*.json")).read_text())
+    assert ledger == {
+        "schema_version": "jaa04.public-rate-ledger.v1",
+        "routes": {
+            f"jobicy.com:{JOBICY_API_PATH}": clock.monotonic(),
+        },
+    }
+
+
+def test_jobicy_listing_capture_cannot_replay_as_certified_access(
+    tmp_path: Path,
+) -> None:
+    policy = _policy(tmp_path / "jobicy-policy.json", hosts=("jobicy.com",))
+    robots_url = "https://jobicy.com/robots.txt"
+    cache = RawResponseCache(tmp_path / "raw")
+    clock = _Clock()
+    controller = PublicAccessController(
+        policy,
+        _Client(_response(200, b"User-agent: *\nAllow: /\n", url=robots_url)),
+        cache,
+        clock=clock.monotonic,
+        wall_clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    api_url = f"https://jobicy.com{JOBICY_API_PATH}?count=100&geo=uk"
+    receipt = asdict(controller.before_request(api_url))
+    with pytest.raises(ValueError, match="non-public URL"):
+        replay_access_receipt(
+            receipt,
+            cache,
+            content_urls=("https://jobicy.com/jobs/147647-ai-engineer-5",),
+            content_retrieved_at=NOW.isoformat(),
+            policies={policy.policy_sha256: policy},
+        )
 
 
 @pytest.mark.parametrize("host", ("localhost", "api.localhost", "127.0.0.1", "169.254.1.1"))
