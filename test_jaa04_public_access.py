@@ -661,6 +661,79 @@ def test_static_to_dynamic_fallback_throttles_every_stage_without_stealth(
     assert clock.sleeps == [10.0, 10.0]
 
 
+@pytest.mark.parametrize(
+    ("timeout_seconds", "dynamic_timeout_ms"),
+    ((45, 60_000), (75, 75_000)),
+)
+def test_retriever_binds_exact_single_send_nonstealth_engine_kwargs(
+    tmp_path: Path,
+    timeout_seconds: int,
+    dynamic_timeout_ms: int,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<html><noscript>You need to enable JavaScript to run this app."
+        b"</noscript><div id=\"root\"></div></html>"
+    )
+    rendered = b"<html><main>Rendered public vacancy evidence.</main></html>" * 4
+
+    class CapturingClient(_Client):
+        def __init__(self) -> None:
+            super().__init__(_response(404, b"not found", url=robots_url))
+            self.page_calls: list[tuple[str, dict[str, Any]]] = []
+
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            self.page_calls.append((engine, dict(kwargs)))
+            return _response(
+                200,
+                shell if engine == "static" else rendered,
+                url=url,
+            )
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = CapturingClient()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(
+        cache,
+        timeout_seconds=timeout_seconds,
+        access_controller=controller,
+    )
+    retriever.client = client
+    result, _ = retriever._fetch(URL)
+    assert result.engine == "dynamic"
+    assert client.page_calls == [
+        (
+            "static",
+            {
+                "timeout": timeout_seconds,
+                "retries": 1,
+                "stealthy_headers": False,
+                "headers": {"User-Agent": USER_AGENT},
+            },
+        ),
+        (
+            "dynamic",
+            {
+                "network_idle": True,
+                "timeout": dynamic_timeout_ms,
+                "retries": 1,
+                "google_search": False,
+                "useragent": USER_AGENT,
+            },
+        ),
+    ]
+
+
 def test_content_bearing_static_response_never_invokes_dynamic(
     tmp_path: Path,
 ) -> None:

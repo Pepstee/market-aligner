@@ -644,9 +644,14 @@ class ScraplingPublicRetriever:
         requested_host = (urlparse(url).hostname or "").casefold()
         stages = (
             ("static", {"timeout": self.timeout_seconds,
+                        "retries": 1,
+                        "stealthy_headers": False,
                         "headers": {"User-Agent": USER_AGENT}}),
-            ("dynamic", {"network_idle": True, "timeout": max(self.timeout_seconds, 60),
-                         "user_agent": USER_AGENT}),
+            ("dynamic", {"network_idle": True,
+                         "timeout": max(self.timeout_seconds, 60) * 1000,
+                         "retries": 1,
+                         "google_search": False,
+                         "useragent": USER_AGENT}),
         )
         for engine, kwargs in stages:
             receipt = self.access.before_request(url)
