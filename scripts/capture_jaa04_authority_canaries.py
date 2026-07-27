@@ -20,7 +20,10 @@ from career_automation.employer_research import (  # noqa: E402
     LIVE_ATS_AUTHORITY_CANARIES, PortableAuthorityRetriever, RawResponseCache,
     ScraplingPublicRetriever,
 )
-from career_automation.public_access import PublicAccessPolicy  # noqa: E402
+from career_automation.public_access import (  # noqa: E402
+    PublicAccessPolicy,
+    replay_access_receipt,
+)
 
 
 def _canonical(value: object) -> bytes:
@@ -29,7 +32,7 @@ def _canonical(value: object) -> bytes:
 
 
 def capture(destination: Path, access_policy: PublicAccessPolicy) -> None:
-    """Publish three self-contained canaries, never a dossier corpus or receipt."""
+    """Publish a replayable three-canary directory, never a dossier corpus."""
     if destination.exists():
         raise RuntimeError("canary destination already exists")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +52,18 @@ def capture(destination: Path, access_policy: PublicAccessPolicy) -> None:
             captures = []
             for citation in citations:
                 raw = cache.resolve(citation.raw_response_ref, citation.content_sha256)
+                content_urls = tuple(dict.fromkeys((
+                    citation.requested_url or citation.url,
+                    *(str(item["url"]) for item in citation.redirect_history),
+                    citation.url,
+                )))
+                replay_access_receipt(
+                    citation.access_receipt,
+                    cache,
+                    content_urls=content_urls,
+                    content_retrieved_at=citation.retrieved_at,
+                    policies={access_policy.policy_sha256: access_policy},
+                )
                 capture_row = vars(citation).copy()
                 capture_row.update({
                     "sidecar_raw_response_ref": citation.raw_response_ref,
@@ -65,10 +80,11 @@ def capture(destination: Path, access_policy: PublicAccessPolicy) -> None:
             }
             filename = record.job_key.split(":", 1)[0] + ".json"
             (stage / filename).write_bytes(_canonical(artifact))
-        shutil.rmtree(stage / ".raw")
         files = sorted(path.name for path in stage.iterdir() if path.is_file())
         if files != ["ashby.json", "greenhouse.json", "workable.json"]:
             raise RuntimeError("canary capture must produce exactly three artifacts")
+        if not (stage / ".raw" / "sha256").is_dir():
+            raise RuntimeError("canary capture lacks its replayable raw response store")
         os.rename(stage, destination)
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)

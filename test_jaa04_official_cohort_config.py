@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
 from career_automation.employer_research import (
     ATS_AUTHORITY_CANARIES,
+    Citation,
     DEFAULT_ATS_ROUTE_ADAPTERS,
     LIVE_ATS_AUTHORITY_CANARIES,
+    RawResponseCache,
 )
 from career_automation.official_cohort import (
     AGGREGATORS,
@@ -17,6 +25,14 @@ from career_automation.official_cohort import (
     _validate_config,
     build,
 )
+from career_automation.public_access import (
+    PublicAccessPolicy,
+    RobotsReceipt,
+    TermsAttestation,
+    USER_AGENT,
+    replay_access_receipt,
+)
+import scripts.capture_jaa04_authority_canaries as canary_capture
 from skeleton.configuration import load_config
 
 
@@ -89,6 +105,143 @@ def test_live_greenhouse_authority_uses_current_public_job_board_api_host() -> N
     assert DEFAULT_ATS_ROUTE_ADAPTERS["greenhouse"].authority_hosts == (
         "boards-api.greenhouse.io",
     )
+
+
+@pytest.mark.parametrize("attack", (None, "wrong-policy"))
+def test_canary_publication_retains_replayable_content_and_robots_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str | None,
+) -> None:
+    stamp = "2026-07-27T02:00:00+00:00"
+    attestations = {}
+    for record in LIVE_ATS_AUTHORITY_CANARIES:
+        host = urlsplit(record.authority_url).hostname or ""
+        attestations[host] = TermsAttestation(
+            host=host,
+            terms_url=f"https://{host}/terms",
+            determination="public_read_only_research_permitted",
+            reviewed_at="2026-07-26T18:00:00+00:00",
+            reviewed_by="Offline Test Operator",
+            reviewer_type="human_operator",
+            notes="Synthetic offline canary portability test.",
+        )
+    policy_hash = hashlib.sha256(b"offline-canary-policy").hexdigest()
+    policy = PublicAccessPolicy(
+        attestations,
+        policy_sha256=policy_hash,
+        now=datetime(2026, 7, 27, 2, tzinfo=timezone.utc),
+    )
+
+    class FakeTransport:
+        def __init__(self, cache: RawResponseCache, **_: object) -> None:
+            self.cache = cache
+
+    class FakeRetriever:
+        def __init__(
+            self,
+            cache: RawResponseCache,
+            *,
+            retriever: FakeTransport,
+        ) -> None:
+            self.cache = cache
+
+        def retrieve_plan(
+            self,
+            task: object,
+        ) -> tuple[list[Citation], list[dict[str, object]]]:
+            job_key = str(getattr(task, "job_key"))
+            record = next(
+                row for row in LIVE_ATS_AUTHORITY_CANARIES
+                if row.job_key == job_key
+            )
+            body = (
+                f'<meta property="article:published_time" content="{stamp}">'
+                f"<main>{record.company} — {record.title}</main>"
+            ).encode()
+            content_hash, content_ref = self.cache.store(body)
+            robots = b"User-agent: *\nAllow: /\n"
+            robots_hash, robots_ref = self.cache.store(robots)
+            host = urlsplit(record.authority_url).hostname or ""
+            receipt = RobotsReceipt(
+                host=host,
+                robots_url=f"https://{host}/robots.txt",
+                final_url=f"https://{host}/robots.txt",
+                status_code=200,
+                content_sha256=robots_hash,
+                raw_response_ref=robots_ref,
+                redirect_history=[],
+                retrieved_at=stamp,
+                user_agent=USER_AGENT,
+                requested_url=record.authority_url,
+                allowed=True,
+                crawl_delay_seconds=10.0,
+                terms_policy_sha256=policy_hash,
+                terms_attestation=asdict(attestations[host]),
+            )
+            citation = Citation(
+                id=f"source:{job_key}",
+                url=record.authority_url,
+                captured_at=stamp,
+                retrieved_at=stamp,
+                content_sha256=content_hash,
+                raw_response_ref=content_ref,
+                status_code=200,
+                requested_url=record.authority_url,
+                published_at=stamp,
+                source_kind="official_vacancy",
+                canonical_publisher=host,
+                canonical_article=record.authority_url,
+                publisher_date_evidence=(
+                    f'<meta property="article:published_time" content="{stamp}">'
+                ),
+                retrieval_engine="scrapling-static",
+                access_receipt={
+                    **asdict(receipt),
+                    **(
+                        {"terms_policy_sha256": "0" * 64}
+                        if attack == "wrong-policy" else {}
+                    ),
+                },
+            )
+            if record.job_key.startswith("greenhouse:"):
+                assert record.admitted_url != record.authority_url
+                assert citation.requested_url == record.authority_url
+                assert citation.access_receipt["requested_url"] == record.authority_url
+            return [citation], []
+
+    monkeypatch.setattr(canary_capture, "ScraplingPublicRetriever", FakeTransport)
+    monkeypatch.setattr(canary_capture, "PortableAuthorityRetriever", FakeRetriever)
+    destination = tmp_path / "canaries"
+    if attack == "wrong-policy":
+        with pytest.raises(ValueError, match="operator-presented policy"):
+            canary_capture.capture(destination, policy)
+        assert not destination.exists()
+        return
+    canary_capture.capture(destination, policy)
+
+    cache = RawResponseCache(destination / ".raw")
+    assert (destination / ".raw" / "sha256").is_dir()
+    assert sorted(path.name for path in destination.glob("*.json")) == [
+        "ashby.json",
+        "greenhouse.json",
+        "workable.json",
+    ]
+    for artifact_path in destination.glob("*.json"):
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        row = artifact["captures"][0]
+        embedded = base64.b64decode(row["raw_response_base64"], validate=True)
+        assert cache.resolve(
+            row["sidecar_raw_response_ref"],
+            row["content_sha256"],
+        ) == embedded
+        replay_access_receipt(
+            row["access_receipt"],
+            cache,
+            content_urls=(row["requested_url"], row["url"]),
+            content_retrieved_at=row["retrieved_at"],
+            policies={policy_hash: policy},
+        )
 
 
 @pytest.mark.parametrize(
