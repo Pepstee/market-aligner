@@ -515,3 +515,57 @@ def test_release_token_consumes_once_only_after_exact_authority_replay(
         ).fetchone()[0]
     assert tuple(stored) == (issued.token_sha256, consumed_at.isoformat())
     assert state == "released"
+
+
+def test_consumed_release_can_be_revalidated_without_second_consumption(
+    tmp_path: Path,
+) -> None:
+    values = _issued_release_inputs(tmp_path)
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        _compilation,
+        gate,
+        _route,
+        issued,
+    ) = values
+    consumed_at = datetime.combine(
+        date.today(),
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    )
+    consumed = gate.consume_release_token(
+        release_token=issued.release_token,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        consumed_at=consumed_at,
+    )
+    replay = gate.verify_consumed_release_token(
+        release_token=issued.release_token,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        consumed_at=consumed_at,
+    )
+    assert replay == consumed
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] == consumed_at.isoformat()

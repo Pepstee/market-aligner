@@ -865,6 +865,13 @@ class ReleaseGateStore:
                    WHERE newer.record_id=record.record_id
                      AND newer.version>record.version
                  )
+                 AND 1=(
+                   SELECT COUNT(*)
+                   FROM candidate_verification_decisions current_decision
+                   WHERE current_decision.target_kind='record'
+                     AND current_decision.target_id=record.record_id
+                     AND current_decision.target_version=record.version
+                 )
                ORDER BY (record.jurisdiction=?) DESC,
                         (record.contract_type=?) DESC,record.version DESC""",
             (
@@ -1705,6 +1712,134 @@ class ReleaseGateStore:
                     "stored release validation differs from current authority"
                 )
 
+    @staticmethod
+    def _release_token_row(
+        connection: sqlite3.Connection,
+        token_sha256: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """SELECT token.token_hash,token.consumed_at,
+                      manifest.release_manifest_hash,
+                      manifest.input_hash,
+                      manifest.manifest_document_json,
+                      compilation.compilation_id,
+                      compilation.job_key,
+                      compilation.strategy_id,
+                      compilation.application_source_id,
+                      compilation.application_source_hash,
+                      compilation.artifact_set_hash,
+                      compilation.artifact_receipt_hash,
+                      compilation.artifact_relative_directory,
+                      compilation.contact_record_id,
+                      compilation.contact_record_version,
+                      compilation.questions_hash,
+                      compilation.compilation_document_json,
+                      compilation.lifecycle_receipt_id
+               FROM release_tokens token
+               JOIN release_manifests manifest
+                 ON manifest.release_manifest_hash=
+                    token.release_manifest_hash
+               JOIN application_compilations compilation
+                 ON compilation.compilation_id=manifest.compilation_id
+               WHERE token.token_hash=?""",
+            (token_sha256,),
+        ).fetchone()
+
+    def _verify_release_replay(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        release_token: str,
+        source: ApplicationSource,
+        artifacts: ApplicationArtifacts,
+        contact: CandidateContact,
+        questions: dict[str, tuple[str, str]] | None,
+        artifact_root: str | Path,
+        repository_root: str | Path,
+        jurisdiction: str,
+        contract_type: str,
+        consumed_utc: datetime,
+    ) -> ReleaseManifest:
+        if (
+            release_token.split(".")[1]
+            != str(row["release_manifest_hash"])
+        ):
+            raise ValueError(
+                "release token cites a different manifest identity"
+            )
+        stored_document = self._stored_manifest_document(row)
+        binding_document = stored_document.get("binding")
+        if not isinstance(binding_document, dict):
+            raise ValueError("stored release binding is invalid")
+        try:
+            issued_date = date.fromisoformat(
+                str(binding_document["evaluated_at"])
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("stored release clock is invalid") from exc
+        if consumed_utc.date() != issued_date:
+            raise ValueError(
+                "release token is valid only on its evaluated UTC date"
+            )
+        compilation = self._stored_compilation(row)
+        current_source = ProductionApplicationCompiler(self.path).compile(
+            source.strategy_id,
+            as_of=consumed_utc.date(),
+            contact=contact,
+            questions=(
+                ApplicationCompilationStore._questions_document(questions)
+            ),
+        )
+        current_artifacts = render_pdf_artifacts(current_source)
+        publication = verify_published_application_artifacts(
+            source,
+            artifacts,
+            root=artifact_root,
+            repository_root=repository_root,
+        )
+        current_binding = self._binding(
+            connection,
+            compilation=compilation,
+            contact=contact,
+            jurisdiction=jurisdiction,
+            contract_type=contract_type,
+            evaluated_at=consumed_utc.date(),
+            expected_state=PipelineState.RELEASED,
+        )
+        if current_binding.prior_application_count != 1:
+            raise ValueError(
+                "release identity has an unexpected application count"
+            )
+        replay_binding = replace(
+            current_binding,
+            evaluated_at=issued_date,
+            prior_application_count=0,
+        )
+        validations = self._validations(
+            replay_binding,
+            compilation=compilation,
+            source=source,
+            current_source=current_source,
+            artifacts=artifacts,
+            current_artifacts=current_artifacts,
+            contact=contact,
+            publication=publication,
+        )
+        replay_manifest = compile_release_manifest(
+            replay_binding,
+            validations,
+        )
+        verify_release_manifest(replay_manifest)
+        if canonical_json(replay_manifest.document()) != canonical_json(
+            stored_document
+        ):
+            raise ValueError(
+                "release token was invalidated by bound-input drift"
+            )
+        self._verify_stored_validations(connection, replay_manifest)
+        return replay_manifest
+
     def consume_release_token(
         self,
         *,
@@ -1733,118 +1868,25 @@ class ReleaseGateStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """SELECT token.token_hash,token.consumed_at,
-                          manifest.release_manifest_hash,
-                          manifest.input_hash,
-                          manifest.manifest_document_json,
-                          compilation.compilation_id,
-                          compilation.job_key,
-                          compilation.strategy_id,
-                          compilation.application_source_id,
-                          compilation.application_source_hash,
-                          compilation.artifact_set_hash,
-                          compilation.artifact_receipt_hash,
-                          compilation.artifact_relative_directory,
-                          compilation.contact_record_id,
-                          compilation.contact_record_version,
-                          compilation.questions_hash,
-                          compilation.compilation_document_json,
-                          compilation.lifecycle_receipt_id
-                   FROM release_tokens token
-                   JOIN release_manifests manifest
-                     ON manifest.release_manifest_hash=
-                        token.release_manifest_hash
-                   JOIN application_compilations compilation
-                     ON compilation.compilation_id=manifest.compilation_id
-                   WHERE token.token_hash=?""",
-                (token_sha256,),
-            ).fetchone()
+            row = self._release_token_row(connection, token_sha256)
             if row is None:
                 raise ValueError("release token is unknown")
             if row["consumed_at"] is not None:
                 raise ValueError("release token was already consumed")
-            if (
-                release_token.split(".")[1]
-                != str(row["release_manifest_hash"])
-            ):
-                raise ValueError(
-                    "release token cites a different manifest identity"
-                )
-            stored_document = self._stored_manifest_document(row)
-            binding_document = stored_document.get("binding")
-            if not isinstance(binding_document, dict):
-                raise ValueError("stored release binding is invalid")
-            try:
-                issued_date = date.fromisoformat(
-                    str(binding_document["evaluated_at"])
-                )
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    "stored release clock is invalid"
-                ) from exc
-            if consumed_utc.date() != issued_date:
-                raise ValueError(
-                    "release token is valid only on its evaluated UTC date"
-                )
-            compilation = self._stored_compilation(row)
-            current_source = ProductionApplicationCompiler(
-                self.path
-            ).compile(
-                source.strategy_id,
-                as_of=consumed_utc.date(),
-                contact=contact,
-                questions=(
-                    ApplicationCompilationStore._questions_document(questions)
-                ),
-            )
-            current_artifacts = render_pdf_artifacts(current_source)
-            publication = verify_published_application_artifacts(
-                source,
-                artifacts,
-                root=artifact_root,
-                repository_root=repository_root,
-            )
-            current_binding = self._binding(
+            replay_manifest = self._verify_release_replay(
                 connection,
-                compilation=compilation,
+                row,
+                release_token=release_token,
+                source=source,
+                artifacts=artifacts,
                 contact=contact,
+                questions=questions,
+                artifact_root=artifact_root,
+                repository_root=repository_root,
                 jurisdiction=jurisdiction,
                 contract_type=contract_type,
-                evaluated_at=consumed_utc.date(),
-                expected_state=PipelineState.RELEASED,
+                consumed_utc=consumed_utc,
             )
-            if current_binding.prior_application_count != 1:
-                raise ValueError(
-                    "release identity has an unexpected application count"
-                )
-            replay_binding = replace(
-                current_binding,
-                evaluated_at=issued_date,
-                prior_application_count=0,
-            )
-            validations = self._validations(
-                replay_binding,
-                compilation=compilation,
-                source=source,
-                current_source=current_source,
-                artifacts=artifacts,
-                current_artifacts=current_artifacts,
-                contact=contact,
-                publication=publication,
-            )
-            replay_manifest = compile_release_manifest(
-                replay_binding,
-                validations,
-            )
-            verify_release_manifest(replay_manifest)
-            if canonical_json(replay_manifest.document()) != canonical_json(
-                stored_document
-            ):
-                raise ValueError(
-                    "release token was invalidated by bound-input drift"
-                )
-            self._verify_stored_validations(connection, replay_manifest)
             changed = connection.execute(
                 """UPDATE release_tokens SET consumed_at=?
                    WHERE token_hash=? AND consumed_at IS NULL""",
@@ -1852,6 +1894,69 @@ class ReleaseGateStore:
             ).rowcount
             if changed != 1:
                 raise ValueError("release token consumption lost its lease")
+            connection.commit()
+            return ConsumedRelease(
+                replay_manifest.release_manifest_sha256,
+                token_sha256,
+                consumed_iso,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def verify_consumed_release_token(
+        self,
+        *,
+        release_token: str,
+        source: ApplicationSource,
+        artifacts: ApplicationArtifacts,
+        contact: CandidateContact,
+        questions: dict[str, tuple[str, str]] | None,
+        artifact_root: str | Path,
+        repository_root: str | Path,
+        jurisdiction: str,
+        contract_type: str,
+        consumed_at: datetime,
+    ) -> ConsumedRelease:
+        """Revalidate a consumed token without performing a second consumption."""
+        if (
+            not release_token.startswith("jaa08.")
+            or len(release_token.split(".")) != 3
+        ):
+            raise ValueError("release token format is invalid")
+        if consumed_at.tzinfo is None or consumed_at.utcoffset() is None:
+            raise ValueError("token consumption time must include a timezone")
+        consumed_utc = consumed_at.astimezone(timezone.utc)
+        consumed_iso = consumed_utc.isoformat()
+        token_sha256 = hashlib.sha256(release_token.encode()).hexdigest()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._release_token_row(connection, token_sha256)
+            if row is None:
+                raise ValueError("release token is unknown")
+            if row["consumed_at"] is None:
+                raise ValueError("release token has not been consumed")
+            if str(row["consumed_at"]) != consumed_iso:
+                raise ValueError(
+                    "release token consumption clock differs from authority"
+                )
+            replay_manifest = self._verify_release_replay(
+                connection,
+                row,
+                release_token=release_token,
+                source=source,
+                artifacts=artifacts,
+                contact=contact,
+                questions=questions,
+                artifact_root=artifact_root,
+                repository_root=repository_root,
+                jurisdiction=jurisdiction,
+                contract_type=contract_type,
+                consumed_utc=consumed_utc,
+            )
             connection.commit()
             return ConsumedRelease(
                 replay_manifest.release_manifest_sha256,

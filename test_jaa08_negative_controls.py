@@ -441,6 +441,64 @@ def test_release_gate_rejects_missing_work_right_without_token(tmp_path) -> None
     assert state == "release_blocked"
 
 
+@pytest.mark.parametrize("conflicting_decision", ("rejected", "abstained"))
+def test_release_gate_rejects_conflicting_work_right_verification(
+    tmp_path,
+    conflicting_decision: str,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    CandidateGraph(database.path).verify_record(
+        "work-right-gb",
+        1,
+        decision=conflicting_decision,
+        verifier_kind="configured",
+        policy_id="test.work-right-conflict",
+        policy_version="1",
+        policy_hash=hashlib.sha256(
+            f"work-right-{conflicting_decision}".encode()
+        ).hexdigest(),
+        reason="adversarial conflicting work-right decision",
+        source_identity=f"test:work-right-{conflicting_decision}",
+    )
+    with pytest.raises(
+        ValueError,
+        match="work-right authority is missing or ambiguous",
+    ):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
+        attempt = connection.execute(
+            """SELECT verdict,finding_codes_json
+               FROM release_gate_attempts"""
+        ).fetchone()
+    assert tuple(attempt) == ("block", '["eligibility"]')
+
+
 def test_release_insert_failure_rolls_back_release_transition(tmp_path) -> None:
     (
         database,
@@ -798,6 +856,36 @@ def test_release_token_drift_check_rejects_post_issue_artifact_tamper(
         assert connection.execute(
             "SELECT consumed_at FROM release_tokens"
         ).fetchone()[0] is None
+
+
+def test_consumed_release_revalidation_rejects_post_consumption_drift(
+    tmp_path,
+) -> None:
+    values = _issued_release_inputs(tmp_path)
+    (
+        database,
+        _strategy,
+        _contact,
+        _questions,
+        _source,
+        _artifacts,
+        artifact_root,
+        publication,
+        _compilation,
+        gate,
+        _route,
+        _issued,
+    ) = values
+    arguments = _consume_arguments(values)
+    consumed = gate.consume_release_token(**arguments)
+    target = artifact_root / publication.relative_directory / "cv.pdf"
+    target.write_bytes(target.read_bytes() + b"post-consumption-tamper")
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        gate.verify_consumed_release_token(**arguments)
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] == consumed.consumed_at
 
 
 def test_release_token_requires_timezone_aware_consumption_clock(
