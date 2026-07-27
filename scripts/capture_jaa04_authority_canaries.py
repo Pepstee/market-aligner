@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import (  # noqa: E402
-    LIVE_ATS_AUTHORITY_CANARIES, PortableAuthorityRetriever, RawResponseCache,
-    ScraplingPublicRetriever,
+    LIVE_ATS_AUTHORITY_CANARIES, PortableAuthorityRetriever,
+    PublicRetrievalExhausted, RawResponseCache, ScraplingPublicRetriever,
 )
 from career_automation.public_access import (  # noqa: E402
     PublicAccessPolicy,
@@ -78,6 +78,11 @@ def _quarantine_failure(
         "exception_type": type(failure).__name__,
         "exception_message": str(failure),
     }
+    if isinstance(failure, PublicRetrievalExhausted):
+        manifest["retrieval_attempts"] = [
+            attempt.as_dict()
+            for attempt in failure.attempts
+        ]
     manifest_path = stage / "canary-failure-manifest.json"
     manifest_path.write_bytes(_canonical(manifest))
     os.chmod(manifest_path, 0o600)

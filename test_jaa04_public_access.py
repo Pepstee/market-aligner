@@ -13,7 +13,11 @@ from typing import Any
 import pytest
 
 import career_automation.employer_research as research
-from career_automation.employer_research import RawResponseCache, ScraplingPublicRetriever
+from career_automation.employer_research import (
+    PublicRetrievalExhausted,
+    RawResponseCache,
+    ScraplingPublicRetriever,
+)
 from career_automation.public_access import (
     DEFAULT_DELAY_SECONDS,
     DenyAllPublicAccess,
@@ -767,11 +771,109 @@ def test_renderer_shell_on_both_stages_exhausts_without_stealth(
     )
     retriever = ScraplingPublicRetriever(cache, access_controller=controller)
     retriever.client = client
-    with pytest.raises(RuntimeError, match="static and dynamic"):
+    with pytest.raises(
+        PublicRetrievalExhausted,
+        match="static and dynamic",
+    ) as raised:
         retriever._fetch(URL)
     assert [engine for engine, _ in client.calls] == [
         "static", "static", "dynamic",
     ]
+    attempts = [row.as_dict() for row in raised.value.attempts]
+    assert [row["engine"] for row in attempts] == ["static", "dynamic"]
+    assert all(row["renderer_shell"] is True for row in attempts)
+    assert all(row["error_type"] is None for row in attempts)
+    for row in attempts:
+        assert cache.resolve(
+            row["raw_response_ref"],
+            row["content_sha256"],
+        ) == shell
+        assert row["body_bytes"] == len(shell)
+        replay_access_receipt(
+            row["access_receipt"],
+            cache,
+            content_urls=(URL,),
+            content_retrieved_at=NOW.isoformat(),
+            policies={controller.policy.policy_sha256: controller.policy},
+        )
+
+
+def test_response_less_stage_exceptions_are_carried_by_typed_exhaustion(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+
+    class FailingClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            raise RuntimeError(f"{engine} offline failure")
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = FailingClient(_response(404, b"not found", url=robots_url))
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicRetrievalExhausted) as raised:
+        retriever._fetch(URL)
+    attempts = [row.as_dict() for row in raised.value.attempts]
+    assert [row["engine"] for row in attempts] == ["static", "dynamic"]
+    assert [row["error_message"] for row in attempts] == [
+        "static offline failure",
+        "dynamic offline failure",
+    ]
+    assert all(row["error_type"] == "RuntimeError" for row in attempts)
+    assert all(row["content_sha256"] is None for row in attempts)
+    assert all(row["raw_response_ref"] is None for row in attempts)
+    assert all(row["access_receipt"]["requested_url"] == URL for row in attempts)
+
+
+@pytest.mark.parametrize("attack", ("invalid-base64", "wrong-byte-count"))
+def test_malformed_response_evidence_fails_closed_with_attempt_record(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = b"<html><main>public vacancy evidence</main></html>" * 4
+    page = _response(200, body, url=URL)
+    if attack == "invalid-base64":
+        page["body_base64"] = "*not-base64*"
+    else:
+        page["body_bytes"] = len(body) + 1
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=page,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(
+        PublicRetrievalExhausted,
+        match="response evidence is malformed",
+    ) as raised:
+        retriever._fetch(URL)
+    assert len(raised.value.attempts) == 1
+    attempt = raised.value.attempts[0].as_dict()
+    assert attempt["engine"] == "static"
+    assert attempt["renderer_shell"] is None
+    assert attempt["error_type"] in {"Error", "ValueError"}
+    if attack == "invalid-base64":
+        assert attempt["content_sha256"] is None
+        assert attempt["raw_response_ref"] is None
+    else:
+        assert attempt["status_code"] == 200
+        assert cache.resolve(
+            attempt["raw_response_ref"],
+            attempt["content_sha256"],
+        ) == body
 
 
 @pytest.mark.parametrize(
@@ -842,6 +944,12 @@ def test_dynamic_challenge_is_terminal_after_static_shell(
     assert [engine for engine, _ in client.calls] == [
         "static", "static", "dynamic",
     ]
+    for body in (shell, challenge):
+        digest = hashlib.sha256(body).hexdigest()
+        assert cache.resolve(
+            f"sha256/{digest[:2]}/{digest}",
+            digest,
+        ) == body
 
 
 def test_page_redirect_to_unattested_host_is_rejected(tmp_path: Path) -> None:

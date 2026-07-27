@@ -20,6 +20,8 @@ from career_automation.employer_research import (
     Citation,
     DEFAULT_ATS_ROUTE_ADAPTERS,
     LIVE_ATS_AUTHORITY_CANARIES,
+    PublicRetrievalAttempt,
+    PublicRetrievalExhausted,
     RawResponseCache,
     _canonical_public_url,
     _public_transport_url,
@@ -1414,6 +1416,77 @@ def test_canary_publication_retains_replayable_content_and_robots_bytes(
             content_retrieved_at=row["retrieved_at"],
             policies={policy_hash: policy},
         )
+
+
+def test_canary_failure_manifest_serializes_typed_retrieval_attempts(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    quarantine = tmp_path / "failure"
+    quarantine.mkdir(mode=0o700)
+    cache = RawResponseCache(stage / ".raw")
+    body = b"<html><noscript>Please enable JavaScript.</noscript></html>"
+    digest, reference = cache.store(body)
+    policy_hash = hashlib.sha256(b"offline-attempt-policy").hexdigest()
+    host = "jobs.example.test"
+    policy = PublicAccessPolicy(
+        {
+            host: TermsAttestation(
+                host=host,
+                terms_url=f"https://{host}/terms",
+                determination="public_read_only_research_permitted",
+                reviewed_at="2026-07-26T18:00:00+00:00",
+                reviewed_by="Offline Test Operator",
+                reviewer_type="human_operator",
+                notes="Synthetic offline failed-attempt test.",
+            ),
+        },
+        policy_sha256=policy_hash,
+        now=datetime(2026, 7, 27, 2, tzinfo=timezone.utc),
+    )
+    receipt = {
+        "requested_url": f"https://{host}/jobs/engineer",
+        "terms_policy_sha256": policy_hash,
+    }
+    attempt = PublicRetrievalAttempt(
+        engine="dynamic",
+        requested_url=receipt["requested_url"],
+        final_url=receipt["requested_url"],
+        status_code=200,
+        body_bytes=len(body),
+        content_sha256=digest,
+        raw_response_ref=reference,
+        access_receipt_json=json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        renderer_shell=True,
+    )
+    failure = PublicRetrievalExhausted(
+        "static and dynamic public retrieval were exhausted",
+        (attempt,),
+    )
+    canary_capture._quarantine_failure(
+        stage,
+        quarantine,
+        destination=tmp_path / "success",
+        access_policy=policy,
+        command=["python", "capture-canaries", "--offline-test"],
+        progress=[{"job_key": "ashby:test:vacancy", "status": "started"}],
+        failing_job_key="ashby:test:vacancy",
+        failure=failure,
+    )
+    manifest = json.loads(
+        (quarantine / "stage" / "canary-failure-manifest.json").read_bytes()
+    )
+    assert manifest["exception_type"] == "PublicRetrievalExhausted"
+    assert manifest["retrieval_attempts"] == [attempt.as_dict()]
+    assert RawResponseCache(quarantine / "stage" / ".raw").resolve(
+        reference,
+        digest,
+    ) == body
 
 
 @pytest.mark.parametrize(

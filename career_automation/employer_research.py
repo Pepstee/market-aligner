@@ -7,6 +7,7 @@ in a content-addressed raw cache before it can become a citation.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -494,6 +495,50 @@ class RawResponseCache:
         return body
 
 
+@dataclass(frozen=True)
+class PublicRetrievalAttempt:
+    """Immutable, byte-resolvable evidence for one policy-gated fetch stage."""
+
+    engine: str
+    requested_url: str
+    final_url: str | None
+    status_code: int | None
+    body_bytes: int | None
+    content_sha256: str | None
+    raw_response_ref: str | None
+    access_receipt_json: str
+    renderer_shell: bool | None
+    error_type: str | None = None
+    error_message: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "engine": self.engine,
+            "requested_url": self.requested_url,
+            "final_url": self.final_url,
+            "status_code": self.status_code,
+            "body_bytes": self.body_bytes,
+            "content_sha256": self.content_sha256,
+            "raw_response_ref": self.raw_response_ref,
+            "access_receipt": json.loads(self.access_receipt_json),
+            "renderer_shell": self.renderer_shell,
+            "error_type": self.error_type,
+            "error_message": self.error_message,
+        }
+
+
+class PublicRetrievalExhausted(RuntimeError):
+    """All ordinary public transports failed, with immutable attempt evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        attempts: Sequence[PublicRetrievalAttempt],
+    ) -> None:
+        super().__init__(message)
+        self.attempts = tuple(attempts)
+
+
 class ScraplingPublicRetriever:
     """Policy-gated adapter over static and ordinary browser rendering."""
 
@@ -595,6 +640,7 @@ class ScraplingPublicRetriever:
         from scraper.scrapling_client import ScraplingResult
 
         attempts: list[dict[str, Any]] = []
+        evidence_attempts: list[PublicRetrievalAttempt] = []
         requested_host = (urlparse(url).hostname or "").casefold()
         stages = (
             ("static", {"timeout": self.timeout_seconds,
@@ -610,14 +656,72 @@ class ScraplingPublicRetriever:
                 attempts.append({"engine": engine, "ok": False,
                                  "error": type(exc).__name__, "message": str(exc),
                                  "access_receipt": asdict(receipt)})
+                evidence_attempts.append(PublicRetrievalAttempt(
+                    engine=engine,
+                    requested_url=url,
+                    final_url=None,
+                    status_code=None,
+                    body_bytes=None,
+                    content_sha256=None,
+                    raw_response_ref=None,
+                    access_receipt_json=canonical_json(asdict(receipt)),
+                    renderer_shell=None,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                ))
                 continue
+            final_url = str(response.get("url", url))
+            status: int | None = None
+            raw: bytes | None = None
+            digest: str | None = None
+            reference: str | None = None
+            try:
+                raw = base64.b64decode(
+                    str(response["body_base64"]),
+                    validate=True,
+                )
+                digest, reference = self.cache.store(raw)
+                status = int(response.get("status", 0))
+                declared_size = int(response.get("body_bytes", -1))
+                if len(raw) != declared_size:
+                    raise ValueError("Scrapling response byte count mismatch")
+                renderer_shell = self._renderer_shell(response)
+            except Exception as exc:
+                evidence_attempts.append(PublicRetrievalAttempt(
+                    engine=engine,
+                    requested_url=url,
+                    final_url=final_url,
+                    status_code=status,
+                    body_bytes=len(raw) if raw is not None else None,
+                    content_sha256=digest,
+                    raw_response_ref=reference,
+                    access_receipt_json=canonical_json(asdict(receipt)),
+                    renderer_shell=None,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                ))
+                raise PublicRetrievalExhausted(
+                    "public retrieval response evidence is malformed",
+                    evidence_attempts,
+                ) from exc
             attempts.append({
                 "engine": engine,
                 "ok": True,
                 "response": response,
                 "access_receipt": asdict(receipt),
             })
-            final_url = str(response.get("url", url))
+            evidence_attempts.append(PublicRetrievalAttempt(
+                engine=engine,
+                requested_url=url,
+                final_url=final_url,
+                status_code=status,
+                body_bytes=len(raw),
+                content_sha256=digest,
+                raw_response_ref=reference,
+                access_receipt_json=canonical_json(asdict(receipt)),
+                renderer_shell=renderer_shell,
+            ))
+            assert status is not None
             final_host = (urlparse(final_url).hostname or "").casefold()
             redirect_hosts = {
                 (urlparse(str(item.get("url", ""))).hostname or "").casefold()
@@ -627,24 +731,23 @@ class ScraplingPublicRetriever:
                 raise PublicAccessDenied("cross-host redirects are forbidden in JAA public retrieval")
             if challenge := self._terminal_challenge(response):
                 raise PublicAccessDenied(f"ACCESS_DENIED: {challenge}")
-            status = int(response.get("status", 0))
-            size = int(response.get("body_bytes", 0))
             if (
                 200 <= status < 300
-                and size >= 128
-                and not self._renderer_shell(response)
+                and len(raw) >= 128
+                and not renderer_shell
             ):
                 return ScraplingResult(engine, dict(response), tuple(attempts)), receipt
             if status in {404, 410}:
                 raise RuntimeError(f"public vacancy is unavailable with HTTP {status}")
-        raise RuntimeError("static and dynamic public retrieval were exhausted")
+        raise PublicRetrievalExhausted(
+            "static and dynamic public retrieval were exhausted",
+            evidence_attempts,
+        )
 
     def retrieve(self, source_id: str, url: str, *, source_kind: str | None = None,
         canonical_publisher: str | None = None,
                  canonical_article: str | None = None) -> Citation:
         _public_url(url)
-        import base64
-
         result, access_receipt = self._fetch(url)
         response = result.response
         final_url = str(response.get("url", url))
