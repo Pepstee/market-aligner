@@ -454,7 +454,11 @@ class ATSRouteAdapter:
 
 DEFAULT_ATS_ROUTE_ADAPTERS = {
     row.family: row for row in (
-        ATSRouteAdapter("greenhouse", ("job-boards.greenhouse.io",), ("boards-api.greenhouse.io",)),
+        ATSRouteAdapter(
+            "greenhouse",
+            ("job-boards.greenhouse.io", "job-boards.eu.greenhouse.io"),
+            ("boards-api.greenhouse.io",),
+        ),
         ATSRouteAdapter("workable", ("apply.workable.com",), ("apply.workable.com",)),
         ATSRouteAdapter("ashby", ("jobs.ashbyhq.com",), ("jobs.ashbyhq.com",)),
         ATSRouteAdapter("lever", ("jobs.lever.co",), ("jobs.lever.co",)),

@@ -1171,6 +1171,61 @@ def test_live_greenhouse_authority_uses_current_public_job_board_api_host() -> N
     )
 
 
+@pytest.mark.parametrize(
+    "admitted_host",
+    ("job-boards.greenhouse.io", "job-boards.eu.greenhouse.io"),
+)
+def test_greenhouse_admitted_identity_hosts_transform_to_current_api(
+    admitted_host: str,
+) -> None:
+    task = SimpleNamespace(
+        job_key="greenhouse:jetbrains:4695363101",
+        url=f"https://{admitted_host}/jetbrains/jobs/4695363101",
+    )
+    adapter = DEFAULT_ATS_ROUTE_ADAPTERS["greenhouse"]
+
+    assert adapter.admitted_hosts == (
+        "job-boards.greenhouse.io",
+        "job-boards.eu.greenhouse.io",
+    )
+    assert adapter.authority_hosts == ("boards-api.greenhouse.io",)
+    authority_url = adapter.authority_url(task)
+    assert authority_url == (
+        "https://boards-api.greenhouse.io/v1/boards/jetbrains/jobs/4695363101"
+    )
+    assert urlsplit(authority_url).hostname == "boards-api.greenhouse.io"
+    assert "job-boards.eu.greenhouse.io" not in adapter.authority_hosts
+    assert "job-boards.eu.greenhouse.io" not in authority_url
+    adapter._validate_route(task, task.url)
+    adapter._validate_route(task, authority_url, final=True)
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://job-boards.us.greenhouse.io/jetbrains/jobs/4695363101",
+        "https://evil.job-boards.eu.greenhouse.io/jetbrains/jobs/4695363101",
+        "https://job-boards.eu.greenhouse.io/physicsx/jobs/4695363101",
+        "https://job-boards.eu.greenhouse.io/jetbrains/jobs/1234567890",
+        "https://job-boards.eu.greenhouse.io/jetbrains/jobs/4695363101?source=test",
+        "https://job-boards.eu.greenhouse.io/jetbrains/jobs/4695363101#details",
+        "ftp://job-boards.eu.greenhouse.io/jetbrains/jobs/4695363101",
+        "https://user:pass@job-boards.eu.greenhouse.io/jetbrains/jobs/4695363101",
+        "https://job-boards.eu.greenhouse.io/jetbrains/job/4695363101",
+    ),
+)
+def test_greenhouse_eu_admitted_identity_host_rejects_route_confusion(
+    url: str,
+) -> None:
+    task = SimpleNamespace(
+        job_key="greenhouse:jetbrains:4695363101",
+        url=url,
+    )
+
+    with pytest.raises(ValueError):
+        DEFAULT_ATS_ROUTE_ADAPTERS["greenhouse"]._validate_route(task, url)
+
+
 def test_live_workable_authority_uses_tenant_bound_markdown_route() -> None:
     task = SimpleNamespace(
         job_key="workable:suade:67D795D3DE",
