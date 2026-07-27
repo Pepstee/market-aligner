@@ -161,6 +161,7 @@ class Evidence:
     valid_until: date | None = None
     negative: bool = False
     claim_lineage: tuple[tuple[str, int, str], ...] = ()
+    evidence_provenance: tuple[str, str] | None = None
 
     def __post_init__(self) -> None:
         _identifier("evidence_id", self.evidence_id)
@@ -196,6 +197,10 @@ class Evidence:
             raise ValueError(
                 "evidence claim lineage must uniquely bind demonstrated claims"
             )
+        if self.evidence_provenance is not None:
+            provenance_id, source_sha256 = self.evidence_provenance
+            _identifier("evidence provenance ID", provenance_id)
+            _digest("evidence provenance source hash", source_sha256)
 
     def is_releasable(self, *, as_of: date) -> bool:
         return (
@@ -340,6 +345,8 @@ def _evidence_payload(evidence: Evidence) -> dict[str, Any]:
     # empty value preserves the locked software-vector identity.
     if evidence.claim_lineage:
         result["claim_lineage"] = evidence.claim_lineage
+    if evidence.evidence_provenance is not None:
+        result["evidence_provenance"] = evidence.evidence_provenance
     return result
 
 
@@ -390,11 +397,19 @@ def requirement_from_mapping(value: Mapping[str, Any]) -> Requirement:
 def evidence_from_mapping(value: Mapping[str, Any]) -> Evidence:
     valid_until = value.get("valid_until")
     raw_lineage = value.get("claim_lineage") or ()
+    raw_provenance = value.get("evidence_provenance")
     if not isinstance(raw_lineage, (list, tuple)) or any(
         not isinstance(row, (list, tuple)) or len(row) != 3
         for row in raw_lineage
     ):
         raise ValueError("evidence claim_lineage must contain claim bindings")
+    if raw_provenance is not None and (
+        not isinstance(raw_provenance, (list, tuple))
+        or len(raw_provenance) != 2
+    ):
+        raise ValueError(
+            "evidence_provenance must contain provenance ID and source hash"
+        )
     if not isinstance(value.get("negative"), bool):
         raise ValueError("evidence negative must be boolean")
     return Evidence(
@@ -413,6 +428,11 @@ def evidence_from_mapping(value: Mapping[str, Any]) -> Evidence:
         claim_lineage=tuple(
             (str(row[0]), int(row[1]), str(row[2]))
             for row in raw_lineage
+        ),
+        evidence_provenance=(
+            None
+            if raw_provenance is None
+            else (str(raw_provenance[0]), str(raw_provenance[1]))
         ),
     )
 
@@ -598,6 +618,8 @@ def candidate_graph_evidence(
                       evidence.evidence_kind,evidence.approval_state,
                       evidence.epistemic_state,evidence.negative,
                       evidence.valid_until,evidence.content_hash,
+                      evidence.provenance_id AS evidence_provenance_id,
+                      evidence_provenance.source_hash AS evidence_source_hash,
                       claim.claim_id,claim.version AS claim_version,
                       claim.statement AS claim_statement,
                       claim.claim_type AS claim_type,
@@ -605,9 +627,14 @@ def candidate_graph_evidence(
                       claim.approval_state AS claim_approval_state,
                       claim.valid_until AS claim_valid_until,
                       claim.provenance_id AS claim_provenance_id,
+                      claim_provenance.source_hash AS claim_source_hash,
                       decision.decision_id,decision.verifier_kind,decision.policy_id,
-                      decision.policy_version,decision.policy_hash
+                      decision.policy_version,decision.policy_hash,decision.reason,
+                      decision.provenance_id AS decision_provenance_id,
+                      decision_provenance.source_hash AS decision_source_hash
                FROM candidate_evidence evidence
+               JOIN candidate_provenance evidence_provenance
+                 ON evidence_provenance.provenance_id=evidence.provenance_id
                JOIN candidate_claim_edges edge
                  ON edge.evidence_id=evidence.evidence_id
                 AND edge.evidence_version=evidence.version
@@ -615,11 +642,15 @@ def candidate_graph_evidence(
                JOIN candidate_claims claim
                  ON claim.claim_id=edge.claim_id
                 AND claim.version=edge.claim_version
+               JOIN candidate_provenance claim_provenance
+                 ON claim_provenance.provenance_id=claim.provenance_id
                JOIN candidate_verification_decisions decision
                  ON decision.target_kind='evidence'
                 AND decision.target_id=evidence.evidence_id
                 AND decision.target_version=evidence.version
                 AND decision.decision='approved'
+               JOIN candidate_provenance decision_provenance
+                 ON decision_provenance.provenance_id=decision.provenance_id
                WHERE evidence.approval_state='approved'
                  AND evidence.epistemic_state IN ('fact','evidence')
                  AND (evidence.valid_until IS NULL OR evidence.valid_until>=?)
@@ -668,6 +699,14 @@ def candidate_graph_evidence(
             decisions.pop()
         )
         _digest("candidate verification policy hash", policy_hash)
+        decision_row = group[0]
+        if str(decision_row["decision_source_hash"]) != content_hash({
+            "policy_hash": policy_hash,
+            "reason": str(decision_row["reason"]),
+        }):
+            raise ValueError(
+                "candidate verification provenance does not bind its decision"
+            )
         valid_until = group[0]["valid_until"]
         result.append(Evidence(
             evidence_id=evidence_id,
@@ -680,7 +719,9 @@ def candidate_graph_evidence(
             verification_decision="approved",
             verification_method=(
                 f"{decision_id}:{verifier_kind}:{policy_id}:"
-                f"{policy_version}:{policy_hash}"
+                f"{policy_version}:{policy_hash}:"
+                f"{decision_row['decision_provenance_id']}:"
+                f"{decision_row['decision_source_hash']}"
             ),
             content_sha256=str(group[0]["content_hash"]),
             valid_until=date.fromisoformat(str(valid_until)) if valid_until else None,
@@ -702,10 +743,15 @@ def candidate_graph_evidence(
                             else str(row["claim_valid_until"])
                         ),
                         "provenance_id": str(row["claim_provenance_id"]),
+                        "provenance_sha256": str(row["claim_source_hash"]),
                     }),
                 )
                 for row in group
             })),
+            evidence_provenance=(
+                str(group[0]["evidence_provenance_id"]),
+                str(group[0]["evidence_source_hash"]),
+            ),
         ))
     return tuple(result)
 

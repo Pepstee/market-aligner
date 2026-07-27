@@ -499,10 +499,13 @@ def test_candidate_graph_projection_binds_and_supersedes_exact_claim_version(
     )
     graph.approve_claim("professional-python")
     with sqlite3.connect(graph.path) as connection:
-        provenance_id = str(connection.execute(
-            """SELECT provenance_id FROM candidate_claims
-               WHERE claim_id='professional-python' AND version=1"""
-        ).fetchone()[0])
+        provenance_id, provenance_sha256 = connection.execute(
+            """SELECT claim.provenance_id,provenance.source_hash
+               FROM candidate_claims claim
+               JOIN candidate_provenance provenance
+                 ON provenance.provenance_id=claim.provenance_id
+               WHERE claim.claim_id='professional-python' AND claim.version=1"""
+        ).fetchone()
     projected, = candidate_graph_evidence(graph.path, as_of=AS_OF)
     assert projected.claim_lineage == ((
         "professional-python",
@@ -516,8 +519,10 @@ def test_candidate_graph_projection_binds_and_supersedes_exact_claim_version(
             "approval_state": "approved",
             "valid_until": "2035-01-01",
             "provenance_id": provenance_id,
+            "provenance_sha256": provenance_sha256,
         }),
     ),)
+    assert projected.evidence_provenance is not None
 
     graph.add_claim(
         "professional-python",
@@ -529,6 +534,105 @@ def test_candidate_graph_projection_binds_and_supersedes_exact_claim_version(
         valid_until="2035-01-01",
     )
     assert candidate_graph_evidence(graph.path, as_of=AS_OF) == ()
+
+
+def test_candidate_projection_identity_binds_evidence_and_verifier_provenance(
+    tmp_path: Path,
+) -> None:
+    graph = CandidateGraph(tmp_path / "provenance-lineage.sqlite3")
+    graph.add_evidence(
+        "employment",
+        statement="An externally recorded employment outcome.",
+        source_identity="test:employer",
+        state="evidence",
+        evidence_kind="employment_record",
+        valid_until="2035-01-01",
+    )
+    graph.verify_evidence(
+        "employment",
+        1,
+        decision="approved",
+        verifier_kind="human",
+        policy_id="employment-check",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="employer record checked",
+        source_identity="test:verifier",
+    )
+    graph.add_claim(
+        "professional-python",
+        statement="Professional Python delivery is externally evidenced.",
+        claim_type="experience",
+        state="evidence",
+        source_identity="test:claim",
+        valid_until="2035-01-01",
+    )
+    graph.link_claim_evidence(
+        "professional-python",
+        "employment",
+        source_identity="test:edge",
+    )
+    graph.approve_claim("professional-python")
+    original = candidate_graph_evidence(graph.path, as_of=AS_OF)
+    original_hash = evidence_projection_hash(original)
+
+    graph.add_evidence(
+        "decoy",
+        statement="An externally recorded employment outcome.",
+        source_identity="test:different-employer-source",
+        state="evidence",
+        evidence_kind="employment_record",
+    )
+    graph.verify_evidence(
+        "decoy",
+        1,
+        decision="approved",
+        verifier_kind="human",
+        policy_id="employment-check",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="employer record checked",
+        source_identity="test:different-verifier",
+    )
+    with sqlite3.connect(graph.path) as connection:
+        original_evidence_provenance, decoy_evidence_provenance = (
+            str(row[0]) for row in connection.execute(
+                """SELECT provenance_id FROM candidate_evidence
+                   WHERE evidence_id IN ('employment','decoy')
+                   ORDER BY evidence_id DESC"""
+            ).fetchall()
+        )
+        decoy_verifier_provenance = str(connection.execute(
+            """SELECT provenance_id FROM candidate_verification_decisions
+               WHERE target_kind='evidence' AND target_id='decoy'
+                 AND target_version=1 AND decision='approved'"""
+        ).fetchone()[0])
+        connection.execute(
+            """UPDATE candidate_evidence SET provenance_id=?
+               WHERE evidence_id='employment' AND version=1""",
+            (decoy_evidence_provenance,),
+        )
+
+    changed = candidate_graph_evidence(graph.path, as_of=AS_OF)
+    assert changed[0].evidence_provenance != original[0].evidence_provenance
+    assert evidence_projection_hash(changed) != original_hash
+
+    with sqlite3.connect(graph.path) as connection:
+        connection.execute(
+            """UPDATE candidate_evidence SET provenance_id=?
+               WHERE evidence_id='employment' AND version=1""",
+            (original_evidence_provenance,),
+        )
+        connection.execute(
+            """UPDATE candidate_verification_decisions SET provenance_id=?
+               WHERE target_kind='evidence' AND target_id='employment'
+                 AND target_version=1 AND decision='approved'""",
+            (decoy_verifier_provenance,),
+        )
+
+    changed = candidate_graph_evidence(graph.path, as_of=AS_OF)
+    assert changed[0].verification_method != original[0].verification_method
+    assert evidence_projection_hash(changed) != original_hash
 
 
 def test_candidate_graph_projection_rejects_multiple_approval_authorities(
