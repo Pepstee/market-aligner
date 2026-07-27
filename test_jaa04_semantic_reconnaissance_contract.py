@@ -15,6 +15,8 @@ import pytest
 from career_automation.employer_research import (
     FRESHNESS_DAYS,
     RawResponseCache,
+    _plain_excerpt,
+    _public_page_excerpts,
     validate_dossier,
 )
 
@@ -38,6 +40,51 @@ UNRELATED = {
     "hiring": "The university careers article explains how alumni hired a speaker in 2003, not a vacancy.",
     "operational_health": "The product page calls its colour current and operational, without financial results.",
 }
+
+
+def test_entity_encoded_json_paragraphs_remain_byte_exact_and_semantic() -> None:
+    paragraph = (
+        b"&lt;p&gt;This role has job responsibilities and duties for the "
+        b"successful position holder working with engineering teams.&lt;/p&gt;"
+    )
+    body = b'{"content":"' + paragraph + b'","title":"Engineer"}'
+    excerpts = _public_page_excerpts(body)
+    assert excerpts == [(
+        paragraph.decode(),
+        "This role has job responsibilities and duties for the successful "
+        "position holder working with engineering teams.",
+    )]
+    assert excerpts[0][0].encode() in body
+    assert _plain_excerpt(excerpts[0][0]) == excerpts[0][1]
+
+
+def test_json_unicode_escaped_entity_paragraphs_decode_only_for_semantics() -> None:
+    paragraph = (
+        br"\u0026lt;p\u0026gt;This role has job responsibilities and duties "
+        br"for the successful position holder working with engineering teams."
+        br"\u0026lt;/p\u0026gt;"
+    )
+    body = b'{"content":"' + paragraph + b'","title":"Engineer"}'
+    excerpts = _public_page_excerpts(body)
+    assert excerpts == [(
+        paragraph.decode(),
+        "This role has job responsibilities and duties for the successful "
+        "position holder working with engineering teams.",
+    )]
+    assert excerpts[0][0].encode() in body
+
+
+def test_markdown_blocks_remain_byte_exact_without_treating_json_as_markdown() -> None:
+    paragraph = (
+        b"We are hiring for this software engineer role. The position holder "
+        b"develops platform services and owns job responsibilities for customers."
+    )
+    body = b"# Software Engineer\n\n" + paragraph + b"\n\n## Requirements\n"
+    excerpts = _public_page_excerpts(body)
+    assert excerpts == [(paragraph.decode(), paragraph.decode())]
+    assert excerpts[0][0].encode() in body
+    with pytest.raises(ValueError, match="no substantive"):
+        _public_page_excerpts(b'{"description":"This is deliberately long but has no structured paragraph authority at all."}')
 
 
 def _dossier(cache: RawResponseCache, *, excerpts: dict[str, str] | None = None) -> dict[str, object]:

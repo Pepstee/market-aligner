@@ -99,7 +99,13 @@ _OPERATIONAL_SUBSTANCE = (
 
 
 def _plain_excerpt(excerpt: str) -> str:
-    plain = re.sub(r"<[^>]+>", " ", excerpt)
+    decoded = excerpt
+    if re.search(r"\\(?:u[0-9a-fA-F]{4}|[\"\\/bfnrt])", excerpt):
+        try:
+            decoded = json.loads(f'"{excerpt}"')
+        except json.JSONDecodeError:
+            decoded = excerpt
+    plain = re.sub(r"<[^>]+>", " ", unescape(decoded))
     return re.sub(r"\s+", " ", plain).strip()
 
 
@@ -1445,26 +1451,46 @@ def _public_page_excerpts(body: bytes, count: int | None = None) -> list[tuple[s
     """Return distinct byte-exact paragraphs and their conservative plain text."""
     excerpts: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for match in re.finditer(br"<p(?:\s[^>]*)?>.*?</p\s*>", body, re.I | re.S):
-        raw = match.group(0)
-        plain = re.sub(br"<[^>]+>", b" ", raw)
-        plain = re.sub(br"\s+", b" ", plain).strip()
-        if len(plain) < 80:
-            continue
+
+    def admit(raw: bytes) -> bool:
         excerpt = raw.decode("utf-8", "strict")
-        summary = plain.decode("utf-8", "strict")
+        summary = _plain_excerpt(excerpt)
+        if len(summary.encode("utf-8")) < 80:
+            return False
         # JSON escaping can make phonetic/transclusion markup resemble a local
         # absolute path. Such markup is irrelevant to commercial research and
         # must not enter the distributable dossier.
         if re.search(r"(?<![\w/])[A-Za-z]:[\\/]", json.dumps(excerpt), re.I):
-            continue
+            return False
         normalized = summary.casefold()
         if normalized in seen:
-            continue
+            return False
         seen.add(normalized)
         excerpts.append((excerpt, summary))
         if count is not None and len(excerpts) == count:
-            return excerpts
+            return True
+        return False
+
+    paragraph_patterns = (
+        br"<p(?:\s[^>]*)?>.*?</p\s*>",
+        br"&lt;p(?:\s[^&]*?)?&gt;.*?&lt;/p\s*&gt;",
+        br"\\u0026lt;p.*?\\u0026gt;.*?\\u0026lt;/p\\u0026gt;",
+    )
+    for pattern in paragraph_patterns:
+        for match in re.finditer(pattern, body, re.I | re.S):
+            if admit(match.group(0)):
+                return excerpts
+
+    # Official ATS representations such as Workable publish Markdown rather
+    # than HTML. Preserve each exact UTF-8 block as the cited byte range. Do
+    # not treat arbitrary JSON as Markdown; structured JSON must contribute an
+    # actual HTML or entity-encoded paragraph above.
+    stripped = body.lstrip()
+    if not excerpts and not stripped.startswith((b"{", b"[")):
+        for block in re.split(br"(?:\r?\n)[ \t]*(?:\r?\n)+", body):
+            raw = block.strip()
+            if raw and admit(raw):
+                return excerpts
     if not excerpts:
         raise ValueError("public response has no substantive UTF-8 paragraph")
     # Small official pages can contain one substantive paragraph. Reusing its
