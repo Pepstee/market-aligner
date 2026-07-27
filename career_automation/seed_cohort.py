@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,7 @@ from scraper.viability import Vacancy, canonical_key, local_decision
 
 
 CHECKED_SEED_RECORDS_HASH = "2e5114bd1f01b75cd598061a07356ac7424c2914833f15d40f0f0d671327e348"
+_PROGRESS_SCHEMA = "jaa04.seed-hydration-progress.v1"
 
 
 @dataclass(frozen=True)
@@ -250,6 +252,90 @@ def _raw_reference(citation: Citation) -> dict[str, Any]:
     }
 
 
+def _write_progress(path: Path, payload: dict[str, Any]) -> None:
+    """Durably replace one private hydration checkpoint."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    if temporary.exists():
+        raise RuntimeError("hydration checkpoint temporary output already exists")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(_canonical(payload) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o600)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _resume_records(
+    progress: dict[str, Any],
+    *,
+    seeds: list[SeedVacancy],
+    seed_sha256: str,
+    records_hash: str,
+    raw_root: Path,
+    maximum_routes: int,
+    timeout_seconds: int,
+    access_policy_sha256: str | None,
+    requested_as_of: datetime | None,
+) -> tuple[datetime, list[dict[str, Any]]]:
+    required = {
+        "schema_version", "seed_sha256", "seed_records_hash", "as_of",
+        "maximum_routes", "timeout_seconds", "access_policy_sha256", "records",
+    }
+    if set(progress) != required or progress.get("schema_version") != _PROGRESS_SCHEMA:
+        raise RuntimeError("hydration checkpoint schema is invalid")
+    if (progress.get("seed_sha256") != seed_sha256
+            or progress.get("seed_records_hash") != records_hash):
+        raise RuntimeError("hydration checkpoint belongs to a different checked seed")
+    if (progress.get("maximum_routes") != maximum_routes
+            or progress.get("timeout_seconds") != timeout_seconds
+            or progress.get("access_policy_sha256") != access_policy_sha256):
+        raise RuntimeError("hydration checkpoint acquisition policy differs")
+    try:
+        pinned_as_of = datetime.fromisoformat(str(progress["as_of"]).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("hydration checkpoint as_of is invalid") from exc
+    if pinned_as_of.tzinfo is None:
+        raise RuntimeError("hydration checkpoint as_of has no timezone")
+    pinned_as_of = pinned_as_of.astimezone(timezone.utc)
+    if requested_as_of is not None:
+        if requested_as_of.tzinfo is None:
+            raise ValueError("as_of must include a timezone")
+        if requested_as_of.astimezone(timezone.utc) != pinned_as_of:
+            raise RuntimeError("hydration checkpoint as_of differs")
+    records = progress.get("records")
+    if not isinstance(records, list) or len(records) > len(seeds):
+        raise RuntimeError("hydration checkpoint record prefix is invalid")
+    cache = RawResponseCache(raw_root)
+    for index, record in enumerate(records):
+        if (not isinstance(record, dict)
+                or record.get("job_key") != seeds[index].job_key
+                or record.get("seed_payload_hash") != seeds[index].payload_hash
+                or record.get("temporal_admission", {}).get("as_of") != pinned_as_of.isoformat()):
+            raise RuntimeError("hydration checkpoint record is not the checked seed prefix")
+        refs = record.get("raw_response_refs")
+        if not isinstance(refs, list) or not refs:
+            raise RuntimeError("hydration checkpoint record lacks raw authority")
+        for reference in refs:
+            if not isinstance(reference, dict):
+                raise RuntimeError("hydration checkpoint raw authority is invalid")
+            cache.resolve(str(reference.get("raw_response", "")),
+                          str(reference.get("sha256", "")))
+        expected_payload_hash = hashlib.sha256(_canonical({
+            "source_identity": seeds[index].job_key,
+            "official_response_hashes": sorted({
+                str(reference["sha256"]) for reference in refs
+            }),
+            "vacancy": record.get("payload"),
+        })).hexdigest()
+        if record.get("payload_hash") != expected_payload_hash:
+            raise RuntimeError("hydration checkpoint payload hash is invalid")
+    return pinned_as_of, list(records)
+
+
 def _temporal(citation: Citation, as_of: datetime) -> dict[str, Any]:
     value = citation.updated_at or citation.published_at
     if not value or not citation.publisher_date_evidence:
@@ -349,10 +435,40 @@ def hydrate_seed(
     if maximum_routes < 1 or timeout_seconds < 1:
         raise ValueError("retrieval limits must be positive")
     seeds = load_seed(seed_path, expected_records_hash=expected_seed_records_hash)
-    as_of = as_of or datetime.now(timezone.utc)
-    if as_of.tzinfo is None:
-        raise ValueError("as_of must include a timezone")
-    as_of = as_of.astimezone(timezone.utc)
+    seed_sha256 = hashlib.sha256(seed_path.read_bytes()).hexdigest()
+    seed_records_hash = hashlib.sha256(_canonical([asdict(seed) for seed in seeds])).hexdigest()
+    access_policy_sha256 = access_policy.policy_sha256 if access_policy is not None else None
+    progress_path = output.with_name(f".{output.name}.progress.json")
+    if progress_path.exists():
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        as_of, records = _resume_records(
+            progress,
+            seeds=seeds,
+            seed_sha256=seed_sha256,
+            records_hash=seed_records_hash,
+            raw_root=raw_root,
+            maximum_routes=maximum_routes,
+            timeout_seconds=timeout_seconds,
+            access_policy_sha256=access_policy_sha256,
+            requested_as_of=as_of,
+        )
+    else:
+        as_of = as_of or datetime.now(timezone.utc)
+        if as_of.tzinfo is None:
+            raise ValueError("as_of must include a timezone")
+        as_of = as_of.astimezone(timezone.utc)
+        records = []
+        progress = {
+            "schema_version": _PROGRESS_SCHEMA,
+            "seed_sha256": seed_sha256,
+            "seed_records_hash": seed_records_hash,
+            "as_of": as_of.isoformat(),
+            "maximum_routes": maximum_routes,
+            "timeout_seconds": timeout_seconds,
+            "access_policy_sha256": access_policy_sha256,
+            "records": records,
+        }
+        _write_progress(progress_path, progress)
     cache = RawResponseCache(raw_root)
     retriever = authority_retriever
     if retriever is None:
@@ -369,10 +485,10 @@ def hydrate_seed(
             exact_canaries=False,
         )
     policy = CalibrationPolicy()
-    records = [
-        _hydrate_one(seed, retriever, cache, policy, as_of)
-        for seed in seeds
-    ]
+    for seed in seeds[len(records):]:
+        records.append(_hydrate_one(seed, retriever, cache, policy, as_of))
+        progress["records"] = records
+        _write_progress(progress_path, progress)
     urls = {_normal_url(str(record["url"])) for record in records}
     bodies = {str(record["content_sha256"]) for record in records}
     if len(urls) != COHORT_SIZE or len(bodies) != COHORT_SIZE:
@@ -383,8 +499,8 @@ def hydrate_seed(
         "selection": "exact checked v1 identities; current official authority replay; exact 30",
         "seed": {
             "schema_version": "jaa04.admitted-queue.v1",
-            "sha256": hashlib.sha256(seed_path.read_bytes()).hexdigest(),
-            "records_hash": hashlib.sha256(_canonical([asdict(seed) for seed in seeds])).hexdigest(),
+            "sha256": seed_sha256,
+            "records_hash": seed_records_hash,
         },
         "policy": {
             "identity": DECISION_RULE_VERSION,
@@ -411,4 +527,5 @@ def hydrate_seed(
         raise RuntimeError("official admitted queue temporary output already exists")
     temporary.write_bytes(_canonical(envelope) + b"\n")
     temporary.replace(output)
+    progress_path.unlink()
     return envelope

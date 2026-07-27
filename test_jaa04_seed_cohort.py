@@ -65,14 +65,20 @@ class _Authorities:
         role_outcome: str = "supported",
         top_level_list: bool = False,
         redirect: bool = False,
+        fail_on: str | None = None,
     ) -> None:
         self.cache = cache
         self.age_days = age_days
         self.role_outcome = role_outcome
         self.top_level_list = top_level_list
         self.redirect = redirect
+        self.fail_on = fail_on
+        self.calls: list[str] = []
 
     def retrieve_plan(self, task: Any):
+        self.calls.append(task.job_key)
+        if task.job_key == self.fail_on:
+            raise RuntimeError("injected acquisition interruption")
         posted = (AS_OF - timedelta(days=self.age_days)).isoformat()
         number = task.job_key.rsplit("-", 1)[1]
         document = {
@@ -200,6 +206,88 @@ def test_hydration_preserves_redirects_and_parses_top_level_json_arrays(
     ]
     assert first["raw_response_refs"][0]["redirect_sequence"] == 1
     _capture_module()._admitted_input(tmp_path / "official-v2.json")
+
+
+def test_hydration_resumes_from_a_validated_completed_prefix(tmp_path: Path) -> None:
+    seed = tmp_path / "seed.json"
+    records = _seed(seed)
+    raw = tmp_path / "raw"
+    output = tmp_path / "official-v2.json"
+    first = _Authorities(RawResponseCache(raw), fail_on="himalayas:seed-03")
+    with pytest.raises(RuntimeError, match="injected acquisition interruption"):
+        hydrate_seed(
+            seed,
+            output,
+            raw,
+            as_of=AS_OF,
+            authority_retriever=first,
+            expected_seed_records_hash=_records_hash(records),
+        )
+    progress_path = tmp_path / ".official-v2.json.progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert [row["job_key"] for row in progress["records"]] == [
+        "himalayas:seed-01",
+        "himalayas:seed-02",
+    ]
+    assert progress_path.stat().st_mode & 0o777 == 0o600
+    assert not output.exists()
+
+    second = _Authorities(RawResponseCache(raw))
+    envelope = hydrate_seed(
+        seed,
+        output,
+        raw,
+        as_of=AS_OF,
+        authority_retriever=second,
+        expected_seed_records_hash=_records_hash(records),
+    )
+    assert second.calls[0] == "himalayas:seed-03"
+    assert len(second.calls) == 28
+    assert len(envelope["records"]) == 30
+    assert not progress_path.exists()
+
+
+def test_hydration_rejects_checkpoint_policy_or_time_substitution(
+    tmp_path: Path,
+) -> None:
+    seed = tmp_path / "seed.json"
+    records = _seed(seed)
+    raw = tmp_path / "raw"
+    output = tmp_path / "official-v2.json"
+    interrupted = _Authorities(RawResponseCache(raw), fail_on="himalayas:seed-02")
+    with pytest.raises(RuntimeError, match="injected acquisition interruption"):
+        hydrate_seed(
+            seed,
+            output,
+            raw,
+            as_of=AS_OF,
+            authority_retriever=interrupted,
+            expected_seed_records_hash=_records_hash(records),
+        )
+    progress_path = tmp_path / ".official-v2.json.progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["access_policy_sha256"] = "0" * 64
+    progress_path.write_bytes(_canonical(progress) + b"\n")
+    with pytest.raises(RuntimeError, match="acquisition policy differs"):
+        hydrate_seed(
+            seed,
+            output,
+            raw,
+            as_of=AS_OF,
+            authority_retriever=_Authorities(RawResponseCache(raw)),
+            expected_seed_records_hash=_records_hash(records),
+        )
+    progress["access_policy_sha256"] = None
+    progress_path.write_bytes(_canonical(progress) + b"\n")
+    with pytest.raises(RuntimeError, match="as_of differs"):
+        hydrate_seed(
+            seed,
+            output,
+            raw,
+            as_of=AS_OF + timedelta(seconds=1),
+            authority_retriever=_Authorities(RawResponseCache(raw)),
+            expected_seed_records_hash=_records_hash(records),
+        )
 
 
 @pytest.mark.parametrize(
