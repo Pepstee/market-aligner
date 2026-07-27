@@ -59,11 +59,20 @@ def test_production_canary_refuses_unattended_network_access_without_terms_autho
         for path in ROOT.glob("**/capture_receipt.json")
     }
     destination = tmp_path / "canaries"
-    completed = subprocess.run((sys.executable, str(CAPTURE_SCRIPT), "--destination", str(destination)),
+    quarantine = tmp_path / "canary-failure"
+    completed = subprocess.run((
+        sys.executable,
+        str(CAPTURE_SCRIPT),
+        "--destination",
+        str(destination),
+        "--failure-quarantine",
+        str(quarantine),
+    ),
                                cwd=ROOT, text=True, capture_output=True, check=False, timeout=240)
     assert completed.returncode != 0
     assert "--access-policy" in completed.stderr
     assert not destination.exists()
+    assert not quarantine.exists()
     receipts_after = {
         path.relative_to(ROOT): path.read_bytes()
         for path in ROOT.glob("**/capture_receipt.json")

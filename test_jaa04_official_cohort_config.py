@@ -1213,7 +1213,10 @@ def test_live_workable_authority_rejects_noncanonical_admitted_identity(
         DEFAULT_ATS_ROUTE_ADAPTERS["workable"].authority_url(task)
 
 
-@pytest.mark.parametrize("attack", (None, "wrong-policy"))
+@pytest.mark.parametrize(
+    "attack",
+    (None, "wrong-policy", "existing-quarantine", "quarantine-failure"),
+)
 def test_canary_publication_retains_replayable_content_and_robots_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1306,7 +1309,7 @@ def test_canary_publication_retains_replayable_content_and_robots_bytes(
                     **asdict(receipt),
                     **(
                         {"terms_policy_sha256": "0" * 64}
-                        if attack == "wrong-policy" else {}
+                        if attack in {"wrong-policy", "quarantine-failure"} else {}
                     ),
                 },
             )
@@ -1319,12 +1322,75 @@ def test_canary_publication_retains_replayable_content_and_robots_bytes(
     monkeypatch.setattr(canary_capture, "ScraplingPublicRetriever", FakeTransport)
     monkeypatch.setattr(canary_capture, "PortableAuthorityRetriever", FakeRetriever)
     destination = tmp_path / "canaries"
-    if attack == "wrong-policy":
-        with pytest.raises(ValueError, match="operator-presented policy"):
-            canary_capture.capture(destination, policy)
+    quarantine = tmp_path / "canary-failure"
+    command = ["python", "capture-canaries", "--offline-test"]
+    if attack == "existing-quarantine":
+        quarantine.mkdir()
+        sentinel = quarantine / "sentinel"
+        sentinel.write_text("do not overwrite", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="quarantine already exists"):
+            canary_capture.capture(
+                destination,
+                policy,
+                failure_quarantine=quarantine,
+                command=command,
+            )
+        assert sentinel.read_text(encoding="utf-8") == "do not overwrite"
         assert not destination.exists()
         return
-    canary_capture.capture(destination, policy)
+    if attack == "wrong-policy":
+        with pytest.raises(ValueError, match="operator-presented policy"):
+            canary_capture.capture(
+                destination,
+                policy,
+                failure_quarantine=quarantine,
+                command=command,
+            )
+        assert not destination.exists()
+        stage = quarantine / "stage"
+        manifest = json.loads(
+            (stage / "canary-failure-manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["schema_version"] == "jaa04.canary-failure-quarantine.v1"
+        assert manifest["accepted"] is False
+        assert manifest["source_commit"]
+        assert manifest["access_policy_sha256"] == policy_hash
+        assert manifest["command"] == command
+        assert manifest["failing_job_key"] == LIVE_ATS_AUTHORITY_CANARIES[0].job_key
+        assert manifest["exception_type"] == "ValueError"
+        assert "operator-presented policy" in manifest["exception_message"]
+        assert [row["status"] for row in manifest["canary_progress"]] == [
+            "started", "pending", "pending",
+        ]
+        assert len(list((stage / ".raw" / "sha256").glob("*/*"))) == 2
+        return
+    if attack == "quarantine-failure":
+        def fail_quarantine(*_: object, **__: object) -> None:
+            raise OSError("injected quarantine failure")
+
+        monkeypatch.setattr(canary_capture, "_quarantine_failure", fail_quarantine)
+        with pytest.raises(ValueError, match="operator-presented policy") as raised:
+            canary_capture.capture(
+                destination,
+                policy,
+                failure_quarantine=quarantine,
+                command=command,
+            )
+        notes = getattr(raised.value, "__notes__", [])
+        assert len(notes) == 1
+        assert "injected quarantine failure" in notes[0]
+        preserved = next(tmp_path.glob("jaa04-canaries-*"))
+        assert str(preserved) in notes[0]
+        assert len(list((preserved / ".raw" / "sha256").glob("*/*"))) == 2
+        assert not destination.exists()
+        return
+    canary_capture.capture(
+        destination,
+        policy,
+        failure_quarantine=quarantine,
+        command=command,
+    )
+    assert not quarantine.exists()
 
     cache = RawResponseCache(destination / ".raw")
     assert (destination / ".raw" / "sha256").is_dir()
