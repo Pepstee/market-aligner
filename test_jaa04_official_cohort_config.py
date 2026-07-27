@@ -26,12 +26,18 @@ from career_automation.employer_research import (
 from career_automation.official_cohort import (
     AGGREGATORS,
     OFFICIAL_ADAPTERS,
+    AuditedAccessController,
+    AuditedRobotsClient,
     ResponseRecorder,
+    _canonical,
+    _select_candidates,
+    _timing_evidence,
     _validate_config,
     build,
 )
 from career_automation.public_access import (
     PublicAccessDenied,
+    PublicAccessController,
     PublicAccessPolicy,
     RobotsReceipt,
     TermsAttestation,
@@ -137,6 +143,13 @@ def test_official_transport_resolves_the_scheme_default_port() -> None:
         resolver=recording_resolver,
     )
     assert resolved == [("api.lever.co", 80), ("api.lever.co", 443)]
+
+
+def test_official_transport_returns_the_exact_validated_dns_set() -> None:
+    assert _public_transport_url(
+        "https://api.lever.co/v0/postings/acme?mode=json",
+        resolver=_public_resolver,
+    ) == ("93.184.216.34",)
 
 
 @pytest.mark.parametrize(
@@ -258,9 +271,225 @@ def test_response_recorder_preserves_query_transport_url_and_exact_bytes(
     record = recorder.records[0]
     assert record["requested_url"] == url
     assert record["response_url"] == url
+    assert record["byte_count"] == len(body)
+    assert record["dns_addresses"] == ["93.184.216.34"]
+    assert record["access_receipt"]["requested_url"] == url
     raw = tmp_path / "raw" / str(record["raw_response"])
     assert raw.read_bytes() == body
     assert hashlib.sha256(body).hexdigest() == record["sha256"]
+    assert recorder.send_events == [
+        {
+            **recorder.send_events[0],
+            "send_sequence": 0,
+            "requested_url": url,
+            "validated_dns_addresses": ["93.184.216.34"],
+            "outcome": "response",
+            "status": 200,
+            "byte_count": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "raw_response": record["raw_response"],
+        }
+    ]
+
+
+def test_content_send_stops_if_dns_changes_during_authority_throttle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter(("93.184.216.34", "93.184.216.35"))
+
+    def changing_resolver(
+        _host: str,
+        port: int,
+    ) -> tuple[tuple[object, ...], ...]:
+        return ((None, None, None, None, (next(answers), port)),)
+
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        changing_resolver,
+    )
+    content_calls: list[str] = []
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    def content_send(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: object,
+    ) -> requests.Response:
+        content_calls.append(str(request.url))
+        raise AssertionError("changed DNS must stop before content transport")
+
+    monkeypatch.setattr(requests.sessions.Session, "send", content_send)
+    recorder = ResponseRecorder(
+        tmp_path / "raw",
+        AllowingController(),  # type: ignore[arg-type]
+    )
+    url = "https://api.lever.co/v0/postings/acme?mode=json"
+    with recorder.installed(), pytest.raises(ValueError, match="DNS changed"):
+        requests.Session().send(requests.Request("GET", url).prepare())
+    assert content_calls == []
+    assert recorder.send_events == []
+
+
+def test_denied_robots_response_is_preserved_before_content_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    host = "careersdeltacapita.recruitee.com"
+    robots = b"authentication required"
+
+    class DeniedRobots:
+        def fetch(self, _engine: str, url: str, **_kwargs: object) -> dict[str, object]:
+            assert url == f"https://{host}/robots.txt"
+            return {
+                "url": url,
+                "status": 401,
+                "body_base64": base64.b64encode(robots).decode(),
+                "body_bytes": len(robots),
+                "history": [],
+            }
+
+    attestation = TermsAttestation(
+        host=host,
+        terms_url="https://tellent.com/terms",
+        determination="public_read_only_research_permitted",
+        reviewed_at="2026-07-26T18:00:00+00:00",
+        reviewed_by="Test Operator",
+        reviewer_type="human_operator",
+        notes="Offline exact-host test.",
+    )
+    policy = PublicAccessPolicy(
+        {host: attestation},
+        policy_sha256="2" * 64,
+        now=datetime(2026, 7, 27, 12, tzinfo=timezone.utc),
+    )
+    cache = RawResponseCache(tmp_path / "raw")
+    robots_client = AuditedRobotsClient(DeniedRobots(), cache)
+    controller = AuditedAccessController(
+        PublicAccessController(policy, robots_client, cache),
+        robots_client,
+    )
+    content = f"https://{host}/api/offers/"
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED: HTTP 401"):
+        controller.before_request(content)
+    assert len(controller.robots_events) == 1
+    event = controller.robots_events[0]
+    assert event["decision"] == "denied"
+    assert event["status"] == 401
+    assert event["byte_count"] == len(robots)
+    assert cache.resolve(str(event["raw_response"]), str(event["sha256"])) == robots
+
+
+def test_timing_evidence_binds_robots_and_content_to_ten_second_floor() -> None:
+    robots = [{
+        "host": "jobs.example.test",
+        "requested_monotonic_ns": 1_000_000_000,
+    }]
+    sends = [
+        {
+            "send_sequence": 0,
+            "host": "jobs.example.test",
+            "sent_at": "2026-07-27T12:00:11+00:00",
+            "sent_monotonic_ns": 11_000_000_000,
+            "required_interval_seconds": 10.0,
+        },
+        {
+            "send_sequence": 1,
+            "host": "jobs.example.test",
+            "sent_at": "2026-07-27T12:00:21+00:00",
+            "sent_monotonic_ns": 21_000_000_000,
+            "required_interval_seconds": 10.0,
+        },
+    ]
+    evidence = _timing_evidence(sends, robots)
+    assert [row["prior_event"] for row in evidence] == ["robots", "content"]
+    assert [row["elapsed_seconds"] for row in evidence] == [10.0, 10.0]
+    assert all(row["compliant"] is True for row in evidence)
+
+
+def test_selection_trace_covers_duplicates_and_rows_below_exact_cut() -> None:
+    candidates = []
+    for number in range(32):
+        candidates.append({
+            "job_key": f"greenhouse:{number:02d}",
+            "url": f"https://jobs.example.test/{number:02d}",
+            "content_sha256": f"{number:064x}",
+            "opportunity0_decision": {"score_bp": 9000 - number},
+            "temporal_admission": {
+                "publisher_time": "2026-07-27T12:00:00+00:00",
+            },
+            "raw_response_refs": [{"sha256": f"{number:064x}"}],
+        })
+    candidates.insert(1, {
+        **candidates[0],
+        "job_key": "greenhouse:duplicate-url",
+    })
+    selected, trace = _select_candidates(candidates)
+    assert len(selected) == 30
+    assert len(trace) == 33
+    assert trace[1]["disposition"] == "duplicate_url"
+    assert [row["disposition"] for row in trace].count("selected") == 30
+    assert [row["disposition"] for row in trace].count("below_exact_30_cut") == 2
+
+
+def test_below_floor_run_writes_evidence_but_no_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("test-only exact bytes\n", encoding="utf-8")
+    output = tmp_path / "queue.json"
+    evidence = tmp_path / "capture-evidence.json"
+    raw = tmp_path / "raw"
+
+    monkeypatch.setattr(
+        "career_automation.official_cohort.load_config",
+        lambda _path: {
+            "boards": {"enabled": ["greenhouse"]},
+            "greenhouse": {"companies": {}},
+            "search_terms": ["software"],
+        },
+    )
+
+    class EmptyAdapter:
+        def discover(self, _terms: list[str], *, live: bool) -> list[object]:
+            assert live is True
+            return []
+
+    monkeypatch.setattr(
+        "career_automation.official_cohort.load_adapter",
+        lambda _board, config: EmptyAdapter(),
+    )
+    controller = SimpleNamespace(
+        policy=SimpleNamespace(
+            source_path=tmp_path / "policy.json",
+            policy_sha256="3" * 64,
+        ),
+        robots_events=(),
+    )
+    with pytest.raises(RuntimeError, match="only 0 current unique"):
+        build(
+            config,
+            output,
+            raw,
+            access_controller=controller,
+            evidence_output=evidence,
+        )
+    assert not output.exists()
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    assert payload["result_status"] == "rejected_below_admission_floor"
+    assert payload["selected_count"] == 0
+    assert payload["raw_store"]["inventory"] == []
+    assert evidence.stat().st_mode & 0o777 == 0o600
+    claimed = payload.pop("evidence_sha256")
+    assert claimed == hashlib.sha256(_canonical(payload)).hexdigest()
 
 
 def test_overnight_config_projects_one_canonical_official_interface() -> None:

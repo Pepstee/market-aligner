@@ -9,10 +9,14 @@ Every HTTP response consumed by an adapter is retained byte-for-byte.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -66,16 +70,40 @@ def _normal_url(value: str) -> str:
 class ResponseRecorder:
     """Record response bodies and redirect chains without changing adapters."""
 
-    def __init__(self, root: Path, access_controller: PublicAccessController) -> None:
+    def __init__(self, root: Path, access_controller: Any) -> None:
         self.root = root
         self.access_controller = access_controller
         self.root.mkdir(parents=True, exist_ok=True)
         self.records: list[dict[str, Any]] = []
+        self.send_events: list[dict[str, Any]] = []
+        self._send_context_by_url: dict[str, dict[str, Any]] = {}
 
-    def record(self, response: Any, observed_at: str) -> None:
+    def record(
+        self,
+        response: Any,
+        observed_at: str,
+        *,
+        access_receipt: Any,
+        send_sequence: int,
+        dns_addresses: tuple[str, ...],
+    ) -> None:
         chain = [*response.history, response]
         redirect_chain = [str(item.url) for item in chain]
         for sequence, item in enumerate(chain):
+            item_requested_url = str(item.request.url)
+            context = self._send_context_by_url.get(item_requested_url)
+            item_receipt = (
+                context["access_receipt"] if context is not None
+                else access_receipt
+            )
+            item_send_sequence = (
+                int(context["send_sequence"]) if context is not None
+                else send_sequence
+            )
+            item_dns_addresses = (
+                tuple(context["dns_addresses"]) if context is not None
+                else dns_addresses
+            )
             body = bytes(item.content)
             digest = hashlib.sha256(body).hexdigest()
             relative = Path(digest[:2]) / f"{digest}.response"
@@ -85,12 +113,24 @@ class ResponseRecorder:
                 raise RuntimeError("raw response hash collision")
             if not path.exists():
                 path.write_bytes(body)
+            published_at, updated_at, publisher_evidence = (
+                extract_publisher_timestamps(body)
+            )
             self.records.append({
                 "sha256": digest, "raw_response": relative.as_posix(),
-                "requested_url": str(item.request.url), "final_url": str(response.url),
+                "requested_url": item_requested_url, "final_url": str(response.url),
                 "response_url": str(item.url), "status": int(item.status_code),
                 "redirect_sequence": sequence, "redirect_chain": redirect_chain,
                 "observed_at": observed_at,
+                "byte_count": len(body),
+                "dns_addresses": list(item_dns_addresses),
+                "send_sequence": item_send_sequence,
+                "published_at": published_at,
+                "updated_at": updated_at,
+                "publisher_time": updated_at or published_at,
+                "publisher_date_evidence": publisher_evidence,
+                "retrieval_engine": "requests-static",
+                "access_receipt": asdict(item_receipt),
             })
 
     @contextmanager
@@ -103,14 +143,76 @@ class ResponseRecorder:
         def send(session: Any, request: Any, **kwargs: Any) -> Any:
             requested_url = str(request.url)
             if urlsplit(requested_url).query:
-                _public_transport_url(requested_url)
+                initial_addresses = _public_transport_url(requested_url)
             else:
-                _public_url(requested_url)
+                initial_addresses = _public_url(requested_url)
+            started_at = datetime.now(timezone.utc).isoformat()
             receipt = recorder.access_controller.before_request(requested_url)
+            if urlsplit(requested_url).query:
+                addresses = _public_transport_url(requested_url)
+            else:
+                addresses = _public_url(requested_url)
+            if addresses != initial_addresses:
+                raise ValueError(
+                    "transport DNS changed between initial validation and send"
+                )
+            send_sequence = len(recorder.send_events)
+            event: dict[str, Any] = {
+                "send_sequence": send_sequence,
+                "host": urlsplit(requested_url).hostname,
+                "requested_url": requested_url,
+                "initial_dns_addresses": list(initial_addresses),
+                "validated_dns_addresses": list(addresses),
+                "validation_started_at": started_at,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+                "sent_monotonic_ns": time.monotonic_ns(),
+                "required_interval_seconds": float(
+                    receipt.crawl_delay_seconds
+                ),
+                "outcome": "pending",
+            }
+            recorder.send_events.append(event)
+            recorder._send_context_by_url[requested_url] = {
+                "send_sequence": send_sequence,
+                "dns_addresses": addresses,
+                "access_receipt": receipt,
+            }
             request.headers["User-Agent"] = USER_AGENT
-            response = original(session, request, **kwargs)
-            recorder.record(response, datetime.now(timezone.utc).isoformat())
-            recorder.records[-1]["access_receipt"] = asdict(receipt)
+            try:
+                response = original(session, request, **kwargs)
+            except Exception as exc:
+                event["outcome"] = "transport_error"
+                event["error_type"] = type(exc).__name__
+                event["observed_at"] = datetime.now(timezone.utc).isoformat()
+                raise
+            observed_at = datetime.now(timezone.utc).isoformat()
+            body = bytes(response.content)
+            body_digest = hashlib.sha256(body).hexdigest()
+            published_at, updated_at, publisher_evidence = (
+                extract_publisher_timestamps(body)
+            )
+            event.update({
+                "outcome": "response",
+                "final_url": str(response.url),
+                "status": int(response.status_code),
+                "byte_count": len(body),
+                "sha256": body_digest,
+                "raw_response": (
+                    f"{body_digest[:2]}/{body_digest}.response"
+                ),
+                "observed_at": observed_at,
+                "published_at": published_at,
+                "updated_at": updated_at,
+                "publisher_time": updated_at or published_at,
+                "publisher_date_evidence": publisher_evidence,
+            })
+            recorder.record(
+                response,
+                observed_at,
+                access_receipt=receipt,
+                send_sequence=send_sequence,
+                dns_addresses=addresses,
+            )
             return response
 
         requests.sessions.Session.send = send
@@ -118,6 +220,125 @@ class ResponseRecorder:
             yield
         finally:
             requests.sessions.Session.send = original
+
+
+class AuditedRobotsClient:
+    """Preserve every robots response before the policy decides its meaning."""
+
+    def __init__(self, client: Any, cache: RawResponseCache) -> None:
+        self.client = client
+        self.cache = cache
+        self.events: list[dict[str, Any]] = []
+
+    def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        addresses = _public_url(url)
+        requested_at = datetime.now(timezone.utc).isoformat()
+        requested_monotonic_ns = time.monotonic_ns()
+        try:
+            response = self.client.fetch(engine, url, **kwargs)
+        except Exception as exc:
+            self.events.append({
+                "host": urlsplit(url).hostname,
+                "requested_url": url,
+                "validated_dns_addresses": list(addresses),
+                "requested_at": requested_at,
+                "requested_monotonic_ns": requested_monotonic_ns,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "decision": "unavailable",
+                "reason": type(exc).__name__,
+            })
+            raise
+        try:
+            body = base64.b64decode(
+                str(response["body_base64"]),
+                validate=True,
+            )
+            if len(body) != int(response.get("body_bytes", -1)):
+                raise ValueError("robots response byte count mismatch")
+        except (KeyError, ValueError) as exc:
+            self.events.append({
+                "host": urlsplit(url).hostname,
+                "requested_url": url,
+                "validated_dns_addresses": list(addresses),
+                "requested_at": requested_at,
+                "requested_monotonic_ns": requested_monotonic_ns,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "decision": "unavailable",
+                "reason": type(exc).__name__,
+            })
+            raise
+        digest, reference = self.cache.store(body)
+        history = [
+            {
+                "url": str(item.get("url", "")),
+                "status": int(item.get("status", 0)),
+            }
+            for item in response.get("history", ()) or ()
+        ]
+        self.events.append({
+            "host": urlsplit(url).hostname,
+            "requested_url": url,
+            "final_url": str(response.get("url", url)),
+            "validated_dns_addresses": list(addresses),
+            "requested_at": requested_at,
+            "requested_monotonic_ns": requested_monotonic_ns,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "status": int(response.get("status", 0)),
+            "byte_count": len(body),
+            "sha256": digest,
+            "raw_response": reference,
+            "redirect_history": history,
+            "decision": "pending",
+            "reason": "awaiting_public_access_decision",
+        })
+        return response
+
+    def mark_decision(self, content_url: str, *, allowed: bool, reason: str) -> None:
+        host = urlsplit(content_url).hostname
+        for event in reversed(self.events):
+            if event.get("host") == host and event.get("decision") == "pending":
+                event["decision"] = "allowed" if allowed else "denied"
+                event["reason"] = reason
+                event["content_route"] = content_url
+                return
+
+
+class AuditedAccessController:
+    """Bind the public-access decision to the exact audited robots response."""
+
+    def __init__(
+        self,
+        controller: PublicAccessController,
+        robots_client: AuditedRobotsClient,
+    ) -> None:
+        self.controller = controller
+        self.robots_client = robots_client
+        self.policy = controller.policy
+
+    @property
+    def receipts(self) -> tuple[Any, ...]:
+        return self.controller.receipts
+
+    @property
+    def robots_events(self) -> tuple[dict[str, Any], ...]:
+        return tuple(self.robots_client.events)
+
+    def before_request(self, url: str) -> Any:
+        try:
+            receipt = self.controller.before_request(url)
+        except Exception as exc:
+            self.robots_client.mark_decision(
+                url,
+                allowed=False,
+                reason=str(exc),
+            )
+            raise
+        self.robots_client.mark_decision(
+            url,
+            allowed=True,
+            reason="public_access_allowed",
+        )
+        return receipt
 
 
 def _field(payload: dict[str, Any], names: tuple[str, ...]) -> str:
@@ -263,15 +484,203 @@ def _temporal_admission(refs: list[dict[str, Any]], raw_root: Path,
     }
 
 
+def _raw_inventory(raw_root: Path) -> tuple[list[dict[str, Any]], str]:
+    inventory: list[dict[str, Any]] = []
+    for path in sorted(
+        (item for item in raw_root.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(raw_root).as_posix(),
+    ):
+        body = path.read_bytes()
+        inventory.append({
+            "path": path.relative_to(raw_root).as_posix(),
+            "byte_count": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+        })
+    return inventory, hashlib.sha256(_canonical(inventory)).hexdigest()
+
+
+def _select_candidates(
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    records: list[dict[str, Any]] = []
+    trace: list[dict[str, Any]] = []
+    seen_identity: set[str] = set()
+    seen_url: set[str] = set()
+    seen_body: set[str] = set()
+    for ordinal, candidate in enumerate(candidates, start=1):
+        identity = candidate["job_key"]
+        url = _normal_url(candidate["url"])
+        body_hash = candidate["content_sha256"]
+        duplicate_reason: str | None = None
+        if identity in seen_identity:
+            duplicate_reason = "duplicate_identity"
+        elif url in seen_url:
+            duplicate_reason = "duplicate_url"
+        elif body_hash in seen_body:
+            duplicate_reason = "duplicate_content"
+        if duplicate_reason is None:
+            seen_identity.add(identity)
+            seen_url.add(url)
+            seen_body.add(body_hash)
+            if len(records) < COHORT_SIZE:
+                records.append(candidate)
+                disposition = "selected"
+            else:
+                disposition = "below_exact_30_cut"
+        else:
+            disposition = duplicate_reason
+        trace.append({
+            "ordinal": ordinal,
+            "job_key": identity,
+            "score_bp": candidate["opportunity0_decision"]["score_bp"],
+            "canonical_url": url,
+            "content_sha256": body_hash,
+            "publisher_time": candidate["temporal_admission"]["publisher_time"],
+            "official_response_hashes": sorted({
+                ref["sha256"] for ref in candidate["raw_response_refs"]
+            }),
+            "disposition": disposition,
+        })
+    return records, trace
+
+
+def _timing_evidence(
+    sends: list[dict[str, Any]],
+    robots: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    first_robot_by_host = {
+        str(row.get("host")): int(row["requested_monotonic_ns"])
+        for row in robots
+        if isinstance(row.get("requested_monotonic_ns"), int)
+    }
+    previous_by_host: dict[str, int] = {}
+    result: list[dict[str, Any]] = []
+    for send in sends:
+        host = str(send.get("host"))
+        sent = int(send["sent_monotonic_ns"])
+        previous = previous_by_host.get(host, first_robot_by_host.get(host))
+        elapsed = None if previous is None else (sent - previous) / 1_000_000_000
+        required = float(send["required_interval_seconds"])
+        result.append({
+            "send_sequence": send["send_sequence"],
+            "host": host,
+            "sent_at": send["sent_at"],
+            "prior_event": (
+                "none" if previous is None
+                else ("content" if host in previous_by_host else "robots")
+            ),
+            "elapsed_seconds": elapsed,
+            "required_interval_seconds": required,
+            "compliant": elapsed is not None and elapsed + 1e-6 >= required,
+        })
+        previous_by_host[host] = sent
+    return result
+
+
+def _write_run_evidence(
+    path: Path,
+    *,
+    config_path: Path,
+    raw_root: Path,
+    access_controller: Any,
+    recorder: ResponseRecorder,
+    selection_trace: list[dict[str, Any]],
+    temporal_decisions: list[dict[str, Any]],
+    errors: list[str],
+    selected_count: int,
+) -> dict[str, Any]:
+    if path.exists() or path.is_symlink():
+        raise RuntimeError("capture evidence output already exists")
+    robots = [
+        dict(row)
+        for row in getattr(access_controller, "robots_events", ())
+    ]
+    timing = _timing_evidence(recorder.send_events, robots)
+    inventory, inventory_hash = _raw_inventory(raw_root)
+    observations = [
+        str(row[field])
+        for rows in (recorder.send_events, robots)
+        for row in rows
+        for field in ("requested_at", "sent_at", "observed_at")
+        if row.get(field)
+    ]
+    result_status = "admission_floor_satisfied" if selected_count == COHORT_SIZE else (
+        "rejected_below_admission_floor"
+    )
+    payload = {
+        "schema_version": "jaa04.official-capture-evidence.v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "result_status": result_status,
+        "selected_count": selected_count,
+        "required_count": COHORT_SIZE,
+        "configuration": {
+            "path": str(config_path),
+            "sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        },
+        "access_policy": {
+            "path": str(access_controller.policy.source_path),
+            "sha256": access_controller.policy.policy_sha256,
+        },
+        "raw_store": {
+            "root": str(raw_root),
+            "inventory": inventory,
+            "inventory_sha256": inventory_hash,
+        },
+        "observation_window": {
+            "first": min(observations) if observations else None,
+            "last": max(observations) if observations else None,
+        },
+        "robots_evidence": robots,
+        "content_send_manifest": recorder.send_events,
+        "raw_response_index": recorder.records,
+        "per_host_timing": timing,
+        "selection_trace": selection_trace,
+        "selection_trace_sha256": hashlib.sha256(
+            _canonical(selection_trace)
+        ).hexdigest(),
+        "temporal_decisions": temporal_decisions,
+        "errors": errors,
+    }
+    payload["evidence_sha256"] = hashlib.sha256(_canonical(payload)).hexdigest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(_canonical(payload) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.link(temporary, path)
+        temporary.unlink()
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return payload
+
+
 def build(
     config_path: Path,
     output: Path,
     raw_root: Path,
     *,
-    access_controller: PublicAccessController | None = None,
+    access_controller: Any | None = None,
+    evidence_output: Path | None = None,
 ) -> dict[str, Any]:
     if output.exists():
         raise RuntimeError("output snapshot already exists")
+    if evidence_output is not None and (
+        evidence_output.exists() or evidence_output.is_symlink()
+    ):
+        raise RuntimeError("capture evidence output already exists")
     if access_controller is None:
         raise RuntimeError("official cohort acquisition requires public access authority")
     boards, configs, terms = _validate_config(load_config(config_path))
@@ -340,24 +749,23 @@ def build(
                     "temporal_admission": temporal,
                 })
     candidates.sort(key=lambda row: (-row["opportunity0_decision"]["score_bp"], row["job_key"]))
-    records: list[dict[str, Any]] = []
-    seen_identity: set[str] = set()
-    seen_url: set[str] = set()
-    seen_body: set[str] = set()
-    for candidate in candidates:
-        identity = candidate["job_key"]
-        url = _normal_url(candidate["url"])
-        body_hash = candidate["content_sha256"]
-        if identity in seen_identity or url in seen_url or body_hash in seen_body:
-            continue
-        seen_identity.add(identity); seen_url.add(url); seen_body.add(body_hash)
-        records.append(candidate)
-        if len(records) == COHORT_SIZE:
-            break
+    records, selection_trace = _select_candidates(candidates)
+    temporal_decisions.sort(key=lambda row: (row["job_key"], str(row["authority_response_sha256"])))
+    if evidence_output is not None:
+        _write_run_evidence(
+            evidence_output,
+            config_path=config_path,
+            raw_root=raw_root,
+            access_controller=access_controller,
+            recorder=recorder,
+            selection_trace=selection_trace,
+            temporal_decisions=temporal_decisions,
+            errors=errors,
+            selected_count=len(records),
+        )
     if len(records) < COHORT_SIZE:
         raise RuntimeError(f"only {len(records)} current unique official vacancies survived; need exactly 30; "
                            + "; ".join(errors[:10]))
-    temporal_decisions.sort(key=lambda row: (row["job_key"], str(row["authority_response_sha256"])))
     envelope = {
         "schema_version": "jaa04.official-admitted-queue.v2",
         "created_at": as_of.isoformat(),
@@ -388,6 +796,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--raw-root", type=Path, required=True,
                         help="external runtime directory for exact official response bytes")
+    parser.add_argument("--evidence-output", type=Path, required=True,
+                        help="external immutable all-capture evidence manifest")
     parser.add_argument("--access-policy", type=Path, required=True,
                         help="external human terms-review attestations")
     args = parser.parse_args()
@@ -397,16 +807,19 @@ def main() -> int:
         client = ScraplingClient(Path(__file__).resolve().parents[1], {
             "command_timeout_seconds": 45,
         })
-        controller = PublicAccessController(
+        cache = RawResponseCache(raw_root)
+        robots_client = AuditedRobotsClient(client, cache)
+        controller = AuditedAccessController(PublicAccessController(
             policy,
-            client,
-            RawResponseCache(raw_root),
-        )
+            robots_client,
+            cache,
+        ), robots_client)
         envelope = build(
             args.config.resolve(),
             args.output.resolve(),
             raw_root,
             access_controller=controller,
+            evidence_output=args.evidence_output.resolve(),
         )
     except Exception as exc:
         print(f"JAA-04 official cohort: ERROR: {exc}", file=sys.stderr)

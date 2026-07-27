@@ -175,7 +175,10 @@ def _canonical_public_url(url: str) -> str:
     return canonical
 
 
-def _public_url(url: str, resolver: Callable[..., Any] | None = None) -> None:
+def _public_url(
+    url: str,
+    resolver: Callable[..., Any] | None = None,
+) -> tuple[str, ...]:
     _canonical_public_url(url)
     parsed = urlparse(url)
     resolver = resolver or socket.getaddrinfo
@@ -185,12 +188,13 @@ def _public_url(url: str, resolver: Callable[..., Any] | None = None) -> None:
         raise ValueError("source hostname must resolve") from exc
     if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
         raise ValueError("source must resolve only to public addresses")
+    return tuple(sorted(addresses))
 
 
 def _public_transport_url(
     url: str,
     resolver: Callable[..., Any] | None = None,
-) -> None:
+) -> tuple[str, ...]:
     """Validate an anonymous public request URL without making it evidence identity.
 
     Official ATS APIs legitimately use query parameters for representation and
@@ -235,6 +239,7 @@ def _public_transport_url(
         for value in addresses
     ):
         raise ValueError("transport must resolve only to public addresses")
+    return tuple(sorted(addresses))
 
 
 @dataclass(frozen=True)
