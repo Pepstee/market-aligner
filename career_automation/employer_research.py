@@ -2084,7 +2084,7 @@ def load_frozen_dossiers(
     job_keys: set[str] = set()
     normalized_claims = {kind: set() for kind in required_kinds}
     normalized_claim_counts = {kind: 0 for kind in required_kinds}
-    corpus_access_by_host: dict[str, tuple[str, str, str]] = {}
+    corpus_access_by_host: dict[str, tuple[str, str]] = {}
     for dossier in dossiers:
         dossier_captures: set[tuple[str, str]] = set()
         captured_dates = [datetime.fromisoformat(
@@ -2107,7 +2107,6 @@ def load_frozen_dossiers(
                 identity = (
                     str(access["content_sha256"]),
                     str(access["raw_response_ref"]),
-                    str(access["retrieved_at"]),
                 )
                 prior = corpus_access_by_host.setdefault(host, identity)
                 if prior != identity:

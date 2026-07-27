@@ -84,6 +84,49 @@ def _dossier(cache: RawResponseCache) -> dict[str, object]:
     )
 
 
+def _strict_corpus(
+    tmp_path: Path,
+) -> tuple[RawResponseCache, list[dict[str, object]], dict[str, PublicAccessPolicy]]:
+    cache = RawResponseCache(tmp_path / "raw")
+    dossiers: list[dict[str, object]] = []
+    policies: dict[str, PublicAccessPolicy] | None = None
+    for number in range(30):
+        company = (
+            "<p>Acme company operates a documented public business serving "
+            f"regulated customers with cohort marker {number:02d}.</p>"
+        )
+        dossier = _portable(
+            cache,
+            company.encode(),
+            {"company": (company, "official_company")},
+        )
+        row_policies = _access_bound(dossier, cache)
+        if policies is None:
+            policies = row_policies
+        else:
+            assert row_policies.keys() == policies.keys()
+            policy_hash = next(iter(policies))
+            assert (
+                row_policies[policy_hash].attestations
+                == policies[policy_hash].attestations
+            )
+        dossier["job_key"] = f"synthetic:{number:02d}"
+        dossiers.append(dossier)
+    assert policies is not None
+    return cache, dossiers, policies
+
+
+def _write_strict_corpus(
+    path: Path,
+    dossiers: list[dict[str, object]],
+) -> None:
+    path.write_text(json.dumps({
+        "schema_version": "jaa04.frozen-dossiers.v5",
+        "dossiers": dossiers,
+        "dossiers_hash": content_hash(dossiers),
+    }), encoding="utf-8")
+
+
 def test_v4_dossier_replays_operator_policy_and_exact_robots_bytes(
     tmp_path: Path,
 ) -> None:
@@ -91,6 +134,87 @@ def test_v4_dossier_replays_operator_policy_and_exact_robots_bytes(
     dossier = _dossier(cache)
     policies = _access_bound(dossier, cache)
     validate_dossier(dossier, cache, access_policies=policies)
+
+
+def test_strict_corpus_accepts_same_robots_bytes_from_two_valid_observations(
+    tmp_path: Path,
+) -> None:
+    cache, dossiers, policies = _strict_corpus(tmp_path)
+    receipt = dossiers[-1]["sources"][0]["access_receipt"]  # type: ignore[index]
+    receipt["retrieved_at"] = "2026-06-30T23:59:59+00:00"
+    path = tmp_path / "two-robots-observations.json"
+    _write_strict_corpus(path, dossiers)
+
+    loaded = load_frozen_dossiers(
+        path,
+        cache,
+        strict_corpus=True,
+        access_policies=policies,
+    )
+
+    assert len(loaded) == 30
+    identities = {
+        (
+            row["sources"][0]["access_receipt"]["content_sha256"],
+            row["sources"][0]["access_receipt"]["raw_response_ref"],
+        )
+        for row in loaded
+    }
+    assert len(identities) == 1
+    assert {
+        row["sources"][0]["access_receipt"]["retrieved_at"]
+        for row in loaded
+    } == {STAMP, "2026-06-30T23:59:59+00:00"}
+
+
+@pytest.mark.parametrize("attack", ("different-content", "different-reference"))
+def test_strict_corpus_rejects_inconsistent_robots_byte_identity(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    cache, dossiers, policies = _strict_corpus(tmp_path)
+    receipt = dossiers[-1]["sources"][0]["access_receipt"]  # type: ignore[index]
+    if attack == "different-content":
+        digest, reference = cache.store(b"User-agent: *\nAllow: /\n# changed\n")
+        receipt["content_sha256"] = digest
+        receipt["raw_response_ref"] = reference
+    else:
+        body = cache.resolve(receipt["raw_response_ref"], receipt["content_sha256"])
+        alternate = cache.root / "alternate" / "robots.txt"
+        alternate.parent.mkdir(parents=True)
+        alternate.write_bytes(body)
+        receipt["raw_response_ref"] = str(alternate.relative_to(cache.root))
+    path = tmp_path / f"{attack}.json"
+    _write_strict_corpus(path, dossiers)
+
+    with pytest.raises(
+        ValueError,
+        match="certified corpus has inconsistent robots bytes for one host",
+    ):
+        load_frozen_dossiers(
+            path,
+            cache,
+            strict_corpus=True,
+            access_policies=policies,
+        )
+
+
+def test_strict_corpus_still_rejects_invalid_individual_access_receipt(
+    tmp_path: Path,
+) -> None:
+    cache, dossiers, policies = _strict_corpus(tmp_path)
+    receipt = dossiers[-1]["sources"][0]["access_receipt"]  # type: ignore[index]
+    receipt["retrieved_at"] = "2026-07-02T00:00:00+00:00"
+    path = tmp_path / "invalid-individual-receipt.json"
+    _write_strict_corpus(path, dossiers)
+
+    with pytest.raises(ValueError, match="access receipt time is later"):
+        load_frozen_dossiers(
+            path,
+            cache,
+            strict_corpus=True,
+            access_policies=policies,
+        )
 
 
 def test_dossier_citation_gate_still_rejects_requests_static(
