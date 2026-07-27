@@ -187,6 +187,56 @@ def _public_url(url: str, resolver: Callable[..., Any] | None = None) -> None:
         raise ValueError("source must resolve only to public addresses")
 
 
+def _public_transport_url(
+    url: str,
+    resolver: Callable[..., Any] | None = None,
+) -> None:
+    """Validate an anonymous public request URL without making it evidence identity.
+
+    Official ATS APIs legitimately use query parameters for representation and
+    pagination.  Those parameters remain part of the exact requested transport
+    URL, but they must never become a canonical evidence identity.
+    """
+    parsed = urlparse(url)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
+            or parsed.password or parsed.fragment):
+        raise ValueError("transport URL must be anonymous public HTTP(S)")
+    if parsed.hostname.casefold() == "localhost":
+        raise ValueError("private transport URL is forbidden")
+    try:
+        literal = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        literal = None
+    if literal is not None and not literal.is_global:
+        raise ValueError("private transport URL is forbidden")
+    canonical = urlunparse((
+        parsed.scheme.casefold(),
+        parsed.netloc.casefold(),
+        parsed.path or "/",
+        "",
+        parsed.query,
+        "",
+    ))
+    if canonical != url:
+        raise ValueError("transport URL must be canonical")
+    resolver = resolver or socket.getaddrinfo
+    try:
+        addresses = {
+            row[4][0]
+            for row in resolver(
+                parsed.hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+            )
+        }
+    except OSError as exc:
+        raise ValueError("transport hostname must resolve") from exc
+    if not addresses or any(
+        not ipaddress.ip_address(value).is_global
+        for value in addresses
+    ):
+        raise ValueError("transport must resolve only to public addresses")
+
+
 @dataclass(frozen=True)
 class Citation:
     id: str

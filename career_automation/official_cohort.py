@@ -22,7 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from career_automation.employer_research import (
     FRESHNESS_DAYS, IntelligenceKind, RawResponseCache,
-    _public_url, extract_publisher_timestamps,
+    _public_transport_url, _public_url, extract_publisher_timestamps,
 )
 from career_automation.opportunity_calibration import (
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
@@ -101,8 +101,12 @@ class ResponseRecorder:
         recorder = self
 
         def send(session: Any, request: Any, **kwargs: Any) -> Any:
-            _public_url(str(request.url))
-            receipt = recorder.access_controller.before_request(str(request.url))
+            requested_url = str(request.url)
+            if urlsplit(requested_url).query:
+                _public_transport_url(requested_url)
+            else:
+                _public_url(requested_url)
+            receipt = recorder.access_controller.before_request(requested_url)
             request.headers["User-Agent"] = USER_AGENT
             response = original(session, request, **kwargs)
             recorder.record(response, datetime.now(timezone.utc).isoformat())

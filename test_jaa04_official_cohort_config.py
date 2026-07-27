@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
+import requests
 
 from career_automation.employer_research import (
     ATS_AUTHORITY_CANARIES,
@@ -19,14 +20,18 @@ from career_automation.employer_research import (
     DEFAULT_ATS_ROUTE_ADAPTERS,
     LIVE_ATS_AUTHORITY_CANARIES,
     RawResponseCache,
+    _canonical_public_url,
+    _public_transport_url,
 )
 from career_automation.official_cohort import (
     AGGREGATORS,
     OFFICIAL_ADAPTERS,
+    ResponseRecorder,
     _validate_config,
     build,
 )
 from career_automation.public_access import (
+    PublicAccessDenied,
     PublicAccessPolicy,
     RobotsReceipt,
     TermsAttestation,
@@ -39,6 +44,223 @@ from skeleton.configuration import load_config
 
 ROOT = Path(__file__).resolve().parent
 OVERNIGHT = ROOT / "skeleton" / "config.overnight.yaml"
+
+
+def _public_resolver(_host: str, port: int) -> tuple[tuple[object, ...], ...]:
+    return ((None, None, None, None, ("93.184.216.34", port)),)
+
+
+def _transport_receipt(url: str) -> RobotsReceipt:
+    host = urlsplit(url).hostname or ""
+    return RobotsReceipt(
+        host=host,
+        robots_url=f"https://{host}/robots.txt",
+        final_url=f"https://{host}/robots.txt",
+        status_code=200,
+        content_sha256="0" * 64,
+        raw_response_ref="sha256/00/" + "0" * 64 + ".response",
+        redirect_history=[],
+        retrieved_at="2026-07-27T12:00:00+00:00",
+        user_agent=USER_AGENT,
+        requested_url=url,
+        allowed=True,
+        crawl_delay_seconds=10.0,
+        terms_policy_sha256="1" * 64,
+        terms_attestation={},
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://api.ashbyhq.com/posting-api/job-board/acme?includeCompensation=true",
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true",
+        "https://api.lever.co/v0/postings/acme?mode=json&limit=100&skip=0",
+        "https://api.smartrecruiters.com/v1/companies/acme/postings?limit=100&offset=0",
+        "https://www.workable.com/api/accounts/acme?details=true",
+    ),
+)
+def test_official_api_transport_queries_are_public_but_not_evidence_identities(
+    url: str,
+) -> None:
+    _public_transport_url(url, resolver=_public_resolver)
+    with pytest.raises(ValueError, match="canonical evidence URL"):
+        _canonical_public_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://user:secret@api.ashbyhq.com/posting-api/job-board/acme?includeCompensation=true",
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true#fragment",
+        "https://127.0.0.1/jobs?content=true",
+        "https://169.254.169.254/latest/meta-data?role=jobs",
+    ),
+)
+def test_official_transport_rejects_credentials_fragments_and_private_literals(
+    url: str,
+) -> None:
+    with pytest.raises(ValueError):
+        _public_transport_url(url, resolver=_public_resolver)
+
+
+def test_official_transport_rejects_a_private_dns_answer() -> None:
+    def private_resolver(
+        _host: str,
+        port: int,
+    ) -> tuple[tuple[object, ...], ...]:
+        return ((None, None, None, None, ("127.0.0.1", port)),)
+
+    with pytest.raises(ValueError, match="public addresses"):
+        _public_transport_url(
+            "https://api.lever.co/v0/postings/acme?mode=json",
+            resolver=private_resolver,
+        )
+
+
+def test_official_transport_resolves_the_scheme_default_port() -> None:
+    resolved: list[tuple[str, int]] = []
+
+    def recording_resolver(
+        host: str,
+        port: int,
+    ) -> tuple[tuple[object, ...], ...]:
+        resolved.append((host, port))
+        return _public_resolver(host, port)
+
+    _public_transport_url(
+        "http://api.lever.co/v0/postings/acme?mode=json",
+        resolver=recording_resolver,
+    )
+    _public_transport_url(
+        "https://api.lever.co/v0/postings/acme?mode=json",
+        resolver=recording_resolver,
+    )
+    assert resolved == [("api.lever.co", 80), ("api.lever.co", 443)]
+
+
+@pytest.mark.parametrize(
+    ("url", "denial"),
+    (
+        (
+            "https://unreviewed.example/jobs?content=true",
+            "TERMS_AUTHORITY_MISSING: unreviewed.example",
+        ),
+        (
+            "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true",
+            "ROBOTS_DISALLOWED: /v1/boards/acme/jobs",
+        ),
+    ),
+)
+def test_transport_policy_or_robots_denial_stops_before_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    denial: str,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    content_calls: list[str] = []
+
+    class DenyingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            assert requested_url == url
+            raise PublicAccessDenied(denial)
+
+    def content_send(
+        _session: object,
+        request: requests.PreparedRequest,
+        **_kwargs: object,
+    ) -> object:
+        content_calls.append(str(request.url))
+        raise AssertionError("content transport must not run after denial")
+
+    monkeypatch.setattr(requests.sessions.Session, "send", content_send)
+    recorder = ResponseRecorder(tmp_path / "raw", DenyingController())  # type: ignore[arg-type]
+    prepared = requests.Request("GET", url).prepare()
+    with recorder.installed(), pytest.raises(PublicAccessDenied, match=denial):
+        requests.Session().send(prepared)
+    assert content_calls == []
+    assert recorder.records == []
+
+
+def test_transport_revalidates_an_unsafe_redirect_before_second_content_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    first = "https://api.lever.co/v0/postings/acme?mode=json"
+    unsafe = "https://127.0.0.1/private?mode=json"
+    content_calls: list[str] = []
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    def redirecting_send(
+        session: requests.Session,
+        request: requests.PreparedRequest,
+        **kwargs: object,
+    ) -> object:
+        content_calls.append(str(request.url))
+        redirected = requests.Request("GET", unsafe).prepare()
+        return session.send(redirected, **kwargs)
+
+    monkeypatch.setattr(requests.sessions.Session, "send", redirecting_send)
+    recorder = ResponseRecorder(tmp_path / "raw", AllowingController())  # type: ignore[arg-type]
+    prepared = requests.Request("GET", first).prepare()
+    with recorder.installed(), pytest.raises(ValueError, match="private transport"):
+        requests.Session().send(prepared)
+    assert content_calls == [first]
+    assert recorder.records == []
+
+
+def test_response_recorder_preserves_query_transport_url_and_exact_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    url = "https://api.ashbyhq.com/posting-api/job-board/acme?includeCompensation=true"
+    body = b'{"jobs":[{"id":"vacancy-1","publishedAt":"2026-07-27T10:00:00Z"}]}'
+
+    class AllowingController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    def content_send(
+        _session: requests.Session,
+        request: requests.PreparedRequest,
+        **_kwargs: object,
+    ) -> requests.Response:
+        response = requests.Response()
+        response.status_code = 200
+        response._content = body
+        response.url = str(request.url)
+        response.request = request
+        response.history = []
+        return response
+
+    monkeypatch.setattr(requests.sessions.Session, "send", content_send)
+    recorder = ResponseRecorder(tmp_path / "raw", AllowingController())  # type: ignore[arg-type]
+    prepared = requests.Request("GET", url).prepare()
+    with recorder.installed():
+        response = requests.Session().send(prepared)
+    assert response.content == body
+    assert len(recorder.records) == 1
+    record = recorder.records[0]
+    assert record["requested_url"] == url
+    assert record["response_url"] == url
+    raw = tmp_path / "raw" / str(record["raw_response"])
+    assert raw.read_bytes() == body
+    assert hashlib.sha256(body).hexdigest() == record["sha256"]
 
 
 def test_overnight_config_projects_one_canonical_official_interface() -> None:
