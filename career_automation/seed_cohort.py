@@ -43,7 +43,7 @@ from career_automation.public_access import PublicAccessPolicy
 from scraper.viability import Vacancy, canonical_key, local_decision
 
 
-CHECKED_SEED_RECORDS_HASH = "2e5114bd1f01b75cd598061a07356ac7424c2914833f15d40f0f0d671327e348"
+CHECKED_SEED_RECORDS_HASH = "00bc655486e5a4e76450bc015e0a9647354aa85215f62ec2363802e9654ef504"
 _PROGRESS_SCHEMA = "jaa04.seed-hydration-progress.v1"
 
 

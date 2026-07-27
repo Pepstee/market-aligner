@@ -212,7 +212,7 @@ strengthen it into an impossible or commercially useless ceremony.
   passing independent-line acceptance declaration, and a content-addressed
   runtime receipt produced by that passing path.
 
-## Live canary discovery observations (20 July 2026)
+## Live canary discovery observations (20 and 27 July 2026)
 
 Three admitted records prove that portable discovery can be deterministic
 without an employer-specific URL inventory:
@@ -221,10 +221,11 @@ without an employer-specific URL inventory:
   is live and publishes the company careers route. Its board slug and numeric
   job ID also deterministically identify the official Greenhouse job API
   representation, whose genuine response carries `updated_at`.
-- Ashby record `ashby:lendable:36d47627-9b4e-4864-9f05-2dbbd1052380`: the
-  admitted hosted response contains JSON-LD `datePosted`, the employer URL and
-  the employer careers route. The board slug also identifies Ashby's official
-  posting API representation and its `publishedAt` field.
+- Ashby record `ashby:lendable:043d9c49-43e6-4a27-ad55-12344a941974`: the
+  admitted hosted response contains the canonical title `Senior Frontend
+  Engineer (React Native)`, JSON-LD `"datePosted":"2026-05-08"`, the employer
+  URL and the employer careers route. The board slug also identifies Ashby's
+  official posting API representation and its publisher date field.
 - Workable record `workable:cogna:847CFBC5F4`: the admitted short URL redirects
   to `/cogna/j/847CFBC5F4` and the returned bytes publish both the board's
   `llms.txt` and `/cogna/jobs/view/847CFBC5F4.md` vacancy representation. The

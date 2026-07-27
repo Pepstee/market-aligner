@@ -280,9 +280,9 @@ class ATSAuthorityCanary:
     final_paths: tuple[str, ...]
 
 
-# Historical Increment-A fixtures remain bound to the exact routes captured on
-# 20 July 2026. Production acquisition uses the separate live route set below
-# so a provider host migration does not rewrite or fabricate old provenance.
+# Increment-A fixtures remain bound to their exact admitted capture routes.
+# Production acquisition uses the separate live route set below so a provider
+# host migration does not rewrite or fabricate accepted provenance.
 ATS_AUTHORITY_CANARIES = (
     ATSAuthorityCanary("greenhouse:anthropic:5030244008", "Anthropic",
         "Anthropic Fellows Program, AI Security",
@@ -290,12 +290,12 @@ ATS_AUTHORITY_CANARIES = (
         "https://api.greenhouse.io/v1/boards/anthropic/jobs/5030244008",
         ("job-boards.greenhouse.io", "api.greenhouse.io"),
         ("/anthropic/jobs/5030244008", "/v1/boards/anthropic/jobs/5030244008")),
-    ATSAuthorityCanary("ashby:lendable:36d47627-9b4e-4864-9f05-2dbbd1052380", "Lendable",
-        "Graduate Analytics Engineer",
-        "https://jobs.ashbyhq.com/lendable/36d47627-9b4e-4864-9f05-2dbbd1052380",
-        "https://jobs.ashbyhq.com/lendable/36d47627-9b4e-4864-9f05-2dbbd1052380",
+    ATSAuthorityCanary("ashby:lendable:043d9c49-43e6-4a27-ad55-12344a941974", "Lendable",
+        "Senior Frontend Engineer (React Native)",
+        "https://jobs.ashbyhq.com/lendable/043d9c49-43e6-4a27-ad55-12344a941974",
+        "https://jobs.ashbyhq.com/lendable/043d9c49-43e6-4a27-ad55-12344a941974",
         ("jobs.ashbyhq.com",),
-        ("/lendable/36d47627-9b4e-4864-9f05-2dbbd1052380",)),
+        ("/lendable/043d9c49-43e6-4a27-ad55-12344a941974",)),
     ATSAuthorityCanary("workable:cogna:847CFBC5F4", "Cogna", "Software Engineer",
         "https://apply.workable.com/j/847CFBC5F4",
         "https://apply.workable.com/cogna/jobs/view/847CFBC5F4.md",
