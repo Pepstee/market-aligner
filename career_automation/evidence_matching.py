@@ -160,6 +160,7 @@ class Evidence:
     content_sha256: str
     valid_until: date | None = None
     negative: bool = False
+    claim_lineage: tuple[tuple[str, int, str], ...] = ()
 
     def __post_init__(self) -> None:
         _identifier("evidence_id", self.evidence_id)
@@ -181,6 +182,20 @@ class Evidence:
         _digest("evidence content hash", self.content_sha256)
         if hashlib.sha256(self.statement.encode("utf-8")).hexdigest() != self.content_sha256:
             raise ValueError("evidence content hash does not bind its exact statement")
+        claim_ids: set[str] = set()
+        for claim_id, version, claim_sha256 in self.claim_lineage:
+            _identifier("evidence claim-lineage ID", claim_id)
+            if version < 1:
+                raise ValueError("evidence claim-lineage version must be positive")
+            _digest("evidence exact claim-lineage hash", claim_sha256)
+            claim_ids.add(claim_id)
+        if (
+            len(claim_ids) != len(self.claim_lineage)
+            or claim_ids.difference(self.demonstrates)
+        ):
+            raise ValueError(
+                "evidence claim lineage must uniquely bind demonstrated claims"
+            )
 
     def is_releasable(self, *, as_of: date) -> bool:
         return (
@@ -306,7 +321,7 @@ def _requirement_payload(requirement: Requirement) -> dict[str, Any]:
 
 
 def _evidence_payload(evidence: Evidence) -> dict[str, Any]:
-    return {
+    result = {
         "evidence_id": evidence.evidence_id,
         "version": evidence.version,
         "statement": evidence.statement,
@@ -320,6 +335,12 @@ def _evidence_payload(evidence: Evidence) -> dict[str, Any]:
         "valid_until": evidence.valid_until.isoformat() if evidence.valid_until else None,
         "negative": evidence.negative,
     }
+    # Synthetic/offline Evidence values predate exact JAA-02 claim lineage.
+    # Production graph projections always populate this field; omitting the
+    # empty value preserves the locked software-vector identity.
+    if evidence.claim_lineage:
+        result["claim_lineage"] = evidence.claim_lineage
+    return result
 
 
 def evidence_projection_hash(evidence: Iterable[Evidence]) -> str:
@@ -368,6 +389,12 @@ def requirement_from_mapping(value: Mapping[str, Any]) -> Requirement:
 
 def evidence_from_mapping(value: Mapping[str, Any]) -> Evidence:
     valid_until = value.get("valid_until")
+    raw_lineage = value.get("claim_lineage") or ()
+    if not isinstance(raw_lineage, (list, tuple)) or any(
+        not isinstance(row, (list, tuple)) or len(row) != 3
+        for row in raw_lineage
+    ):
+        raise ValueError("evidence claim_lineage must contain claim bindings")
     if not isinstance(value.get("negative"), bool):
         raise ValueError("evidence negative must be boolean")
     return Evidence(
@@ -383,6 +410,10 @@ def evidence_from_mapping(value: Mapping[str, Any]) -> Evidence:
         content_sha256=str(value.get("content_sha256", "")),
         valid_until=date.fromisoformat(str(valid_until)) if valid_until else None,
         negative=value.get("negative") is True,
+        claim_lineage=tuple(
+            (str(row[0]), int(row[1]), str(row[2]))
+            for row in raw_lineage
+        ),
     )
 
 
@@ -567,7 +598,13 @@ def candidate_graph_evidence(
                       evidence.evidence_kind,evidence.approval_state,
                       evidence.epistemic_state,evidence.negative,
                       evidence.valid_until,evidence.content_hash,
-                      claim.claim_id,
+                      claim.claim_id,claim.version AS claim_version,
+                      claim.statement AS claim_statement,
+                      claim.claim_type AS claim_type,
+                      claim.epistemic_state AS claim_epistemic_state,
+                      claim.approval_state AS claim_approval_state,
+                      claim.valid_until AS claim_valid_until,
+                      claim.provenance_id AS claim_provenance_id,
                       decision.decision_id,decision.verifier_kind,decision.policy_id,
                       decision.policy_version,decision.policy_hash
                FROM candidate_evidence evidence
@@ -589,6 +626,11 @@ def candidate_graph_evidence(
                  AND claim.approval_state='approved'
                  AND claim.epistemic_state IN ('fact','evidence')
                  AND (claim.valid_until IS NULL OR claim.valid_until>=?)
+                 AND NOT EXISTS(
+                   SELECT 1 FROM candidate_claims newer_claim
+                   WHERE newer_claim.claim_id=claim.claim_id
+                     AND newer_claim.version>claim.version
+                 )
                  AND NOT EXISTS(
                    SELECT 1 FROM candidate_evidence newer
                    WHERE newer.evidence_id=evidence.evidence_id
@@ -643,6 +685,27 @@ def candidate_graph_evidence(
             content_sha256=str(group[0]["content_hash"]),
             valid_until=date.fromisoformat(str(valid_until)) if valid_until else None,
             negative=bool(group[0]["negative"]),
+            claim_lineage=tuple(sorted({
+                (
+                    str(row["claim_id"]),
+                    int(row["claim_version"]),
+                    content_hash({
+                        "claim_id": str(row["claim_id"]),
+                        "version": int(row["claim_version"]),
+                        "statement": str(row["claim_statement"]),
+                        "claim_type": str(row["claim_type"]),
+                        "epistemic_state": str(row["claim_epistemic_state"]),
+                        "approval_state": str(row["claim_approval_state"]),
+                        "valid_until": (
+                            None
+                            if row["claim_valid_until"] is None
+                            else str(row["claim_valid_until"])
+                        ),
+                        "provenance_id": str(row["claim_provenance_id"]),
+                    }),
+                )
+                for row in group
+            })),
         ))
     return tuple(result)
 

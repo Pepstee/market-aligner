@@ -460,6 +460,77 @@ def test_candidate_graph_projection_rejects_caller_self_approval_and_newer_drift
     assert candidate_graph_evidence(graph.path, as_of=AS_OF) == ()
 
 
+def test_candidate_graph_projection_binds_and_supersedes_exact_claim_version(
+    tmp_path: Path,
+) -> None:
+    graph = CandidateGraph(tmp_path / "claim-lineage.sqlite3")
+    graph.add_evidence(
+        "employment",
+        statement="An externally recorded employment outcome.",
+        source_identity="test:employer",
+        state="evidence",
+        evidence_kind="employment_record",
+        valid_until="2035-01-01",
+    )
+    graph.verify_evidence(
+        "employment",
+        1,
+        decision="approved",
+        verifier_kind="human",
+        policy_id="employment-check",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="employer record checked",
+        source_identity="test:verifier",
+    )
+    original_statement = "Professional Python delivery is externally evidenced."
+    graph.add_claim(
+        "professional-python",
+        statement=original_statement,
+        claim_type="experience",
+        state="evidence",
+        source_identity="test:claim",
+        valid_until="2035-01-01",
+    )
+    graph.link_claim_evidence(
+        "professional-python",
+        "employment",
+        source_identity="test:edge",
+    )
+    graph.approve_claim("professional-python")
+    with sqlite3.connect(graph.path) as connection:
+        provenance_id = str(connection.execute(
+            """SELECT provenance_id FROM candidate_claims
+               WHERE claim_id='professional-python' AND version=1"""
+        ).fetchone()[0])
+    projected, = candidate_graph_evidence(graph.path, as_of=AS_OF)
+    assert projected.claim_lineage == ((
+        "professional-python",
+        1,
+        content_hash({
+            "claim_id": "professional-python",
+            "version": 1,
+            "statement": original_statement,
+            "claim_type": "experience",
+            "epistemic_state": "evidence",
+            "approval_state": "approved",
+            "valid_until": "2035-01-01",
+            "provenance_id": provenance_id,
+        }),
+    ),)
+
+    graph.add_claim(
+        "professional-python",
+        version=2,
+        statement="A replacement claim is awaiting verification.",
+        claim_type="experience",
+        state="evidence",
+        source_identity="test:replacement",
+        valid_until="2035-01-01",
+    )
+    assert candidate_graph_evidence(graph.path, as_of=AS_OF) == ()
+
+
 def test_candidate_graph_projection_rejects_multiple_approval_authorities(
     tmp_path: Path,
 ) -> None:
