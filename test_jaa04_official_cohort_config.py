@@ -1353,7 +1353,7 @@ def test_canary_publication_retains_replayable_content_and_robots_bytes(
         manifest = json.loads(
             (stage / "canary-failure-manifest.json").read_text(encoding="utf-8")
         )
-        assert manifest["schema_version"] == "jaa04.canary-failure-quarantine.v1"
+        assert manifest["schema_version"] == "jaa04.canary-failure-quarantine.v2"
         assert manifest["accepted"] is False
         assert manifest["source_commit"]
         assert manifest["access_policy_sha256"] == policy_hash
@@ -1428,41 +1428,57 @@ def test_canary_failure_manifest_serializes_typed_retrieval_attempts(
     cache = RawResponseCache(stage / ".raw")
     body = b"<html><noscript>Please enable JavaScript.</noscript></html>"
     digest, reference = cache.store(body)
+    robots = b"User-agent: *\nAllow: /\n"
+    robots_digest, robots_reference = cache.store(robots)
     policy_hash = hashlib.sha256(b"offline-attempt-policy").hexdigest()
     host = "jobs.example.test"
+    stamp = "2026-07-27T02:00:00+00:00"
+    attestation = TermsAttestation(
+        host=host,
+        terms_url=f"https://{host}/terms",
+        determination="public_read_only_research_permitted",
+        reviewed_at="2026-07-26T18:00:00+00:00",
+        reviewed_by="Offline Test Operator",
+        reviewer_type="human_operator",
+        notes="Synthetic offline failed-attempt test.",
+    )
     policy = PublicAccessPolicy(
-        {
-            host: TermsAttestation(
-                host=host,
-                terms_url=f"https://{host}/terms",
-                determination="public_read_only_research_permitted",
-                reviewed_at="2026-07-26T18:00:00+00:00",
-                reviewed_by="Offline Test Operator",
-                reviewer_type="human_operator",
-                notes="Synthetic offline failed-attempt test.",
-            ),
-        },
+        {host: attestation},
         policy_sha256=policy_hash,
         now=datetime(2026, 7, 27, 2, tzinfo=timezone.utc),
     )
-    receipt = {
-        "requested_url": f"https://{host}/jobs/engineer",
-        "terms_policy_sha256": policy_hash,
-    }
+    requested_url = f"https://{host}/jobs/engineer"
+    receipt = RobotsReceipt(
+        host=host,
+        robots_url=f"https://{host}/robots.txt",
+        final_url=f"https://{host}/robots.txt",
+        status_code=200,
+        content_sha256=robots_digest,
+        raw_response_ref=robots_reference,
+        redirect_history=[],
+        retrieved_at=stamp,
+        user_agent=USER_AGENT,
+        requested_url=requested_url,
+        allowed=True,
+        crawl_delay_seconds=10.0,
+        terms_policy_sha256=policy_hash,
+        terms_attestation=asdict(attestation),
+    )
     attempt = PublicRetrievalAttempt(
         engine="dynamic",
-        requested_url=receipt["requested_url"],
-        final_url=receipt["requested_url"],
+        requested_url=requested_url,
+        final_url=requested_url,
         status_code=200,
         body_bytes=len(body),
         content_sha256=digest,
         raw_response_ref=reference,
         access_receipt_json=json.dumps(
-            receipt,
+            asdict(receipt),
             sort_keys=True,
             separators=(",", ":"),
         ),
         renderer_shell=True,
+        retrieved_at=stamp,
     )
     failure = PublicRetrievalExhausted(
         "static and dynamic public retrieval were exhausted",
@@ -1481,12 +1497,254 @@ def test_canary_failure_manifest_serializes_typed_retrieval_attempts(
     manifest = json.loads(
         (quarantine / "stage" / "canary-failure-manifest.json").read_bytes()
     )
+    assert manifest["schema_version"] == "jaa04.canary-failure-quarantine.v2"
     assert manifest["exception_type"] == "PublicRetrievalExhausted"
-    assert manifest["retrieval_attempts"] == [attempt.as_dict()]
+    assert manifest["retrieval_attempts"] == [{
+        "job_key": "ashby:test:vacancy",
+        "attempt": attempt.as_dict(),
+    }]
     assert RawResponseCache(quarantine / "stage" / ".raw").resolve(
         reference,
         digest,
     ) == body
+    replay_access_receipt(
+        manifest["retrieval_attempts"][0]["attempt"]["access_receipt"],
+        RawResponseCache(quarantine / "stage" / ".raw"),
+        content_urls=(requested_url,),
+        content_retrieved_at=stamp,
+        policies={policy_hash: policy},
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "message"),
+    (
+        ("validation", "ATS authority bytes do not identify"),
+        ("planning", "injected planning failure after retrieval"),
+    ),
+)
+def test_canary_post_retrieval_failures_preserve_replayable_typed_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+    message: str,
+) -> None:
+    record = LIVE_ATS_AUTHORITY_CANARIES[0]
+    host = urlsplit(record.authority_url).hostname or ""
+    stamp = "2026-07-27T02:00:00+00:00"
+    policy_hash = hashlib.sha256(b"post-retrieval-policy").hexdigest()
+    attestation = TermsAttestation(
+        host=host,
+        terms_url=f"https://{host}/terms",
+        determination="public_read_only_research_permitted",
+        reviewed_at="2026-07-26T18:00:00+00:00",
+        reviewed_by="Offline Test Operator",
+        reviewer_type="human_operator",
+        notes="Synthetic offline post-retrieval failure test.",
+    )
+    policy = PublicAccessPolicy(
+        {host: attestation},
+        policy_sha256=policy_hash,
+        now=datetime(2026, 7, 27, 2, tzinfo=timezone.utc),
+    )
+    production_retriever = canary_capture.PortableAuthorityRetriever
+
+    class FakeTransport:
+        def __init__(self, cache: RawResponseCache, **_: object) -> None:
+            self.cache = cache
+            self.retrieval_attempts: list[PublicRetrievalAttempt] = []
+
+        def retrieve(self, task: object) -> Citation:
+            body = b"<html><main>Job not found. The requested job was not found.</main></html>"
+            digest, reference = self.cache.store(body)
+            robots_digest, robots_reference = self.cache.store(
+                b"User-agent: *\nAllow: /\n"
+            )
+            receipt = RobotsReceipt(
+                host=host,
+                robots_url=f"https://{host}/robots.txt",
+                final_url=f"https://{host}/robots.txt",
+                status_code=200,
+                content_sha256=robots_digest,
+                raw_response_ref=robots_reference,
+                redirect_history=[],
+                retrieved_at=stamp,
+                user_agent=USER_AGENT,
+                requested_url=record.authority_url,
+                allowed=True,
+                crawl_delay_seconds=10.0,
+                terms_policy_sha256=policy_hash,
+                terms_attestation=asdict(attestation),
+            )
+            self.retrieval_attempts.append(PublicRetrievalAttempt(
+                engine="dynamic",
+                requested_url=record.authority_url,
+                final_url=record.authority_url,
+                status_code=200,
+                body_bytes=len(body),
+                content_sha256=digest,
+                raw_response_ref=reference,
+                access_receipt_json=json.dumps(
+                    asdict(receipt),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                renderer_shell=False,
+                retrieved_at=stamp,
+            ))
+            return Citation(
+                id=f"source:{record.job_key}",
+                url=record.authority_url,
+                captured_at=stamp,
+                retrieved_at=stamp,
+                content_sha256=digest,
+                raw_response_ref=reference,
+                status_code=200,
+                requested_url=record.authority_url,
+                source_kind="official_vacancy",
+                canonical_publisher=host,
+                canonical_article=record.authority_url,
+                retrieval_engine="scrapling-dynamic",
+                access_receipt=asdict(receipt),
+            )
+
+    class FakeRetriever:
+        def __init__(
+            self,
+            cache: RawResponseCache,
+            *,
+            retriever: FakeTransport,
+        ) -> None:
+            self.cache = cache
+            self.retriever = retriever
+
+        def retrieve_plan(
+            self,
+            task: object,
+        ) -> tuple[list[Citation], list[dict[str, object]]]:
+            citation = self.retriever.retrieve(task)
+            if failure_kind == "validation":
+                production_retriever._validate_canary_capture(
+                    record,
+                    citation,
+                    self.cache,
+                )
+            raise RuntimeError(message)
+
+    monkeypatch.setattr(canary_capture, "ScraplingPublicRetriever", FakeTransport)
+    monkeypatch.setattr(canary_capture, "PortableAuthorityRetriever", FakeRetriever)
+    destination = tmp_path / "canaries"
+    quarantine = tmp_path / "canary-failure"
+    expected = ValueError if failure_kind == "validation" else RuntimeError
+    with pytest.raises(expected, match=message):
+        canary_capture.capture(
+            destination,
+            policy,
+            failure_quarantine=quarantine,
+            command=["python", "capture-canaries", "--offline-test"],
+        )
+    assert not destination.exists()
+    manifest = json.loads(
+        (quarantine / "stage" / "canary-failure-manifest.json").read_bytes()
+    )
+    assert manifest["schema_version"] == "jaa04.canary-failure-quarantine.v2"
+    assert manifest["exception_type"] == expected.__name__
+    assert len(manifest["retrieval_attempts"]) == 1
+    preserved = manifest["retrieval_attempts"][0]
+    assert preserved["job_key"] == record.job_key
+    attempt = preserved["attempt"]
+    cache = RawResponseCache(quarantine / "stage" / ".raw")
+    assert len(cache.resolve(
+        attempt["raw_response_ref"],
+        attempt["content_sha256"],
+    )) == attempt["body_bytes"]
+    replay_access_receipt(
+        attempt["access_receipt"],
+        cache,
+        content_urls=(attempt["requested_url"], attempt["final_url"]),
+        content_retrieved_at=attempt["retrieved_at"],
+        policies={policy_hash: policy},
+    )
+
+
+def test_canary_failure_quarantine_rejects_tampered_attempt_bytes(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    quarantine = tmp_path / "failure"
+    quarantine.mkdir(mode=0o700)
+    cache = RawResponseCache(stage / ".raw")
+    body = b"<html><main>Captured vacancy bytes.</main></html>"
+    digest, reference = cache.store(body)
+    target = stage / ".raw" / reference
+    target.chmod(0o600)
+    target.write_bytes(body + b"tampered")
+    policy_hash = hashlib.sha256(b"tamper-attempt-policy").hexdigest()
+    host = "jobs.example.test"
+    stamp = "2026-07-27T02:00:00+00:00"
+    attestation = TermsAttestation(
+        host=host,
+        terms_url=f"https://{host}/terms",
+        determination="public_read_only_research_permitted",
+        reviewed_at="2026-07-26T18:00:00+00:00",
+        reviewed_by="Offline Test Operator",
+        reviewer_type="human_operator",
+        notes="Synthetic offline tampered-attempt test.",
+    )
+    policy = PublicAccessPolicy(
+        {host: attestation},
+        policy_sha256=policy_hash,
+        now=datetime(2026, 7, 27, 2, tzinfo=timezone.utc),
+    )
+    robots_digest, robots_reference = cache.store(b"User-agent: *\nAllow: /\n")
+    requested_url = f"https://{host}/jobs/engineer"
+    receipt = RobotsReceipt(
+        host=host,
+        robots_url=f"https://{host}/robots.txt",
+        final_url=f"https://{host}/robots.txt",
+        status_code=200,
+        content_sha256=robots_digest,
+        raw_response_ref=robots_reference,
+        redirect_history=[],
+        retrieved_at=stamp,
+        user_agent=USER_AGENT,
+        requested_url=requested_url,
+        allowed=True,
+        crawl_delay_seconds=10.0,
+        terms_policy_sha256=policy_hash,
+        terms_attestation=asdict(attestation),
+    )
+    attempt = PublicRetrievalAttempt(
+        engine="static",
+        requested_url=requested_url,
+        final_url=requested_url,
+        status_code=200,
+        body_bytes=len(body),
+        content_sha256=digest,
+        raw_response_ref=reference,
+        access_receipt_json=json.dumps(
+            asdict(receipt),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        renderer_shell=False,
+        retrieved_at=stamp,
+    )
+    with pytest.raises(ValueError, match="raw response hash mismatch"):
+        canary_capture._quarantine_failure(
+            stage,
+            quarantine,
+            destination=tmp_path / "success",
+            access_policy=policy,
+            command=["python", "capture-canaries", "--offline-test"],
+            progress=[{"job_key": "greenhouse:test:vacancy", "status": "started"}],
+            failing_job_key="greenhouse:test:vacancy",
+            failure=ValueError("post-retrieval validation failed"),
+            retrieval_attempts=[("greenhouse:test:vacancy", attempt)],
+        )
+    assert stage.exists()
+    assert not (quarantine / "stage").exists()
 
 
 @pytest.mark.parametrize(

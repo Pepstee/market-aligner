@@ -508,6 +508,8 @@ class PublicRetrievalAttempt:
     raw_response_ref: str | None
     access_receipt_json: str
     renderer_shell: bool | None
+    retrieved_at: str
+    redirect_history: tuple[dict[str, Any], ...] = ()
     error_type: str | None = None
     error_message: str | None = None
 
@@ -522,6 +524,8 @@ class PublicRetrievalAttempt:
             "raw_response_ref": self.raw_response_ref,
             "access_receipt": json.loads(self.access_receipt_json),
             "renderer_shell": self.renderer_shell,
+            "retrieved_at": self.retrieved_at,
+            "redirect_history": [dict(row) for row in self.redirect_history],
             "error_type": self.error_type,
             "error_message": self.error_message,
         }
@@ -564,6 +568,20 @@ class ScraplingPublicRetriever:
             self.access = PublicAccessController(access_policy, self.client, cache)
         else:
             self.access = DenyAllPublicAccess()
+        self._retrieval_attempts: list[PublicRetrievalAttempt] = []
+
+    @property
+    def retrieval_attempts(self) -> tuple[PublicRetrievalAttempt, ...]:
+        """Return immutable typed evidence for every transport stage attempted."""
+        return tuple(self._retrieval_attempts)
+
+    def _remember_attempt(
+        self,
+        attempt: PublicRetrievalAttempt,
+        current: list[PublicRetrievalAttempt],
+    ) -> None:
+        current.append(attempt)
+        self._retrieval_attempts.append(attempt)
 
     @staticmethod
     def _terminal_challenge(response: Mapping[str, Any]) -> str | None:
@@ -661,7 +679,7 @@ class ScraplingPublicRetriever:
                 attempts.append({"engine": engine, "ok": False,
                                  "error": type(exc).__name__, "message": str(exc),
                                  "access_receipt": asdict(receipt)})
-                evidence_attempts.append(PublicRetrievalAttempt(
+                self._remember_attempt(PublicRetrievalAttempt(
                     engine=engine,
                     requested_url=url,
                     final_url=None,
@@ -671,9 +689,10 @@ class ScraplingPublicRetriever:
                     raw_response_ref=None,
                     access_receipt_json=canonical_json(asdict(receipt)),
                     renderer_shell=None,
+                    retrieved_at=datetime.now(timezone.utc).isoformat(),
                     error_type=type(exc).__name__,
                     error_message=str(exc),
-                ))
+                ), evidence_attempts)
                 continue
             final_url = str(response.get("url", url))
             status: int | None = None
@@ -692,7 +711,7 @@ class ScraplingPublicRetriever:
                     raise ValueError("Scrapling response byte count mismatch")
                 renderer_shell = self._renderer_shell(response)
             except Exception as exc:
-                evidence_attempts.append(PublicRetrievalAttempt(
+                self._remember_attempt(PublicRetrievalAttempt(
                     engine=engine,
                     requested_url=url,
                     final_url=final_url,
@@ -702,9 +721,17 @@ class ScraplingPublicRetriever:
                     raw_response_ref=reference,
                     access_receipt_json=canonical_json(asdict(receipt)),
                     renderer_shell=None,
+                    retrieved_at=datetime.now(timezone.utc).isoformat(),
+                    redirect_history=tuple(
+                        {
+                            "url": str(item.get("url", "")),
+                            "status_code": int(item.get("status", 0)),
+                        }
+                        for item in response.get("history", ()) or ()
+                    ),
                     error_type=type(exc).__name__,
                     error_message=str(exc),
-                ))
+                ), evidence_attempts)
                 raise PublicRetrievalExhausted(
                     "public retrieval response evidence is malformed",
                     evidence_attempts,
@@ -715,7 +742,7 @@ class ScraplingPublicRetriever:
                 "response": response,
                 "access_receipt": asdict(receipt),
             })
-            evidence_attempts.append(PublicRetrievalAttempt(
+            self._remember_attempt(PublicRetrievalAttempt(
                 engine=engine,
                 requested_url=url,
                 final_url=final_url,
@@ -725,7 +752,15 @@ class ScraplingPublicRetriever:
                 raw_response_ref=reference,
                 access_receipt_json=canonical_json(asdict(receipt)),
                 renderer_shell=renderer_shell,
-            ))
+                retrieved_at=datetime.now(timezone.utc).isoformat(),
+                redirect_history=tuple(
+                    {
+                        "url": str(item.get("url", "")),
+                        "status_code": int(item.get("status", 0)),
+                    }
+                    for item in response.get("history", ()) or ()
+                ),
+            ), evidence_attempts)
             assert status is not None
             final_host = (urlparse(final_url).hostname or "").casefold()
             redirect_hosts = {

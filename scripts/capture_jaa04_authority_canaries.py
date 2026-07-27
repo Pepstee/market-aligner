@@ -18,7 +18,8 @@ sys.path.insert(0, str(ROOT))
 
 from career_automation.employer_research import (  # noqa: E402
     LIVE_ATS_AUTHORITY_CANARIES, PortableAuthorityRetriever,
-    PublicRetrievalExhausted, RawResponseCache, ScraplingPublicRetriever,
+    PublicRetrievalAttempt, PublicRetrievalExhausted, RawResponseCache,
+    ScraplingPublicRetriever,
 )
 from career_automation.public_access import (  # noqa: E402
     PublicAccessPolicy,
@@ -61,9 +62,45 @@ def _quarantine_failure(
     progress: list[dict[str, object]],
     failing_job_key: str | None,
     failure: BaseException,
+    retrieval_attempts: list[tuple[str, PublicRetrievalAttempt]] | None = None,
 ) -> None:
+    typed_attempts = list(retrieval_attempts or ())
+    if isinstance(failure, PublicRetrievalExhausted):
+        existing = {
+            (job_key, json.dumps(attempt.as_dict(), sort_keys=True, separators=(",", ":")))
+            for job_key, attempt in typed_attempts
+        }
+        for attempt in failure.attempts:
+            identity = (
+                failing_job_key or "",
+                json.dumps(attempt.as_dict(), sort_keys=True, separators=(",", ":")),
+            )
+            if identity not in existing:
+                typed_attempts.append((failing_job_key or "", attempt))
+                existing.add(identity)
+    cache = RawResponseCache(stage / ".raw")
+    serialized_attempts = []
+    for job_key, attempt in typed_attempts:
+        row = attempt.as_dict()
+        content_urls = tuple(dict.fromkeys((
+            attempt.requested_url,
+            *(str(item["url"]) for item in attempt.redirect_history),
+            *([attempt.final_url] if attempt.final_url else []),
+        )))
+        replay_access_receipt(
+            row["access_receipt"],
+            cache,
+            content_urls=content_urls,
+            content_retrieved_at=attempt.retrieved_at,
+            policies={access_policy.policy_sha256: access_policy},
+        )
+        if attempt.raw_response_ref is not None or attempt.content_sha256 is not None:
+            if attempt.raw_response_ref is None or attempt.content_sha256 is None:
+                raise ValueError("typed retrieval attempt has incomplete raw byte identity")
+            cache.resolve(attempt.raw_response_ref, attempt.content_sha256)
+        serialized_attempts.append({"job_key": job_key, "attempt": row})
     manifest = {
-        "schema_version": "jaa04.canary-failure-quarantine.v1",
+        "schema_version": "jaa04.canary-failure-quarantine.v2",
         "classification": "failure_quarantine",
         "accepted": False,
         "inadmissible_as": ["canary_acceptance", "admission_evidence", "dossier_corpus"],
@@ -77,12 +114,8 @@ def _quarantine_failure(
         "failing_job_key": failing_job_key,
         "exception_type": type(failure).__name__,
         "exception_message": str(failure),
+        "retrieval_attempts": serialized_attempts,
     }
-    if isinstance(failure, PublicRetrievalExhausted):
-        manifest["retrieval_attempts"] = [
-            attempt.as_dict()
-            for attempt in failure.attempts
-        ]
     manifest_path = stage / "canary-failure-manifest.json"
     manifest_path.write_bytes(_canonical(manifest))
     os.chmod(manifest_path, 0o600)
@@ -122,6 +155,7 @@ def capture(
         for record in LIVE_ATS_AUTHORITY_CANARIES
     ]
     failing_job_key: str | None = None
+    retrieval_attempts: list[tuple[str, PublicRetrievalAttempt]] = []
     try:
         cache = RawResponseCache(stage / ".raw")
         transport = ScraplingPublicRetriever(
@@ -135,7 +169,14 @@ def capture(
             progress[index]["status"] = "started"
             task = SimpleNamespace(job_key=record.job_key, company=record.company,
                                    title=record.title, url=record.admitted_url)
-            citations, plan = retriever.retrieve_plan(task)
+            attempt_start = len(getattr(transport, "retrieval_attempts", ()))
+            try:
+                citations, plan = retriever.retrieve_plan(task)
+            finally:
+                retrieval_attempts.extend(
+                    (record.job_key, attempt)
+                    for attempt in getattr(transport, "retrieval_attempts", ())[attempt_start:]
+                )
             captures = []
             for citation in citations:
                 raw = cache.resolve(citation.raw_response_ref, citation.content_sha256)
@@ -193,6 +234,7 @@ def capture(
                 progress=progress,
                 failing_job_key=failing_job_key,
                 failure=exc,
+                retrieval_attempts=retrieval_attempts,
             )
         except BaseException as quarantine_error:
             preserved = (
