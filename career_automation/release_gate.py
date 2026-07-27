@@ -14,7 +14,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .application_artifacts import (
     PublishedArtifactReceipt,
@@ -759,11 +759,36 @@ class ReleaseGateStore:
         "truth",
     )
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.path = Path(path)
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         apply_jaa_08_migrations(self.path)
         self.lifecycle = LifecycleReducer(self.path)
         self.compilations = ApplicationCompilationStore(self.path)
+
+    def _trusted_utc_date(self) -> date:
+        current = self._clock()
+        if (
+            not isinstance(current, datetime)
+            or current.tzinfo is None
+            or current.utcoffset() is None
+        ):
+            raise ValueError("release-gate clock must be timezone-aware")
+        return current.astimezone(timezone.utc).date()
+
+    def _require_current_utc_date(
+        self,
+        value: date,
+        *,
+        label: str,
+    ) -> None:
+        if value != self._trusted_utc_date():
+            raise ValueError(f"{label} must use the trusted current UTC date")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -1387,6 +1412,10 @@ class ReleaseGateStore:
         evaluated_at: date,
     ) -> IssuedRelease:
         """Issue one token; never invoke or expose any consequential action."""
+        self._require_current_utc_date(
+            evaluated_at,
+            label="release evaluation",
+        )
         try:
             compilation = self.compilations.register(
                 source=source,
@@ -1886,6 +1915,10 @@ class ReleaseGateStore:
                 jurisdiction=jurisdiction,
                 contract_type=contract_type,
                 consumed_utc=consumed_utc,
+            )
+            self._require_current_utc_date(
+                consumed_utc.date(),
+                label="release consumption",
             )
             changed = connection.execute(
                 """UPDATE release_tokens SET consumed_at=?

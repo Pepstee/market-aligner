@@ -159,6 +159,88 @@ def test_clock_is_explicit_and_not_implicitly_today() -> None:
     assert compile_release_manifest(binding, _validations(binding)).binding.evaluated_at == AS_OF
 
 
+def test_action_capable_release_store_rejects_caller_forged_future_clock(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    forged_date = date.today() + timedelta(days=1)
+    with pytest.raises(ValueError, match="trusted current UTC date"):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=forged_date,
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "application_compiled"
+
+
+def test_action_capable_release_store_requires_aware_trusted_clock(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        _gate,
+        _route,
+    ) = _authorized_release_inputs(tmp_path)
+    gate = ReleaseGateStore(
+        database.path,
+        clock=lambda: datetime.combine(
+            date.today(),
+            datetime.min.time(),
+        ),
+    )
+    with pytest.raises(ValueError, match="clock must be timezone-aware"):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=date.today(),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM release_tokens"
+        ).fetchone()[0] == 0
+
+
 def test_compilation_registration_rejects_external_tamper_without_state_change(
     tmp_path,
 ) -> None:
