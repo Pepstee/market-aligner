@@ -66,7 +66,7 @@ DEFAULT_TEMPLATES: Mapping[str, TaskTemplate] = {
         ("deterministic", "human"), 5, 9000,
     ),
     "experience": TaskTemplate(
-        "gain_real_experience", "external-outcome-receipt", "external_outcome",
+        "gain_real_experience", "employer-attested-record", "employment_record",
         ("external", "human"), 10, 7000,
     ),
     "credential": TaskTemplate(

@@ -44,6 +44,28 @@ POLICY = MatchingPolicy()
 DIGEST = hashlib.sha256(b"negative-control").hexdigest()
 ROOT = Path(__file__).resolve().parent
 LOCKED = ROOT / "career_automation/fixtures/jaa05_locked_labels.json"
+PRODUCTION_EXPERIENCE_REQUIREMENT_IDS = (
+    "jaa05-gold-anthropic-5115935008-r04",
+    "jaa05-gold-anthropic-5198999008-r04",
+    "jaa05-gold-brunswickgroup-8593698002-r01",
+    "jaa05-gold-brunswickgroup-8593698002-r02",
+    "jaa05-gold-brunswickgroup-8593698002-r04",
+    "jaa05-gold-chaosindustries-5162751007-r04",
+    "jaa05-gold-graphcore-8466438002-r04",
+    "jaa05-gold-graphcore-8630718002-r03",
+    "jaa05-gold-graphcore-8630718002-r05",
+    "jaa05-gold-graphcore-8632581002-r01",
+    "jaa05-gold-jetbrains-4695363101-r01",
+    "jaa05-gold-jetbrains-4754978101-r01",
+    "jaa05-gold-jetbrains-4754978101-r04",
+    "jaa05-gold-jetbrains-4769511101-r01",
+    "jaa05-gold-jetbrains-4769511101-r02",
+    "jaa05-gold-jetbrains-4769511101-r03",
+    "jaa05-gold-jetbrains-4771939101-r01",
+    "jaa05-gold-koboldmetals-4678367005-r01",
+    "jaa05-gold-monzo-8038447-r01",
+    "jaa05-gold-physicsx-4652630101-r04",
+)
 
 
 def _requirement() -> Requirement:
@@ -778,6 +800,143 @@ def test_improvement_task_must_be_capable_of_satisfying_requirement_proof() -> N
     )
     with pytest.raises(ValueError, match="cannot satisfy"):
         optimise_gaps((requirement,), (no_match,))
+
+
+def test_all_production_experience_gaps_create_satisfiable_employment_tasks() -> None:
+    template = DEFAULT_TEMPLATES["experience"]
+    assert template == TaskTemplate(
+        "gain_real_experience",
+        "employer-attested-record",
+        "employment_record",
+        ("external", "human"),
+        10,
+        7000,
+    )
+    for requirement_id in PRODUCTION_EXPERIENCE_REQUIREMENT_IDS:
+        requirement = Requirement(
+            requirement_id,
+            "professional-experience",
+            "Demonstrate the required professional experience.",
+            True,
+            "experience",
+            "gain_experience",
+            ("employment_record", "verified_claim"),
+            7000,
+            "vacancy:production-control",
+            (0, 49),
+        )
+        no_match = evaluate_match(
+            requirement,
+            MatchProposal(
+                requirement_id,
+                (),
+                9000,
+                "none",
+                "No approved employment evidence.",
+                _receipt(requirement, ()),
+            ),
+            {},
+            as_of=AS_OF,
+        )
+        task, = optimise_gaps((requirement,), (no_match,)).tasks
+        assert task.verification.proof_class in requirement.accepted_proof_classes
+        assert task.verification.proof_class == "employment_record"
+
+
+def test_employer_attested_experience_record_stays_pending_and_rejects_generated_text() -> None:
+    requirement = Requirement(
+        "experience-contract",
+        "professional-experience",
+        "Demonstrate the required professional experience.",
+        True,
+        "experience",
+        "gain_experience",
+        ("employment_record", "verified_claim"),
+        7000,
+        "vacancy:production-control",
+        (0, 49),
+    )
+    no_match = evaluate_match(
+        requirement,
+        MatchProposal(
+            requirement.requirement_id,
+            (),
+            9000,
+            "none",
+            "No approved employment evidence.",
+            _receipt(requirement, ()),
+        ),
+        {},
+        as_of=AS_OF,
+    )
+    task, = optimise_gaps((requirement,), (no_match,)).tasks
+    evidence = TaskEvidence(
+        task.task_id,
+        "employment_record",
+        "employer-attested-record",
+        "external",
+        DIGEST,
+        "test:external-verifier",
+    )
+    promotion = validate_task_evidence(task, evidence)
+    assert promotion.approval_state == "pending"
+    assert promotion.proof_class == "employment_record"
+    assert promotion.artifact_sha256 == DIGEST
+    with pytest.raises(ValueError, match="generated learning text"):
+        validate_task_evidence(
+            task,
+            TaskEvidence(
+                task.task_id,
+                "employment_record",
+                "employer-attested-record",
+                "external",
+                DIGEST,
+                "test:external-verifier",
+                generated_text="I gained the required professional experience.",
+            ),
+        )
+
+
+def test_external_outcome_experience_template_still_fails_closed() -> None:
+    requirement = Requirement(
+        "experience-proof-mismatch",
+        "professional-experience",
+        "Demonstrate the required professional experience.",
+        True,
+        "experience",
+        "gain_experience",
+        ("employment_record", "verified_claim"),
+        7000,
+        "vacancy:negative-control",
+        (0, 49),
+    )
+    no_match = evaluate_match(
+        requirement,
+        MatchProposal(
+            requirement.requirement_id,
+            (),
+            9000,
+            "none",
+            "No approved employment evidence.",
+            _receipt(requirement, ()),
+        ),
+        {},
+        as_of=AS_OF,
+    )
+    unsafe_templates = dict(DEFAULT_TEMPLATES)
+    unsafe_templates["experience"] = TaskTemplate(
+        "gain_real_experience",
+        "external-outcome-receipt",
+        "external_outcome",
+        ("external", "human"),
+        10,
+        7000,
+    )
+    with pytest.raises(
+        ValueError,
+        match="task resulting evidence cannot satisfy the requirement proof contract",
+    ):
+        optimise_gaps((requirement,), (no_match,), templates=unsafe_templates)
 
 
 def test_structural_gap_blocks_without_creating_a_task() -> None:
