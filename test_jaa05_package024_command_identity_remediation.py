@@ -376,7 +376,10 @@ def test_fresh_v11_paths_are_absent(amendment: dict) -> None:
         Path(paths["success_output"]),
         Path(paths["failure_output"]),
     ]
-    assert all("jaa05-canary-v11-3c2887f-" in str(path) for path in values)
+    assert all(
+        f"jaa05-canary-v11-{_head()[:7]}-" in str(path)
+        for path in values
+    )
     assert len(set(values)) == 3
     assert len({path.parent for path in values}) == 1
     assert all(not path.exists() and not path.is_symlink() for path in values)
