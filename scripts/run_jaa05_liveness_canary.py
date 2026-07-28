@@ -605,8 +605,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _runtime_argv(cli_arguments: list[str], *, executable: str) -> list[str]:
+    """Preserve the exact invoked interpreter spelling without dereferencing it."""
+    return [
+        str(Path(executable).absolute()),
+        str(Path(__file__).absolute()),
+        *cli_arguments,
+    ]
+
+
 def main() -> int:
-    argv = [str(Path(sys.executable).resolve()), str(Path(__file__).resolve()), *sys.argv[1:]]
+    argv = _runtime_argv(sys.argv[1:], executable=sys.executable)
     try:
         execute(_parser().parse_args(), argv=argv)
     except Exception as exc:

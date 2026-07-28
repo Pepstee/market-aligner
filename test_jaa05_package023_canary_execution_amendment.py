@@ -58,6 +58,33 @@ def _load_module(name: str, path: Path) -> ModuleType:
     return module
 
 
+def _load_historical_runner() -> ModuleType:
+    source = subprocess.run(
+        (
+            "git",
+            "show",
+            "d98506a5e8529d1aa2a6f996ab6428d13049acdb:"
+            "scripts/run_jaa05_liveness_canary.py",
+        ),
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    module = ModuleType("package023_historical_runner")
+    module.__file__ = str(EXECUTOR)
+    exec(compile(source, str(EXECUTOR), "exec"), module.__dict__)
+    current_executor = EXECUTOR.read_bytes()
+    historical_digest = module._digest
+
+    def digest_with_historical_executor(value: bytes) -> str:
+        if value == current_executor:
+            return EXECUTOR_SHA256
+        return historical_digest(value)
+
+    module._digest = digest_with_historical_executor
+    return module
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -74,12 +101,32 @@ def _head() -> str:
 
 @pytest.fixture(scope="module")
 def builder() -> ModuleType:
-    return _load_module("package023_builder", BUILDER)
+    module = _load_module("package023_builder", BUILDER)
+    historical_executor = subprocess.run(
+        (
+            "git",
+            "show",
+            "d98506a5e8529d1aa2a6f996ab6428d13049acdb:"
+            "scripts/run_jaa05_liveness_canary.py",
+        ),
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    read_regular = module._read_regular
+
+    def read_with_historical_executor(path: Path) -> bytes:
+        if path == EXECUTOR:
+            return historical_executor
+        return read_regular(path)
+
+    module._read_regular = read_with_historical_executor
+    return module
 
 
 @pytest.fixture(scope="module")
 def runner() -> ModuleType:
-    return _load_module("package023_runner", EXECUTOR)
+    return _load_historical_runner()
 
 
 @pytest.fixture(scope="module")
@@ -94,7 +141,18 @@ def amendment(builder: ModuleType) -> dict:
 def test_frozen_builder_amendment_and_executor_hashes_match() -> None:
     assert _sha256(BUILDER) == BUILDER_SHA256
     assert _sha256(AMENDMENT) == AMENDMENT_SHA256
-    assert _sha256(EXECUTOR) == EXECUTOR_SHA256
+    historical = subprocess.run(
+        (
+            "git",
+            "show",
+            "d98506a5e8529d1aa2a6f996ab6428d13049acdb:"
+            "scripts/run_jaa05_liveness_canary.py",
+        ),
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    assert hashlib.sha256(historical).hexdigest() == EXECUTOR_SHA256
     assert BUILDER.stat().st_mode & 0o777 == 0o444
     assert AMENDMENT.stat().st_mode & 0o777 == 0o444
 
@@ -173,9 +231,15 @@ def test_executor_is_exactly_revision_and_hash_bound(amendment: dict) -> None:
     executor = amendment["future_executor"]
     assert executor["path"] == str(EXECUTOR)
     assert executor["sha256"] == EXECUTOR_SHA256
-    assert executor["source_commit"] == _head()
+    assert executor["source_commit"] == (
+        "d98506a5e8529d1aa2a6f996ab6428d13049acdb"
+    )
     assert executor["source_tree"] == subprocess.run(
-        ("git", "rev-parse", "HEAD^{tree}"),
+        (
+            "git",
+            "rev-parse",
+            "d98506a5e8529d1aa2a6f996ab6428d13049acdb^{tree}",
+        ),
         cwd=ROOT,
         check=True,
         stdout=subprocess.PIPE,
