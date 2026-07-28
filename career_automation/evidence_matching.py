@@ -243,6 +243,10 @@ class MatchProposal:
     basis: str
     rationale: str
     receipt: InferenceReceipt
+    # Explicit (evidence_id, claim_id) bindings into Evidence.claim_lineage.
+    # When present, evaluate_match uses the citation path (candidate-claim namespace).
+    # When absent, the deprecated criterion-in-demonstrates path is used (vacancy namespace).
+    citations: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _identifier("proposal requirement_id", self.requirement_id)
@@ -258,6 +262,18 @@ class MatchProposal:
             raise ValueError("a relationship proposal must cite evidence")
         if not self.rationale.strip():
             raise ValueError("proposal rationale is required")
+        if self.citations:
+            unknown_ev = {ev_id for ev_id, _ in self.citations}.difference(self.evidence_ids)
+            if unknown_ev:
+                raise ValueError(
+                    f"citations reference evidence IDs not in evidence_ids: "
+                    f"{sorted(unknown_ev)}"
+                )
+            if len(set(self.citations)) != len(self.citations):
+                raise ValueError("citation (evidence_id, claim_id) pairs must be unique")
+            for ev_id, claim_id in self.citations:
+                _identifier("citation evidence_id", ev_id)
+                _identifier("citation claim_id", claim_id)
 
 
 @dataclass(frozen=True)
@@ -300,14 +316,17 @@ class CandidateMatchBatch:
 
 
 def _proposal_hash(proposal: MatchProposal) -> str:
-    return content_hash({
+    payload: dict[str, Any] = {
         "requirement_id": proposal.requirement_id,
         "evidence_ids": proposal.evidence_ids,
         "confidence_bp": proposal.confidence_bp,
         "basis": proposal.basis,
         "rationale": proposal.rationale,
         "receipt": vars(proposal.receipt),
-    })
+    }
+    if proposal.citations:
+        payload["citations"] = proposal.citations
+    return content_hash(payload)
 
 
 def _requirement_payload(requirement: Requirement) -> dict[str, Any]:
@@ -441,6 +460,12 @@ def proposal_from_mapping(value: Mapping[str, Any]) -> MatchProposal:
     receipt = value.get("receipt")
     if not isinstance(receipt, Mapping):
         raise ValueError("proposal inference receipt is required")
+    raw_citations = value.get("citations") or ()
+    if not isinstance(raw_citations, (list, tuple)) or any(
+        not isinstance(row, (list, tuple)) or len(row) != 2
+        for row in raw_citations
+    ):
+        raise ValueError("proposal citations must be (evidence_id, claim_id) pairs")
     return MatchProposal(
         requirement_id=str(value.get("requirement_id", "")),
         evidence_ids=tuple(value.get("evidence_ids") or ()),
@@ -455,6 +480,7 @@ def proposal_from_mapping(value: Mapping[str, Any]) -> MatchProposal:
             candidate_profile_sha256=str(receipt.get("candidate_profile_sha256", "")),
             input_sha256=str(receipt.get("input_sha256", "")),
         ),
+        citations=tuple((str(row[0]), str(row[1])) for row in raw_citations),
     )
 
 
@@ -528,6 +554,60 @@ def evaluate_match(
             proposal_sha256,
             proposal.receipt,
         )
+    if proposal.citations:
+        # Citation path: each (evidence_id, claim_id) must bind into Evidence.claim_lineage,
+        # AND every cited pair must be releasable with an accepted proof class.
+        # Vacancy criteria and candidate claim IDs are separate namespaces; this path
+        # operates entirely within the candidate-claim namespace.
+        lineage_failures: list[tuple[str, str]] = []
+        ineligible_pairs: list[tuple[str, str]] = []
+        eligible_ids: list[str] = []
+        for ev_id, claim_id in proposal.citations:
+            ev = evidence[ev_id]  # existence guaranteed by __post_init__ + prior unknown check
+            lineage_claim_ids = {cl[0] for cl in ev.claim_lineage}
+            if claim_id not in lineage_claim_ids:
+                lineage_failures.append((ev_id, claim_id))
+            elif ev.is_releasable(as_of=as_of) and ev.proof_class in requirement.accepted_proof_classes:
+                if ev_id not in eligible_ids:
+                    eligible_ids.append(ev_id)
+            else:
+                ineligible_pairs.append((ev_id, claim_id))
+        if lineage_failures:
+            return MatchResult(
+                requirement.requirement_id, "no_match", (), proposal.confidence_bp,
+                f"cited claim_id not in evidence claim_lineage: {lineage_failures[0]}",
+                policy.policy_hash, proposal_sha256, proposal.receipt,
+            )
+        if ineligible_pairs:
+            return MatchResult(
+                requirement.requirement_id, "no_match", (), proposal.confidence_bp,
+                f"cited (evidence, claim) pair resolves lineage but is not releasable "
+                f"with an accepted proof class: {ineligible_pairs[0]}",
+                policy.policy_hash, proposal_sha256, proposal.receipt,
+            )
+        if not eligible_ids:
+            return MatchResult(
+                requirement.requirement_id, "no_match", (), proposal.confidence_bp,
+                "no cited (evidence, claim) pair is releasable with an accepted proof class",
+                policy.policy_hash, proposal_sha256, proposal.receipt,
+            )
+        if proposal.confidence_bp < policy.match_confidence_bp:
+            return MatchResult(
+                requirement.requirement_id, "abstain",
+                tuple(eligible_ids), proposal.confidence_bp,
+                "citation-bound relationship confidence is below the match threshold",
+                policy.policy_hash, proposal_sha256, proposal.receipt,
+            )
+        return MatchResult(
+            requirement.requirement_id, "matched",
+            tuple(eligible_ids), proposal.confidence_bp,
+            "citation-bound evidence demonstrates requirement through approved claim lineage",
+            policy.policy_hash, proposal_sha256, proposal.receipt,
+        )
+    # DEPRECATED: criterion-in-demonstrates fallback when no explicit citations are supplied.
+    # The requirement criterion (vacancy namespace) is matched against Evidence.demonstrates
+    # (candidate-claim namespace), which crosses the namespace boundary. Preserved only for
+    # backward compatibility with proposals that predate explicit citation binding.
     eligible = tuple(
         item for item in cited
         if item.is_releasable(as_of=as_of)
