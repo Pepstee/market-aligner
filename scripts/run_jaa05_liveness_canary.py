@@ -481,6 +481,13 @@ def execute(args: argparse.Namespace, *, argv: list[str]) -> dict[str, Any]:
                 "url": route["url"],
                 "canonical_url_sha256": route["canonical_url_sha256"],
                 "status": "started",
+                "http_status": None,
+                "bytes_received": None,
+                "bytes_preserved": None,
+                "content_sha256": None,
+                "raw_response_ref": None,
+                "truncated": False,
+                "robots_receipt": None,
             }
             receipt["route_outcomes"].append(outcome)
             try:
@@ -520,6 +527,23 @@ def execute(args: argparse.Namespace, *, argv: list[str]) -> dict[str, Any]:
             except PublicAccessDenied as exc:
                 outcome["status"] = "robots_or_policy_denied"
                 raise LivenessCanaryFailure(str(exc)) from exc
+            except LivenessCanaryFailure:
+                event = client.events[-1] if client.events else {}
+                if event.get("url") == route["url"]:
+                    for key in (
+                        "bytes_received",
+                        "bytes_preserved",
+                        "content_sha256",
+                        "raw_response_ref",
+                        "truncated",
+                    ):
+                        if key in event:
+                            outcome[key] = event[key]
+                    if event.get("outcome") == "response_too_large":
+                        outcome["status"] = "failed_response_too_large"
+                    elif event.get("outcome") == "redirect_prohibited":
+                        outcome["status"] = "failed_redirect"
+                raise
         receipt["status"] = "success"
         receipt["completed_at"] = datetime.now(timezone.utc).isoformat()
         receipt["requests"] = client.events
