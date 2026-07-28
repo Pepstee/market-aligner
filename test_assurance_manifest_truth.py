@@ -27,7 +27,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         for item in yaml.safe_load(SLICES.read_text(encoding="utf-8"))["slices"]
     }
     jaa05 = components["JAA-05"]
-    assert jaa05["increment"] == "implementation_in_progress_dependency_blocked"
+    assert jaa05["increment"] == "implementation_in_progress_human_evidence_blocked"
+    assert jaa05["certification"]["status"] == "blocked"
+    assert jaa05["certification"]["blocked_by"] == "HUMAN_EVIDENCE_AUTHORING"
     for relative in jaa05["owns"]:
         assert (ROOT / relative).is_file(), f"JAA-05 materialised path missing: {relative}"
     for test in jaa05["tests"]:
@@ -185,7 +187,16 @@ def test_stale_and_incomplete_slice_states_are_explicit() -> None:
     ]
     assert components["JAA-02"]["increment"] == "complete"
     assert components["JAA-03"]["increment"] == "complete"
-    assert components["JAA-04"]["increment"] == "increment_b_incomplete"
+    jaa04 = components["JAA-04"]
+    assert jaa04["increment"] == "complete"
+    assert jaa04["certification"] == {
+        "status": "independently_certified",
+        "certified_source_git_revision": "a4f44905323abd21f926341e35263a478d381cf4",
+        "corpus_inventory_sha256": "f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        "receipt": "sha256-69299c7d8bac80bcd2b73a85069e80ba433ef75d6092349384f2dd6cdaff418b.json",
+        "independent_ruling": "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/jaa/round-09-fable-jaa04-final-certification-ruling.json",
+        "note": "This certification supersedes the stale increment_b_incomplete manifest state.",
+    }
 
 
 def test_jaa04_inflight_databases_and_response_bytes_are_untracked() -> None:

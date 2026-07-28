@@ -168,8 +168,16 @@
     },
     "JAA-04": {
       "claim": "Employer reconnaissance produces cited, freshness-aware dossiers and Opportunity-1 decisions.",
-      "increment": "increment_b_incomplete",
+      "increment": "complete",
       "depends_on": ["JAA-03"],
+      "certification": {
+        "status": "independently_certified",
+        "certified_source_git_revision": "a4f44905323abd21f926341e35263a478d381cf4",
+        "corpus_inventory_sha256": "f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        "receipt": "sha256-69299c7d8bac80bcd2b73a85069e80ba433ef75d6092349384f2dd6cdaff418b.json",
+        "independent_ruling": "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/jaa/round-09-fable-jaa04-final-certification-ruling.json",
+        "note": "This certification supersedes the stale increment_b_incomplete manifest state."
+      },
       "owns": [
         "career_automation/admission_evidence.py",
         "career_automation/employer_research.py",
@@ -227,8 +235,14 @@
     },
     "JAA-05": {
       "claim": "Evidence matching and gap optimisation are calibrated, abstaining and evidence-gated.",
-      "increment": "implementation_in_progress_dependency_blocked",
+      "increment": "implementation_in_progress_human_evidence_blocked",
       "depends_on": ["JAA-04"],
+      "certification": {
+        "status": "blocked",
+        "blocked_by": "HUMAN_EVIDENCE_AUTHORING",
+        "rule": "Models may discover and questionnaire candidate claims but must not create, edit, normalise or approve production candidate evidence.",
+        "candidate_inventory": "Mac-side non-production draft pending operator answers and explicit approval"
+      },
       "owns": [
         "career_automation/evidence_matching.py",
         "career_automation/gap_optimizer.py",
