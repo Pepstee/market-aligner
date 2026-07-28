@@ -560,6 +560,7 @@ def execute(args: argparse.Namespace, *, argv: list[str]) -> dict[str, Any]:
             "robots": client.robots,
             "total": client.total,
         }
+        receipt["raw_inventory"] = _inventory(workspace)
         _write_manifest(workspace, receipt)
         os.rename(workspace, output)
         return receipt
@@ -577,6 +578,7 @@ def execute(args: argparse.Namespace, *, argv: list[str]) -> dict[str, Any]:
             "message": str(exc),
         }
         try:
+            receipt["raw_inventory"] = _inventory(workspace)
             _write_manifest(workspace, receipt)
             os.rename(workspace, failure_output)
         except BaseException as preserve_error:
