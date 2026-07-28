@@ -194,7 +194,17 @@ def test_stale_and_incomplete_slice_states_are_explicit() -> None:
         "certified_source_git_revision": "a4f44905323abd21f926341e35263a478d381cf4",
         "corpus_inventory_sha256": "f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
         "receipt": "sha256-69299c7d8bac80bcd2b73a85069e80ba433ef75d6092349384f2dd6cdaff418b.json",
-        "independent_ruling": "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/jaa/round-09-fable-jaa04-final-certification-ruling.json",
+        "independent_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-12h-supervisor-20260727/evidence/"
+                "round-09-fable-jaa04-final-certification-ruling.json"
+            ),
+            "sha256": (
+                "62ffda62500184b03b53eb3c61d6a0ee"
+                "3f66beda6f63f5501355c6d9746c5b53"
+            ),
+        },
         "note": "This certification supersedes the stale increment_b_incomplete manifest state.",
     }
 

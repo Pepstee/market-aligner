@@ -186,6 +186,20 @@ def test_acquisition_requirement_field_fabrication_fails_closed(
         )
 
 
+def test_acquisition_sealed_root_is_bound_without_shipping_host_path(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(ACQUISITION.read_text())
+    document["derived_from"]["sealed_root"] = "/different/control/root"
+    path = tmp_path / ACQUISITION.name
+    path.write_bytes(_canonical(document))
+    with pytest.raises(HoldoutFirewallFailure, match="sealed-root binding"):
+        load_acquisition_quarantine_index(
+            path,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+
+
 def test_runtime_union_excludes_all_four_acquisition_identity_classes() -> None:
     bundle = load_quarantine_bundle(BUNDLE, BUNDLE_SHA)
     trace = json.loads(SEALED_EVIDENCE.read_text())["selection_trace"]

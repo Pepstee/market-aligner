@@ -19,6 +19,9 @@ ACQUISITION_INDEX_SCHEMA = "jaa05.failed-cycle-acquisition-quarantine-index.v1"
 BUNDLE_SCHEMA = "jaa05.combined-quarantine-bundle.v1"
 FIREWALL_SCHEMA = "jaa05.post-acquisition-firewall.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+EXPECTED_ACQUISITION_SEALED_ROOT_SHA256 = (
+    "fd6b322cf46a43bbb0f2cc90fe18f54bfaeb57714e2b9199b0337e5a93979b2e"
+)
 INDEX_FIELDS = frozenset({
     "schema_version",
     "authority",
@@ -456,24 +459,29 @@ def load_acquisition_quarantine_index(
             for child in value:
                 reject_forbidden(child)
     reject_forbidden(document)
+    derived_from = document["derived_from"]
     _require(
-        document["derived_from"] == {
-            "failure_record_sha256": (
-                "a76ca48dc4c3d502385ffad979979ae8510b22b8fea6fab967044e337ffa643d"
-            ),
-            "capture_evidence_file_sha256": (
-                "b1e0c5de0af3419f0ae2085476d3afe19c86b5e0cb11fb0cdc6f488b57979217"
-            ),
-            "capture_evidence_self_sha256": (
-                "7481b33baa077af31b84089db78da3c11f06fd5f5feccdd9ad51ee0ff7ab3c49"
-            ),
-            "sealed_root": (
-                "/home/gutua/software-factory/.control/"
-                "resumed-dual-lane-20260728/jaa/runtime/"
-                "fresh-jaa05-holdout-v1-0c90c73"
-            ),
-        },
+        isinstance(derived_from, dict)
+        and set(derived_from) == {
+            "failure_record_sha256",
+            "capture_evidence_file_sha256",
+            "capture_evidence_self_sha256",
+            "sealed_root",
+        }
+        and derived_from["failure_record_sha256"]
+        == "a76ca48dc4c3d502385ffad979979ae8510b22b8fea6fab967044e337ffa643d"
+        and derived_from["capture_evidence_file_sha256"]
+        == "b1e0c5de0af3419f0ae2085476d3afe19c86b5e0cb11fb0cdc6f488b57979217"
+        and derived_from["capture_evidence_self_sha256"]
+        == "7481b33baa077af31b84089db78da3c11f06fd5f5feccdd9ad51ee0ff7ab3c49",
         "acquisition quarantine derivation binding differs",
+    )
+    sealed_root = derived_from["sealed_root"]
+    _require(
+        isinstance(sealed_root, str)
+        and hashlib.sha256(sealed_root.encode("utf-8")).hexdigest()
+        == EXPECTED_ACQUISITION_SEALED_ROOT_SHA256,
+        "acquisition quarantine sealed-root binding differs",
     )
     entries = document["entries"]
     _require(
