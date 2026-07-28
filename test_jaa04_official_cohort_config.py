@@ -39,6 +39,7 @@ from career_automation.official_cohort import (
     _validate_config,
     build,
 )
+from career_automation.holdout_firewall import QuarantineIndex
 from career_automation.public_access import (
     PublicAccessDenied,
     PublicAccessController,
@@ -54,6 +55,16 @@ from skeleton.configuration import load_config
 
 ROOT = Path(__file__).resolve().parent
 OVERNIGHT = ROOT / "skeleton" / "config.overnight.yaml"
+EMPTY_TEST_QUARANTINE = QuarantineIndex(
+    path=Path("/offline-test/empty-quarantine-index.json"),
+    sha256="f" * 64,
+    entry_count=0,
+    job_keys=frozenset(),
+    payload_hashes=frozenset(),
+    requirement_ids=frozenset(),
+    source_text_sha256=frozenset(),
+    source_identity_sha256=frozenset(),
+)
 
 
 def _public_resolver(_host: str, port: int) -> tuple[tuple[object, ...], ...]:
@@ -301,6 +312,7 @@ def _request_journal(
     *,
     resume: bool,
     policy_sha256: str = "3" * 64,
+    quarantine_index_sha256: str = EMPTY_TEST_QUARANTINE.sha256,
     source_head: str = "a" * 40,
 ) -> DurableRequestJournal:
     config = run_root.parent / f"{run_root.name}-config.yaml"
@@ -309,6 +321,7 @@ def _request_journal(
     return DurableRequestJournal.open(
         config_path=config,
         policy_sha256=policy_sha256,
+        quarantine_index_sha256=quarantine_index_sha256,
         source_head=source_head,
         raw_root=run_root / "raw",
         resume=resume,
@@ -487,6 +500,7 @@ def test_build_resume_after_simulated_kill_matches_uninterrupted_inventory(
             config,
             interrupted / "queue.json",
             interrupted / "raw",
+            quarantine_index=EMPTY_TEST_QUARANTINE,
             access_controller=AllowingController(),
             evidence_output=interrupted / "capture-evidence.json",
             source_head="a" * 40,
@@ -500,6 +514,7 @@ def test_build_resume_after_simulated_kill_matches_uninterrupted_inventory(
             config,
             interrupted / "queue.json",
             interrupted / "raw",
+            quarantine_index=EMPTY_TEST_QUARANTINE,
             access_controller=AllowingController(),
             evidence_output=interrupted / "capture-evidence.json",
             resume=True,
@@ -524,6 +539,7 @@ def test_build_resume_after_simulated_kill_matches_uninterrupted_inventory(
             uninterrupted_config,
             uninterrupted / "queue.json",
             uninterrupted / "raw",
+            quarantine_index=EMPTY_TEST_QUARANTINE,
             access_controller=AllowingController(),
             evidence_output=uninterrupted / "capture-evidence.json",
             source_head="a" * 40,
@@ -592,7 +608,10 @@ def test_durable_request_journal_refuses_raw_or_journal_tampering(
         _request_journal(run_root, resume=True)
 
 
-@pytest.mark.parametrize("mismatch", ("configuration", "policy", "head"))
+@pytest.mark.parametrize(
+    "mismatch",
+    ("configuration", "policy", "quarantine", "head"),
+)
 def test_durable_request_journal_refuses_run_identity_mismatch(
     tmp_path: Path,
     mismatch: str,
@@ -602,16 +621,22 @@ def test_durable_request_journal_refuses_run_identity_mismatch(
     if mismatch == "configuration":
         config = run_root.parent / f"{run_root.name}-config.yaml"
         config.write_text("changed fixture configuration\n", encoding="utf-8")
-        policy, head = "3" * 64, "a" * 40
+        policy, quarantine, head = "3" * 64, "f" * 64, "a" * 40
     elif mismatch == "policy":
-        policy, head = "4" * 64, "a" * 40
+        policy, quarantine, head = "4" * 64, "f" * 64, "a" * 40
+    elif mismatch == "quarantine":
+        policy, quarantine, head = "3" * 64, "e" * 64, "a" * 40
     else:
-        policy, head = "3" * 64, "b" * 40
-    with pytest.raises(RuntimeError, match="configuration, policy, HEAD"):
+        policy, quarantine, head = "3" * 64, "f" * 64, "b" * 40
+    with pytest.raises(
+        RuntimeError,
+        match="configuration, policy, quarantine index, HEAD",
+    ):
         _request_journal(
             run_root,
             resume=True,
             policy_sha256=policy,
+            quarantine_index_sha256=quarantine,
             source_head=head,
         )
 
@@ -1033,6 +1058,7 @@ def test_selection_trace_covers_duplicates_and_rows_below_exact_cut() -> None:
             "job_key": f"greenhouse:{number:02d}",
             "url": f"https://jobs.example.test/{number:02d}",
             "content_sha256": f"{number:064x}",
+            "payload_hash": f"{number + 100:064x}",
             "opportunity0_decision": {"score_bp": 9000 - number},
             "temporal_admission": {
                 "publisher_time": "2026-07-27T12:00:00+00:00",
@@ -1043,7 +1069,7 @@ def test_selection_trace_covers_duplicates_and_rows_below_exact_cut() -> None:
         **candidates[0],
         "job_key": "greenhouse:duplicate-url",
     })
-    selected, trace = _select_candidates(candidates)
+    selected, trace = _select_candidates(candidates, EMPTY_TEST_QUARANTINE)
     assert len(selected) == 30
     assert len(trace) == 33
     assert trace[1]["disposition"] == "duplicate_url"
@@ -1091,6 +1117,7 @@ def test_below_floor_run_writes_evidence_but_no_queue(
             config,
             output,
             raw,
+            quarantine_index=EMPTY_TEST_QUARANTINE,
             access_controller=controller,
             evidence_output=evidence,
         )
@@ -1099,6 +1126,10 @@ def test_below_floor_run_writes_evidence_but_no_queue(
     assert payload["result_status"] == "rejected_below_admission_floor"
     assert payload["selected_count"] == 0
     assert payload["raw_store"]["inventory"] == []
+    assert (
+        payload["failed_holdout_quarantine"]
+        == EMPTY_TEST_QUARANTINE.binding()
+    )
     assert evidence.stat().st_mode & 0o777 == 0o600
     claimed = payload.pop("evidence_sha256")
     assert claimed == hashlib.sha256(_canonical(payload)).hexdigest()
@@ -1146,6 +1177,7 @@ def test_live_official_cohort_refuses_to_start_without_access_authority(
             tmp_path / "not-read-without-authority.yaml",
             tmp_path / "output.json",
             tmp_path / "raw",
+            quarantine_index=EMPTY_TEST_QUARANTINE,
         )
 
 

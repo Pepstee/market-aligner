@@ -29,6 +29,10 @@ from career_automation.employer_research import (
     FRESHNESS_DAYS, IntelligenceKind, RawResponseCache,
     _public_transport_url, _public_url, extract_publisher_timestamps,
 )
+from career_automation.holdout_firewall import (
+    QuarantineIndex,
+    load_quarantine_index,
+)
 from career_automation.opportunity_calibration import (
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
     calibration_policy_json, decide_opportunity0,
@@ -150,6 +154,7 @@ class DurableRequestJournal:
         *,
         config_path: Path,
         policy_sha256: str,
+        quarantine_index_sha256: str,
         source_head: str,
         raw_root: Path,
         resume: bool,
@@ -161,6 +166,7 @@ class DurableRequestJournal:
                 config_path.read_bytes()
             ).hexdigest(),
             "access_policy_sha256": policy_sha256,
+            "failed_holdout_quarantine_index_sha256": quarantine_index_sha256,
             "source_head": source_head,
             "raw_root": raw_root.name,
         }
@@ -230,7 +236,8 @@ class DurableRequestJournal:
             raise RuntimeError("request journal identity is invalid") from exc
         if actual_identity != self.identity:
             raise RuntimeError(
-                "request journal configuration, policy, HEAD or raw root mismatch"
+                "request journal configuration, policy, quarantine index, "
+                "HEAD or raw root mismatch"
             )
         previous: str | None = None
         starts: dict[int, dict[str, Any]] = {}
@@ -1313,6 +1320,7 @@ def _raw_inventory(raw_root: Path) -> tuple[list[dict[str, Any]], str]:
 
 def _select_candidates(
     candidates: list[dict[str, Any]],
+    quarantine_index: QuarantineIndex,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     trace: list[dict[str, Any]] = []
@@ -1323,8 +1331,13 @@ def _select_candidates(
         identity = candidate["job_key"]
         url = _normal_url(candidate["url"])
         body_hash = candidate["content_sha256"]
+        payload_hash = candidate["payload_hash"]
         duplicate_reason: str | None = None
-        if identity in seen_identity:
+        if identity in quarantine_index.job_keys:
+            duplicate_reason = "quarantined_job_key"
+        elif payload_hash in quarantine_index.payload_hashes:
+            duplicate_reason = "quarantined_payload_hash"
+        elif identity in seen_identity:
             duplicate_reason = "duplicate_identity"
         elif url in seen_url:
             duplicate_reason = "duplicate_url"
@@ -1347,11 +1360,13 @@ def _select_candidates(
             "score_bp": candidate["opportunity0_decision"]["score_bp"],
             "canonical_url": url,
             "content_sha256": body_hash,
+            "payload_hash": payload_hash,
             "publisher_time": candidate["temporal_admission"]["publisher_time"],
             "official_response_hashes": sorted({
                 ref["sha256"] for ref in candidate["raw_response_refs"]
             }),
             "disposition": disposition,
+            "quarantine_index_sha256": quarantine_index.sha256,
         })
     return records, trace
 
@@ -1401,6 +1416,7 @@ def _write_run_evidence(
     errors: list[str],
     selected_count: int,
     journal: DurableRequestJournal,
+    quarantine_index: QuarantineIndex,
 ) -> dict[str, Any]:
     if path.exists() or path.is_symlink():
         raise RuntimeError("capture evidence output already exists")
@@ -1434,6 +1450,7 @@ def _write_run_evidence(
             "path": str(access_controller.policy.source_path),
             "sha256": access_controller.policy.policy_sha256,
         },
+        "failed_holdout_quarantine": quarantine_index.binding(),
         "raw_store": {
             "root": str(raw_root),
             "inventory": inventory,
@@ -1465,6 +1482,7 @@ def build(
     output: Path,
     raw_root: Path,
     *,
+    quarantine_index: QuarantineIndex,
     access_controller: Any | None = None,
     evidence_output: Path | None = None,
     resume: bool = False,
@@ -1482,6 +1500,7 @@ def build(
     journal = DurableRequestJournal.open(
         config_path=config_path,
         policy_sha256=policy_sha256,
+        quarantine_index_sha256=quarantine_index.sha256,
         source_head=source_head or source_git_revision(
             Path(__file__).resolve().parents[1]
         ),
@@ -1561,7 +1580,7 @@ def build(
                     "temporal_admission": temporal,
                 })
     candidates.sort(key=lambda row: (-row["opportunity0_decision"]["score_bp"], row["job_key"]))
-    records, selection_trace = _select_candidates(candidates)
+    records, selection_trace = _select_candidates(candidates, quarantine_index)
     temporal_decisions.sort(key=lambda row: (row["job_key"], str(row["authority_response_sha256"])))
     journal.assert_replay_consumed()
     if evidence_output is not None:
@@ -1576,6 +1595,7 @@ def build(
             errors=errors,
             selected_count=len(records),
             journal=journal,
+            quarantine_index=quarantine_index,
         )
     if len(records) < COHORT_SIZE:
         raise RuntimeError(f"only {len(records)} current unique official vacancies survived; need exactly 30; "
@@ -1598,6 +1618,7 @@ def build(
         "temporal_decisions_hash": hashlib.sha256(_canonical(temporal_decisions)).hexdigest(),
         "records": records,
         "records_hash": hashlib.sha256(_canonical(records)).hexdigest(),
+        "failed_holdout_quarantine": quarantine_index.binding(),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(output, _canonical(envelope) + b"\n")
@@ -1615,12 +1636,27 @@ def main() -> int:
     parser.add_argument("--access-policy", type=Path, required=True,
                         help="external human terms-review attestations")
     parser.add_argument(
+        "--quarantine-index",
+        type=Path,
+        required=True,
+        help="decision-free failed-holdout exclusion index",
+    )
+    parser.add_argument(
+        "--quarantine-index-sha256",
+        required=True,
+        help="expected SHA-256 of the exact quarantine index bytes",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="resume only after validating the durable request journal",
     )
     args = parser.parse_args()
     try:
+        quarantine_index = load_quarantine_index(
+            args.quarantine_index.resolve(),
+            args.quarantine_index_sha256,
+        )
         raw_root = args.raw_root.resolve()
         policy = PublicAccessPolicy.load(args.access_policy.resolve())
         client = ScraplingClient(Path(__file__).resolve().parents[1], {
@@ -1637,6 +1673,7 @@ def main() -> int:
             args.config.resolve(),
             args.output.resolve(),
             raw_root,
+            quarantine_index=quarantine_index,
             access_controller=controller,
             evidence_output=args.evidence_output.resolve(),
             resume=args.resume,
