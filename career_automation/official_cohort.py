@@ -30,8 +30,9 @@ from career_automation.employer_research import (
     _public_transport_url, _public_url, extract_publisher_timestamps,
 )
 from career_automation.holdout_firewall import (
+    QuarantineBundle,
     QuarantineIndex,
-    load_quarantine_index,
+    load_quarantine_bundle,
 )
 from career_automation.opportunity_calibration import (
     DECISION_RULE_VERSION, CalibrationPolicy, Confidence, Opportunity0Input,
@@ -154,7 +155,7 @@ class DurableRequestJournal:
         *,
         config_path: Path,
         policy_sha256: str,
-        quarantine_index_sha256: str,
+        quarantine_binding_sha256: str,
         source_head: str,
         raw_root: Path,
         resume: bool,
@@ -166,7 +167,7 @@ class DurableRequestJournal:
                 config_path.read_bytes()
             ).hexdigest(),
             "access_policy_sha256": policy_sha256,
-            "failed_holdout_quarantine_index_sha256": quarantine_index_sha256,
+            "combined_quarantine_bundle_sha256": quarantine_binding_sha256,
             "source_head": source_head,
             "raw_root": raw_root.name,
         }
@@ -1251,6 +1252,38 @@ def _validate_config(payload: Any) -> tuple[list[str], dict[str, dict[str, Any]]
     return names, configs, list(terms)
 
 
+def _validate_package019_supply_config(
+    config: dict[str, Any],
+    attested_hosts: set[str],
+) -> None:
+    block = config.get("package_019_supply_derivation")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        raise RuntimeError("Package-019 supply derivation is invalid")
+    active = block.get("executable_tenants_added")
+    inactive = block.get("inactive_pending_human_terms_review")
+    if not isinstance(active, list) or not isinstance(inactive, list):
+        raise RuntimeError("Package-019 tenant lists are invalid")
+    for row in active:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"provider", "tenant", "api_host"}
+            or row["api_host"] not in attested_hosts
+        ):
+            raise RuntimeError(
+                "Package-019 active tenant lacks exact host attestation"
+            )
+    for row in inactive:
+        if (
+            not isinstance(row, dict)
+            or row.get("executable") is not False
+        ):
+            raise RuntimeError(
+                "Package-019 pending-terms tenant must remain inactive"
+            )
+
+
 def _temporal_admission(refs: list[dict[str, Any]], raw_root: Path,
                         as_of: datetime) -> dict[str, Any]:
     """Replay the downstream ROLE/HIRING publisher-time prerequisite.
@@ -1330,7 +1363,7 @@ def _raw_inventory(raw_root: Path) -> tuple[list[dict[str, Any]], str]:
 
 def _select_candidates(
     candidates: list[dict[str, Any]],
-    quarantine_index: QuarantineIndex,
+    quarantine_index: QuarantineIndex | QuarantineBundle,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     trace: list[dict[str, Any]] = []
@@ -1347,6 +1380,17 @@ def _select_candidates(
             duplicate_reason = "quarantined_job_key"
         elif payload_hash in quarantine_index.payload_hashes:
             duplicate_reason = "quarantined_payload_hash"
+        elif (
+            isinstance(quarantine_index, QuarantineBundle)
+            and body_hash in quarantine_index.content_hashes
+        ):
+            duplicate_reason = "quarantined_content_hash"
+        elif (
+            isinstance(quarantine_index, QuarantineBundle)
+            and hashlib.sha256(url.encode("utf-8")).hexdigest()
+            in quarantine_index.canonical_url_hashes
+        ):
+            duplicate_reason = "quarantined_canonical_url_hash"
         elif identity in seen_identity:
             duplicate_reason = "duplicate_identity"
         elif url in seen_url:
@@ -1376,7 +1420,11 @@ def _select_candidates(
                 ref["sha256"] for ref in candidate["raw_response_refs"]
             }),
             "disposition": disposition,
-            "quarantine_index_sha256": quarantine_index.sha256,
+            (
+                "quarantine_bundle_sha256"
+                if isinstance(quarantine_index, QuarantineBundle)
+                else "quarantine_index_sha256"
+            ): quarantine_index.sha256,
         })
     return records, trace
 
@@ -1435,7 +1483,7 @@ def _write_run_evidence(
     errors: list[str],
     selected_count: int,
     journal: DurableRequestJournal,
-    quarantine_index: QuarantineIndex,
+    quarantine_index: QuarantineIndex | QuarantineBundle,
 ) -> dict[str, Any]:
     if path.exists() or path.is_symlink():
         raise RuntimeError("capture evidence output already exists")
@@ -1469,7 +1517,11 @@ def _write_run_evidence(
             "path": str(access_controller.policy.source_path),
             "sha256": access_controller.policy.policy_sha256,
         },
-        "failed_holdout_quarantine": quarantine_index.binding(),
+        (
+            "failed_holdout_quarantine_bundle"
+            if isinstance(quarantine_index, QuarantineBundle)
+            else "failed_holdout_quarantine"
+        ): quarantine_index.binding(),
         "raw_store": {
             "root": str(raw_root),
             "inventory": inventory,
@@ -1501,7 +1553,7 @@ def build(
     output: Path,
     raw_root: Path,
     *,
-    quarantine_index: QuarantineIndex,
+    quarantine_index: QuarantineIndex | QuarantineBundle,
     access_controller: Any | None = None,
     evidence_output: Path | None = None,
     resume: bool = False,
@@ -1515,11 +1567,19 @@ def build(
         raise RuntimeError("capture evidence output already exists")
     if access_controller is None:
         raise RuntimeError("official cohort acquisition requires public access authority")
+    loaded_config = load_config(config_path)
+    _validate_package019_supply_config(
+        loaded_config,
+        set(getattr(access_controller.policy, "attestations", {})),
+    )
+    if loaded_config.get("execution_authorized") is False:
+        raise RuntimeError("proposal-only official cohort config is not executable")
+    boards, configs, terms = _validate_config(loaded_config)
     policy_sha256 = str(access_controller.policy.policy_sha256)
     journal = DurableRequestJournal.open(
         config_path=config_path,
         policy_sha256=policy_sha256,
-        quarantine_index_sha256=quarantine_index.sha256,
+        quarantine_binding_sha256=quarantine_index.sha256,
         source_head=source_head or source_git_revision(
             Path(__file__).resolve().parents[1]
         ),
@@ -1529,7 +1589,6 @@ def build(
     robots_client = getattr(access_controller, "robots_client", None)
     if isinstance(robots_client, AuditedRobotsClient):
         robots_client.journal = journal
-    boards, configs, terms = _validate_config(load_config(config_path))
     recorder = ResponseRecorder(
         raw_root,
         access_controller,
@@ -1637,7 +1696,11 @@ def build(
         "temporal_decisions_hash": hashlib.sha256(_canonical(temporal_decisions)).hexdigest(),
         "records": records,
         "records_hash": hashlib.sha256(_canonical(records)).hexdigest(),
-        "failed_holdout_quarantine": quarantine_index.binding(),
+        (
+            "failed_holdout_quarantine_bundle"
+            if isinstance(quarantine_index, QuarantineBundle)
+            else "failed_holdout_quarantine"
+        ): quarantine_index.binding(),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(output, _canonical(envelope) + b"\n")
@@ -1655,15 +1718,15 @@ def main() -> int:
     parser.add_argument("--access-policy", type=Path, required=True,
                         help="external human terms-review attestations")
     parser.add_argument(
-        "--quarantine-index",
+        "--quarantine-bundle",
         type=Path,
         required=True,
-        help="decision-free failed-holdout exclusion index",
+        help="decision-free combined failed-cycle exclusion bundle",
     )
     parser.add_argument(
-        "--quarantine-index-sha256",
+        "--quarantine-bundle-sha256",
         required=True,
-        help="expected SHA-256 of the exact quarantine index bytes",
+        help="expected SHA-256 of the exact quarantine bundle bytes",
     )
     parser.add_argument(
         "--resume",
@@ -1672,9 +1735,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
-        quarantine_index = load_quarantine_index(
-            args.quarantine_index.resolve(),
-            args.quarantine_index_sha256,
+        quarantine_index = load_quarantine_bundle(
+            args.quarantine_bundle.resolve(),
+            args.quarantine_bundle_sha256,
         )
         raw_root = args.raw_root.resolve()
         policy = PublicAccessPolicy.load(args.access_policy.resolve())

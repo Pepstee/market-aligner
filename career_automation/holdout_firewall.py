@@ -15,6 +15,8 @@ from typing import Any, Iterable, Mapping
 
 
 INDEX_SCHEMA = "jaa05.failed-holdout-quarantine-index.v1"
+ACQUISITION_INDEX_SCHEMA = "jaa05.failed-cycle-acquisition-quarantine-index.v1"
+BUNDLE_SCHEMA = "jaa05.combined-quarantine-bundle.v1"
 FIREWALL_SCHEMA = "jaa05.post-acquisition-firewall.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 INDEX_FIELDS = frozenset({
@@ -51,6 +53,33 @@ REQUIREMENT_FIELDS = frozenset({
     "payload_hash",
     "source_span",
     "text",
+})
+ACQUISITION_INDEX_FIELDS = frozenset({
+    "schema_version",
+    "decision_fields_included",
+    "source_text_included",
+    "derived_from",
+    "derivation_rule",
+    "entry_count",
+    "disposition_counts_crosscheck",
+    "job_keys",
+    "payload_hashes",
+    "content_hashes",
+    "canonical_url_hashes",
+    "entries",
+})
+ACQUISITION_ENTRY_FIELDS = frozenset({
+    "job_key",
+    "payload_hash",
+    "content_sha256",
+    "canonical_url_sha256",
+})
+BUNDLE_FIELDS = frozenset({
+    "schema_version",
+    "members",
+    "runtime_exclusion_semantics",
+    "post_extraction_disjointness_semantics",
+    "binds_failure_trees",
 })
 
 
@@ -144,6 +173,77 @@ class QuarantineIndex:
             "entry_count": self.entry_count,
             "job_key_count": len(self.job_keys),
             "selection_use": "exclusion_only",
+        }
+
+
+@dataclass(frozen=True)
+class AcquisitionQuarantineIndex:
+    path: Path
+    sha256: str
+    entry_count: int
+    job_keys: frozenset[str]
+    payload_hashes: frozenset[str]
+    content_hashes: frozenset[str]
+    canonical_url_hashes: frozenset[str]
+
+
+@dataclass(frozen=True)
+class QuarantineBundle:
+    path: Path
+    sha256: str
+    requirement_index: QuarantineIndex
+    acquisition_index: AcquisitionQuarantineIndex
+
+    @property
+    def job_keys(self) -> frozenset[str]:
+        return self.requirement_index.job_keys | self.acquisition_index.job_keys
+
+    @property
+    def payload_hashes(self) -> frozenset[str]:
+        return (
+            self.requirement_index.payload_hashes
+            | self.acquisition_index.payload_hashes
+        )
+
+    @property
+    def content_hashes(self) -> frozenset[str]:
+        return self.acquisition_index.content_hashes
+
+    @property
+    def canonical_url_hashes(self) -> frozenset[str]:
+        return self.acquisition_index.canonical_url_hashes
+
+    @property
+    def requirement_ids(self) -> frozenset[str]:
+        return self.requirement_index.requirement_ids
+
+    @property
+    def source_text_sha256(self) -> frozenset[str]:
+        return self.requirement_index.source_text_sha256
+
+    @property
+    def source_identity_sha256(self) -> frozenset[str]:
+        return self.requirement_index.source_identity_sha256
+
+    def binding(self) -> dict[str, Any]:
+        return {
+            "schema_version": "jaa05.combined-quarantine-binding.v1",
+            "path": str(self.path),
+            "sha256": self.sha256,
+            "members": [
+                {
+                    "schema_version": INDEX_SCHEMA,
+                    "path": str(self.requirement_index.path),
+                    "sha256": self.requirement_index.sha256,
+                },
+                {
+                    "schema_version": ACQUISITION_INDEX_SCHEMA,
+                    "path": str(self.acquisition_index.path),
+                    "sha256": self.acquisition_index.sha256,
+                },
+            ],
+            "runtime_exclusion_use": "union",
+            "post_extraction_use": "requirement_index_only",
         }
 
 
@@ -295,15 +395,237 @@ def load_quarantine_index(path: Path, expected_sha256: str) -> QuarantineIndex:
     )
 
 
+def load_acquisition_quarantine_index(
+    path: Path,
+    expected_sha256: str,
+) -> AcquisitionQuarantineIndex:
+    expected = _digest(expected_sha256, "expected acquisition index")
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise HoldoutFirewallFailure(
+            "acquisition quarantine index is missing or unreadable"
+        ) from exc
+    actual = hashlib.sha256(raw).hexdigest()
+    _require(actual == expected, "acquisition quarantine index SHA-256 mismatch")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HoldoutFirewallFailure(
+            "acquisition quarantine index is not valid JSON"
+        ) from exc
+    _require(
+        isinstance(document, dict)
+        and set(document) == ACQUISITION_INDEX_FIELDS,
+        "acquisition quarantine index schema differs",
+    )
+    _require(
+        raw == _canonical_pretty(document),
+        "acquisition quarantine index bytes are not canonical",
+    )
+    _require(
+        document["schema_version"] == ACQUISITION_INDEX_SCHEMA,
+        "acquisition quarantine index schema differs",
+    )
+    _require(
+        document["decision_fields_included"] is False
+        and document["source_text_included"] is False,
+        "acquisition quarantine index contains forbidden data",
+    )
+    forbidden = {
+        "requirement_id",
+        "source_span",
+        "source_text_sha256",
+        "source_identity_sha256",
+        "disposition",
+        "decision",
+        "rationale",
+        "label",
+        "score_bp",
+        "source_text",
+    }
+    def reject_forbidden(value: Any) -> None:
+        if isinstance(value, dict):
+            _require(
+                not forbidden.intersection(value),
+                "acquisition quarantine index contains forbidden fields",
+            )
+            for child in value.values():
+                reject_forbidden(child)
+        elif isinstance(value, list):
+            for child in value:
+                reject_forbidden(child)
+    reject_forbidden(document)
+    _require(
+        document["derived_from"] == {
+            "failure_record_sha256": (
+                "a76ca48dc4c3d502385ffad979979ae8510b22b8fea6fab967044e337ffa643d"
+            ),
+            "capture_evidence_file_sha256": (
+                "b1e0c5de0af3419f0ae2085476d3afe19c86b5e0cb11fb0cdc6f488b57979217"
+            ),
+            "capture_evidence_self_sha256": (
+                "7481b33baa077af31b84089db78da3c11f06fd5f5feccdd9ad51ee0ff7ab3c49"
+            ),
+            "sealed_root": (
+                "/home/gutua/software-factory/.control/"
+                "resumed-dual-lane-20260728/jaa/runtime/"
+                "fresh-jaa05-holdout-v1-0c90c73"
+            ),
+        },
+        "acquisition quarantine derivation binding differs",
+    )
+    entries = document["entries"]
+    _require(
+        isinstance(entries, list)
+        and document["entry_count"] == len(entries) == 57,
+        "acquisition quarantine entry count differs",
+    )
+    jobs: set[str] = set()
+    payloads: set[str] = set()
+    contents: set[str] = set()
+    urls: set[str] = set()
+    for entry in entries:
+        _require(
+            isinstance(entry, dict)
+            and set(entry) == ACQUISITION_ENTRY_FIELDS,
+            "acquisition quarantine entry schema differs",
+        )
+        job_key = entry["job_key"]
+        _require(
+            isinstance(job_key, str) and bool(job_key.strip()),
+            "acquisition quarantine job key differs",
+        )
+        jobs.add(job_key)
+        payloads.add(_digest(entry["payload_hash"], "acquisition payload"))
+        contents.add(_digest(entry["content_sha256"], "acquisition content"))
+        urls.add(_digest(entry["canonical_url_sha256"], "acquisition URL"))
+    for field, actual_values in (
+        ("job_keys", jobs),
+        ("payload_hashes", payloads),
+        ("content_hashes", contents),
+        ("canonical_url_hashes", urls),
+    ):
+        expected_values = _string_list(
+            document[field],
+            f"acquisition {field}",
+            hashes=field != "job_keys",
+        )
+        _require(
+            set(expected_values) == actual_values,
+            f"acquisition {field} summary differs",
+        )
+    _require(
+        document["disposition_counts_crosscheck"] == {
+            "selected": 25,
+            "quarantined_job_key": 25,
+            "duplicate_content": 4,
+            "duplicate_url": 3,
+        },
+        "acquisition disposition count cross-check differs",
+    )
+    return AcquisitionQuarantineIndex(
+        path=path.resolve(),
+        sha256=actual,
+        entry_count=len(entries),
+        job_keys=frozenset(jobs),
+        payload_hashes=frozenset(payloads),
+        content_hashes=frozenset(contents),
+        canonical_url_hashes=frozenset(urls),
+    )
+
+
+def load_quarantine_bundle(
+    path: Path,
+    expected_sha256: str,
+) -> QuarantineBundle:
+    expected = _digest(expected_sha256, "expected quarantine bundle")
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise HoldoutFirewallFailure(
+            "quarantine bundle is missing or unreadable"
+        ) from exc
+    actual = hashlib.sha256(raw).hexdigest()
+    _require(actual == expected, "quarantine bundle SHA-256 mismatch")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HoldoutFirewallFailure("quarantine bundle is not valid JSON") from exc
+    _require(
+        isinstance(document, dict) and set(document) == BUNDLE_FIELDS,
+        "quarantine bundle schema differs",
+    )
+    _require(raw == _canonical_pretty(document), "quarantine bundle bytes are not canonical")
+    _require(document["schema_version"] == BUNDLE_SCHEMA, "quarantine bundle schema differs")
+    _require(
+        document["binds_failure_trees"] == [
+            "a76ca48dc4c3d502385ffad979979ae8510b22b8fea6fab967044e337ffa643d",
+            "00352f85941456d0ca3893b9e6855f3806e6e4ae5031d6ac7a42b615dfbc76b0",
+        ],
+        "quarantine bundle failure bindings differ",
+    )
+    members = document["members"]
+    _require(
+        isinstance(members, list)
+        and len(members) == 2
+        and [row.get("schema_version") for row in members] == [
+            INDEX_SCHEMA,
+            ACQUISITION_INDEX_SCHEMA,
+        ],
+        "quarantine bundle members differ",
+    )
+    expected_roles = [
+        ["runtime_exclusion", "post_extraction_disjointness"],
+        ["runtime_exclusion"],
+    ]
+    loaded: list[Any] = []
+    for number, member in enumerate(members):
+        _require(
+            isinstance(member, dict)
+            and set(member) == {"schema_version", "path", "sha256", "roles"}
+            and member["roles"] == expected_roles[number],
+            "quarantine bundle member schema differs",
+        )
+        relative = Path(member["path"])
+        _require(
+            not relative.is_absolute()
+            and relative.name == str(relative)
+            and relative.name in {
+                "failed-holdout-quarantine-index.json",
+                "failed-cycle-acquisition-quarantine-index.json",
+            },
+            "quarantine bundle member path differs",
+        )
+        member_path = path.parent / relative
+        loader = (
+            load_quarantine_index
+            if number == 0
+            else load_acquisition_quarantine_index
+        )
+        loaded.append(loader(member_path, member["sha256"]))
+    return QuarantineBundle(
+        path=path.resolve(),
+        sha256=actual,
+        requirement_index=loaded[0],
+        acquisition_index=loaded[1],
+    )
+
+
 def validate_quarantine_binding(
     document: Mapping[str, Any],
-    quarantine: QuarantineIndex,
+    quarantine: QuarantineIndex | QuarantineBundle,
     *,
     label: str,
 ) -> None:
     """Reject output or evidence that omits or changes the exclusion binding."""
+    key = (
+        "failed_holdout_quarantine_bundle"
+        if isinstance(quarantine, QuarantineBundle)
+        else "failed_holdout_quarantine"
+    )
     _require(
-        document.get("failed_holdout_quarantine") == quarantine.binding(),
+        document.get(key) == quarantine.binding(),
         f"{label} omits or changes the quarantine-index binding",
     )
 
@@ -311,7 +633,7 @@ def validate_quarantine_binding(
 def validate_post_acquisition_holdout(
     queue_records: Iterable[Mapping[str, Any]],
     requirements: Iterable[Mapping[str, Any]],
-    quarantine: QuarantineIndex,
+    quarantine: QuarantineIndex | QuarantineBundle,
     *,
     required_dossiers: int = 30,
 ) -> dict[str, Any]:
@@ -346,6 +668,20 @@ def validate_post_acquisition_holdout(
             payload_hash not in quarantine.payload_hashes,
             "failed holdout payload reused",
         )
+        if isinstance(quarantine, QuarantineBundle):
+            _require(
+                content_hash not in quarantine.content_hashes,
+                "failed cycle content reused",
+            )
+            canonical_url = row.get("canonical_url")
+            if isinstance(canonical_url, str):
+                url_hash = hashlib.sha256(
+                    canonical_url.encode("utf-8")
+                ).hexdigest()
+                _require(
+                    url_hash not in quarantine.canonical_url_hashes,
+                    "failed cycle canonical URL reused",
+                )
         viability = row.get("viability_decision")
         opportunity = row.get("opportunity0_decision")
         temporal = row.get("temporal_admission")
@@ -462,7 +798,11 @@ def validate_post_acquisition_holdout(
     receipt = {
         "schema_version": FIREWALL_SCHEMA,
         "result": "PASS",
-        "failed_holdout_quarantine": quarantine.binding(),
+        (
+            "failed_holdout_quarantine_bundle"
+            if isinstance(quarantine, QuarantineBundle)
+            else "failed_holdout_quarantine"
+        ): quarantine.binding(),
         "dossier_count": len(rows),
         "requirement_count": len(extracted),
         "per_dossier": dossier_rows,

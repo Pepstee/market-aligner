@@ -312,7 +312,7 @@ def _request_journal(
     *,
     resume: bool,
     policy_sha256: str = "3" * 64,
-    quarantine_index_sha256: str = EMPTY_TEST_QUARANTINE.sha256,
+    quarantine_binding_sha256: str = EMPTY_TEST_QUARANTINE.sha256,
     source_head: str = "a" * 40,
 ) -> DurableRequestJournal:
     config = run_root.parent / f"{run_root.name}-config.yaml"
@@ -321,7 +321,7 @@ def _request_journal(
     return DurableRequestJournal.open(
         config_path=config,
         policy_sha256=policy_sha256,
-        quarantine_index_sha256=quarantine_index_sha256,
+        quarantine_binding_sha256=quarantine_binding_sha256,
         source_head=source_head,
         raw_root=run_root / "raw",
         resume=resume,
@@ -636,7 +636,7 @@ def test_durable_request_journal_refuses_run_identity_mismatch(
             run_root,
             resume=True,
             policy_sha256=policy,
-            quarantine_index_sha256=quarantine,
+            quarantine_binding_sha256=quarantine,
             source_head=head,
         )
 
