@@ -43,6 +43,9 @@ QUARANTINE_SHA256 = (
 POLICY_SHA256 = (
     "95e09b38821efa3f2e82df3b7587d74381d4ae5548dc7adb00416883dad9068e"
 )
+PACKAGE_023_AMENDMENT_SHA256 = (
+    "35a8ae8ca6b1adb6d30dea717e77bfd3c1d77ff24495122f807dabf0bd340fcf"
+)
 MAX_CONTENT_REQUESTS = 9
 MAX_ROBOTS_REQUESTS = 2
 MAX_TOTAL_REQUESTS = 11
@@ -153,13 +156,15 @@ def _validate_amendment(
 ) -> None:
     if (
         amendment.get("schema_version")
-        != "jaa05.package023-canary-execution-amendment.v1"
+        != "jaa05.package024-command-identity-remediation.v1"
         or amendment.get("contract_sha256") != CONTRACT_SHA256
+        or amendment.get("predecessor_amendment_sha256")
+        != PACKAGE_023_AMENDMENT_SHA256
         or amendment.get("execution_authorized") is not False
         or amendment.get("canary_executed") is not False
         or amendment.get("requests_specified_not_performed") is not True
     ):
-        raise LivenessCanaryFailure("Package 023 amendment markers differ")
+        raise LivenessCanaryFailure("Package 024 amendment markers differ")
     budget = amendment.get("request_budget")
     if budget != {
         "content_get_maximum": MAX_CONTENT_REQUESTS,
@@ -170,14 +175,14 @@ def _validate_amendment(
         "resume_permitted": False,
         "frozen_input_permitted": False,
     }:
-        raise LivenessCanaryFailure("Package 023 request budget differs")
+        raise LivenessCanaryFailure("Package 024 request budget differs")
     executor = amendment.get("future_executor")
     if (
         not isinstance(executor, dict)
         or executor.get("path") != str(Path(__file__).resolve())
         or executor.get("sha256") != executor_sha256
     ):
-        raise LivenessCanaryFailure("Package 023 executor binding differs")
+        raise LivenessCanaryFailure("Package 024 executor binding differs")
 
 
 def _command_identity(argv: list[str]) -> str:
