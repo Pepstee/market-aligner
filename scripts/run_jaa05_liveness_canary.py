@@ -181,7 +181,15 @@ def _validate_amendment(
 
 
 def _command_identity(argv: list[str]) -> str:
-    return _digest(_canonical(argv))
+    normalized = list(argv)
+    try:
+        activation_index = normalized.index("--activation-sha256") + 1
+    except (ValueError, IndexError) as exc:
+        raise LivenessCanaryFailure(
+            "command lacks activation hash argument"
+        ) from exc
+    normalized[activation_index] = "{FABLE_ACTIVATION_RULING_SHA256}"
+    return _digest(_canonical(normalized))
 
 
 def _validate_activation(
