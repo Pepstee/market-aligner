@@ -27,9 +27,101 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         for item in yaml.safe_load(SLICES.read_text(encoding="utf-8"))["slices"]
     }
     jaa05 = components["JAA-05"]
-    assert jaa05["increment"] == "implementation_in_progress_human_evidence_blocked"
-    assert jaa05["certification"]["status"] == "blocked"
-    assert jaa05["certification"]["blocked_by"] == "HUMAN_EVIDENCE_AUTHORING"
+    assert jaa05["increment"] == "human_evidence_ingested_production_receipted"
+    assert jaa05["certification"] == {
+        "status": "certified_implementation",
+        "certified_source_git_revision": (
+            "894484336111913ea728985f13e1dbfed35448fd"
+        ),
+        "certified_source_tree": (
+            "bf37e9cd9e2ee1c7c4fdbdc963c11622f4826c20"
+        ),
+        "certified_source_content_revision": (
+            "sha256:51294567a7bfe20b348c97c19ddef46"
+            "c9614d64264f08e02f4a3b0007a7217ef"
+        ),
+        "rule": (
+            "Models may discover and questionnaire candidate claims but must "
+            "not create, edit, normalise or approve production candidate evidence."
+        ),
+        "private_evidence_sha256": (
+            "7a7e18a686b0979e48716f983871568e"
+            "018c04398e05b8c71af88059f6fb6195"
+        ),
+        "human_authority_sha256": (
+            "9cb26a0478b64bf8c5b63c602e7ad454"
+            "cc79d2d4a81e93d4d3298ac7046c207b"
+        ),
+        "source_packet_sha256": (
+            "6ee3cc29b2074b4244686ca938028ad3"
+            "97ca0a39ab6323de59b52eb20d6eadb7"
+        ),
+        "file_sha256": (
+            "71deaaadcc7498f77204e5ff9e96679f"
+            "35ce181a67e78b585c46fb2b6821878d"
+        ),
+        "projection_sha256": (
+            "82ba6ca979b66fea25b1e987c50b8cdb"
+            "beca746869d0563a24480892c7ddab00"
+        ),
+        "production_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-current-supervisor-20260728/"
+                "jaa05-production-ingestion-8944843/"
+                "sha256-0980278bca34b851ff6208e5317cd80306f88a6b"
+                "1496db2c8e4af1e618b00228.json"
+            ),
+            "sha256": (
+                "0980278bca34b851ff6208e5317cd803"
+                "06f88a6b1496db2c8e4af1e618b00228"
+            ),
+        },
+        "entry_fable_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-current-supervisor-20260728/"
+                "fable-jaa05-entry-certification-raw.json"
+            ),
+            "sha256": (
+                "72d5197e4283f61226316900d41c0d7b"
+                "199ad023fa2c837fe8ac396ce4ffa7d0"
+            ),
+        },
+        "sonnet_bounded_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-current-supervisor-20260728/"
+                "sonnet-jaa05-bounded-repair-review-raw.json"
+            ),
+            "sha256": (
+                "9954f5ef6294689a7274d30c12de4cd5"
+                "92323c208ff3a8301148d80c63ea175c"
+            ),
+        },
+        "implementation_certification_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-current-supervisor-20260728/"
+                "fable-jaa05-exact-source-certification-raw.json"
+            ),
+            "sha256": (
+                "0590955e65f78a66d25108d6b5c8d507"
+                "aed2034e3cf96cdec14cd78270fdcf64"
+            ),
+        },
+        "full_regression_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-current-supervisor-20260728/"
+                "jaa05-full-regression-8944843.log"
+            ),
+            "sha256": (
+                "d631808a650b395ec337314120bb06583"
+                "29b05a021c88a1c2dbb0ba39d58bfd5"
+            ),
+        },
+    }
     for relative in jaa05["owns"]:
         assert (ROOT / relative).is_file(), f"JAA-05 materialised path missing: {relative}"
     for test in jaa05["tests"]:
