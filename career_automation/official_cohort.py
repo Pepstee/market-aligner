@@ -573,6 +573,15 @@ class ResponseRecorder:
         self._last_actual_send_ns: dict[str, int] = {}
         self._send_lock = threading.Lock()
 
+    def _seed_robots_send_reference(self, host: str) -> None:
+        robots = getattr(self.access_controller, "robots_events", ())
+        reference = _robots_send_references(robots).get(host)
+        previous = self._last_actual_send_ns.get(host)
+        if reference is not None and (
+            previous is None or reference > previous
+        ):
+            self._last_actual_send_ns[host] = reference
+
     def record(
         self,
         response: Any,
@@ -760,6 +769,7 @@ class ResponseRecorder:
                 )
             required_interval = float(receipt.crawl_delay_seconds)
             with recorder._send_lock:
+                recorder._seed_robots_send_reference(host)
                 prior_send_ns = recorder._last_actual_send_ns.get(host)
                 top_up_seconds = 0.0
                 if prior_send_ns is not None:
@@ -1371,21 +1381,30 @@ def _select_candidates(
     return records, trace
 
 
+def _robots_send_references(
+    robots: Any,
+) -> dict[str, int]:
+    references: dict[str, int] = {}
+    for row in robots:
+        value = row.get("requested_monotonic_ns")
+        if not isinstance(value, int):
+            continue
+        host = str(row.get("host"))
+        references[host] = max(references.get(host, value), value)
+    return references
+
+
 def _timing_evidence(
     sends: list[dict[str, Any]],
     robots: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    first_robot_by_host = {
-        str(row.get("host")): int(row["requested_monotonic_ns"])
-        for row in robots
-        if isinstance(row.get("requested_monotonic_ns"), int)
-    }
+    robot_by_host = _robots_send_references(robots)
     previous_by_host: dict[str, int] = {}
     result: list[dict[str, Any]] = []
     for send in sends:
         host = str(send.get("host"))
         sent = int(send["sent_monotonic_ns"])
-        previous = previous_by_host.get(host, first_robot_by_host.get(host))
+        previous = previous_by_host.get(host, robot_by_host.get(host))
         elapsed = None if previous is None else (sent - previous) / 1_000_000_000
         required = float(send["required_interval_seconds"])
         result.append({

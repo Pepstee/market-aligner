@@ -756,6 +756,154 @@ def test_immediate_send_tops_up_only_the_residual_same_host_interval(
     assert timing[1]["compliant"] is True
 
 
+def test_first_content_send_enforces_the_audited_robots_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _successful_content_send(calls),
+    )
+    clock = _ImmediateSendClock()
+    host = "api.lever.co"
+
+    class RobotsAwareController:
+        def __init__(self) -> None:
+            self.robots_events: list[dict[str, object]] = []
+
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            self.robots_events.append({
+                "host": host,
+                "requested_monotonic_ns": clock.monotonic_ns(),
+            })
+            return _transport_receipt(requested_url)
+
+    controller = RobotsAwareController()
+    recorder = ResponseRecorder(
+        tmp_path / "raw",
+        controller,
+        clock_ns=clock.monotonic_ns,
+        sleeper=clock.sleep,
+    )
+    content = f"https://{host}/v0/postings/acme?mode=json"
+    with recorder.installed():
+        requests.Session().send(
+            requests.Request("GET", content).prepare()
+        )
+    assert calls == [content]
+    assert clock.sleeps == [10.0]
+    assert recorder.send_events[0]["immediate_send_top_up_seconds"] == 10.0
+    timing = _timing_evidence(
+        recorder.send_events,
+        controller.robots_events,
+    )
+    assert timing == [{
+        "send_sequence": 0,
+        "host": host,
+        "sent_at": recorder.send_events[0]["sent_at"],
+        "prior_event": "robots",
+        "elapsed_seconds": 10.0,
+        "required_interval_seconds": 10.0,
+        "compliant": True,
+    }]
+
+
+def test_timing_harness_detects_the_pre_fix_unenforced_robots_edge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _successful_content_send(calls),
+    )
+
+    class PreFixController:
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    clock = _ImmediateSendClock()
+    recorder = ResponseRecorder(
+        tmp_path / "raw",
+        PreFixController(),  # type: ignore[arg-type]
+        clock_ns=clock.monotonic_ns,
+        sleeper=clock.sleep,
+    )
+    host = "api.lever.co"
+    content = f"https://{host}/v0/postings/acme?mode=json"
+    robots = [{
+        "host": host,
+        "requested_monotonic_ns": clock.monotonic_ns(),
+    }]
+    with recorder.installed():
+        requests.Session().send(
+            requests.Request("GET", content).prepare()
+        )
+    assert calls == [content]
+    assert clock.sleeps == []
+    timing = _timing_evidence(recorder.send_events, robots)
+    assert timing[0]["prior_event"] == "robots"
+    assert timing[0]["elapsed_seconds"] == 0.0
+    assert timing[0]["compliant"] is False
+
+
+def test_first_content_send_hard_fails_if_rate_top_up_remains_short(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "career_automation.employer_research.socket.getaddrinfo",
+        _public_resolver,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "send",
+        _successful_content_send(calls),
+    )
+    host = "api.lever.co"
+    readings = iter((0, 10_000_000_000, 10_000_000_000, 9_999_999_999))
+    sleeps: list[float] = []
+
+    class RobotsAwareController:
+        robots_events = [{
+            "host": host,
+            "requested_monotonic_ns": 0,
+        }]
+
+        def before_request(self, requested_url: str) -> RobotsReceipt:
+            return _transport_receipt(requested_url)
+
+    recorder = ResponseRecorder(
+        tmp_path / "raw",
+        RobotsAwareController(),  # type: ignore[arg-type]
+        clock_ns=lambda: next(readings),
+        sleeper=sleeps.append,
+    )
+    content = f"https://{host}/v0/postings/acme?mode=json"
+    with recorder.installed(), pytest.raises(
+        RuntimeError,
+        match="immediate-send rate interval remains below policy",
+    ):
+        requests.Session().send(
+            requests.Request("GET", content).prepare()
+        )
+    assert sleeps == [10.0]
+    assert calls == []
+    assert recorder.send_events == []
+
+
 def test_immediate_send_does_not_sleep_when_actual_interval_is_compliant(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
