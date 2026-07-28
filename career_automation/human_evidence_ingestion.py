@@ -34,16 +34,29 @@ from .candidate_graph import CandidateGraph, DEFAULT_SECRET_PATTERNS
 # ---------------------------------------------------------------------------
 
 INGESTION_SCHEMA_VERSION = "jaa05.candidate-evidence.v1"
-EXPECTED_HUMAN_AUTHORITY = "gutu.artiom444@gmail.com"
+EXPECTED_HUMAN_AUTHORITY_SHA256 = (
+    "9cb26a0478b64bf8c5b63c602e7ad454cc79d2d4a81e93d4d3298ac7046c207b"
+)
 EXPECTED_STATUS = "HUMAN_AUTHORED_AND_APPROVED"
 EXPECTED_RECORD_COUNT = 18
 EXPECTED_SOURCE_PACKET_SHA256 = "6ee3cc29b2074b4244686ca938028ad397ca0a39ab6323de59b52eb20d6eadb7"
+KNOWN_INPUT_PROOF_CLASSES = frozenset({
+    "verified_claim",
+    "work_artifact",
+    "test_result",
+    "external_outcome",
+    "employment_record",
+    "credential",
+    "portfolio_artifact",
+})
 
 INGESTION_POLICY_ID = "jaa05.human-evidence-ingestion.v1"
 INGESTION_POLICY_VERSION = "1"
 
 # Human author identity: the person who wrote and approved the evidence packet.
-AUTHOR_IDENTITY = "jaa05:human-author:gutu.artiom444@gmail.com:20260728"
+AUTHOR_IDENTITY = (
+    f"jaa05:human-author:sha256:{EXPECTED_HUMAN_AUTHORITY_SHA256}:20260728"
+)
 
 # Verifier identity: the deterministic ingestion verifier, DISTINCT from human author.
 VERIFIER_IDENTITY = "jaa05:deterministic-ingestion-verifier:v1"
@@ -70,6 +83,10 @@ def _check_no_secret(text: str, evidence_id: str) -> None:
                 f"secret pattern detected in statement for {evidence_id}: "
                 f"matched {pattern.pattern!r}"
             )
+
+
+def _authority_sha256(value: Any) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +168,7 @@ def _preflight_existing_rows(
 
         reason = (
             f"deterministic verification: content_sha256 bound to statement, "
-            f"human_authority={EXPECTED_HUMAN_AUTHORITY}, "
+            f"human_authority_sha256={EXPECTED_HUMAN_AUTHORITY_SHA256}, "
             f"status={EXPECTED_STATUS}, "
             f"schema={INGESTION_SCHEMA_VERSION}, "
             f"source_packet_sha256={source_packet_sha256}"
@@ -173,7 +190,7 @@ def _preflight_existing_rows(
 
         row = connection.execute(
             "SELECT evidence_kind, statement, content_hash, source_identity, "
-            "epistemic_state, negative, valid_until, provenance_id "
+            "epistemic_state, approval_state, negative, valid_until, provenance_id "
             "FROM candidate_evidence WHERE evidence_id=? AND version=?",
             (evidence_id, version),
         ).fetchone()
@@ -184,6 +201,7 @@ def _preflight_existing_rows(
                 or str(row["content_hash"]) != content_sha256
                 or str(row["source_identity"]) != AUTHOR_IDENTITY
                 or str(row["epistemic_state"]) != "evidence"
+                or str(row["approval_state"]) not in {"pending", "approved"}
                 or int(row["negative"]) != 0
                 or row["valid_until"] is not None
                 or str(row["provenance_id"]) != expected_evidence_prov_id
@@ -194,7 +212,8 @@ def _preflight_existing_rows(
                 )
 
         row = connection.execute(
-            "SELECT claim_type, statement, epistemic_state, valid_until, provenance_id "
+            "SELECT claim_type, statement, epistemic_state, approval_state, "
+            "valid_until, provenance_id "
             "FROM candidate_claims WHERE claim_id=? AND version=1",
             (claim_id,),
         ).fetchone()
@@ -203,6 +222,7 @@ def _preflight_existing_rows(
                 str(row["claim_type"]) != "human_authored_claim"
                 or str(row["statement"]) != statement
                 or str(row["epistemic_state"]) != "evidence"
+                or str(row["approval_state"]) not in {"pending", "approved"}
                 or row["valid_until"] is not None
                 or str(row["provenance_id"]) != expected_claim_prov_id
             ):
@@ -281,7 +301,7 @@ def _ingest_one(
     """
     reason = (
         f"deterministic verification: content_sha256 bound to statement, "
-        f"human_authority={EXPECTED_HUMAN_AUTHORITY}, "
+        f"human_authority_sha256={EXPECTED_HUMAN_AUTHORITY_SHA256}, "
         f"status={EXPECTED_STATUS}, "
         f"schema={INGESTION_SCHEMA_VERSION}, "
         f"source_packet_sha256={source_packet_sha256}"
@@ -390,6 +410,36 @@ def _ingest_one(
     )
 
 
+def _assert_all_approved(
+    connection: sqlite3.Connection,
+    records: list[dict[str, Any]],
+) -> None:
+    failures: list[str] = []
+    for record in records:
+        evidence_id = str(record["evidence_id"])
+        evidence_version = int(record.get("version") or 1)
+        claim_id = f"claim-{evidence_id}"
+        evidence = connection.execute(
+            "SELECT approval_state FROM candidate_evidence "
+            "WHERE evidence_id=? AND version=?",
+            (evidence_id, evidence_version),
+        ).fetchone()
+        if evidence is None or str(evidence["approval_state"]) != "approved":
+            failures.append(f"evidence:{evidence_id}:{evidence_version}")
+        claim = connection.execute(
+            "SELECT approval_state FROM candidate_claims "
+            "WHERE claim_id=? AND version=1",
+            (claim_id,),
+        ).fetchone()
+        if claim is None or str(claim["approval_state"]) != "approved":
+            failures.append(f"claim:{claim_id}:1")
+    if failures:
+        raise ValueError(
+            "ingestion did not produce approved evidence and claims for every record: "
+            f"{failures}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -422,11 +472,8 @@ def ingest_human_evidence_schema(
         )
 
     human_authority = document.get("human_authority", "")
-    if human_authority != EXPECTED_HUMAN_AUTHORITY:
-        raise ValueError(
-            f"unexpected human_authority: {human_authority!r} "
-            f"(expected {EXPECTED_HUMAN_AUTHORITY!r})"
-        )
+    if _authority_sha256(human_authority) != EXPECTED_HUMAN_AUTHORITY_SHA256:
+        raise ValueError("unexpected human_authority SHA-256 binding")
 
     status = document.get("status", "")
     if status != EXPECTED_STATUS:
@@ -477,12 +524,32 @@ def ingest_human_evidence_schema(
         # Secret screening — fail before any write.
         _check_no_secret(statement, evidence_id)
 
+        approval_state = record.get("approval_state")
+        if approval_state != "approved":
+            raise ValueError(
+                f"approval_state must be approved for {evidence_id}"
+            )
+        verification_decision = record.get("verification_decision")
+        if verification_decision != "approved":
+            raise ValueError(
+                f"verification_decision must be approved for {evidence_id}"
+            )
+        epistemic_state = record.get("epistemic_state")
+        if epistemic_state != "evidence":
+            raise ValueError(
+                f"epistemic_state must be evidence for {evidence_id}"
+            )
+        proof_class = record.get("proof_class")
+        if proof_class not in KNOWN_INPUT_PROOF_CLASSES:
+            raise ValueError(
+                f"proof_class is not recognized for {evidence_id}"
+            )
+
         prov = record.get("evidence_provenance") or {}
         record_authority = prov.get("human_authority", "")
-        if record_authority != EXPECTED_HUMAN_AUTHORITY:
+        if _authority_sha256(record_authority) != EXPECTED_HUMAN_AUTHORITY_SHA256:
             raise ValueError(
-                f"authority mismatch in evidence_provenance for {evidence_id}: "
-                f"{record_authority!r}"
+                f"authority SHA-256 mismatch in evidence_provenance for {evidence_id}"
             )
         record_packet_sha256 = prov.get("source_sha256", "")
         if record_packet_sha256 != source_packet_sha256:
@@ -517,10 +584,10 @@ def ingest_human_evidence_schema(
 
     connection = graph.connect()
     try:
-        # Preflight: verify all 18 target rows are absent or exactly match the
-        # intended contract before opening any write transaction.
-        _preflight_existing_rows(connection, records, source_packet_sha256)
         connection.execute("BEGIN IMMEDIATE")
+        # Acquire the write lock before preflight so no concurrent writer can
+        # insert a conflicting row between validation and INSERT OR IGNORE.
+        _preflight_existing_rows(connection, records, source_packet_sha256)
         for record in records:
             _ingest_one(
                 connection,
@@ -531,6 +598,7 @@ def ingest_human_evidence_schema(
                 yaml_path_str=yaml_path_str,
                 source_packet_sha256=source_packet_sha256,
             )
+        _assert_all_approved(connection, records)
         connection.commit()
     except Exception:
         connection.rollback()

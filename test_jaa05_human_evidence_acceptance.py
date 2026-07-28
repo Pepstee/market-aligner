@@ -38,7 +38,7 @@ from career_automation.evidence_matching import (
 )
 from career_automation.human_evidence_ingestion import (
     AUTHOR_IDENTITY,
-    EXPECTED_HUMAN_AUTHORITY,
+    EXPECTED_HUMAN_AUTHORITY_SHA256,
     EXPECTED_RECORD_COUNT,
     EXPECTED_STATUS,
     INGESTION_POLICY_HASH,
@@ -57,7 +57,7 @@ AS_OF = date(2027, 1, 1)
 # Computed deterministically from the ingestion policy, evidence statements,
 # claim IDs, and verifier provenance — all fixed constants.
 EXPECTED_PROJECTION_HASH = (
-    "b574f5949d0d95434f930660b62ccf5ff2e160089212daa1041b99387935b881"
+    "82ba6ca979b66fea25b1e987c50b8cdbbeca746869d0563a24480892c7ddab00"
 )
 
 
@@ -183,8 +183,8 @@ def test_statement_tamper_is_detected_by_validate_ingestion_integrity(
 
 def test_author_and_verifier_identities_are_distinct() -> None:
     assert AUTHOR_IDENTITY != VERIFIER_IDENTITY
-    assert EXPECTED_HUMAN_AUTHORITY in AUTHOR_IDENTITY
-    assert EXPECTED_HUMAN_AUTHORITY not in VERIFIER_IDENTITY
+    assert f"sha256:{EXPECTED_HUMAN_AUTHORITY_SHA256}" in AUTHOR_IDENTITY
+    assert EXPECTED_HUMAN_AUTHORITY_SHA256 not in VERIFIER_IDENTITY
 
 
 def test_evidence_provenance_uses_author_identity(tmp_path: Path) -> None:
@@ -283,6 +283,30 @@ def test_wrong_status_rejected(tmp_path: Path) -> None:
     bad_yaml.write_text(__import__("yaml").dump(yaml_doc), encoding="utf-8")
     graph_path = tmp_path / "graph.sqlite3"
     with pytest.raises(ValueError, match="status"):
+        ingest_human_evidence_schema(graph_path, bad_yaml)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("approval_state", "pending", "approval_state"),
+        ("verification_decision", "rejected", "verification_decision"),
+        ("epistemic_state", "inference", "epistemic_state"),
+        ("proof_class", "unknown-proof-class", "proof_class"),
+    ),
+)
+def test_nonapproved_per_record_authority_fields_rejected(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    yaml_doc = yaml.safe_load(YAML_PATH.read_text(encoding="utf-8"))
+    yaml_doc["records"][0][field] = value
+    bad_yaml = tmp_path / "bad.yaml"
+    bad_yaml.write_text(__import__("yaml").dump(yaml_doc), encoding="utf-8")
+    graph_path = tmp_path / "graph.sqlite3"
+    with pytest.raises(ValueError, match=message):
         ingest_human_evidence_schema(graph_path, bad_yaml)
 
 
@@ -548,12 +572,12 @@ def test_valid_until_nonnull_rejected(tmp_path: Path) -> None:
 
 
 def test_preflight_conflict_on_last_record_leaves_no_partial_rows(tmp_path: Path) -> None:
-    """Preflight scans all 18 records before BEGIN IMMEDIATE; a conflict on E-018 prevents any write.
+    """Locked preflight scans all 18 records before writes; E-018 conflict rolls back.
 
     Plants a conflicting row only for E-018 (the final record).  If preflight ran
     record-by-record inside the transaction, the first 17 records could be committed
-    before the conflict is detected.  Because preflight runs entirely outside BEGIN
-    IMMEDIATE, zero rows must be written for any of the 18 evidence IDs.
+    before the conflict is detected.  Because the full preflight runs after
+    BEGIN IMMEDIATE and before any target write, zero rows are written.
     """
     graph_path = tmp_path / "candidate.sqlite3"
     graph = CandidateGraph(graph_path)
@@ -613,7 +637,7 @@ def test_conflicting_preexisting_evidence_row_prevents_ingestion(tmp_path: Path)
     """Preflight rejects ingestion when a pre-existing evidence row has a different statement.
 
     No partial target ingestion occurs: the 17 other evidence records are also absent
-    because the preflight runs over all 18 rows before the write transaction is opened.
+    because the locked preflight runs over all 18 rows before target writes begin.
     """
     graph_path = tmp_path / "candidate.sqlite3"
     graph = CandidateGraph(graph_path)  # initialises schema via migrations
@@ -648,7 +672,7 @@ def test_conflicting_preexisting_evidence_row_prevents_ingestion(tmp_path: Path)
     finally:
         conn.close()
 
-    # Ingestion must fail in the preflight stage — before the write transaction is opened.
+    # Ingestion must fail in the locked preflight stage before target writes begin.
     with pytest.raises(ValueError, match="conflict"):
         ingest_human_evidence_schema(graph_path, YAML_PATH)
 
@@ -670,3 +694,39 @@ def test_conflicting_preexisting_evidence_row_prevents_ingestion(tmp_path: Path)
         )
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("target", ("evidence", "claim"))
+def test_preexisting_rejected_target_cannot_report_success(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    graph_path, _ = _graph(tmp_path)
+    with sqlite3.connect(graph_path) as conn:
+        if target == "evidence":
+            conn.execute("DROP TRIGGER approved_evidence_cannot_be_degraded")
+            conn.execute(
+                "UPDATE candidate_evidence SET approval_state='rejected' "
+                "WHERE evidence_id='E-018' AND version=1"
+            )
+        else:
+            conn.execute(
+                "UPDATE candidate_claims SET approval_state='rejected' "
+                "WHERE claim_id='claim-E-018' AND version=1"
+            )
+
+    with pytest.raises(ValueError, match="conflict"):
+        ingest_human_evidence_schema(graph_path, YAML_PATH)
+
+    with sqlite3.connect(graph_path) as conn:
+        if target == "evidence":
+            state = conn.execute(
+                "SELECT approval_state FROM candidate_evidence "
+                "WHERE evidence_id='E-018' AND version=1"
+            ).fetchone()[0]
+        else:
+            state = conn.execute(
+                "SELECT approval_state FROM candidate_claims "
+                "WHERE claim_id='claim-E-018' AND version=1"
+            ).fetchone()[0]
+    assert state == "rejected"
