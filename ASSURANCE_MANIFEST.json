@@ -392,7 +392,7 @@
     },
     "JAA-07": {
       "claim": "ATS-safe documents and answers compile only from approved claims and retain provenance.",
-      "increment": "implementation_in_progress_dependency_blocked",
+      "increment": "implementation_in_progress",
       "depends_on": ["JAA-06"],
       "owns": [
         "career_automation/application_compiler.py",
