@@ -718,8 +718,51 @@
     },
     "JAA-12": {
       "claim": "Track the application after submission without manual bookkeeping.",
-      "increment": "not_implemented",
+      "increment": "local_export_contract_complete_dependency_and_connectors_withheld",
       "depends_on": ["JAA-11"],
+      "provisional_local_export_contract": {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_ratification": "absent_pending_ratification",
+        "implemented_source_git_revision": "21ee76bfe5e886e8bc1230a24010b1d841882509",
+        "implemented_source_tree": "6a66f606efa38112701d76a4406bfbcd8180be40",
+        "implemented_source_content_revision": "sha256:4efcdbc108aaea487bb6305dcd370213f77969085e33ec8e7f6d0cd505fb723d",
+        "upstream_dependency_satisfied": false,
+        "mailbox_connector_status": "not_connected",
+        "portal_connector_status": "not_connected",
+        "message_send_authority": "withheld",
+        "production_certification": "withheld",
+        "dependency_satisfied": false,
+        "deputy_authority": {
+          "path_base": "software_factory_root",
+          "relative_path": "giga-user/reports/JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md",
+          "sha256": "8199c4848468669dd908eff8f4b92226df11b82831baf04fd9e663cabc462ef3"
+        },
+        "provisional_local_export_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_PROVISIONAL_LOCAL_EXPORT_CONTRACT_ACCEPTANCE.md",
+          "sha256": "4684e3b09e3d19eac8cacabc1c4adb35d57e0c6bae451dbc93fa10376d37f97d"
+        },
+        "sonnet_post_repair_review": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-post-repair-review-raw.json",
+          "sha256": "e572ae7d5e0ec8db9a0621e6f363c7313a0400b3f7cd8235de0094e9c9c99f95"
+        },
+        "positive_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa12-post-review-positive.log",
+          "sha256": "dd16cbdbb2cff39a7ff41edae14420833d1d368adba1f7523723a58e363ea28d"
+        },
+        "negative_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa12-post-review-negative.log",
+          "sha256": "1e326b4f56c3766bd4e38495df7fea6ea9e0b23f9971d64cfceec7a3baad0290"
+        },
+        "ruff_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa12-post-review-ruff.log",
+          "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        }
+      },
       "owns": ["career_automation/status_ingestion.py"],
       "inputs": ["career_automation/official_ats_adapter.py", "career_automation/database.py"],
       "interfaces": [],

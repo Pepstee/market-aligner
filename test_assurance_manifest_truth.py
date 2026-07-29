@@ -903,7 +903,128 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 f"JAA-11 declared test missing: {relative}"
             )
 
-    for number in range(12, 17):
+    jaa12 = components["JAA-12"]
+    assert (
+        jaa12["increment"]
+        == "local_export_contract_complete_dependency_and_connectors_withheld"
+    )
+    assert jaa12["claim"] == executable_slices["JAA-12"]["objective"]
+    assert jaa12["depends_on"] == executable_slices["JAA-12"]["depends_on"]
+    assert jaa12["provisional_local_export_contract"] == {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_ratification": "absent_pending_ratification",
+        "implemented_source_git_revision": (
+            "21ee76bfe5e886e8bc1230a24010b1d841882509"
+        ),
+        "implemented_source_tree": (
+            "6a66f606efa38112701d76a4406bfbcd8180be40"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:4efcdbc108aaea487bb6305dcd370213f7"
+            "7969085e33ec8e7f6d0cd505fb723d"
+        ),
+        "upstream_dependency_satisfied": False,
+        "mailbox_connector_status": "not_connected",
+        "portal_connector_status": "not_connected",
+        "message_send_authority": "withheld",
+        "production_certification": "withheld",
+        "dependency_satisfied": False,
+        "deputy_authority": {
+            "path_base": "software_factory_root",
+            "relative_path": (
+                "giga-user/reports/"
+                "JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md"
+            ),
+            "sha256": (
+                "8199c4848468669dd908eff8f4b92226d"
+                "f11b82831baf04fd9e663cabc462ef3"
+            ),
+        },
+        "provisional_local_export_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_PROVISIONAL_LOCAL_EXPORT_CONTRACT_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "4684e3b09e3d19eac8cacabc1c4adb35"
+                "d57e0c6bae451dbc93fa10376d37f97d"
+            ),
+        },
+        "sonnet_post_repair_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa12-post-repair-review-raw.json"
+            ),
+            "sha256": (
+                "e572ae7d5e0ec8db9a0621e6f363c731"
+                "3a0400b3f7cd8235de0094e9c9c99f95"
+            ),
+        },
+        "positive_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa12-post-review-positive.log"
+            ),
+            "sha256": (
+                "dd16cbdbb2cff39a7ff41edae14420833"
+                "d1d368adba1f7523723a58e363ea28d"
+            ),
+        },
+        "negative_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa12-post-review-negative.log"
+            ),
+            "sha256": (
+                "1e326b4f56c3766bd4e38495df7fea6e"
+                "a9e0b23f9971d64cfceec7a3baad0290"
+            ),
+        },
+        "ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/jaa12-post-review-ruff.log"
+            ),
+            "sha256": (
+                "82b3e6a6c090a57601d22943bd23fca9"
+                "218d1031dbe5a7b754092f9a156b4f18"
+            ),
+        },
+    }
+    assert "certification" not in jaa12
+    for key in (
+        "deputy_authority",
+        "provisional_local_export_receipt",
+        "sonnet_post_repair_review",
+        "positive_log",
+        "negative_log",
+        "ruff_log",
+    ):
+        pointer = jaa12["provisional_local_export_contract"][key]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
+    assert jaa12["evidence"] == []
+    for relative in jaa12["owns"]:
+        assert (ROOT / relative).is_file(), (
+            f"JAA-12 materialised path missing: {relative}"
+        )
+    for test in jaa12["tests"]:
+        for relative in test["files"]:
+            assert (ROOT / relative).is_file(), (
+                f"JAA-12 declared test missing: {relative}"
+            )
+
+    for number in range(13, 17):
         slice_id = f"JAA-{number:02d}"
         component = components[slice_id]
         assert component["increment"] == "not_implemented"
