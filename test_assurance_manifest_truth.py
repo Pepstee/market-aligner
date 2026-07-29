@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -489,9 +490,133 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             assert (ROOT / relative).is_file(), f"JAA-08 declared test missing: {relative}"
 
     jaa09 = components["JAA-09"]
-    assert jaa09["increment"] == "implementation_in_progress"
+    assert (
+        jaa09["increment"]
+        == "implementation_complete_pending_fable_ratification"
+    )
     assert jaa09["evidence"] == []
     assert "one genuine JAA-08 token" in jaa09["claim"]
+    assert (
+        jaa09["provisional_acceptance"]
+        == {
+            "status": (
+                "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION"
+            ),
+            "independent_fable_certification": (
+                "absent_pending_ratification"
+            ),
+            "implemented_source_git_revision": (
+                "ccc1d14bb65c7f3654359d6b4e08939c524b3161"
+            ),
+            "implemented_source_tree": (
+                "f10b49a80f9a6b3d54647b706fa749d0f74b9a5a"
+            ),
+            "implemented_source_content_revision": (
+                "sha256:3dcc1e030941645115ec5956e56bf1825"
+                "de406c1b0d2a8b8c337d60cb7389621"
+            ),
+            "deputy_authority": {
+                "path_base": "software_factory_root",
+                "relative_path": (
+                    "giga-user/reports/"
+                    "JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md"
+                ),
+                "sha256": (
+                    "8199c4848468669dd908eff8f4b92226d"
+                    "f11b82831baf04fd9e663cabc462ef3"
+                ),
+            },
+            "provisional_acceptance_receipt": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "SOL_JAA09_PROVISIONAL_IMPLEMENTATION_ACCEPTANCE.md"
+                ),
+                "sha256": (
+                    "a24b616d23e781c8a7cea29f03e3418ca"
+                    "ae2c77ca7092bc3ad5c1bd079e1c728"
+                ),
+            },
+            "sonnet_post_repair_review": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "sonnet-jaa09-sol-deputy-post-repair-review-raw.json"
+                ),
+                "sha256": (
+                    "e77be399d983cfb795b758e0d07b37848"
+                    "bc72754d069cc8a0f223bdc8a1613ea"
+                ),
+            },
+            "positive_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa09-sol-deputy-post-review-positive.log"
+                ),
+                "sha256": (
+                    "77c0c7d21cb7c859206f08759e24213de"
+                    "d843104e55f3b57fb019672a6ecdc40"
+                ),
+            },
+            "negative_restart_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa09-sol-deputy-post-review-negative.log"
+                ),
+                "sha256": (
+                    "8f51e13f65eae64d0267cac2efaf8980f"
+                    "a226c33f74c56da740ed1bfbbb58fa7"
+                ),
+            },
+            "jaa08_cross_slice_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa09-sol-deputy-post-review-jaa08-cross-slice.log"
+                ),
+                "sha256": (
+                    "bc3231ddc0a9050c98b96810c589d4670"
+                    "979466779d28a2a54f972380a22070e"
+                ),
+            },
+            "ruff_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa09-sol-deputy-post-review-ruff.log"
+                ),
+                "sha256": (
+                    "82b3e6a6c090a57601d22943bd23fca9"
+                    "218d1031dbe5a7b754092f9a156b4f18"
+                ),
+            },
+        }
+    )
+    assert "certification" not in jaa09
+    evidence_bases = {
+        "operator_control_root": ROOT.parents[1] / ".control",
+        "software_factory_root": ROOT.parents[1],
+    }
+    for key in (
+        "deputy_authority",
+        "provisional_acceptance_receipt",
+        "sonnet_post_repair_review",
+        "positive_log",
+        "negative_restart_log",
+        "jaa08_cross_slice_log",
+        "ruff_log",
+    ):
+        pointer = jaa09["provisional_acceptance"][key]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
     for relative in jaa09["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-09 materialised path missing: {relative}"
