@@ -5,7 +5,9 @@ from dataclasses import replace
 import pytest
 
 from career_automation.operations import (
+    DrillSuiteAssessment,
     FROZEN_OPERATIONS_CONTRACT,
+    _content_hash as operations_hash,
     compile_operations_plan,
     compile_provider_route,
     compile_provider_route_set,
@@ -14,6 +16,8 @@ from career_automation.operations import (
 )
 from career_automation.release_certification import (
     FROZEN_RELEASE_CERTIFICATION_CONTRACT,
+    ReleaseAssessment,
+    _content_hash as release_hash,
     assess_release_candidate,
     compile_release_candidate,
     record_distribution_scan,
@@ -216,6 +220,77 @@ def test_missing_drill_kind_blocks_runtime_review():
         rows,
     )
     assert partial.reason_codes == ("missing_failure_drill",)
+
+
+def test_drill_assessment_cannot_rehash_away_missing_drills():
+    plan = operations_plan()
+    rows = tuple(
+        record_failure_drill_observation(
+            FROZEN_OPERATIONS_CONTRACT,
+            plan,
+            failure_kind=kind,
+            input_snapshot_sha256=digest(f"rehash-input-{kind}"),
+            ledger_before_sha256=digest(f"rehash-before-{kind}"),
+            ledger_after_sha256=digest(f"rehash-after-{kind}"),
+            checkpoint_sha256=digest(f"rehash-checkpoint-{kind}"),
+            consequential_action_ids=(),
+            duplicate_consequential_actions=0,
+            lost_record_count=0,
+            affected_work_paused=kind in {"quota", "network"},
+            resumed_from_checkpoint=kind == "crash",
+            fallback_schema_preserved=True,
+            verification_rungs_preserved=True,
+            fabricated_progress=False,
+            observed_at=NOW,
+        )
+        for kind in ("crash", "quota", "network")
+    )
+    accepted = evaluate_failure_drills(
+        FROZEN_OPERATIONS_CONTRACT,
+        plan,
+        rows,
+    )
+    fields = {
+        **vars(accepted),
+        "failure_kinds": (
+            "crash",
+            "model_failure",
+            "network",
+            "quota",
+            "restart",
+            "stale_source",
+        ),
+        "reason_codes": (),
+        "eligible_for_independent_runtime_review": True,
+    }
+    shell = object.__new__(DrillSuiteAssessment)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["assessment_id"] = operations_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its typed lineage"):
+        DrillSuiteAssessment(**fields)
+
+
+def test_release_assessment_cannot_rehash_away_candidate_blockers():
+    accepted = assess_release_candidate(
+        FROZEN_RELEASE_CERTIFICATION_CONTRACT,
+        release_candidate(),
+    )
+    fields = {
+        **vars(accepted),
+        "reason_codes": (),
+        "eligible_for_independent_release_review": True,
+    }
+    shell = object.__new__(ReleaseAssessment)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["assessment_id"] = release_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its typed candidate"):
+        ReleaseAssessment(**fields)
 
 
 def test_prior_slice_rejects_provisional_or_deputy_status():

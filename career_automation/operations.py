@@ -1006,6 +1006,8 @@ DRILL_REASON_ORDER = (
 
 @dataclass(frozen=True)
 class DrillSuiteAssessment:
+    plan: OperationsPlan
+    drills: tuple[FailureDrillObservation, ...]
     contract_sha256: str
     plan_id: str
     drill_ids: tuple[str, ...]
@@ -1025,6 +1027,8 @@ class DrillSuiteAssessment:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
+            "plan": self.plan.document(),
+            "drills": tuple(row.document() for row in self.drills),
             "contract_sha256": self.contract_sha256,
             "plan_id": self.plan_id,
             "drill_ids": self.drill_ids,
@@ -1043,6 +1047,10 @@ class DrillSuiteAssessment:
         return result
 
     def verify(self) -> None:
+        derived = _expected_drill_assessment_fields(
+            self.plan,
+            self.drills,
+        )
         for value, label in (
             (self.contract_sha256, "drill assessment contract hash"),
             (self.plan_id, "drill assessment plan ID"),
@@ -1079,10 +1087,76 @@ class DrillSuiteAssessment:
             or self.schema_version != "jaa16.drill-suite-assessment.v1"
         ):
             raise ValueError("drill assessment cannot certify runtime")
+        if {key: getattr(self, key) for key in derived} != derived:
+            raise ValueError(
+                "drill assessment differs from its typed lineage"
+            )
         if self.assessment_id != _content_hash(
             self.document(include_identity=False)
         ):
             raise ValueError("drill assessment identity is invalid")
+
+
+def _expected_drill_assessment_fields(
+    plan: OperationsPlan,
+    drills: tuple[FailureDrillObservation, ...],
+) -> dict[str, object]:
+    if not isinstance(plan, OperationsPlan):
+        raise TypeError("drill assessment requires a typed operations plan")
+    if not drills or not all(
+        isinstance(row, FailureDrillObservation) for row in drills
+    ):
+        raise TypeError("drill assessment requires typed drills")
+    plan.verify()
+    for row in drills:
+        row.verify()
+        if row.plan_id != plan.plan_id:
+            raise ValueError("drill suite mixes operations plans")
+    if len({row.drill_id for row in drills}) != len(drills):
+        raise ValueError("drill suite cannot duplicate observations")
+    kinds = {row.failure_kind for row in drills}
+    reasons: list[str] = []
+    if kinds != set(FAILURE_KINDS):
+        reasons.append("missing_failure_drill")
+    if any(row.duplicate_consequential_actions for row in drills):
+        reasons.append("duplicate_consequential_action")
+    if any(row.lost_record_count for row in drills):
+        reasons.append("data_loss")
+    if any(
+        row.failure_kind in PAUSE_FAILURE_KINDS
+        and not row.affected_work_paused
+        for row in drills
+    ):
+        reasons.append("affected_work_not_paused")
+    if any(
+        row.failure_kind in CHECKPOINT_FAILURE_KINDS
+        and not row.resumed_from_checkpoint
+        for row in drills
+    ):
+        reasons.append("checkpoint_not_resumed")
+    if any(
+        row.failure_kind in PROVIDER_FAILURE_KINDS
+        and not row.fallback_schema_preserved
+        for row in drills
+    ):
+        reasons.append("fallback_schema_changed")
+    if any(not row.verification_rungs_preserved for row in drills):
+        reasons.append("verification_rung_skipped")
+    if any(row.fabricated_progress for row in drills):
+        reasons.append("fabricated_progress")
+    reason_codes = tuple(
+        reason for reason in DRILL_REASON_ORDER if reason in reasons
+    )
+    ordered = tuple(sorted(drills, key=lambda row: row.failure_kind))
+    return {
+        "contract_sha256": FROZEN_OPERATIONS_CONTRACT.contract_sha256,
+        "plan_id": plan.plan_id,
+        "drill_ids": tuple(row.drill_id for row in ordered),
+        "failure_kinds": tuple(sorted(kinds)),
+        "reason_codes": reason_codes,
+        "eligible_for_independent_runtime_review": not reason_codes,
+        "runtime_evidence_verified": False,
+    }
 
 
 def evaluate_failure_drills(
@@ -1141,6 +1215,8 @@ def evaluate_failure_drills(
     ordered = tuple(sorted(drills, key=lambda row: row.failure_kind))
     body = {
         "schema_version": "jaa16.drill-suite-assessment.v1",
+        "plan": plan.document(),
+        "drills": tuple(row.document() for row in ordered),
         "contract_sha256": contract.contract_sha256,
         "plan_id": plan.plan_id,
         "drill_ids": tuple(row.drill_id for row in ordered),
@@ -1153,6 +1229,8 @@ def evaluate_failure_drills(
         "certifies_slice": False,
     }
     return DrillSuiteAssessment(
+        plan=plan,
+        drills=ordered,
         contract_sha256=contract.contract_sha256,
         plan_id=plan.plan_id,
         drill_ids=tuple(row.drill_id for row in ordered),

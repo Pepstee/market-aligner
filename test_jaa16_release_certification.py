@@ -209,6 +209,10 @@ def test_operations_plan_is_content_addressed_paused_and_non_executing():
 
 def test_all_six_local_failure_drills_are_review_eligible_not_runtime_proof():
     assessment = drill_suite()
+    assert assessment.plan.plan_id == assessment.plan_id
+    assert tuple(row.drill_id for row in assessment.drills) == (
+        assessment.drill_ids
+    )
     assert assessment.failure_kinds == tuple(sorted(FAILURE_KINDS))
     assert assessment.reason_codes == ()
     assert assessment.eligible_for_independent_runtime_review is True
@@ -268,6 +272,7 @@ def test_current_local_candidate_names_every_missing_release_requirement():
         "operations_plan_dependency_unsatisfied",
         "drill_runtime_not_independently_verified",
     )
+    assert assessment.candidate.candidate_id == assessment.candidate_id
     assert assessment.eligible_for_independent_release_review is False
     assert assessment.release_certificate_id is None
     assert assessment.released is False

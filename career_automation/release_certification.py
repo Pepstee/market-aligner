@@ -597,6 +597,7 @@ def compile_release_candidate(
 
 @dataclass(frozen=True)
 class ReleaseAssessment:
+    candidate: ReleaseCandidate
     contract_sha256: str
     candidate_id: str
     reason_codes: tuple[str, ...]
@@ -617,6 +618,7 @@ class ReleaseAssessment:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result = {
             "schema_version": self.schema_version,
+            "candidate": self.candidate.document(),
             "contract_sha256": self.contract_sha256,
             "candidate_id": self.candidate_id,
             "reason_codes": self.reason_codes,
@@ -636,6 +638,7 @@ class ReleaseAssessment:
         return result
 
     def verify(self) -> None:
+        derived = _expected_release_assessment_fields(self.candidate)
         _digest(self.contract_sha256, "release-assessment contract hash")
         _digest(self.candidate_id, "assessed candidate ID")
         _digest(self.assessment_id, "release assessment ID")
@@ -662,10 +665,62 @@ class ReleaseAssessment:
             or self.schema_version != "jaa16.release-assessment.v1"
         ):
             raise ValueError("local release assessment cannot release or certify")
+        if {key: getattr(self, key) for key in derived} != derived:
+            raise ValueError(
+                "release assessment differs from its typed candidate"
+            )
         if self.assessment_id != _content_hash(
             self.document(include_identity=False)
         ):
             raise ValueError("release assessment identity is invalid")
+
+
+def _expected_release_assessment_fields(
+    candidate: ReleaseCandidate,
+) -> dict[str, object]:
+    if not isinstance(candidate, ReleaseCandidate):
+        raise TypeError("assessment requires a typed release candidate")
+    candidate.verify()
+    reasons: list[str] = []
+    prior_ids = tuple(row.slice_id for row in candidate.prior_certifications)
+    evidence_kinds = tuple(
+        row.evidence_kind for row in candidate.release_evidence
+    )
+    if set(prior_ids) != set(REQUIRED_PRIOR_SLICES):
+        reasons.append("missing_prior_slice_certification")
+    if len(prior_ids) != len(set(prior_ids)):
+        reasons.append("duplicate_prior_slice_certification")
+    if set(evidence_kinds) != set(REQUIRED_RELEASE_EVIDENCE):
+        reasons.append("missing_release_evidence")
+    if len(evidence_kinds) != len(set(evidence_kinds)):
+        reasons.append("duplicate_release_evidence")
+    if any(
+        not row.independently_verified for row in candidate.release_evidence
+    ):
+        reasons.append("unverified_release_evidence")
+    if not candidate.operations_plan.dependency_satisfied:
+        reasons.append("operations_plan_dependency_unsatisfied")
+    if not candidate.drill_assessment.eligible_for_independent_runtime_review:
+        reasons.append("drill_suite_failed")
+    drill_evidence = {
+        row.evidence_kind: row
+        for row in candidate.release_evidence
+    }.get("runtime_failure_drills")
+    if drill_evidence is None or not drill_evidence.independently_verified:
+        reasons.append("drill_runtime_not_independently_verified")
+    if not candidate.distribution_scan.is_clean:
+        reasons.append("distributable_contamination")
+    reason_codes = tuple(
+        reason for reason in RELEASE_REASON_ORDER if reason in reasons
+    )
+    return {
+        "contract_sha256": FROZEN_RELEASE_CERTIFICATION_CONTRACT.contract_sha256,
+        "candidate_id": candidate.candidate_id,
+        "reason_codes": reason_codes,
+        "eligible_for_independent_release_review": not reason_codes,
+        "release_certificate_id": None,
+        "released": False,
+    }
 
 
 def assess_release_candidate(
@@ -711,6 +766,7 @@ def assess_release_candidate(
     )
     body = {
         "schema_version": "jaa16.release-assessment.v1",
+        "candidate": candidate.document(),
         "contract_sha256": contract.contract_sha256,
         "candidate_id": candidate.candidate_id,
         "reason_codes": reason_codes,
@@ -724,6 +780,7 @@ def assess_release_candidate(
         "certifies_slice": False,
     }
     return ReleaseAssessment(
+        candidate=candidate,
         contract_sha256=contract.contract_sha256,
         candidate_id=candidate.candidate_id,
         reason_codes=reason_codes,
