@@ -1427,25 +1427,161 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 f"JAA-15 declared test missing: {relative}"
             )
 
-    for number in range(16, 17):
-        slice_id = f"JAA-{number:02d}"
-        component = components[slice_id]
-        assert component["increment"] == "not_implemented"
-        assert component["claim"] == executable_slices[slice_id]["objective"]
-        assert component["depends_on"] == executable_slices[slice_id]["depends_on"]
-        assert component["evidence"] == []
-
-        # A future declaration cannot become progress merely by changing this
-        # status string. Every declared owned path and named slice test is
-        # currently absent, matching the truthful starting state.
-        for pattern in component["owns"]:
-            if not any(token in pattern for token in ("*", "?", "[")):
-                assert not (ROOT / pattern).exists(), f"{slice_id} status needs reassessment"
-        for test in component["tests"]:
-            for relative in test["files"]:
-                if slice_id == "JAA-16" and relative == "test_acceptance_declaration_contract.py":
-                    continue
-                assert not (ROOT / relative).exists(), f"{slice_id} status needs reassessment"
+    jaa16 = components["JAA-16"]
+    assert (
+        jaa16["increment"]
+        == (
+            "local_operations_and_release_gate_contract_complete_"
+            "dependency_runtime_distribution_and_certification_withheld"
+        )
+    )
+    assert jaa16["claim"] == executable_slices["JAA-16"]["objective"]
+    assert jaa16["depends_on"] == executable_slices["JAA-16"]["depends_on"]
+    assert jaa16["provisional_local_contract"] == {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_ratification": "absent_pending_ratification",
+        "implemented_source_git_revision": (
+            "df341a275cbc4ec960250b9c5f2b8c26cad189e5"
+        ),
+        "implemented_source_tree": (
+            "e19da2ada822cf815620163c7062b18c2cc45b7d"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:7ce7b1fedd9322dca7f709eadee61869"
+            "d5416a8911fc7c251f9c431b8fd44d9a"
+        ),
+        "upstream_dependency_satisfied": False,
+        "runtime_drill_evidence_verified": False,
+        "distributable_artifact_verified": False,
+        "release_certificate_status": "absent",
+        "scheduling_authority": "withheld",
+        "provider_execution_authority": "withheld",
+        "deployment_authority": "withheld",
+        "external_health_check_authority": "withheld",
+        "report_send_authority": "withheld",
+        "distribution_authority": "withheld",
+        "entitlement_activation_authority": "withheld",
+        "production_certification": "withheld",
+        "dependency_satisfied": False,
+        "deputy_authority": {
+            "path_base": "software_factory_root",
+            "relative_path": (
+                "giga-user/reports/"
+                "JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md"
+            ),
+            "sha256": (
+                "8199c4848468669dd908eff8f4b92226d"
+                "f11b82831baf04fd9e663cabc462ef3"
+            ),
+        },
+        "provisional_local_contract_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA16_PROVISIONAL_LOCAL_CONTRACT_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "1d3eafc411d5631e53e7e10f5dbd1c3"
+                "49919188ae30bfd9a8e7aa9085a15cd7b"
+            ),
+        },
+        "sonnet_post_repair_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa16-post-repair-review-raw.json"
+            ),
+            "sha256": (
+                "b52be842c9dabe200bd9c74c3bf533df"
+                "fa3e56599797c0978acd1c3d62d8eaae"
+            ),
+        },
+        "positive_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa16-repair-definitive-positive.log"
+            ),
+            "sha256": (
+                "0d01c33cc7348dd2c33f14ab55819e61"
+                "263f75f08ca7c4a7f899a09a19ea7e5a"
+            ),
+        },
+        "negative_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa16-repair-definitive-negative.log"
+            ),
+            "sha256": (
+                "b2c1e843cd81f68eba3b0e55799e8d6f"
+                "6e542c3138615a7fb806e4c09a181ebd"
+            ),
+        },
+        "acceptance_declaration_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa16-repair-definitive-acceptance-contract.log"
+            ),
+            "sha256": (
+                "6c1f1852aded9a68ba76536c980c0a3f"
+                "0382e1f1593893498a827cc83ac8f66f"
+            ),
+        },
+        "upstream_cross_slice_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa16-repair-definitive-upstream-cross-slice.log"
+            ),
+            "sha256": (
+                "7b928b8c7e9f5a7c5acf98504be2d901"
+                "2fc5a7481c7ba7a738364ffaecb1fabe"
+            ),
+        },
+        "ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa16-repair-definitive-ruff.log"
+            ),
+            "sha256": (
+                "82b3e6a6c090a57601d22943bd23fca9"
+                "218d1031dbe5a7b754092f9a156b4f18"
+            ),
+        },
+    }
+    assert "certification" not in jaa16
+    for key in (
+        "deputy_authority",
+        "provisional_local_contract_receipt",
+        "sonnet_post_repair_review",
+        "positive_log",
+        "negative_log",
+        "acceptance_declaration_log",
+        "upstream_cross_slice_log",
+        "ruff_log",
+    ):
+        pointer = jaa16["provisional_local_contract"][key]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
+    assert jaa16["evidence"] == []
+    for relative in jaa16["owns"]:
+        assert (ROOT / relative).is_file(), (
+            f"JAA-16 materialised path missing: {relative}"
+        )
+    for test in jaa16["tests"]:
+        for relative in test["files"]:
+            assert (ROOT / relative).is_file(), (
+                f"JAA-16 declared test missing: {relative}"
+            )
 
 
 def test_stale_and_incomplete_slice_states_are_explicit() -> None:
