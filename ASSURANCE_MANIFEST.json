@@ -518,7 +518,7 @@
     },
     "JAA-09": {
       "claim": "A dependency-blocked cooperative local browser walking skeleton consumes one genuine JAA-08 token, binds exact approved materialisations, checkpoints one fixture receipt and recovers post-click interruption without a repeated submit.",
-      "increment": "implementation_in_progress_dependency_blocked",
+      "increment": "implementation_in_progress",
       "depends_on": ["JAA-08"],
       "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py", "career_automation/browser_workflows.py"],
       "inputs": ["career_automation/release_gate.py"],
