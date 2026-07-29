@@ -910,6 +910,57 @@ def test_executor_uses_canonical_trusted_clock_when_caller_time_differs(
         ) == 1
 
 
+def test_expected_fixture_payload_normalizes_cover_note_newlines(
+    tmp_path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "cover-note-newlines",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        _, _, _, _, authority, _ = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+
+    def with_newlines(value: str):
+        editable = replace(
+            authority.artifacts.editable,
+            answers_text=value,
+            answers_sha256=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        return replace(
+            authority,
+            artifacts=replace(authority.artifacts, editable=editable),
+        )
+
+    expected = LocalBrowserExecutor._expected_fixture_payload_sha256(
+        with_newlines("first\nsecond\n")
+    )
+    assert (
+        LocalBrowserExecutor._expected_fixture_payload_sha256(
+            with_newlines("first\r\nsecond\r\n")
+        )
+        == expected
+    )
+    assert (
+        LocalBrowserExecutor._expected_fixture_payload_sha256(
+            with_newlines("first\rsecond\r")
+        )
+        == expected
+    )
+
+
 def test_post_consumption_drift_blocks_submit_before_click(
     tmp_path,
 ) -> None:

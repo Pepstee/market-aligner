@@ -431,10 +431,10 @@ class LocalBrowserExecutor:
                 "city": authority.contact.city,
                 "work_authorisation": "authorised",
                 "cover_note": (
-                    authority.artifacts.editable.answers_text.strip().replace(
-                        "\n",
-                        "\r\n",
-                    )
+                    authority.artifacts.editable.answers_text.strip()
+                    .replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                    .replace("\n", "\r\n")
                 ),
             },
             "sponsorship_details": "",
