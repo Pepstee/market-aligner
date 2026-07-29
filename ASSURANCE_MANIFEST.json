@@ -775,8 +775,53 @@
     },
     "JAA-13": {
       "claim": "Convert the same evidence and employer intelligence into interview preparation and post-interview continuity.",
-      "increment": "not_implemented",
+      "increment": "local_preparation_debrief_and_draft_contract_complete_dependency_refresh_and_send_withheld",
       "depends_on": ["JAA-12"],
+      "provisional_local_contract": {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_ratification": "absent_pending_ratification",
+        "implemented_source_git_revision": "59bd3f044485a62407e0ffc92c6d786a8e7f689e",
+        "implemented_source_tree": "3a03bed3cf6fe71de5f789dcb42850bb96776489",
+        "implemented_source_content_revision": "sha256:d2a17c9cefc8dbafea4b8074e035fcfcabd2384f744d31c525b71345bf0dd0e4",
+        "upstream_dependency_satisfied": false,
+        "source_refresh_authority": "withheld",
+        "private_person_inference": false,
+        "candidate_fact_mutation_authority": false,
+        "connector_status": "not_connected",
+        "message_send_authority": "withheld",
+        "production_certification": "withheld",
+        "dependency_satisfied": false,
+        "deputy_authority": {
+          "path_base": "software_factory_root",
+          "relative_path": "giga-user/reports/JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md",
+          "sha256": "8199c4848468669dd908eff8f4b92226df11b82831baf04fd9e663cabc462ef3"
+        },
+        "provisional_local_contract_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA13_PROVISIONAL_LOCAL_CONTRACT_ACCEPTANCE.md",
+          "sha256": "fe23cf0bb50db9f13805b76b6fed07d9b779bffea2c1a3d28037376c962e26d1"
+        },
+        "sonnet_post_repair_review": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/sonnet-jaa13-post-repair-review-raw.json",
+          "sha256": "67facde6fbe855a24ffa191949cef22ad8d6df06e20b18ae49200400290ede60"
+        },
+        "positive_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa13-post-review-positive.log",
+          "sha256": "ba687f67e739d608d0c2920e1525f9fa9c54bbaf5dbf028d4955aed5701ab533"
+        },
+        "negative_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa13-post-review-negative.log",
+          "sha256": "21326f9afa0de598f626c77f483f8c4cc4132aaf3a74ec11b1d929e98e85bbc3"
+        },
+        "ruff_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa13-post-review-ruff.log",
+          "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        }
+      },
       "owns": ["career_automation/interview_communication.py"],
       "inputs": ["career_automation/status_ingestion.py", "career_automation/employer_research.py", "career_automation/candidate_graph.py", "career_automation/application_compiler.py"],
       "interfaces": [],
