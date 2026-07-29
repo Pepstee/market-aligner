@@ -417,6 +417,56 @@ class LocalBrowserExecutor:
         return hashlib.sha256(document.encode()).hexdigest()
 
     @staticmethod
+    def _expected_fixture_payload_sha256(
+        authority: ReleaseExecutionAuthority,
+    ) -> str:
+        document = {
+            "contract": "jaa09.fixture-application.v1",
+            "application_id": authority.application_id,
+            "job_key": authority.job_key,
+            "fields": {
+                "full_name": authority.contact.full_name,
+                "email": authority.contact.email,
+                "phone": authority.contact.phone,
+                "city": authority.contact.city,
+                "work_authorisation": "authorised",
+                "cover_note": (
+                    authority.artifacts.editable.answers_text.strip().replace(
+                        "\n",
+                        "\r\n",
+                    )
+                ),
+            },
+            "sponsorship_details": "",
+            "uploads": {
+                "cv": {
+                    "filename": "cv.pdf",
+                    "sha256": authority.artifacts.cv_pdf.pdf_sha256,
+                    "size_bytes": len(
+                        authority.artifacts.cv_pdf.pdf_bytes
+                    ),
+                },
+                "cover_letter": {
+                    "filename": "cover-letter.pdf",
+                    "sha256": (
+                        authority.artifacts.cover_letter_pdf.pdf_sha256
+                    ),
+                    "size_bytes": len(
+                        authority.artifacts.cover_letter_pdf.pdf_bytes
+                    ),
+                },
+            },
+        }
+        return hashlib.sha256(
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    @staticmethod
     def _stored_selector_report(
         action: BrowserAction,
         dispatch: Mapping[str, object],
@@ -444,6 +494,161 @@ class LocalBrowserExecutor:
                 "durable submit selector report differs from its plan"
             )
         return report
+
+    def _restore_prior_state(
+        self,
+        page: Page,
+        pending: PendingAction,
+        *,
+        approved_values: Collection[ApprovedValue],
+        materialized_values: Mapping[str, MaterializedValue],
+        release_authority: ReleaseExecutionAuthority | None,
+    ) -> None:
+        dispatch = self.store.submit_dispatch(pending.run_id)
+        if (
+            dispatch is not None
+            and str(dispatch["state"]) not in {
+                "prepared",
+                "release_consumed",
+            }
+        ):
+            raise SubmissionIndeterminateError(
+                "started submit browser state cannot be reconstructed safely"
+            )
+        prefix = self.store.replay_prefix(
+            pending.run_id,
+            before_action_index=pending.action_index,
+        )
+        if prefix[0][0].kind is not ActionKind.NAVIGATE:
+            raise SubmissionIndeterminateError(
+                "browser replay requires an initial navigation checkpoint"
+            )
+        for action, prior_result in prefix:
+            if action.kind is ActionKind.NAVIGATE:
+                if action.target_url is None or not _loopback_url(
+                    action.target_url
+                ):
+                    raise LocalBrowserBoundaryError(
+                        "replay navigation target is not loopback HTTP"
+                    )
+                target_origin = _origin(action.target_url)
+                if target_origin is None:
+                    raise LocalBrowserBoundaryError(
+                        "replay navigation origin is invalid"
+                    )
+                self._allowed_origins[page] = target_origin
+                response = page.goto(
+                    action.target_url,
+                    wait_until="domcontentloaded",
+                )
+                if (
+                    response is None
+                    or not response.ok
+                    or _origin(page.url) != target_origin
+                ):
+                    raise LocalBrowserBoundaryError(
+                        "replay navigation left or failed the local fixture"
+                    )
+                outputs: dict[str, object] = {
+                    "navigation_status": response.status,
+                    "url_sha256": hashlib.sha256(
+                        page.url.encode()
+                    ).hexdigest(),
+                    "field_map_sha256": self._field_map_sha256(page),
+                }
+            else:
+                if action.kind is ActionKind.SUBMIT:
+                    raise ConsequentialActionError(
+                        "a submit checkpoint can never be replayed"
+                    )
+                allowed_origin = self._allowed_origins.get(page)
+                if (
+                    allowed_origin is None
+                    or _origin(page.url) != allowed_origin
+                ):
+                    raise LocalBrowserBoundaryError(
+                        "browser replay left the local fixture"
+                    )
+                locator, report = self._resolve(page, action)
+                if report != prior_result.selector_report:
+                    raise SelectorExecutionError(
+                        "replayed selector differs from its checkpoint"
+                    )
+                if action.kind is ActionKind.CLICK:
+                    if self._click_is_consequential(page, locator):
+                        raise ConsequentialActionError(
+                            "browser replay reached a consequential control"
+                        )
+                    locator.click()
+                    outputs = {"action_status": "clicked"}
+                elif action.kind in {
+                    ActionKind.FILL,
+                    ActionKind.SELECT_OPTION,
+                    ActionKind.UPLOAD,
+                }:
+                    materialized = self._approved_materialized(
+                        action,
+                        approved_values,
+                        materialized_values,
+                    )
+                    self._assert_release_materialization(
+                        action,
+                        materialized,
+                        release_authority,
+                    )
+                    if action.kind is ActionKind.FILL:
+                        if not isinstance(materialized.value, str):
+                            raise TypeError(
+                                "fill materialization must be text"
+                            )
+                        locator.fill(materialized.value)
+                        outputs = {"field_status": "filled"}
+                    elif action.kind is ActionKind.SELECT_OPTION:
+                        if not isinstance(materialized.value, str):
+                            raise TypeError(
+                                "select materialization must be text"
+                            )
+                        locator.select_option(materialized.value)
+                        outputs = {"field_status": "selected"}
+                    else:
+                        upload, digest = self._upload_path(materialized)
+                        locator.set_input_files(str(upload))
+                        if (
+                            hashlib.sha256(upload.read_bytes()).hexdigest()
+                            != digest
+                        ):
+                            raise ValueError(
+                                "browser upload changed during replay"
+                            )
+                        outputs = {
+                            "field_status": "uploaded",
+                            "upload_sha256": digest,
+                        }
+                    if release_authority is not None:
+                        outputs["release_materialization_status"] = "verified"
+                        outputs["release_manifest_sha256"] = (
+                            release_authority.release_token.split(".")[1]
+                        )
+                elif action.kind is ActionKind.ASSERT:
+                    outputs = {"assertion_status": "matched"}
+                elif action.kind is ActionKind.EXTRACT:
+                    outputs = {
+                        "extracted_text_sha256": hashlib.sha256(
+                            locator.inner_text().encode()
+                        ).hexdigest()
+                    }
+                else:
+                    raise ConsequentialActionError(
+                        f"{action.kind.value} cannot be replayed"
+                    )
+                if _origin(page.url) != allowed_origin:
+                    raise LocalBrowserBoundaryError(
+                        "browser replay left the local fixture"
+                    )
+            if outputs != dict(prior_result.outputs):
+                raise WorkflowError(
+                    f"replayed step {action.step_id} differs from checkpoint"
+                )
 
     def _execute_submit(
         self,
@@ -527,6 +732,17 @@ class LocalBrowserExecutor:
             raise WorkflowError("submit dispatch was not persisted")
         report = self._stored_selector_report(action, dispatch)
         state = str(dispatch["state"])
+        release_arguments = {
+            "release_token": authority.release_token,
+            "source": authority.source,
+            "artifacts": authority.artifacts,
+            "contact": authority.contact,
+            "questions": authority.questions,
+            "artifact_root": authority.artifact_root,
+            "repository_root": authority.repository_root,
+            "jurisdiction": authority.jurisdiction,
+            "contract_type": authority.contract_type,
+        }
         if state in {"prepared", "release_consumed"} and locator is None:
             allowed_origin = self._allowed_origins.get(page)
             if (
@@ -545,20 +761,14 @@ class LocalBrowserExecutor:
                 raise ConsequentialActionError(
                     "prepared SUBMIT no longer targets final submit"
                 )
+        returned_consumed_at: str | None = None
         if state == "prepared":
             try:
-                authority.gate.consume_release_token(
-                    release_token=authority.release_token,
-                    source=authority.source,
-                    artifacts=authority.artifacts,
-                    contact=authority.contact,
-                    questions=authority.questions,
-                    artifact_root=authority.artifact_root,
-                    repository_root=authority.repository_root,
-                    jurisdiction=authority.jurisdiction,
-                    contract_type=authority.contract_type,
+                consumed = authority.gate.consume_release_token(
+                    **release_arguments,
                     consumed_at=authority.consumed_at,
                 )
+                returned_consumed_at = consumed.consumed_at
             except ValueError as error:
                 if str(error) != "release token was already consumed":
                     raise
@@ -573,8 +783,29 @@ class LocalBrowserExecutor:
                     "consumed release dispatch was not persisted"
                 )
             state = str(dispatch["state"])
+            if (
+                returned_consumed_at is not None
+                and dispatch["release_consumed_at"] != returned_consumed_at
+            ):
+                raise ReleaseGateError(
+                    "durable release consumption differs from JAA-08 return"
+                )
         fresh_click = False
         if state == "release_consumed":
+            durable_consumed_at = datetime.fromisoformat(
+                str(dispatch["release_consumed_at"])
+            )
+            if (
+                durable_consumed_at.tzinfo is None
+                or durable_consumed_at.utcoffset() is None
+            ):
+                raise ReleaseGateError(
+                    "durable release consumption time lacks a timezone"
+                )
+            authority.gate.verify_consumed_release_token(
+                **release_arguments,
+                consumed_at=durable_consumed_at,
+            )
             fresh_click = self.store.mark_submit_started(
                 pending.run_id,
                 worker_id,
@@ -619,6 +850,13 @@ class LocalBrowserExecutor:
             payload_sha256=payload_sha256,
         )
         receipt.verify()
+        if (
+            receipt.payload_sha256
+            != self._expected_fixture_payload_sha256(authority)
+        ):
+            raise ValueError(
+                "fixture receipt payload differs from exact JAA-08 authority"
+            )
         screenshot_sha256 = hashlib.sha256(
             page.screenshot(full_page=True)
         ).hexdigest()
@@ -702,6 +940,26 @@ class LocalBrowserExecutor:
         if pending is None:
             return None
         action = pending.action
+        dispatch = self.store.submit_dispatch(run_id)
+        if (
+            action.kind is not ActionKind.NAVIGATE
+            and (
+                self._allowed_origins.get(page) is None
+                or _origin(page.url) != self._allowed_origins.get(page)
+            )
+            and (
+                dispatch is None
+                or str(dispatch["state"])
+                in {"prepared", "release_consumed"}
+            )
+        ):
+            self._restore_prior_state(
+                page,
+                pending,
+                approved_values=approved_values,
+                materialized_values=values,
+                release_authority=release_authority,
+            )
         if action.kind is ActionKind.SUBMIT:
             if release_authority is None:
                 raise ConsequentialActionError(

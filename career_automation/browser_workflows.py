@@ -1497,6 +1497,94 @@ class BrowserWorkflowStore:
             rows = self._checkpoint_rows(conn, run_id)
         return {str(row["step_id"]): json.loads(row["output_json"]) for row in rows}
 
+    def replay_prefix(
+        self,
+        run_id: str,
+        *,
+        before_action_index: int,
+    ) -> tuple[tuple[BrowserAction, StepResult], ...]:
+        """Load and authenticate a contiguous checkpoint prefix for page replay."""
+        if before_action_index < 1:
+            raise WorkflowError("browser replay requires a checkpoint prefix")
+        with self.connection() as conn:
+            run = conn.execute(
+                "SELECT workflow_hash FROM browser_workflow_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            workflow = self._load_workflow(
+                conn,
+                str(run["workflow_hash"]),
+            )
+            rows = self._checkpoint_rows(conn, run_id)
+        indexes = tuple(int(row["action_index"]) for row in rows)
+        if indexes != tuple(range(before_action_index)):
+            raise WorkflowError(
+                "browser replay checkpoints are not one contiguous prefix"
+            )
+        replay: list[tuple[BrowserAction, StepResult]] = []
+        for row in rows:
+            action = workflow.actions[int(row["action_index"])]
+            action_hash = _sha256(_canonical_json(action.to_dict()))
+            if (
+                str(row["step_id"]) != action.step_id
+                or str(row["action_hash"]) != action_hash
+            ):
+                raise WorkflowError(
+                    "browser replay checkpoint differs from its workflow"
+                )
+            try:
+                outputs = json.loads(str(row["output_json"]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise WorkflowError(
+                    "browser replay output is invalid JSON"
+                ) from exc
+            if (
+                not isinstance(outputs, dict)
+                or _canonical_json(outputs) != str(row["output_json"])
+            ):
+                raise WorkflowError("browser replay output is not canonical")
+            report: SelectorRecoveryReport | None = None
+            if row["selector_report_json"] is not None:
+                if action.selectors is None:
+                    raise WorkflowError(
+                        "selector-free replay checkpoint has a report"
+                    )
+                try:
+                    report_document = json.loads(
+                        str(row["selector_report_json"])
+                    )
+                    outcomes = tuple(
+                        SelectorOutcome(str(attempt["outcome"]))
+                        for attempt in report_document["attempts"]
+                    )
+                except (
+                    KeyError,
+                    TypeError,
+                    json.JSONDecodeError,
+                    ValueError,
+                ) as exc:
+                    raise WorkflowError(
+                        "browser replay selector report is invalid"
+                    ) from exc
+                report = action.selectors.assess(outcomes)
+                if (
+                    report.to_dict() != report_document
+                    or _canonical_json(report_document)
+                    != str(row["selector_report_json"])
+                ):
+                    raise WorkflowError(
+                        "browser replay selector report is inconsistent"
+                    )
+            self._validate_selector_report(
+                action,
+                report,
+                require_success=True,
+            )
+            replay.append((action, StepResult(outputs, report)))
+        return tuple(replay)
+
     def run_snapshot(self, run_id: str) -> dict[str, Any]:
         with self.connection() as conn:
             row = conn.execute(

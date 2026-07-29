@@ -187,6 +187,12 @@ class _FixtureState:
         with self.lock:
             if self.receipt is not None:
                 raise FileExistsError("fixture application already submitted")
+            for pending in self.pending.values():
+                if (
+                    pending.payload_sha256 == payload_sha256
+                    and pending.summary == summary
+                ):
+                    return pending
             value = self.nonce()
             if (
                 not isinstance(value, str)
@@ -233,6 +239,26 @@ def _host_is_loopback(value: str) -> bool:
         return ipaddress.ip_address(hostname).is_loopback
     except ValueError:
         return False
+
+
+def _http_origin(value: str) -> tuple[str, int] | None:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "http"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    try:
+        port = parsed.port or 80
+    except ValueError:
+        return None
+    return parsed.hostname.casefold(), port
+
+
+def _host_authority(value: str) -> tuple[str, int] | None:
+    return _http_origin(f"http://{value}")
 
 
 def _page(title: str, body: str) -> bytes:
@@ -472,6 +498,7 @@ class LocalATSFixture:
         if self._server is not None:
             return self
         state = self.state
+        fixture_host = self.host.casefold()
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "JAA-Local-ATS/1"
@@ -518,10 +545,25 @@ class LocalATSFixture:
             def _allowed_request(self) -> bool:
                 host = self.headers.get("Host", "")
                 origin = self.headers.get("Origin")
-                return _host_is_loopback(host) and (
-                    origin is None
-                    or origin == "null"
-                    or _host_is_loopback(urlsplit(origin).netloc)
+                expected_port = int(self.server.server_port)
+                host_authority = _host_authority(host)
+                if host_authority is None:
+                    return False
+                host_name, host_port = host_authority
+                if (
+                    not _host_is_loopback(host)
+                    or host_name != fixture_host
+                    or host_port != expected_port
+                ):
+                    return False
+                if origin is None:
+                    return True
+                if origin == "null":
+                    return True
+                origin_authority = _http_origin(origin)
+                return origin_authority == (
+                    host_name,
+                    host_port,
                 )
 
             def _path(self, suffix: str) -> str:

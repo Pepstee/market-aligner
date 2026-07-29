@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import hashlib
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.request import Request, urlopen
@@ -33,7 +32,10 @@ from career_automation.browser_workflows import (
     ValueReference,
     ValueSource,
 )
-from test_jaa08_independent_acceptance import _issued_release_inputs
+from test_jaa08_independent_acceptance import (
+    _fixture_now,
+    _issued_release_inputs,
+)
 
 
 PDF = b"%PDF-1.4\nsynthetic fixture PDF\n%%EOF\n"
@@ -319,15 +321,12 @@ def _released_browser_inputs(
         repository_root=ROOT,
         jurisdiction="GB",
         contract_type="employee",
-        consumed_at=datetime.combine(
-            date.today(),
-            datetime.min.time(),
-            tzinfo=timezone.utc,
-        ),
+        consumed_at=_fixture_now(database),
         receipt_url=fixture.receipt_url,
         application_id=fixture.state.vacancy.application_id,
         job_key=source.job_key,
     )
+    assert authority.consumed_at == _fixture_now(database)
     return (
         database,
         workflow,
@@ -585,3 +584,94 @@ def test_real_browser_consumes_jaa08_token_and_records_official_receipt(
         assert token["token_hash"] == issued.token_sha256
         assert token["consumed_at"] is not None
         assert issued.release_token.encode() not in database.path.read_bytes()
+
+
+def test_fresh_browser_replays_checkpointed_form_without_second_submit(
+    tmp_path: Path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "restart-platform-engineer",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        with sync_playwright() as playwright:
+            first_browser = playwright.chromium.launch(headless=True)
+            first_page = first_browser.new_page()
+            first_executor = LocalBrowserExecutor(
+                store,
+                repository_root=ROOT,
+            )
+            for _action in workflow.actions[:-1]:
+                first_executor.execute_next(
+                    first_page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            first_browser.close()
+            assert fixture.receipt is None
+            assert len(fixture.state.pending) == 1
+
+            resumed_browser = playwright.chromium.launch(headless=True)
+            resumed_page = resumed_browser.new_page()
+            resumed = LocalBrowserExecutor(
+                store,
+                repository_root=ROOT,
+            ).execute_next(
+                resumed_page,
+                run_id=run_id,
+                worker_id="local_worker",
+                approved_values=approvals,
+                materialized_values=values,
+                release_authority=authority,
+            )
+            assert resumed is not None
+            assert resumed.action_kind is ActionKind.SUBMIT
+            assert resumed_page.get_by_role(
+                "heading",
+                name="Application received",
+            ).is_visible()
+            resumed_browser.close()
+        assert fixture.receipt is not None
+        assert store.run_snapshot(run_id)["status"] == "completed"
+        assert store.run_snapshot(run_id)["checkpoint_count"] == len(
+            workflow.actions
+        )
+        assert sum(
+            row["event_type"] == "submit_click_started"
+            for row in store.events(run_id)
+        ) == 1

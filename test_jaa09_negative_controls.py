@@ -9,6 +9,7 @@ import socket
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -16,7 +17,11 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
+from career_automation.ats_fixture import (
+    FixtureReceipt,
+    FixtureVacancy,
+    LocalATSFixture,
+)
 from career_automation.browser_executor import (
     ConsequentialActionError,
     LocalBrowserBoundaryError,
@@ -35,6 +40,7 @@ from career_automation.browser_workflows import (
     SelectorPlan,
     SelectorStrategy,
 )
+from career_automation.release_gate import ReleaseGateStore
 from playwright.sync_api import sync_playwright
 from test_jaa09_independent_acceptance import (
     FORM_TOKEN,
@@ -76,6 +82,23 @@ def test_fixture_refuses_non_loopback_origin_header() -> None:
         with pytest.raises(HTTPError) as captured:
             urlopen(request, timeout=5)
         assert captured.value.code == 403
+
+
+def test_fixture_refuses_other_loopback_host_port_or_origin() -> None:
+    with _fixture() as fixture:
+        parsed = urlsplit(fixture.application_url)
+        wrong_port = int(parsed.port) + 1
+        for headers in (
+            {"Host": f"{parsed.hostname}:{wrong_port}"},
+            {"Origin": f"http://{parsed.hostname}:{wrong_port}"},
+        ):
+            request = Request(
+                fixture.application_url,
+                headers=headers,
+            )
+            with pytest.raises(HTTPError) as captured:
+                urlopen(request, timeout=5)
+            assert captured.value.code == 403
 
 
 def test_fixture_rejects_review_without_form_authority() -> None:
@@ -672,6 +695,320 @@ def test_interruption_after_click_recovers_receipt_without_second_submit(
         ) == 1
 
 
+@pytest.mark.parametrize(
+    "interruption_point",
+    (
+        "post_prepare_pre_consume",
+        "post_consume_pre_reconcile",
+        "post_consume_pre_click",
+    ),
+)
+def test_preclick_interruption_replays_and_submits_exactly_once(
+    tmp_path,
+    interruption_point: str,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        f"preclick-{interruption_point.replace('_', '-')}",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            first_browser = playwright.chromium.launch(headless=True)
+            first_page = first_browser.new_page()
+            for _action in workflow.actions[:-1]:
+                executor.execute_next(
+                    first_page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            if interruption_point == "post_prepare_pre_consume":
+                original = authority.gate.consume_release_token
+
+                def interrupt(**_kwargs):
+                    raise RuntimeError("injected before release consumption")
+
+                authority.gate.consume_release_token = interrupt
+            elif interruption_point == "post_consume_pre_reconcile":
+                original = store.reconcile_release_consumed
+
+                def interrupt(*_args, **_kwargs):
+                    raise RuntimeError("injected before consumption reconcile")
+
+                store.reconcile_release_consumed = interrupt  # type: ignore[method-assign]
+            else:
+                original = store.mark_submit_started
+
+                def interrupt(*_args, **_kwargs):
+                    raise RuntimeError("injected before click intent")
+
+                store.mark_submit_started = interrupt  # type: ignore[method-assign]
+            with pytest.raises(RuntimeError, match="injected before"):
+                executor.execute_next(
+                    first_page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            if interruption_point == "post_prepare_pre_consume":
+                authority.gate.consume_release_token = original
+                assert store.submit_dispatch(run_id)["state"] == "prepared"  # type: ignore[index]
+            elif interruption_point == "post_consume_pre_reconcile":
+                store.reconcile_release_consumed = original  # type: ignore[method-assign]
+                assert store.submit_dispatch(run_id)["state"] == "prepared"  # type: ignore[index]
+                with database.connection() as connection:
+                    consumed_at = connection.execute(
+                        """SELECT consumed_at FROM release_tokens
+                           WHERE token_hash=?""",
+                        (issued.token_sha256,),
+                    ).fetchone()[0]
+                assert consumed_at is not None
+            else:
+                store.mark_submit_started = original  # type: ignore[method-assign]
+                assert (
+                    store.submit_dispatch(run_id)["state"]  # type: ignore[index]
+                    == "release_consumed"
+                )
+            first_browser.close()
+            assert fixture.receipt is None
+
+            resumed_browser = playwright.chromium.launch(headless=True)
+            resumed_page = resumed_browser.new_page()
+            completed = LocalBrowserExecutor(
+                store,
+                repository_root=ROOT,
+            ).execute_next(
+                resumed_page,
+                run_id=run_id,
+                worker_id="local_worker",
+                approved_values=approvals,
+                materialized_values=values,
+                release_authority=authority,
+            )
+            resumed_browser.close()
+        assert completed is not None
+        assert completed.action_kind is ActionKind.SUBMIT
+        assert fixture.receipt is not None
+        assert store.run_snapshot(run_id)["status"] == "completed"
+        assert sum(
+            row["event_type"] == "submit_click_started"
+            for row in store.events(run_id)
+        ) == 1
+
+
+def test_executor_uses_canonical_trusted_clock_when_caller_time_differs(
+    tmp_path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "trusted-clock-divergence",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        trusted_consumed_at = authority.consumed_at + timedelta(seconds=1)
+        authority = replace(
+            authority,
+            gate=ReleaseGateStore(
+                database.path,
+                clock=lambda: trusted_consumed_at,
+            ),
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for _action in workflow.actions:
+                completed = executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+                assert completed is not None
+            browser.close()
+        dispatch = store.submit_dispatch(run_id)
+        assert dispatch is not None
+        assert dispatch["state"] == "receipt_recorded"
+        assert dispatch["release_consumed_at"] == (
+            trusted_consumed_at.isoformat()
+        )
+        assert authority.consumed_at != trusted_consumed_at
+        assert fixture.receipt is not None
+        assert sum(
+            row["event_type"] == "submit_click_started"
+            for row in store.events(run_id)
+        ) == 1
+
+
+def test_post_consumption_drift_blocks_submit_before_click(
+    tmp_path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    publication = release_inputs[7]
+    vacancy = FixtureVacancy(
+        "post-consumption-drift",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        original_mark = store.mark_submit_started
+
+        def interrupt_before_click(*_args, **_kwargs):
+            raise RuntimeError("injected before click")
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for _action in workflow.actions[:-1]:
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            store.mark_submit_started = interrupt_before_click  # type: ignore[method-assign]
+            with pytest.raises(RuntimeError, match="before click"):
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            store.mark_submit_started = original_mark  # type: ignore[method-assign]
+            dispatch = store.submit_dispatch(run_id)
+            assert dispatch is not None
+            assert dispatch["state"] == "release_consumed"
+            target = (
+                authority.artifact_root
+                / publication.relative_directory
+                / "cv.pdf"
+            )
+            target.write_bytes(target.read_bytes() + b"drift-before-click")
+            with pytest.raises(ValueError, match="differs from its receipt"):
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            browser.close()
+        assert fixture.receipt is None
+        dispatch = store.submit_dispatch(run_id)
+        assert dispatch is not None
+        assert dispatch["state"] == "release_consumed"
+        assert not any(
+            row["event_type"] == "submit_click_started"
+            for row in store.events(run_id)
+        )
+
+
 def test_invalid_jaa08_token_cannot_create_fixture_receipt(
     tmp_path,
 ) -> None:
@@ -753,6 +1090,110 @@ def test_invalid_jaa08_token_cannot_create_fixture_receipt(
                 (issued.token_sha256,),
             ).fetchone()[0]
         assert consumed_at is None
+
+
+def test_self_consistent_wrong_payload_receipt_is_not_recorded(
+    tmp_path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "wrong-payload-receipt",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        authentic_submit = fixture.state.submit
+
+        def fabricate_receipt(
+            nonce: str,
+            form_token: str,
+        ) -> FixtureReceipt:
+            authentic = authentic_submit(nonce, form_token)
+            provisional = FixtureReceipt(
+                "0" * 64,
+                authentic.application_id,
+                authentic.job_key,
+                "0" * 64,
+            )
+            forged = replace(
+                provisional,
+                receipt_id=hashlib.sha256(
+                    json.dumps(
+                        provisional.document(include_identity=False),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest(),
+            )
+            forged.verify()
+            fixture.state.receipt = forged
+            return forged
+
+        fixture.state.submit = fabricate_receipt  # type: ignore[method-assign]
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for _action in workflow.actions[:-1]:
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            with pytest.raises(
+                ValueError,
+                match="differs from exact JAA-08 authority",
+            ):
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            browser.close()
+        dispatch = store.submit_dispatch(run_id)
+        assert dispatch is not None
+        assert dispatch["state"] == "click_started"
+        assert dispatch["receipt_id"] is None
+        assert "submit" not in store.checkpoint_outputs(run_id)
+        assert fixture.receipt is not None
+        assert fixture.receipt.payload_sha256 == "0" * 64
 
 
 def test_one_jaa08_token_cannot_prepare_two_browser_submit_runs(
