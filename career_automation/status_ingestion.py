@@ -929,6 +929,7 @@ def compile_status_timeline(
 @dataclass(frozen=True)
 class FollowUpIntent:
     contract_sha256: str
+    timeline: StatusTimeline
     timeline_id: str
     application_id: str
     job_key: str
@@ -945,9 +946,12 @@ class FollowUpIntent:
     dependency_satisfied: bool = False
     production_certification: str = "withheld"
     certifies_slice: bool = False
-    schema_version: str = "jaa12.follow-up-intent.v3"
+    schema_version: str = "jaa12.follow-up-intent.v4"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.timeline, StatusTimeline):
+            raise TypeError("follow-up intent requires a typed timeline")
+        self.timeline.verify()
         for value, label in (
             (self.contract_sha256, "follow-up contract hash"),
             (self.timeline_id, "follow-up timeline identity"),
@@ -961,6 +965,35 @@ class FollowUpIntent:
             _digest(value, label)
         _required(self.application_id, "follow-up application ID")
         _required(self.job_key, "follow-up job key")
+        if (
+            self.timeline.contract_sha256 != self.contract_sha256
+            or self.timeline.timeline_id != self.timeline_id
+            or self.timeline.application_id != self.application_id
+            or self.timeline.job_key != self.job_key
+        ):
+            raise ValueError(
+                "follow-up intent differs from its typed timeline"
+            )
+        if self.timeline.final_state not in {
+            PipelineState.RECEIPT_CONFIRMED,
+            PipelineState.SCREENING,
+        }:
+            raise ValueError(
+                "follow-up policy does not permit the current application state"
+            )
+        classified_observations = tuple(
+            row
+            for row in self.timeline.observations
+            if row.classified_state is not None
+        )
+        if not classified_observations:
+            raise ValueError(
+                "follow-up requires classified source-backed status evidence"
+            )
+        if self.last_observed_at != classified_observations[-1].observed_at:
+            raise ValueError(
+                "follow-up clock differs from its typed timeline"
+            )
         try:
             due_at = datetime.fromisoformat(self.due_at)
             last_observed_at = datetime.fromisoformat(
@@ -999,13 +1032,14 @@ class FollowUpIntent:
             )
         if self.policy_sha256 != FOLLOW_UP_POLICY_SHA256:
             raise ValueError("follow-up intent binds a different policy")
-        if self.schema_version != "jaa12.follow-up-intent.v3":
+        if self.schema_version != "jaa12.follow-up-intent.v4":
             raise ValueError("follow-up intent schema is unsupported")
 
     def document(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
             "contract_sha256": self.contract_sha256,
+            "timeline": self.timeline.document(),
             "timeline_id": self.timeline_id,
             "application_id": self.application_id,
             "job_key": self.job_key,
@@ -1079,6 +1113,7 @@ def compile_follow_up_intent(
     )
     return FollowUpIntent(
         contract_sha256=contract.contract_sha256,
+        timeline=timeline,
         timeline_id=timeline.timeline_id,
         application_id=timeline.application_id,
         job_key=timeline.job_key,

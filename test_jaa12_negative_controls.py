@@ -424,6 +424,43 @@ def test_follow_up_cannot_claim_send_or_change_idempotency() -> None:
         )
 
 
+def test_follow_up_cannot_detach_or_replace_typed_timeline_lineage() -> None:
+    timeline = _timeline("under_review")
+    intent = compile_follow_up_intent(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        timeline,
+        released_application_sha256="c" * 64,
+        draft_sha256="d" * 64,
+    )
+    with pytest.raises(TypeError, match="typed timeline"):
+        replace(intent, timeline="a" * 64)
+    with pytest.raises(ValueError, match="differs from its typed timeline"):
+        replace(intent, timeline_id="a" * 64)
+
+    other_timeline = compile_status_timeline(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id="other-application",
+        job_key=JOB_KEY,
+        observations=(
+            classify_status_evidence(
+                FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+                compile_local_export_evidence(
+                    FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+                    application_id="other-application",
+                    job_key=JOB_KEY,
+                    source_kind="local_portal_export",
+                    source_record_id="other-follow-up-status",
+                    raw_export_bytes=b"under_review",
+                    observed_at=BASE_TIME,
+                ),
+                explicit_status_code="under_review",
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="differs from its typed timeline"):
+        replace(intent, timeline=other_timeline)
+
+
 def test_naive_or_caller_changed_timeline_clock_is_rejected() -> None:
     timeline = _timeline("under_review")
     raw = timeline.observations[0].raw_evidence

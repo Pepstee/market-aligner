@@ -311,6 +311,23 @@ def test_prior_slice_rejects_provisional_or_deputy_status():
             )
 
 
+def test_caller_asserted_certification_and_verification_labels_stay_blocked():
+    candidate = release_candidate(
+        priors=prior_certifications(),
+        evidence=release_evidence(independently_verified=True),
+    )
+    assessment = assess_release_candidate(
+        FROZEN_RELEASE_CERTIFICATION_CONTRACT,
+        candidate,
+    )
+    assert "unauthenticated_prior_slice_certifications" in (
+        assessment.reason_codes
+    )
+    assert "unauthenticated_release_evidence" in assessment.reason_codes
+    assert assessment.eligible_for_independent_release_review is False
+    assert assessment.release_certificate_id is None
+
+
 def test_unverified_runtime_evidence_blocks_release_review():
     candidate = release_candidate(
         priors=prior_certifications(),

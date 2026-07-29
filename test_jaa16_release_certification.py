@@ -297,6 +297,8 @@ def test_complete_synthetic_references_cannot_bypass_unsatisfied_dependency():
         for row in candidate.release_evidence
     )
     assert assessment.reason_codes == (
+        "unauthenticated_prior_slice_certifications",
+        "unauthenticated_release_evidence",
         "operations_plan_dependency_unsatisfied",
     )
     assert assessment.eligible_for_independent_release_review is False

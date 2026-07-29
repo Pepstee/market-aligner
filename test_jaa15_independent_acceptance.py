@@ -225,8 +225,10 @@ def test_measurement_uses_worthwhile_vacancies_predictions_cost_and_friction() -
 def test_complete_adapter_gate_is_review_only_and_preserves_quality() -> None:
     candidate = _candidate("adapter:eligible")
     evaluation = _evaluation(candidate)
-    assert evaluation.eligible_for_review is True
-    assert evaluation.reason_codes == ()
+    assert evaluation.eligible_for_review is False
+    assert evaluation.reason_codes == (
+        "unauthenticated_evidence_references",
+    )
     assert evaluation.evidence_kinds == (
         "fixture_runtime",
         "independent_test",
@@ -237,6 +239,9 @@ def test_complete_adapter_gate_is_review_only_and_preserves_quality() -> None:
     assert tuple(
         row.evidence_id for row in evaluation.evidence
     ) == evaluation.evidence_ids
+    assert {
+        row.authentication_status for row in evaluation.evidence
+    } == {"caller_asserted_digest_only"}
     assert evaluation.baseline_quality.phase == "baseline"
     assert evaluation.candidate_quality.phase == "candidate"
     assert evaluation.rollback_adapter_version == "v1"
@@ -263,19 +268,26 @@ def test_portfolio_ranks_value_and_keeps_blocked_routes_visible() -> None:
         evaluations,
     )
     assert tuple(row.adapter_id for row in portfolio.entries) == (
-        "adapter:eligible",
         "adapter:missing-runtime",
         "adapter:unsupported",
+        "adapter:eligible",
     )
     assert tuple(row.status for row in portfolio.entries) == (
-        "eligible_for_review",
         "blocked",
         "blocked",
+        "blocked",
+    )
+    assert portfolio.entries[0].reason_codes == (
+        "missing_real_runtime_evidence",
+        "unauthenticated_evidence_references",
     )
     assert portfolio.entries[1].reason_codes == (
-        "missing_real_runtime_evidence",
+        "unsupported_route",
+        "unauthenticated_evidence_references",
     )
-    assert portfolio.entries[2].reason_codes == ("unsupported_route",)
+    assert portfolio.entries[2].reason_codes == (
+        "unauthenticated_evidence_references",
+    )
     assert tuple(
         row.evaluation.evaluation_id for row in portfolio.entries
     ) == tuple(row.evaluation_id for row in portfolio.entries)

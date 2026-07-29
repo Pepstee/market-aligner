@@ -45,9 +45,11 @@ PRE_JAA16_MANIFEST_SHA256 = (
 RELEASE_REASON_ORDER = (
     "missing_prior_slice_certification",
     "duplicate_prior_slice_certification",
+    "unauthenticated_prior_slice_certifications",
     "missing_release_evidence",
     "duplicate_release_evidence",
     "unverified_release_evidence",
+    "unauthenticated_release_evidence",
     "operations_plan_dependency_unsatisfied",
     "drill_suite_failed",
     "drill_runtime_not_independently_verified",
@@ -697,6 +699,8 @@ def _expected_release_assessment_fields(
         reasons.append("missing_prior_slice_certification")
     if len(prior_ids) != len(set(prior_ids)):
         reasons.append("duplicate_prior_slice_certification")
+    if candidate.prior_certifications:
+        reasons.append("unauthenticated_prior_slice_certifications")
     if set(evidence_kinds) != set(REQUIRED_RELEASE_EVIDENCE):
         reasons.append("missing_release_evidence")
     if len(evidence_kinds) != len(set(evidence_kinds)):
@@ -705,6 +709,8 @@ def _expected_release_assessment_fields(
         not row.independently_verified for row in candidate.release_evidence
     ):
         reasons.append("unverified_release_evidence")
+    if candidate.release_evidence:
+        reasons.append("unauthenticated_release_evidence")
     if not candidate.operations_plan.dependency_satisfied:
         reasons.append("operations_plan_dependency_unsatisfied")
     if not candidate.drill_assessment.eligible_for_independent_runtime_review:
@@ -748,6 +754,8 @@ def assess_release_candidate(
         reasons.append("missing_prior_slice_certification")
     if len(prior_ids) != len(set(prior_ids)):
         reasons.append("duplicate_prior_slice_certification")
+    if candidate.prior_certifications:
+        reasons.append("unauthenticated_prior_slice_certifications")
     if set(evidence_kinds) != set(REQUIRED_RELEASE_EVIDENCE):
         reasons.append("missing_release_evidence")
     if len(evidence_kinds) != len(set(evidence_kinds)):
@@ -756,6 +764,8 @@ def assess_release_candidate(
         not row.independently_verified for row in candidate.release_evidence
     ):
         reasons.append("unverified_release_evidence")
+    if candidate.release_evidence:
+        reasons.append("unauthenticated_release_evidence")
     if not candidate.operations_plan.dependency_satisfied:
         reasons.append("operations_plan_dependency_unsatisfied")
     if not candidate.drill_assessment.eligible_for_independent_runtime_review:

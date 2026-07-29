@@ -191,6 +191,9 @@ def test_follow_up_intent_is_exactly_once_and_structurally_unsendable() -> None:
     )
     assert repeated == intent
     assert intent.intent_sha256 == repeated.intent_sha256
+    assert intent.timeline == timeline
+    assert intent.timeline_id == timeline.timeline_id
+    assert intent.document()["timeline"] == timeline.document()
     assert intent.max_sends == 1
     assert intent.sent_count == 0
     assert intent.connector_authority == "withheld"

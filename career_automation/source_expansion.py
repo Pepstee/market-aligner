@@ -36,6 +36,7 @@ EVIDENCE_KINDS = (
     "real_runtime",
 )
 REQUIRED_EVIDENCE_KINDS = frozenset(EVIDENCE_KINDS)
+EVIDENCE_REFERENCE_AUTHENTICATION = "caller_asserted_digest_only"
 QUALITY_PHASES = ("baseline", "candidate")
 HARD_QUALITY_FIELDS = (
     "unsupported_release_claims",
@@ -50,6 +51,7 @@ REASON_ORDER = (
     "missing_fixture_runtime_evidence",
     "missing_independent_test_evidence",
     "missing_real_runtime_evidence",
+    "unauthenticated_evidence_references",
     "source_freshness_regression",
     "baseline_hard_quality_not_clean",
     "candidate_hard_quality_regression",
@@ -1020,10 +1022,11 @@ class AdapterEvidenceReference:
     evidence_sha256: str
     observed_at: str
     evidence_id: str
+    authentication_status: str = EVIDENCE_REFERENCE_AUTHENTICATION
     activation_authority: str = "withheld"
     dependency_satisfied: bool = False
     certifies_slice: bool = False
-    schema_version: str = "jaa15.adapter-evidence-reference.v1"
+    schema_version: str = "jaa15.adapter-evidence-reference.v2"
 
     def __post_init__(self) -> None:
         self.verify()
@@ -1044,6 +1047,7 @@ class AdapterEvidenceReference:
             "evidence_kind": self.evidence_kind,
             "evidence_sha256": self.evidence_sha256,
             "observed_at": self.observed_at,
+            "authentication_status": self.authentication_status,
             "activation_authority": "withheld",
             "dependency_satisfied": False,
             "certifies_slice": False,
@@ -1075,10 +1079,12 @@ class AdapterEvidenceReference:
             self.contract_sha256
             != FROZEN_SOURCE_EXPANSION_CONTRACT.contract_sha256
             or self.activation_authority != "withheld"
+            or self.authentication_status
+            != EVIDENCE_REFERENCE_AUTHENTICATION
             or self.dependency_satisfied is not False
             or self.certifies_slice is not False
             or self.schema_version
-            != "jaa15.adapter-evidence-reference.v1"
+            != "jaa15.adapter-evidence-reference.v2"
         ):
             raise ValueError("adapter evidence cannot activate or certify")
         if self.evidence_id != _content_hash(
@@ -1104,7 +1110,7 @@ def record_adapter_evidence_reference(
     candidate.verify()
     observed = _aware(observed_at, "adapter evidence time")
     body = {
-        "schema_version": "jaa15.adapter-evidence-reference.v1",
+        "schema_version": "jaa15.adapter-evidence-reference.v2",
         "contract_sha256": contract.contract_sha256,
         "candidate_id": candidate.candidate_id,
         "adapter_id": candidate.adapter_id,
@@ -1118,6 +1124,7 @@ def record_adapter_evidence_reference(
         "evidence_kind": evidence_kind,
         "evidence_sha256": evidence_sha256,
         "observed_at": observed.isoformat(),
+        "authentication_status": EVIDENCE_REFERENCE_AUTHENTICATION,
         "activation_authority": "withheld",
         "dependency_satisfied": False,
         "certifies_slice": False,
@@ -1311,7 +1318,7 @@ class AdapterExpansionEvaluation:
     production_certification: str = "withheld"
     dependency_satisfied: bool = False
     certifies_slice: bool = False
-    schema_version: str = "jaa15.adapter-expansion-evaluation.v1"
+    schema_version: str = "jaa15.adapter-expansion-evaluation.v2"
 
     def __post_init__(self) -> None:
         self.verify()
@@ -1441,7 +1448,7 @@ class AdapterExpansionEvaluation:
             or self.dependency_satisfied is not False
             or self.certifies_slice is not False
             or self.schema_version
-            != "jaa15.adapter-expansion-evaluation.v1"
+            != "jaa15.adapter-expansion-evaluation.v2"
         ):
             raise ValueError("adapter evaluation cannot activate or certify")
         if self.evaluation_id != _content_hash(
@@ -1554,6 +1561,8 @@ def _expected_adapter_evaluation_fields(
     for kind in EVIDENCE_KINDS:
         if kind not in kinds:
             reasons.append(f"missing_{kind}_evidence")
+    if evidence:
+        reasons.append("unauthenticated_evidence_references")
     if (
         candidate_quality.freshness_pass_rate_bp
         < baseline_quality.freshness_pass_rate_bp
@@ -1700,6 +1709,8 @@ def evaluate_adapter_candidate(
     for kind in EVIDENCE_KINDS:
         if kind not in kinds:
             reasons.append(f"missing_{kind}_evidence")
+    if evidence:
+        reasons.append("unauthenticated_evidence_references")
     if (
         candidate_quality.freshness_pass_rate_bp
         < baseline_quality.freshness_pass_rate_bp
@@ -1716,7 +1727,7 @@ def evaluate_adapter_candidate(
         sorted(evidence, key=lambda row: (row.evidence_kind, row.evidence_id))
     )
     body = {
-        "schema_version": "jaa15.adapter-expansion-evaluation.v1",
+        "schema_version": "jaa15.adapter-expansion-evaluation.v2",
         "candidate": candidate.document(),
         "measurement": measurement.document(),
         "evidence": tuple(row.document() for row in sorted_evidence),

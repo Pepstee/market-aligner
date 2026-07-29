@@ -266,12 +266,23 @@ def test_adapter_evidence_must_follow_the_measurement_window() -> None:
         )
 
 
+def test_caller_asserted_evidence_cannot_claim_authentication() -> None:
+    candidate = _candidate("adapter:caller-asserted-evidence")
+    evidence = _evidence(candidate)[0]
+    assert evidence.authentication_status == "caller_asserted_digest_only"
+    with pytest.raises(ValueError, match="cannot activate or certify"):
+        replace(evidence, authentication_status="independently_verified")
+
+
 def test_missing_runtime_evidence_blocks_but_remains_visible() -> None:
     candidate = _candidate("adapter:no-runtime")
     evaluation = _evaluation(candidate, include_real=False)
     assert evaluation.eligible_for_review is False
     assert evaluation.visible is True
-    assert evaluation.reason_codes == ("missing_real_runtime_evidence",)
+    assert evaluation.reason_codes == (
+        "missing_real_runtime_evidence",
+        "unauthenticated_evidence_references",
+    )
     portfolio = rank_expansion_candidates(
         FROZEN_SOURCE_EXPANSION_CONTRACT,
         (evaluation,),
@@ -289,7 +300,10 @@ def test_freshness_regression_blocks_review() -> None:
         candidate_freshness=9_800,
     )
     assert evaluation.eligible_for_review is False
-    assert evaluation.reason_codes == ("source_freshness_regression",)
+    assert evaluation.reason_codes == (
+        "unauthenticated_evidence_references",
+        "source_freshness_regression",
+    )
 
 
 def test_receipt_or_hard_quality_regression_blocks_review() -> None:
@@ -300,6 +314,7 @@ def test_receipt_or_hard_quality_regression_blocks_review() -> None:
     )
     assert evaluation.eligible_for_review is False
     assert evaluation.reason_codes == (
+        "unauthenticated_evidence_references",
         "candidate_hard_quality_regression",
     )
 
@@ -309,7 +324,10 @@ def test_non_positive_value_is_visible_but_blocked() -> None:
     evaluation = _evaluation(candidate, cost=500, friction=500)
     assert evaluation.value_score < 0
     assert evaluation.eligible_for_review is False
-    assert evaluation.reason_codes == ("non_positive_incremental_value",)
+    assert evaluation.reason_codes == (
+        "non_positive_incremental_value",
+        "unauthenticated_evidence_references",
+    )
 
 
 def test_evaluation_cannot_rehash_away_missing_runtime_evidence() -> None:
