@@ -17,9 +17,14 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from .ats_fixture import FixtureReceipt
+from .browser_workflows import (
+    SubmissionProof,
+    fixture_submit_event_sha256,
+)
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
-BASELINE_REVISION = "ccc1d14bb65c7f3654359d6b4e08939c524b3161"
+BASELINE_REVISION = "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
 MINIMUM_SHADOW_SEPARATION = timedelta(hours=24)
 REQUIRED_INTERRUPTION_POINTS = (
     "post_prepare_pre_consume",
@@ -372,13 +377,19 @@ class MutationObservation:
 class ShadowObservation:
     observation_id: str
     observed_at: str
+    run_id: str
+    step_id: str
     workflow_sha256: str
+    durable_workflow_sha256: str
     release_manifest_sha256: str
     receipt_id: str
     receipt_payload_sha256: str
     field_map_sha256: str
     screenshot_sha256: str
     submit_event_sha256: str
+    normalized_submit_event_sha256: str
+    submission_proof: SubmissionProof
+    fixture_receipt: FixtureReceipt
     action_elapsed_ms: Mapping[str, int]
     browser_launch_count: int
     database_bytes: int
@@ -389,7 +400,8 @@ class ShadowObservation:
     model_version: str = "deterministic:none"
     prompt_version: str = "deterministic:none"
     model_cost_microusd: int = 0
-    schema_version: str = "jaa10.shadow-observation.v1"
+    execution_claim: str = "structural_lineage_only"
+    schema_version: str = "jaa10.shadow-observation.v2"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -397,13 +409,17 @@ class ShadowObservation:
             "action_elapsed_ms",
             MappingProxyType(dict(self.action_elapsed_ms)),
         )
-        if not self.observation_id:
-            raise ValueError("shadow observation ID is required")
+        if not self.observation_id or not self.run_id or not self.step_id:
+            raise ValueError("shadow observation execution identity is incomplete")
         parsed = datetime.fromisoformat(self.observed_at)
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ValueError("shadow observation time must include a timezone")
         for value, label in (
             (self.workflow_sha256, "observation workflow hash"),
+            (
+                self.durable_workflow_sha256,
+                "observation durable workflow hash",
+            ),
             (
                 self.release_manifest_sha256,
                 "observation release manifest hash",
@@ -413,8 +429,73 @@ class ShadowObservation:
             (self.field_map_sha256, "observation field-map hash"),
             (self.screenshot_sha256, "observation screenshot hash"),
             (self.submit_event_sha256, "observation submit-event hash"),
+            (
+                self.normalized_submit_event_sha256,
+                "observation normalized submit-event hash",
+            ),
         ):
             _digest(value, label)
+        if not isinstance(self.submission_proof, SubmissionProof):
+            raise TypeError("shadow observation requires a typed submission proof")
+        if not isinstance(self.fixture_receipt, FixtureReceipt):
+            raise TypeError("shadow observation requires a typed fixture receipt")
+        self.fixture_receipt.verify()
+        proof_values = (
+            self.submission_proof.release_manifest_sha256,
+            self.submission_proof.receipt_id,
+            self.submission_proof.receipt_payload_sha256,
+            self.submission_proof.field_map_sha256,
+            self.submission_proof.screenshot_sha256,
+            self.submission_proof.submit_event_sha256,
+        )
+        observation_values = (
+            self.release_manifest_sha256,
+            self.receipt_id,
+            self.receipt_payload_sha256,
+            self.field_map_sha256,
+            self.screenshot_sha256,
+            self.submit_event_sha256,
+        )
+        if proof_values != observation_values:
+            raise ValueError(
+                "shadow submission proof differs from observation lineage"
+            )
+        if (
+            self.fixture_receipt.receipt_id != self.receipt_id
+            or self.fixture_receipt.application_id
+            != FROZEN_SHADOW_CONTRACT.application_id
+            or self.fixture_receipt.job_key != FROZEN_SHADOW_CONTRACT.job_key
+            or self.fixture_receipt.payload_sha256
+            != self.receipt_payload_sha256
+        ):
+            raise ValueError(
+                "shadow fixture receipt differs from observation lineage"
+            )
+        expected_submit_event = fixture_submit_event_sha256(
+            run_id=self.run_id,
+            workflow_sha256=self.durable_workflow_sha256,
+            step_id=self.step_id,
+            release_manifest_sha256=self.release_manifest_sha256,
+            receipt_id=self.receipt_id,
+            receipt_payload_sha256=self.receipt_payload_sha256,
+            screenshot_sha256=self.screenshot_sha256,
+            field_map_sha256=self.field_map_sha256,
+        )
+        if self.submit_event_sha256 != expected_submit_event:
+            raise ValueError(
+                "shadow durable submit event differs from its exact lineage"
+            )
+        expected_normalized_event = normalized_submit_event_sha256(
+            workflow_sha256=self.workflow_sha256,
+            receipt_id=self.receipt_id,
+            receipt_payload_sha256=self.receipt_payload_sha256,
+            screenshot_sha256=self.screenshot_sha256,
+            field_map_sha256=self.field_map_sha256,
+        )
+        if self.normalized_submit_event_sha256 != expected_normalized_event:
+            raise ValueError(
+                "shadow normalized submit event differs from its exact lineage"
+            )
         if set(self.action_elapsed_ms) != set(REQUIRED_ACTIONS):
             raise ValueError("shadow action latency inventory is incomplete")
         if any(
@@ -435,6 +516,10 @@ class ShadowObservation:
             or self.model_cost_microusd != 0
         ):
             raise ValueError("shadow observation cannot claim live or model work")
+        if self.execution_claim != "structural_lineage_only":
+            raise ValueError(
+                "shadow observation cannot self-attest execution"
+            )
         if tuple(row.injection_point for row in self.interruptions) != (
             REQUIRED_INTERRUPTION_POINTS
         ):
@@ -443,7 +528,7 @@ class ShadowObservation:
             REQUIRED_MUTATION_CONTROLS
         ):
             raise ValueError("shadow mutation inventory is incomplete")
-        if self.schema_version != "jaa10.shadow-observation.v1":
+        if self.schema_version != "jaa10.shadow-observation.v2":
             raise ValueError("shadow observation schema is unsupported")
 
     def document(self) -> dict[str, object]:
@@ -452,13 +537,38 @@ class ShadowObservation:
             "observation_id": self.observation_id,
             "observed_at": self.observed_at,
             "evidence_kind": self.evidence_kind,
+            "execution_claim": self.execution_claim,
+            "run_id": self.run_id,
+            "step_id": self.step_id,
             "workflow_sha256": self.workflow_sha256,
+            "durable_workflow_sha256": self.durable_workflow_sha256,
             "release_manifest_sha256": self.release_manifest_sha256,
             "receipt_id": self.receipt_id,
             "receipt_payload_sha256": self.receipt_payload_sha256,
             "field_map_sha256": self.field_map_sha256,
             "screenshot_sha256": self.screenshot_sha256,
             "submit_event_sha256": self.submit_event_sha256,
+            "normalized_submit_event_sha256": (
+                self.normalized_submit_event_sha256
+            ),
+            "submission_proof": {
+                "release_manifest_sha256": (
+                    self.submission_proof.release_manifest_sha256
+                ),
+                "token_sha256": self.submission_proof.token_sha256,
+                "receipt_id": self.submission_proof.receipt_id,
+                "receipt_payload_sha256": (
+                    self.submission_proof.receipt_payload_sha256
+                ),
+                "screenshot_sha256": (
+                    self.submission_proof.screenshot_sha256
+                ),
+                "field_map_sha256": self.submission_proof.field_map_sha256,
+                "submit_event_sha256": (
+                    self.submission_proof.submit_event_sha256
+                ),
+            },
+            "fixture_receipt": self.fixture_receipt.document(),
             "action_elapsed_ms": dict(sorted(self.action_elapsed_ms.items())),
             "browser_launch_count": self.browser_launch_count,
             "database_bytes": self.database_bytes,
@@ -475,99 +585,21 @@ class ShadowObservation:
         return _content_hash(self.document())
 
 
-@dataclass(frozen=True)
-class WithheldShadowEvidence:
-    contract_sha256: str
-    observation_sha256s: tuple[str, ...]
-    release_manifest_sha256s: tuple[str, ...]
-    hard_quality_targets: Mapping[str, int]
-    evidence_id: str
-    metrics_evaluated: bool = False
-    production_certification: str = "withheld"
-    withheld_reason: str = "upstream_jaa04_authentic_authority_blocked"
-    evidence_kind: str = "synthetic_shadow"
-    certifies_slice: bool = False
-    schema_version: str = "jaa10.withheld-shadow-evidence.v2"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "hard_quality_targets",
-            MappingProxyType(dict(self.hard_quality_targets)),
-        )
-        self.verify()
-
-    def document(self, *, include_identity: bool = True) -> dict[str, object]:
-        result: dict[str, object] = {
-            "schema_version": self.schema_version,
-            "contract_sha256": self.contract_sha256,
-            "observation_sha256s": self.observation_sha256s,
-            "release_manifest_sha256s": self.release_manifest_sha256s,
-            "hard_quality_targets": dict(
-                sorted(self.hard_quality_targets.items())
-            ),
-            "metrics_evaluated": False,
-            "production_certification": "withheld",
-            "withheld_reason": self.withheld_reason,
-            "evidence_kind": "synthetic_shadow",
-            "certifies_slice": False,
-        }
-        if include_identity:
-            result["evidence_id"] = self.evidence_id
-        return result
-
-    def verify(self) -> None:
-        _digest(self.contract_sha256, "shadow contract hash")
-        if not self.observation_sha256s:
-            raise ValueError("withheld shadow evidence requires observations")
-        for value in self.observation_sha256s:
-            _digest(value, "shadow observation hash")
-        if len(self.release_manifest_sha256s) != len(
-            self.observation_sha256s
-        ):
-            raise ValueError(
-                "shadow manifest and observation inventories differ"
-            )
-        for value in self.release_manifest_sha256s:
-            _digest(value, "shadow release manifest hash")
-        if len(set(self.observation_sha256s)) != len(
-            self.observation_sha256s
-        ):
-            raise ValueError("shadow observation identities must be unique")
-        if dict(self.hard_quality_targets) != HARD_QUALITY_TARGETS:
-            raise ValueError("shadow hard-quality targets differ from policy")
-        if (
-            self.metrics_evaluated is not False
-            or self.production_certification != "withheld"
-            or self.withheld_reason
-            != "upstream_jaa04_authentic_authority_blocked"
-            or self.evidence_kind != "synthetic_shadow"
-            or self.certifies_slice is not False
-        ):
-            raise ValueError("shadow evidence cannot certify production")
-        if self.schema_version != "jaa10.withheld-shadow-evidence.v2":
-            raise ValueError("withheld shadow schema is unsupported")
-        expected = _content_hash(self.document(include_identity=False))
-        if self.evidence_id != expected:
-            raise ValueError("shadow evidence differs from its exact content")
-
-
-def compile_withheld_shadow_evidence(
+def _validate_shadow_observations(
     contract: FrozenShadowContract,
     observations: tuple[ShadowObservation, ...],
-) -> WithheldShadowEvidence:
-    """Compile exact synthetic evidence while structurally withholding certification."""
-    if not isinstance(contract, FrozenShadowContract):
-        raise TypeError("shadow compilation requires a frozen contract")
+) -> None:
     if contract != FROZEN_SHADOW_CONTRACT:
         raise ValueError(
-            "shadow compilation requires the canonical frozen contract"
+            "shadow evidence requires the canonical frozen contract"
         )
     if len(observations) < 2 or not all(
         isinstance(row, ShadowObservation) for row in observations
     ):
-        raise ValueError("shadow compilation requires two typed observations")
-    times = tuple(datetime.fromisoformat(row.observed_at) for row in observations)
+        raise ValueError("shadow evidence requires two typed observations")
+    times = tuple(
+        datetime.fromisoformat(row.observed_at) for row in observations
+    )
     if tuple(sorted(times)) != times or len(set(times)) != len(times):
         raise ValueError("shadow observations must be time-separated and ordered")
     if any(
@@ -592,7 +624,7 @@ def compile_withheld_shadow_evidence(
             row.receipt_payload_sha256,
             row.field_map_sha256,
             row.screenshot_sha256,
-            row.submit_event_sha256,
+            row.normalized_submit_event_sha256,
         )
         expected = (
             contract.workflow_sha256,
@@ -603,17 +635,124 @@ def compile_withheld_shadow_evidence(
             contract.submit_event_sha256,
         )
         if actual != expected:
-            raise ValueError("shadow observation differs from its frozen golden set")
+            raise ValueError(
+                "shadow observation differs from its frozen golden set"
+            )
+
+
+@dataclass(frozen=True)
+class WithheldShadowEvidence:
+    contract: FrozenShadowContract
+    observations: tuple[ShadowObservation, ...]
+    hard_quality_targets: Mapping[str, int]
+    evidence_id: str
+    metrics_evaluated: bool = False
+    production_certification: str = "withheld"
+    withheld_reason: str = "upstream_jaa04_authentic_authority_blocked"
+    evidence_kind: str = "synthetic_shadow"
+    certifies_slice: bool = False
+    schema_version: str = "jaa10.withheld-shadow-evidence.v3"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "hard_quality_targets",
+            MappingProxyType(dict(self.hard_quality_targets)),
+        )
+        self.verify()
+
+    @property
+    def contract_sha256(self) -> str:
+        return self.contract.contract_sha256
+
+    @property
+    def observation_sha256s(self) -> tuple[str, ...]:
+        return tuple(row.observation_sha256 for row in self.observations)
+
+    @property
+    def release_manifest_sha256s(self) -> tuple[str, ...]:
+        return tuple(
+            row.release_manifest_sha256 for row in self.observations
+        )
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        result: dict[str, object] = {
+            "schema_version": self.schema_version,
+            "contract": self.contract.document(),
+            "contract_sha256": self.contract.contract_sha256,
+            "observations": [
+                row.document() for row in self.observations
+            ],
+            "observation_sha256s": self.observation_sha256s,
+            "release_manifest_sha256s": self.release_manifest_sha256s,
+            "hard_quality_targets": dict(
+                sorted(self.hard_quality_targets.items())
+            ),
+            "metrics_evaluated": False,
+            "production_certification": "withheld",
+            "withheld_reason": self.withheld_reason,
+            "evidence_kind": "synthetic_shadow",
+            "certifies_slice": False,
+        }
+        if include_identity:
+            result["evidence_id"] = self.evidence_id
+        return result
+
+    def verify(self) -> None:
+        if (
+            not isinstance(self.contract, FrozenShadowContract)
+            or self.contract != FROZEN_SHADOW_CONTRACT
+        ):
+            raise ValueError(
+                "withheld evidence requires the canonical frozen contract"
+            )
+        _validate_shadow_observations(self.contract, self.observations)
+        if len(set(self.observation_sha256s)) != len(
+            self.observation_sha256s
+        ):
+            raise ValueError("shadow observation identities must be unique")
+        if dict(self.hard_quality_targets) != HARD_QUALITY_TARGETS:
+            raise ValueError("shadow hard-quality targets differ from policy")
+        if (
+            self.metrics_evaluated is not False
+            or self.production_certification != "withheld"
+            or self.withheld_reason
+            != "upstream_jaa04_authentic_authority_blocked"
+            or self.evidence_kind != "synthetic_shadow"
+            or self.certifies_slice is not False
+        ):
+            raise ValueError("shadow evidence cannot certify production")
+        if self.schema_version != "jaa10.withheld-shadow-evidence.v3":
+            raise ValueError("withheld shadow schema is unsupported")
+        expected = _content_hash(self.document(include_identity=False))
+        if self.evidence_id != expected:
+            raise ValueError("shadow evidence differs from its exact content")
+
+
+def compile_withheld_shadow_evidence(
+    contract: FrozenShadowContract,
+    observations: tuple[ShadowObservation, ...],
+) -> WithheldShadowEvidence:
+    """Compile exact synthetic evidence while structurally withholding certification."""
+    if not isinstance(contract, FrozenShadowContract):
+        raise TypeError("shadow compilation requires a frozen contract")
+    if contract != FROZEN_SHADOW_CONTRACT:
+        raise ValueError(
+            "shadow compilation requires the canonical frozen contract"
+        )
+    _validate_shadow_observations(contract, observations)
     body = {
-        "schema_version": "jaa10.withheld-shadow-evidence.v2",
+        "schema_version": "jaa10.withheld-shadow-evidence.v3",
+        "contract": contract.document(),
         "contract_sha256": contract.contract_sha256,
+        "observations": [row.document() for row in observations],
         "observation_sha256s": tuple(
             row.observation_sha256 for row in observations
         ),
         "release_manifest_sha256s": tuple(
             row.release_manifest_sha256 for row in observations
         ),
-        "hard_quality_targets": dict(HARD_QUALITY_TARGETS),
+        "hard_quality_targets": dict(sorted(HARD_QUALITY_TARGETS.items())),
         "metrics_evaluated": False,
         "production_certification": "withheld",
         "withheld_reason": "upstream_jaa04_authentic_authority_blocked",
@@ -621,11 +760,8 @@ def compile_withheld_shadow_evidence(
         "certifies_slice": False,
     }
     result = WithheldShadowEvidence(
-        contract_sha256=contract.contract_sha256,
-        observation_sha256s=tuple(body["observation_sha256s"]),
-        release_manifest_sha256s=tuple(
-            body["release_manifest_sha256s"]
-        ),
+        contract=contract,
+        observations=observations,
         hard_quality_targets=dict(HARD_QUALITY_TARGETS),
         evidence_id=_content_hash(body),
     )

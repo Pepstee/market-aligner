@@ -8,11 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from career_automation.browser_workflows import fixture_submit_event_sha256
 from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
     MUTATION_TEST_NODES,
     InterruptionObservation,
     MutationObservation,
+    WithheldShadowEvidence,
     compile_withheld_shadow_evidence,
 )
 from test_jaa10_independent_acceptance import _observation
@@ -21,18 +23,8 @@ from test_jaa10_independent_acceptance import _observation
 def test_fabricated_receipt_cannot_match_the_frozen_golden_set() -> None:
     first_time = datetime(2030, 1, 1, tzinfo=timezone.utc)
     first = _observation("shadow-001", first_time)
-    fabricated = replace(first, receipt_id="0" * 64)
-    with pytest.raises(ValueError, match="frozen golden"):
-        compile_withheld_shadow_evidence(
-            FROZEN_SHADOW_CONTRACT,
-            (
-                fabricated,
-                _observation(
-                    "shadow-002",
-                    first_time + timedelta(days=1),
-                ),
-            ),
-        )
+    with pytest.raises(ValueError, match="submission proof differs"):
+        replace(first, receipt_id="0" * 64)
 
 
 def test_stub_executor_output_cannot_enter_shadow_evidence() -> None:
@@ -95,20 +87,36 @@ def test_missing_or_duplicate_time_separation_cannot_compile() -> None:
                 ),
             ),
         )
+    second = _observation(
+        "shadow-002",
+        observed_at + timedelta(days=1),
+    )
+    duplicate_event = fixture_submit_event_sha256(
+        run_id=second.run_id,
+        workflow_sha256=second.durable_workflow_sha256,
+        step_id=second.step_id,
+        release_manifest_sha256=first.release_manifest_sha256,
+        receipt_id=second.receipt_id,
+        receipt_payload_sha256=second.receipt_payload_sha256,
+        screenshot_sha256=second.screenshot_sha256,
+        field_map_sha256=second.field_map_sha256,
+    )
+    duplicate_manifest = replace(
+        second,
+        release_manifest_sha256=first.release_manifest_sha256,
+        submit_event_sha256=duplicate_event,
+        submission_proof=replace(
+            second.submission_proof,
+            release_manifest_sha256=first.release_manifest_sha256,
+            submit_event_sha256=duplicate_event,
+        ),
+    )
     with pytest.raises(ValueError, match="distinct release manifests"):
         compile_withheld_shadow_evidence(
             FROZEN_SHADOW_CONTRACT,
             (
                 first,
-                replace(
-                    _observation(
-                        "shadow-002",
-                        observed_at + timedelta(days=1),
-                    ),
-                    release_manifest_sha256=(
-                        first.release_manifest_sha256
-                    ),
-                ),
+                duplicate_manifest,
             ),
         )
 
@@ -166,18 +174,8 @@ def test_interruption_and_mutation_rows_fail_if_they_claim_unsafe_success() -> N
 def test_frozen_field_map_drift_cannot_enter_shadow_evidence() -> None:
     observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
     first = _observation("shadow-001", observed_at)
-    changed = replace(first, field_map_sha256="f" * 64)
-    with pytest.raises(ValueError, match="frozen golden"):
-        compile_withheld_shadow_evidence(
-            FROZEN_SHADOW_CONTRACT,
-            (
-                changed,
-                _observation(
-                    "shadow-002",
-                    observed_at + timedelta(days=1),
-                ),
-            ),
-        )
+    with pytest.raises(ValueError, match="submission proof differs"):
+        replace(first, field_map_sha256="f" * 64)
 
 
 def test_shadow_evidence_has_no_certifying_or_action_capability() -> None:
@@ -219,3 +217,71 @@ def test_shadow_evidence_has_no_certifying_or_action_capability() -> None:
     )
     with pytest.raises(ValueError, match="cannot certify production"):
         replace(evidence, certifies_slice=True)
+
+
+def test_durable_submit_event_and_typed_proof_cannot_drift() -> None:
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    first = _observation("shadow-001", observed_at)
+    with pytest.raises(ValueError, match="submission proof differs"):
+        replace(
+            first,
+            submit_event_sha256="f" * 64,
+        )
+    with pytest.raises(ValueError, match="submission proof differs"):
+        replace(
+            first,
+            submission_proof=replace(
+                first.submission_proof,
+                release_manifest_sha256="e" * 64,
+            ),
+        )
+    with pytest.raises(ValueError, match="fixture receipt differs"):
+        replace(
+            first,
+            fixture_receipt=replace(
+                first.fixture_receipt,
+                job_key="forged:job",
+                receipt_id="0" * 64,
+            ),
+        )
+
+
+def test_caller_only_observation_cannot_self_attest_execution() -> None:
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    first = _observation("shadow-001", observed_at)
+    assert first.execution_claim == "structural_lineage_only"
+    with pytest.raises(ValueError, match="cannot self-attest execution"):
+        replace(first, execution_claim="executed")
+
+
+def test_withheld_evidence_cannot_replace_embedded_lineage_with_digests() -> None:
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    observations = (
+        _observation("shadow-001", observed_at),
+        _observation("shadow-002", observed_at + timedelta(days=1)),
+    )
+    evidence = compile_withheld_shadow_evidence(
+        FROZEN_SHADOW_CONTRACT,
+        observations,
+    )
+    assert evidence.document()["contract"] == (
+        FROZEN_SHADOW_CONTRACT.document()
+    )
+    assert evidence.document()["observations"] == [
+        row.document() for row in observations
+    ]
+    with pytest.raises(TypeError):
+        WithheldShadowEvidence(  # type: ignore[call-arg]
+            contract_sha256=FROZEN_SHADOW_CONTRACT.contract_sha256,
+            observation_sha256s=evidence.observation_sha256s,
+            release_manifest_sha256s=evidence.release_manifest_sha256s,
+            hard_quality_targets=evidence.hard_quality_targets,
+            evidence_id=evidence.evidence_id,
+        )
+    with pytest.raises(ValueError, match="two typed observations"):
+        WithheldShadowEvidence(
+            contract=FROZEN_SHADOW_CONTRACT,
+            observations=(observations[0],),
+            hard_quality_targets=evidence.hard_quality_targets,
+            evidence_id="0" * 64,
+        )

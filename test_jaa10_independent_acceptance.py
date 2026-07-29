@@ -11,13 +11,19 @@ from time import perf_counter_ns
 import pytest
 from playwright.sync_api import sync_playwright
 
-from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
+from career_automation.ats_fixture import (
+    FixtureReceipt,
+    FixtureVacancy,
+    LocalATSFixture,
+)
 from career_automation.browser_executor import (
     LocalBrowserExecutor,
     SubmissionIndeterminateError,
 )
 from career_automation.browser_workflows import (
     BrowserWorkflowStore,
+    SubmissionProof,
+    fixture_submit_event_sha256,
 )
 from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
@@ -47,18 +53,52 @@ def _observation(
     observed_at: datetime,
 ) -> ShadowObservation:
     golden = FROZEN_SHADOW_CONTRACT
+    run_id = f"structured-{identifier}"
+    step_id = "submit"
+    release_manifest_sha256 = hashlib.sha256(
+        f"shadow-release:{identifier}".encode()
+    ).hexdigest()
+    submit_event_sha256 = fixture_submit_event_sha256(
+        run_id=run_id,
+        workflow_sha256=golden.workflow_sha256,
+        step_id=step_id,
+        release_manifest_sha256=release_manifest_sha256,
+        receipt_id=golden.receipt_id,
+        receipt_payload_sha256=golden.receipt_payload_sha256,
+        screenshot_sha256=golden.screenshot_sha256,
+        field_map_sha256=golden.field_map_sha256,
+    )
     return ShadowObservation(
         observation_id=identifier,
         observed_at=observed_at.isoformat(),
+        run_id=run_id,
+        step_id=step_id,
         workflow_sha256=golden.workflow_sha256,
-        release_manifest_sha256=hashlib.sha256(
-            f"shadow-release:{identifier}".encode()
-        ).hexdigest(),
+        durable_workflow_sha256=golden.workflow_sha256,
+        release_manifest_sha256=release_manifest_sha256,
         receipt_id=golden.receipt_id,
         receipt_payload_sha256=golden.receipt_payload_sha256,
         field_map_sha256=golden.field_map_sha256,
         screenshot_sha256=golden.screenshot_sha256,
-        submit_event_sha256=golden.submit_event_sha256,
+        submit_event_sha256=submit_event_sha256,
+        normalized_submit_event_sha256=golden.submit_event_sha256,
+        submission_proof=SubmissionProof(
+            release_manifest_sha256=release_manifest_sha256,
+            token_sha256=hashlib.sha256(
+                f"shadow-token:{identifier}".encode()
+            ).hexdigest(),
+            receipt_id=golden.receipt_id,
+            receipt_payload_sha256=golden.receipt_payload_sha256,
+            field_map_sha256=golden.field_map_sha256,
+            screenshot_sha256=golden.screenshot_sha256,
+            submit_event_sha256=submit_event_sha256,
+        ),
+        fixture_receipt=FixtureReceipt(
+            receipt_id=golden.receipt_id,
+            application_id=golden.application_id,
+            job_key=golden.job_key,
+            payload_sha256=golden.receipt_payload_sha256,
+        ),
         action_elapsed_ms={
             action: index
             for index, action in enumerate(REQUIRED_ACTIONS, start=1)
@@ -179,6 +219,22 @@ def _execute_frozen_observation(
             assert outputs[key] == expected
         dispatch = store.submit_dispatch(run_id)
         assert dispatch is not None
+        actual_submit_event = str(outputs["submit_event_sha256"])
+        expected_actual_submit_event = fixture_submit_event_sha256(
+            run_id=run_id,
+            workflow_sha256=workflow.content_hash,
+            step_id="submit",
+            release_manifest_sha256=str(
+                dispatch["release_manifest_hash"]
+            ),
+            receipt_id=str(outputs["receipt_id"]),
+            receipt_payload_sha256=str(
+                outputs["receipt_payload_sha256"]
+            ),
+            screenshot_sha256=str(outputs["screenshot_sha256"]),
+            field_map_sha256=str(outputs["field_map_sha256"]),
+        )
+        assert actual_submit_event == expected_actual_submit_event
         normalized_event = normalized_submit_event_sha256(
             workflow_sha256=workflow_sha256,
             receipt_id=str(outputs["receipt_id"]),
@@ -195,7 +251,10 @@ def _execute_frozen_observation(
         return ShadowObservation(
             observation_id=observation_id,
             observed_at=observed_at.isoformat(),
+            run_id=run_id,
+            step_id="submit",
             workflow_sha256=workflow_sha256,
+            durable_workflow_sha256=workflow.content_hash,
             release_manifest_sha256=str(
                 dispatch["release_manifest_hash"]
             ),
@@ -205,7 +264,27 @@ def _execute_frozen_observation(
             ),
             field_map_sha256=str(outputs["field_map_sha256"]),
             screenshot_sha256=str(outputs["screenshot_sha256"]),
-            submit_event_sha256=normalized_event,
+            submit_event_sha256=actual_submit_event,
+            normalized_submit_event_sha256=normalized_event,
+            submission_proof=SubmissionProof(
+                release_manifest_sha256=str(
+                    dispatch["release_manifest_hash"]
+                ),
+                token_sha256=issued.token_sha256,
+                receipt_id=str(outputs["receipt_id"]),
+                receipt_payload_sha256=str(
+                    outputs["receipt_payload_sha256"]
+                ),
+                screenshot_sha256=str(outputs["screenshot_sha256"]),
+                field_map_sha256=str(outputs["field_map_sha256"]),
+                submit_event_sha256=actual_submit_event,
+            ),
+            fixture_receipt=FixtureReceipt(
+                receipt_id=str(outputs["receipt_id"]),
+                application_id=FROZEN_SHADOW_CONTRACT.application_id,
+                job_key=FROZEN_SHADOW_CONTRACT.job_key,
+                payload_sha256=str(outputs["receipt_payload_sha256"]),
+            ),
             action_elapsed_ms=elapsed,
             browser_launch_count=1,
             database_bytes=database.path.stat().st_size,
@@ -526,7 +605,7 @@ def _execute_interruption(
 def test_frozen_shadow_contract_binds_exact_accepted_jaa09_golden_set() -> None:
     golden = FROZEN_SHADOW_CONTRACT
     assert golden.baseline_revision == (
-        "ccc1d14bb65c7f3654359d6b4e08939c524b3161"
+        "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
     )
     assert golden.workflow_sha256 == (
         "ec9329ec86534bc2a1fa37c0f12034806cdedbdd0ba472d34fc74b2ae69961da"
@@ -555,6 +634,8 @@ def test_time_separated_shadow_evidence_is_content_addressed_and_withheld() -> N
     assert evidence.production_certification == "withheld"
     assert evidence.certifies_slice is False
     assert evidence.evidence_kind == "synthetic_shadow"
+    assert evidence.contract == FROZEN_SHADOW_CONTRACT
+    assert evidence.observations == observations
     assert tuple(
         row.observation_sha256 for row in observations
     ) == evidence.observation_sha256s
@@ -564,6 +645,9 @@ def test_time_separated_shadow_evidence_is_content_addressed_and_withheld() -> N
     assert "receipt" not in evidence.document()
     assert "hard_quality_metrics" not in evidence.document()
     assert "model_cost_microusd" not in evidence.document()
+    assert evidence.document()["observations"] == [
+        row.document() for row in observations
+    ]
 
 
 def test_observation_identity_changes_with_runtime_metrics() -> None:
