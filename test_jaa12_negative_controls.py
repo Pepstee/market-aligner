@@ -357,6 +357,46 @@ def test_abstained_content_cannot_move_the_follow_up_clock() -> None:
     )
 
 
+def test_follow_up_idempotency_has_no_colon_delimiter_collision() -> None:
+    def scoped_timeline(application_id: str, job_key: str):
+        raw = compile_local_export_evidence(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            application_id=application_id,
+            job_key=job_key,
+            source_kind="local_portal_export",
+            source_record_id=f"status:{application_id}:{job_key}",
+            raw_export_bytes=b"under_review",
+            observed_at=BASE_TIME,
+        )
+        observation = classify_status_evidence(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            raw,
+            explicit_status_code="under_review",
+        )
+        return compile_status_timeline(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            application_id=application_id,
+            job_key=job_key,
+            observations=(observation,),
+        )
+
+    timeline_a = scoped_timeline("application:a:b", "job:c")
+    timeline_b = scoped_timeline("application:a", "b:job:c")
+    intent_a = compile_follow_up_intent(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        timeline_a,
+        released_application_sha256="c" * 64,
+        draft_sha256="d" * 64,
+    )
+    intent_b = compile_follow_up_intent(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        timeline_b,
+        released_application_sha256="c" * 64,
+        draft_sha256="d" * 64,
+    )
+    assert intent_a.idempotency_key != intent_b.idempotency_key
+
+
 def test_follow_up_cannot_claim_send_or_change_idempotency() -> None:
     timeline = _timeline("under_review")
     intent = compile_follow_up_intent(

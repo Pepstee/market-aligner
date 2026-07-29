@@ -687,7 +687,8 @@ class LocalSubmissionContext:
     token_sha256: str
     field_map_sha256: str
     context_id: str
-    schema_version: str = "jaa13.local-submission-context.v1"
+    assertion_status: str = "unauthenticated_structural_assertion"
+    schema_version: str = "jaa13.local-submission-context.v2"
 
     def __post_init__(self) -> None:
         self.verify()
@@ -706,6 +707,7 @@ class LocalSubmissionContext:
             "release_manifest_sha256": self.release_manifest_sha256,
             "token_sha256": self.token_sha256,
             "field_map_sha256": self.field_map_sha256,
+            "assertion_status": "unauthenticated_structural_assertion",
         }
         if include_identity:
             result["context_id"] = self.context_id
@@ -726,7 +728,7 @@ class LocalSubmissionContext:
             or submit_actions[0].kind is not ActionKind.SUBMIT
         ):
             raise ValueError(
-                "submission context requires its exact JAA-09 submit step"
+                "structural submission assertion requires one submit step"
             )
         for value, label in (
             (self.workflow_sha256, "submission workflow hash"),
@@ -739,7 +741,11 @@ class LocalSubmissionContext:
             (self.context_id, "submission context ID"),
         ):
             _digest(value, label)
-        if self.schema_version != "jaa13.local-submission-context.v1":
+        if self.assertion_status != "unauthenticated_structural_assertion":
+            raise ValueError(
+                "submission context cannot claim authenticated execution"
+            )
+        if self.schema_version != "jaa13.local-submission-context.v2":
             raise ValueError("submission context schema is unsupported")
         if self.context_id != _content_hash(
             self.document(include_identity=False)
@@ -762,7 +768,7 @@ def compile_local_submission_context(
     if not isinstance(workflow, BrowserWorkflow):
         raise TypeError("submission context requires a BrowserWorkflow")
     body = {
-        "schema_version": "jaa13.local-submission-context.v1",
+        "schema_version": "jaa13.local-submission-context.v2",
         "run_id": run_id,
         "workflow_sha256": workflow.content_hash,
         "workflow": workflow.to_dict(),
@@ -770,6 +776,7 @@ def compile_local_submission_context(
         "release_manifest_sha256": release_manifest_sha256,
         "token_sha256": token_sha256,
         "field_map_sha256": field_map_sha256,
+        "assertion_status": "unauthenticated_structural_assertion",
     }
     return LocalSubmissionContext(
         run_id=run_id,
@@ -834,8 +841,8 @@ class InterviewPreparationPack:
     dependency_satisfied: bool = False
     production_certification: str = "withheld"
     certifies_slice: bool = False
-    lineage_claim: str = "structural_lineage_only"
-    schema_version: str = "jaa13.interview-preparation-pack.v3"
+    lineage_claim: str = "unauthenticated_structural_lineage_only"
+    schema_version: str = "jaa13.interview-preparation-pack.v4"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -906,7 +913,7 @@ class InterviewPreparationPack:
             "dependency_satisfied": False,
             "production_certification": "withheld",
             "certifies_slice": False,
-            "lineage_claim": "structural_lineage_only",
+            "lineage_claim": "unauthenticated_structural_lineage_only",
         }
         if include_identity:
             result["pack_id"] = self.pack_id
@@ -1012,7 +1019,7 @@ class InterviewPreparationPack:
             != expected_submit_event_sha256
         ):
             raise ValueError(
-                "preparation submit event differs from its JAA-09 context"
+                "preparation submit event differs from its structural assertion"
             )
         if (
             self.timeline.application_id != self.application_id
@@ -1117,10 +1124,11 @@ class InterviewPreparationPack:
             or self.dependency_satisfied is not False
             or self.production_certification != "withheld"
             or self.certifies_slice is not False
-            or self.lineage_claim != "structural_lineage_only"
+            or self.lineage_claim
+            != "unauthenticated_structural_lineage_only"
         ):
             raise ValueError("local preparation pack cannot act or certify")
-        if self.schema_version != "jaa13.interview-preparation-pack.v3":
+        if self.schema_version != "jaa13.interview-preparation-pack.v4":
             raise ValueError("preparation pack schema is unsupported")
         if self.pack_id != _content_hash(self.document(include_identity=False)):
             raise ValueError("preparation pack differs from exact content")
@@ -1369,7 +1377,7 @@ def compile_interview_preparation_pack(
         ),
     )
     body = {
-        "schema_version": "jaa13.interview-preparation-pack.v3",
+        "schema_version": "jaa13.interview-preparation-pack.v4",
         "contract_sha256": contract.contract_sha256,
         "application_id": application_id,
         "job_key": source.job_key,
@@ -1398,7 +1406,7 @@ def compile_interview_preparation_pack(
         "dependency_satisfied": False,
         "production_certification": "withheld",
         "certifies_slice": False,
-        "lineage_claim": "structural_lineage_only",
+        "lineage_claim": "unauthenticated_structural_lineage_only",
     }
     return InterviewPreparationPack(
         contract_sha256=contract.contract_sha256,

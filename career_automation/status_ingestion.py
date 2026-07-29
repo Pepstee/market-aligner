@@ -71,7 +71,7 @@ CLASSIFIER_POLICY: Mapping[str, object] = MappingProxyType({
     "candidate_fact_authority": False,
 })
 FOLLOW_UP_POLICY_DOCUMENT: Mapping[str, object] = MappingProxyType({
-    "schema_version": "jaa12.follow-up-policy.v2",
+    "schema_version": "jaa12.follow-up-policy.v3",
     "delay_seconds": 7 * 24 * 60 * 60,
     "eligible_states": (
         PipelineState.RECEIPT_CONFIRMED.value,
@@ -79,6 +79,7 @@ FOLLOW_UP_POLICY_DOCUMENT: Mapping[str, object] = MappingProxyType({
     ),
     "schedule_anchor": "latest_classified_observation",
     "idempotency_scope": "application_job_release_policy",
+    "idempotency_encoding": "canonical_json_sha256",
     "max_sends": 1,
     "connector_authority": "withheld",
     "send_authority": "withheld",
@@ -97,6 +98,22 @@ def _canonical_json(value: object) -> str:
 
 def _content_hash(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
+
+
+def _follow_up_idempotency_key(
+    *,
+    application_id: str,
+    job_key: str,
+    released_application_sha256: str,
+    policy_sha256: str,
+) -> str:
+    scope_sha256 = _content_hash({
+        "application_id": application_id,
+        "job_key": job_key,
+        "released_application_sha256": released_application_sha256,
+        "policy_sha256": policy_sha256,
+    })
+    return f"follow-up:{scope_sha256}"
 
 
 def _digest(value: str, label: str) -> str:
@@ -928,7 +945,7 @@ class FollowUpIntent:
     dependency_satisfied: bool = False
     production_certification: str = "withheld"
     certifies_slice: bool = False
-    schema_version: str = "jaa12.follow-up-intent.v2"
+    schema_version: str = "jaa12.follow-up-intent.v3"
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -960,10 +977,11 @@ class FollowUpIntent:
             raise ValueError(
                 "follow-up due time differs from the bound observation"
             )
-        expected_key = (
-            f"follow-up:{self.application_id}:"
-            f"{self.job_key}:{self.released_application_sha256}:"
-            f"{self.policy_sha256}"
+        expected_key = _follow_up_idempotency_key(
+            application_id=self.application_id,
+            job_key=self.job_key,
+            released_application_sha256=self.released_application_sha256,
+            policy_sha256=self.policy_sha256,
         )
         if self.idempotency_key != expected_key:
             raise ValueError("follow-up idempotency key is inconsistent")
@@ -981,7 +999,7 @@ class FollowUpIntent:
             )
         if self.policy_sha256 != FOLLOW_UP_POLICY_SHA256:
             raise ValueError("follow-up intent binds a different policy")
-        if self.schema_version != "jaa12.follow-up-intent.v2":
+        if self.schema_version != "jaa12.follow-up-intent.v3":
             raise ValueError("follow-up intent schema is unsupported")
 
     def document(self) -> dict[str, object]:
@@ -1053,10 +1071,11 @@ def compile_follow_up_intent(
     due_at = last_observed_at + timedelta(
         seconds=int(FOLLOW_UP_POLICY_DOCUMENT["delay_seconds"])
     )
-    key = (
-        f"follow-up:{timeline.application_id}:"
-        f"{timeline.job_key}:{released_application_sha256}:"
-        f"{FOLLOW_UP_POLICY_SHA256}"
+    key = _follow_up_idempotency_key(
+        application_id=timeline.application_id,
+        job_key=timeline.job_key,
+        released_application_sha256=released_application_sha256,
+        policy_sha256=FOLLOW_UP_POLICY_SHA256,
     )
     return FollowUpIntent(
         contract_sha256=contract.contract_sha256,

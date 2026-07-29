@@ -440,7 +440,12 @@ def test_preparation_pack_reuses_exact_fact_authority_and_current_sources() -> N
     )
     assert pack.fixture_receipt.application_id == APPLICATION_ID
     assert pack.timeline == _timeline()
-    assert pack.lineage_claim == "structural_lineage_only"
+    assert pack.lineage_claim == (
+        "unauthenticated_structural_lineage_only"
+    )
+    assert pack.submission_context.assertion_status == (
+        "unauthenticated_structural_assertion"
+    )
     assert {row.kind for row in pack.items} == {
         "candidate_story",
         "likely_objection",

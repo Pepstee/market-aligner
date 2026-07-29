@@ -170,7 +170,7 @@ def test_preparation_rejects_inconsistent_submission_proof(
     "field",
     ("run_id", "workflow", "step_id"),
 )
-def test_preparation_rederives_event_from_exact_jaa09_context(
+def test_preparation_rederives_event_from_structural_context(
     field: str,
 ) -> None:
     _pack_row, _source_row, candidate_ids, employer_ids = _selections()
@@ -217,6 +217,63 @@ def test_preparation_rederives_event_from_exact_jaa09_context(
             candidate_sentence_ids=candidate_ids,
             employer_sentence_ids=employer_ids,
         )
+
+
+def test_coordinated_rehash_remains_an_unauthenticated_assertion() -> None:
+    _pack_row, _source_row, candidate_ids, employer_ids = _selections()
+    base = _preparation_base()
+    changed_workflow = replace(
+        SUBMISSION_WORKFLOW,
+        name="caller-created-structural-workflow",
+    )
+    changed_context = compile_local_submission_context(
+        FROZEN_INTERVIEW_COMMUNICATION_CONTRACT,
+        run_id="run:caller-created-structural-assertion",
+        workflow=changed_workflow,
+        step_id=SUBMISSION_STEP_ID,
+        release_manifest_sha256=(
+            base["submission_context"].release_manifest_sha256
+        ),
+        token_sha256="a" * 64,
+        field_map_sha256="b" * 64,
+    )
+    changed_proof = replace(
+        base["submission_proof"],
+        token_sha256=changed_context.token_sha256,
+        screenshot_sha256="c" * 64,
+        field_map_sha256=changed_context.field_map_sha256,
+        submit_event_sha256=fixture_submit_event_sha256(
+            run_id=changed_context.run_id,
+            workflow_sha256=changed_context.workflow_sha256,
+            step_id=changed_context.step_id,
+            release_manifest_sha256=(
+                changed_context.release_manifest_sha256
+            ),
+            receipt_id=base["fixture_receipt"].receipt_id,
+            receipt_payload_sha256=(
+                base["fixture_receipt"].payload_sha256
+            ),
+            screenshot_sha256="c" * 64,
+            field_map_sha256=changed_context.field_map_sha256,
+        ),
+    )
+    pack = compile_interview_preparation_pack(
+        **{
+            **base,
+            "submission_context": changed_context,
+            "submission_proof": changed_proof,
+        },
+        candidate_sentence_ids=candidate_ids,
+        employer_sentence_ids=employer_ids,
+    )
+    assert pack.submission_context.assertion_status == (
+        "unauthenticated_structural_assertion"
+    )
+    assert pack.lineage_claim == (
+        "unauthenticated_structural_lineage_only"
+    )
+    assert pack.dependency_satisfied is False
+    assert pack.certifies_slice is False
 
 
 def test_unknown_duplicate_or_wrong_kind_fact_selection_fails() -> None:
