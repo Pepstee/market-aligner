@@ -272,6 +272,11 @@ class RawStatusEvidence:
 
     def verify(self) -> None:
         _digest(self.contract_sha256, "raw evidence contract hash")
+        if (
+            self.contract_sha256
+            != FROZEN_LOCAL_EXPORT_STATUS_CONTRACT.contract_sha256
+        ):
+            raise ValueError("raw evidence binds a different status contract")
         _digest(self.source_sha256, "raw export hash")
         for value, label in (
             (self.application_id, "raw evidence application ID"),
@@ -350,6 +355,7 @@ def compile_local_export_evidence(
 
 @dataclass(frozen=True)
 class StatusObservation:
+    raw_evidence: RawStatusEvidence
     application_id: str
     job_key: str
     raw_evidence_id: str
@@ -372,6 +378,7 @@ class StatusObservation:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
+            "raw_evidence": self.raw_evidence.document(),
             "application_id": self.application_id,
             "job_key": self.job_key,
             "raw_evidence_id": self.raw_evidence_id,
@@ -395,6 +402,11 @@ class StatusObservation:
         return result
 
     def verify(self) -> None:
+        if not isinstance(self.raw_evidence, RawStatusEvidence):
+            raise TypeError(
+                "status observation requires typed raw evidence"
+            )
+        self.raw_evidence.verify()
         for value, label in (
             (self.raw_evidence_id, "status raw evidence identity"),
             (self.source_sha256, "status source hash"),
@@ -404,6 +416,18 @@ class StatusObservation:
         _required(self.application_id, "status application ID")
         _required(self.job_key, "status job key")
         _required(self.source_record_id, "status source record ID")
+        if (
+            self.raw_evidence.evidence_id != self.raw_evidence_id
+            or self.raw_evidence.application_id != self.application_id
+            or self.raw_evidence.job_key != self.job_key
+            or self.raw_evidence.source_sha256 != self.source_sha256
+            or self.raw_evidence.source_record_id
+            != self.source_record_id
+            or self.raw_evidence.observed_at != self.observed_at
+        ):
+            raise ValueError(
+                "status observation differs from its typed raw evidence"
+            )
         if not isinstance(self.explicit_status_code, str):
             raise ValueError("explicit status code must be text")
         try:
@@ -471,6 +495,7 @@ def classify_status_evidence(
     state = EXPLICIT_STATUS_CODES.get(explicit_status_code)
     body = {
         "schema_version": "jaa12.status-observation.v1",
+        "raw_evidence": evidence.document(),
         "application_id": evidence.application_id,
         "job_key": evidence.job_key,
         "raw_evidence_id": evidence.evidence_id,
@@ -486,6 +511,7 @@ def classify_status_evidence(
         "candidate_fact_authority": False,
     }
     return StatusObservation(
+        raw_evidence=evidence,
         application_id=evidence.application_id,
         job_key=evidence.job_key,
         raw_evidence_id=evidence.evidence_id,
@@ -560,10 +586,7 @@ class StatusTimeline:
     application_id: str
     job_key: str
     baseline_state: PipelineState
-    observation_ids: tuple[str, ...]
-    evidence_ids: tuple[str, ...]
-    source_record_ids: tuple[str, ...]
-    observed_at: tuple[str, ...]
+    observations: tuple[StatusObservation, ...]
     transitions: tuple[tuple[str, str], ...]
     censored_silence: tuple[CensoredSilence, ...]
     final_state: PipelineState
@@ -575,14 +598,11 @@ class StatusTimeline:
     schema_version: str = "jaa12.status-timeline.v1"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "observation_ids", tuple(self.observation_ids))
-        object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
         object.__setattr__(
             self,
-            "source_record_ids",
-            tuple(self.source_record_ids),
+            "observations",
+            tuple(self.observations),
         )
-        object.__setattr__(self, "observed_at", tuple(self.observed_at))
         object.__setattr__(
             self,
             "transitions",
@@ -595,6 +615,22 @@ class StatusTimeline:
         )
         self.verify()
 
+    @property
+    def observation_ids(self) -> tuple[str, ...]:
+        return tuple(row.observation_id for row in self.observations)
+
+    @property
+    def evidence_ids(self) -> tuple[str, ...]:
+        return tuple(row.raw_evidence_id for row in self.observations)
+
+    @property
+    def source_record_ids(self) -> tuple[str, ...]:
+        return tuple(row.source_record_id for row in self.observations)
+
+    @property
+    def observed_at(self) -> tuple[str, ...]:
+        return tuple(row.observed_at for row in self.observations)
+
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
@@ -602,10 +638,9 @@ class StatusTimeline:
             "application_id": self.application_id,
             "job_key": self.job_key,
             "baseline_state": self.baseline_state.value,
-            "observation_ids": self.observation_ids,
-            "evidence_ids": self.evidence_ids,
-            "source_record_ids": self.source_record_ids,
-            "observed_at": self.observed_at,
+            "observations": tuple(
+                row.document() for row in self.observations
+            ),
             "transitions": self.transitions,
             "censored_silence": tuple(
                 row.document() for row in self.censored_silence
@@ -622,6 +657,25 @@ class StatusTimeline:
 
     def verify(self) -> None:
         _digest(self.contract_sha256, "timeline contract hash")
+        if (
+            self.contract_sha256
+            != FROZEN_LOCAL_EXPORT_STATUS_CONTRACT.contract_sha256
+        ):
+            raise ValueError("timeline binds a different status contract")
+        if not all(
+            isinstance(row, StatusObservation)
+            for row in self.observations
+        ):
+            raise TypeError("status timeline observations must be typed")
+        for row in self.observations:
+            row.verify()
+            if (
+                row.application_id != self.application_id
+                or row.job_key != self.job_key
+            ):
+                raise ValueError(
+                    "status observation belongs to a different application"
+                )
         for value in (*self.observation_ids, *self.evidence_ids):
             _digest(value, "timeline evidence identity")
         _required(self.application_id, "timeline application ID")
@@ -677,25 +731,24 @@ class StatusTimeline:
                 "status timeline censor belongs to a different application"
             )
         current = self.baseline_state
-        for transition in self.transitions:
-            if len(transition) != 2:
-                raise ValueError("status timeline transition is malformed")
-            source_value, target_value = transition
-            try:
-                source = PipelineState(source_value)
-                target = PipelineState(target_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "status timeline transition has an unknown state"
-                ) from exc
-            if source is not current or target not in LEGAL_TRANSITIONS[source]:
+        expected_transitions: list[tuple[str, str]] = []
+        for row in self.observations:
+            target = row.classified_state
+            if target is None or target is current:
+                continue
+            if target not in LEGAL_TRANSITIONS[current]:
                 raise ValueError(
                     "status timeline transition is illegal or out of order"
                 )
+            expected_transitions.append((current.value, target.value))
             current = target
+        if tuple(expected_transitions) != self.transitions:
+            raise ValueError(
+                "status timeline transitions differ from observations"
+            )
         if current is not self.final_state:
             raise ValueError(
-                "status timeline final state differs from transitions"
+                "status timeline final state differs from observations"
             )
         if (
             self.dependency_satisfied is not False
@@ -782,16 +835,7 @@ def compile_status_timeline(
         "application_id": application_id,
         "job_key": job_key,
         "baseline_state": PipelineState.RECEIPT_CONFIRMED.value,
-        "observation_ids": tuple(
-            row.observation_id for row in observations
-        ),
-        "evidence_ids": tuple(
-            row.raw_evidence_id for row in observations
-        ),
-        "source_record_ids": tuple(
-            row.source_record_id for row in observations
-        ),
-        "observed_at": tuple(row.observed_at for row in observations),
+        "observations": tuple(row.document() for row in observations),
         "transitions": tuple(transitions),
         "censored_silence": tuple(
             row.document() for row in censored_silence
@@ -807,10 +851,7 @@ def compile_status_timeline(
         application_id=application_id,
         job_key=job_key,
         baseline_state=PipelineState.RECEIPT_CONFIRMED,
-        observation_ids=tuple(body["observation_ids"]),
-        evidence_ids=tuple(body["evidence_ids"]),
-        source_record_ids=tuple(body["source_record_ids"]),
-        observed_at=tuple(body["observed_at"]),
+        observations=observations,
         transitions=tuple(body["transitions"]),
         censored_silence=censored_silence,
         final_state=current,

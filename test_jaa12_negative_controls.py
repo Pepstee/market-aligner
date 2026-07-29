@@ -253,7 +253,9 @@ def test_timeline_identity_transition_and_withholding_tamper_fail() -> None:
     timeline = _timeline("under_review", "interview_requested")
     with pytest.raises(ValueError, match="differs from exact content"):
         replace(timeline, timeline_id="0" * 64)
-    with pytest.raises(ValueError, match="illegal or out of order"):
+    with pytest.raises(ValueError, match="different status contract"):
+        replace(timeline, contract_sha256="0" * 64)
+    with pytest.raises(ValueError, match="differ from observations"):
         replace(
             timeline,
             transitions=(("receipt_confirmed", "offer"),),
@@ -324,14 +326,26 @@ def test_follow_up_cannot_claim_send_or_change_idempotency() -> None:
 
 def test_naive_or_caller_changed_timeline_clock_is_rejected() -> None:
     timeline = _timeline("under_review")
+    raw = timeline.observations[0].raw_evidence
     with pytest.raises(ValueError, match="must include a timezone"):
-        replace(timeline, observed_at=("2030-01-01T12:00:00",))
-    with pytest.raises(ValueError, match="differs from exact content"):
+        replace(raw, observed_at="2030-01-01T12:00:00")
+    with pytest.raises(ValueError, match="differs from its exact content"):
         replace(
-            timeline,
-            observed_at=(
-                (BASE_TIME + timedelta(days=100)).isoformat(),
-            ),
+            raw,
+            observed_at=(BASE_TIME + timedelta(days=100)).isoformat(),
+        )
+
+
+def test_timeline_rejects_observation_with_different_typed_evidence() -> None:
+    timeline = _timeline("under_review")
+    other_raw, _other_observation = _evidence(
+        "under_review",
+        hour=1,
+    )
+    with pytest.raises(ValueError, match="differs from its typed raw evidence"):
+        replace(
+            timeline.observations[0],
+            raw_evidence=other_raw,
         )
 
 
