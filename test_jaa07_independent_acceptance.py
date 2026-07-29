@@ -518,6 +518,131 @@ def test_production_compiler_resolves_vacancy_contact_claim_and_employer_authori
     assert artifacts.cover_letter_pdf.page_count == 1
 
 
+def test_production_compiler_covers_multiple_requirements_sections_and_cv_pages(
+    tmp_path: Path,
+) -> None:
+    claim_rows = (
+        ("delivery-achievement", "Deliver production services.", "achievement"),
+        ("platform-skill", "Build reliable platforms.", "skill"),
+        ("degree-education", "Hold a relevant degree.", "education"),
+    )
+    database, run, _requirement = _fit_database(
+        tmp_path,
+        matched=True,
+        claims=claim_rows,
+    )
+    strategy = ApplicationStrategyStore(database.path).compile_and_record(
+        fit_run_id=run.run_id,
+        as_of=date.today(),
+    )
+    requirement_ids = {row[0] for row in claim_rows}
+    elements_by_requirement = {
+        requirement_id: {
+            row.kind: row.element_id
+            for row in strategy.elements
+            if row.requirement_id == requirement_id
+        }
+        for requirement_id in requirement_ids
+    }
+    assert all(
+        set(elements) == {
+            "cv_emphasis",
+            "cover_letter_argument",
+            "structured_answer",
+            "interview_seed",
+            "objection_response",
+            "employer_hook",
+        }
+        for elements in elements_by_requirement.values()
+    )
+    assert len({
+        element_id
+        for elements in elements_by_requirement.values()
+        for element_id in elements.values()
+    }) == len(requirement_ids) * 6
+
+    graph = CandidateGraph(database.path)
+    contact_value = {
+        "full_name": "Alex Example",
+        "email": "alex@example.test",
+        "phone": "+44 7700 900123",
+        "city": "London",
+    }
+    graph.add_record(
+        "contact-multi-requirement",
+        kind="fact",
+        subject="contact",
+        value=contact_value,
+        state="fact",
+        source_identity="test:verified-contact",
+    )
+    graph.verify_record(
+        "contact-multi-requirement",
+        1,
+        decision="approved",
+        verifier_kind="configured",
+        policy_id="test.contact",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="operator-verified contact projection",
+        source_identity="test:contact-verifier",
+    )
+    with database.connection() as connection:
+        source_hash = str(connection.execute(
+            """SELECT provenance.source_hash
+               FROM candidate_records record
+               JOIN candidate_provenance provenance
+                 ON provenance.provenance_id=record.provenance_id
+               WHERE record.record_id='contact-multi-requirement'
+                 AND record.version=1"""
+        ).fetchone()[0])
+    source = ProductionApplicationCompiler(database.path).compile(
+        strategy.strategy_id,
+        as_of=date.today(),
+        contact=CandidateContact(
+            record_id="contact-multi-requirement",
+            record_version=1,
+            provenance_sha256=source_hash,
+            **contact_value,
+        ),
+    )
+    verify_application_source(source)
+
+    sections = {row.heading: row for row in source.cv_sections}
+    assert tuple(sections) == (
+        "Professional Summary",
+        "Experience",
+        "Skills",
+        "Education",
+    )
+    facts = {row.sentence_id: row for row in source.facts}
+    assert {
+        facts[sentence_id].authority.requirement_id
+        for sentence_id in sections["Experience"].sentence_ids
+    } == {"delivery-achievement"}
+    assert {
+        facts[sentence_id].authority.requirement_id
+        for sentence_id in sections["Skills"].sentence_ids
+    } == {"platform-skill"}
+    assert {
+        facts[sentence_id].authority.requirement_id
+        for sentence_id in sections["Education"].sentence_ids
+    } == {"degree-education"}
+
+    artifacts = render_pdf_artifacts(source)
+    assert artifacts.cv_pdf.page_count == 2
+    first_page, second_page = artifacts.cv_pdf.rendered_lines
+    assert "Experience" in first_page
+    assert "Skills" in second_page
+    assert "Education" in second_page
+    for requirement_id in requirement_ids:
+        assert any(
+            row.authority.requirement_id == requirement_id
+            and row.document_kind == "cv"
+            for row in source.facts
+        )
+
+
 def test_twenty_locked_packs_pass_exact_noncertifying_software_metrics() -> None:
     completed = subprocess.run(
         (sys.executable, "scripts/evaluate_jaa07_locked_packs.py"),

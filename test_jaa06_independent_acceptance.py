@@ -114,9 +114,13 @@ def _fit_database(
     tmp_path: Path,
     *,
     matched: bool,
+    claims: tuple[tuple[str, str, str], ...] | None = None,
 ) -> tuple[CareerDatabase, object, Requirement]:
     database = CareerDatabase(tmp_path / "career.sqlite3")
-    body = "Deliver product engineering."
+    claim_rows = claims or (
+        ("product-delivery", "Deliver product engineering.", "achievement"),
+    )
+    body = " ".join(row[1] for row in claim_rows)
     job = scored_job_from_payload({
         "board": "jaa06-synthetic",
         "job_id": "strategy-job",
@@ -147,83 +151,113 @@ def _fit_database(
             "SELECT payload_hash FROM pipeline_jobs WHERE job_key=?",
             (job.key,),
         ).fetchone()[0])
-    requirement = Requirement(
-        "product-delivery",
-        "claim-product-delivery",
-        body,
-        False,
-        "evidence",
-        "build_evidence",
-        ("portfolio_artifact",),
-        9000,
-        f"vacancy:{job.key}:{payload_hash}",
-        (0, len(body)),
+    requirements = tuple(
+        Requirement(
+            requirement_id,
+            f"claim-{requirement_id}",
+            text,
+            False,
+            "evidence",
+            "build_evidence",
+            ("portfolio_artifact",),
+            9000,
+            f"vacancy:{job.key}:{payload_hash}",
+            (body.index(text), body.index(text) + len(text)),
+        )
+        for requirement_id, text, _claim_type in claim_rows
     )
     evidence = ()
     if matched:
         graph = CandidateGraph(database.path)
-        graph.add_evidence(
-            "evidence-product-delivery",
-            statement="Content-addressed product delivery evidence.",
-            source_identity="test:portfolio",
-            state="evidence",
-            evidence_kind="portfolio_artifact",
-            valid_until=(date.today().replace(year=date.today().year + 1).isoformat()),
-        )
-        graph.verify_evidence(
-            "evidence-product-delivery",
-            1,
-            decision="approved",
-            verifier_kind="deterministic",
-            policy_id="test:portfolio-review",
-            policy_version="1",
-            policy_hash=DIGEST,
-            reason="tests and artefact verified",
-            source_identity="test:independent-reviewer",
-        )
-        graph.add_claim(
-            requirement.criterion,
-            statement="Delivered a tested product capability.",
-            claim_type="achievement",
-            state="evidence",
-            source_identity="test:claim",
-            valid_until=(date.today().replace(year=date.today().year + 1).isoformat()),
-        )
-        graph.link_claim_evidence(
-            requirement.criterion,
-            "evidence-product-delivery",
-            source_identity="test:edge",
-            edge_type="demonstrated_by",
-        )
-        graph.approve_claim(requirement.criterion)
+        for requirement, (_requirement_id, _text, claim_type) in zip(
+            requirements,
+            claim_rows,
+            strict=True,
+        ):
+            evidence_id = f"evidence-{requirement.requirement_id}"
+            graph.add_evidence(
+                evidence_id,
+                statement=(
+                    "Content-addressed product delivery evidence."
+                    if requirement.requirement_id == "product-delivery"
+                    else f"Verified evidence for {requirement.requirement_id}."
+                ),
+                source_identity="test:portfolio",
+                state="evidence",
+                evidence_kind="portfolio_artifact",
+                valid_until=(
+                    date.today().replace(year=date.today().year + 1).isoformat()
+                ),
+            )
+            graph.verify_evidence(
+                evidence_id,
+                1,
+                decision="approved",
+                verifier_kind="deterministic",
+                policy_id="test:portfolio-review",
+                policy_version="1",
+                policy_hash=DIGEST,
+                reason="tests and artefact verified",
+                source_identity="test:independent-reviewer",
+            )
+            graph.add_claim(
+                requirement.criterion,
+                statement=(
+                    "Delivered a tested product capability."
+                    if requirement.requirement_id == "product-delivery"
+                    else f"Approved {claim_type} evidence for "
+                    f"{requirement.requirement_id}."
+                ),
+                claim_type=claim_type,
+                state="evidence",
+                source_identity="test:claim",
+                valid_until=(
+                    date.today().replace(year=date.today().year + 1).isoformat()
+                ),
+            )
+            graph.link_claim_evidence(
+                requirement.criterion,
+                evidence_id,
+                source_identity="test:edge",
+                edge_type="demonstrated_by",
+            )
+            graph.approve_claim(requirement.criterion)
         evidence = candidate_graph_evidence(database.path, as_of=date.today())
     profile_hash = evidence_projection_hash(evidence)
-    proposal = MatchProposal(
-        requirement.requirement_id,
-        tuple(row.evidence_id for row in evidence),
-        9000,
-        "direct" if evidence else "none",
-        "Exact reviewed fit input.",
-        InferenceReceipt(
-            "test",
-            "strategy-fit-v1",
-            DIGEST,
-            POLICY.policy_hash,
-            profile_hash,
-            matching_input_hash(
-                requirement,
-                candidate_profile_sha256=profile_hash,
-                as_of=date.today(),
+    evidence_ids = {row.evidence_id for row in evidence}
+    proposals = tuple(
+        MatchProposal(
+            requirement.requirement_id,
+            (
+                (f"evidence-{requirement.requirement_id}",)
+                if f"evidence-{requirement.requirement_id}" in evidence_ids
+                else ()
             ),
-        ),
+            9000,
+            "direct" if evidence else "none",
+            "Exact reviewed fit input.",
+            InferenceReceipt(
+                "test",
+                "strategy-fit-v1",
+                DIGEST,
+                POLICY.policy_hash,
+                profile_hash,
+                matching_input_hash(
+                    requirement,
+                    candidate_profile_sha256=profile_hash,
+                    as_of=date.today(),
+                ),
+            ),
+        )
+        for requirement in requirements
     )
     run = FitAssessmentStore(database.path).assess(
         job_key=job.key,
-        requirements=(requirement,),
-        proposals=(proposal,),
+        requirements=requirements,
+        proposals=proposals,
         as_of=date.today(),
     )
-    return database, run, requirement
+    return database, run, requirements[0]
 
 
 def _requirement(
