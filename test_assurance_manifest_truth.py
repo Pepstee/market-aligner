@@ -1288,7 +1288,146 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 f"JAA-14 declared test missing: {relative}"
             )
 
-    for number in range(15, 17):
+    jaa15 = components["JAA-15"]
+    assert (
+        jaa15["increment"]
+        == (
+            "local_expansion_ranking_and_gate_contract_complete_"
+            "dependency_runtime_and_activation_withheld"
+        )
+    )
+    assert jaa15["claim"] == executable_slices["JAA-15"]["objective"]
+    assert jaa15["depends_on"] == executable_slices["JAA-15"]["depends_on"]
+    assert jaa15["provisional_local_contract"] == {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_ratification": "absent_pending_ratification",
+        "implemented_source_git_revision": (
+            "a33334832c88038199df475fca281f0c51b5ae38"
+        ),
+        "implemented_source_tree": (
+            "988d6c3c6c40d5e2e802e8cd750938bf898c370e"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:f788d5a6e5864956915dc12b07e2ff16"
+            "504a54c8c9d37b41537beaa0141450cd"
+        ),
+        "upstream_dependency_satisfied": False,
+        "real_runtime_evidence_verified": False,
+        "adapter_created_or_activated": False,
+        "adapter_activation_authority": "withheld",
+        "crawl_authority": "withheld",
+        "connector_authority": "withheld",
+        "submission_authority": "withheld",
+        "production_certification": "withheld",
+        "dependency_satisfied": False,
+        "deputy_authority": {
+            "path_base": "software_factory_root",
+            "relative_path": (
+                "giga-user/reports/"
+                "JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md"
+            ),
+            "sha256": (
+                "8199c4848468669dd908eff8f4b92226d"
+                "f11b82831baf04fd9e663cabc462ef3"
+            ),
+        },
+        "provisional_local_contract_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA15_PROVISIONAL_LOCAL_CONTRACT_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "9e58e34375da0bbe08b71c5acf8c87c2"
+                "66430ab7d7355cad34acfe637ca11ba6"
+            ),
+        },
+        "sonnet_post_repair_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa15-post-repair-review-raw.json"
+            ),
+            "sha256": (
+                "6bc786e8e38cfff2241ed0224f9588b9"
+                "8b2d68e56bf23815a4381cc142f2b4d1"
+            ),
+        },
+        "positive_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa15-repair-final-positive.log"
+            ),
+            "sha256": (
+                "fc04c4ed459b92d32a3835538d313386"
+                "aceee93bf4d005bf5bb81449e34239eb"
+            ),
+        },
+        "negative_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa15-repair-final-negative.log"
+            ),
+            "sha256": (
+                "8e4b3699497ab4b7f7b6d603078754b8"
+                "492b75fa505b7dd3e456c07790c9cd74"
+            ),
+        },
+        "upstream_cross_slice_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa15-repair-final-jaa14-cross-slice.log"
+            ),
+            "sha256": (
+                "825b6727fceaedd7feedac51e0d0c095b"
+                "7ccde29fe9cf165ccb025cb0b6672ac"
+            ),
+        },
+        "ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/jaa15-repair-final-ruff.log"
+            ),
+            "sha256": (
+                "82b3e6a6c090a57601d22943bd23fca9"
+                "218d1031dbe5a7b754092f9a156b4f18"
+            ),
+        },
+    }
+    assert "certification" not in jaa15
+    for key in (
+        "deputy_authority",
+        "provisional_local_contract_receipt",
+        "sonnet_post_repair_review",
+        "positive_log",
+        "negative_log",
+        "upstream_cross_slice_log",
+        "ruff_log",
+    ):
+        pointer = jaa15["provisional_local_contract"][key]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
+    assert jaa15["evidence"] == []
+    for relative in jaa15["owns"]:
+        assert (ROOT / relative).is_file(), (
+            f"JAA-15 materialised path missing: {relative}"
+        )
+    for test in jaa15["tests"]:
+        for relative in test["files"]:
+            assert (ROOT / relative).is_file(), (
+                f"JAA-15 declared test missing: {relative}"
+            )
+
+    for number in range(16, 17):
         slice_id = f"JAA-{number:02d}"
         component = components[slice_id]
         assert component["increment"] == "not_implemented"
