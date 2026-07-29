@@ -3,15 +3,38 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from tempfile import TemporaryDirectory
 
+from career_automation.application_artifacts import (
+    ARTIFACT_FILENAMES,
+    ArtifactFileReceipt,
+    PublishedArtifactReceipt,
+)
+from career_automation.ats_fixture import FixtureReceipt
+from career_automation.browser_workflows import SubmissionProof
+from career_automation.employer_research import (
+    FRESHNESS_DAYS,
+    RawResponseCache,
+)
 from career_automation.interview_communication import (
     FROZEN_INTERVIEW_COMMUNICATION_CONTRACT,
+    compile_employer_dossier_evidence,
     compile_follow_up_draft_plan,
     compile_interview_preparation_pack,
     compile_local_debrief_evidence,
 )
 from career_automation.models import PipelineState
+from career_automation.release_gate import (
+    REQUIRED_VALIDATORS,
+    OfficialRouteBinding,
+    ReleaseBinding,
+    ValidationReceipt,
+    WorkRightBinding,
+    compile_release_manifest,
+)
 from career_automation.status_ingestion import (
     FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
     classify_status_evidence,
@@ -23,7 +46,32 @@ from test_jaa07_independent_acceptance import _source
 
 APPLICATION_ID = "application:local-interview-fixture"
 BASE_TIME = datetime(2030, 1, 2, 9, 0, tzinfo=timezone.utc)
-RELEASED_SHA256 = hashlib.sha256(b"released-application").hexdigest()
+KINDS = ("company", "role", "product", "hiring", "operational_health")
+EXCERPTS = {
+    "company": (
+        "The company confirms that Example Ltd operates a documented service."
+    ),
+    "role": "This role has documented job responsibilities and duties.",
+    "product": "The product platform provides a service for customers.",
+    "hiring": "The careers vacancy invites candidates to apply through hiring.",
+    "operational_health": (
+        "In 2030 the company reported current operational revenue and profit."
+    ),
+}
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _hash(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
 
 
 def _timeline(*, final_state: PipelineState = PipelineState.INTERVIEW):
@@ -59,8 +107,208 @@ def _timeline(*, final_state: PipelineState = PipelineState.INTERVIEW):
     )
 
 
+def _employer_evidence(source):
+    employer_fact = next(
+        row for row in source.facts if row.fact_kind == "employer"
+    )
+    fact_document = json.loads(employer_fact.employer_fact_json)
+    with TemporaryDirectory(prefix="jaa13-employer-") as directory:
+        cache = RawResponseCache(directory)
+        sources = []
+        plan = []
+        claims = []
+        timestamp = "2030-01-02T00:00:00+00:00"
+        for index, kind in enumerate(KINDS):
+            excerpt = f"<p>{EXCERPTS[kind]}</p>"
+            digest, reference = cache.store(excerpt.encode())
+            source_id = (
+                fact_document["source_ids"][0]
+                if kind == "company"
+                else f"source:{kind}"
+            )
+            plan_id = f"plan:{kind}"
+            sources.append({
+                "id": source_id,
+                "url": f"https://8.8.8.8/jaa13/{index}",
+                "captured_at": timestamp,
+                "retrieved_at": timestamp,
+                "published_at": timestamp,
+                "updated_at": None,
+                "content_sha256": digest,
+                "raw_response_ref": reference,
+                "status_code": 200,
+                "source_kind": "official_company",
+            })
+            plan.append({
+                "id": plan_id,
+                "kind": kind,
+                "source_id": source_id,
+                "source_type": {
+                    "company": "official_company",
+                    "role": "official_vacancy",
+                    "product": "official_product",
+                    "hiring": "official_careers",
+                    "operational_health": "official_financial",
+                }[kind],
+                "permitted_purposes": [kind],
+                "freshness_days": next(
+                    value
+                    for key, value in FRESHNESS_DAYS.items()
+                    if key.value == kind
+                ),
+                "excerpt_sha256": hashlib.sha256(
+                    excerpt.encode()
+                ).hexdigest(),
+            })
+            claims.append({
+                "id": (
+                    fact_document["id"]
+                    if kind == "company"
+                    else f"claim:{kind}"
+                ),
+                "kind": kind,
+                "classification": (
+                    "fact" if kind == "company" else "inference"
+                ),
+                "subject_type": (
+                    "organisation" if kind == "company" else None
+                ),
+                "text": (
+                    fact_document["text"]
+                    if kind == "company"
+                    else EXCERPTS[kind]
+                ),
+                "observed_at": timestamp,
+                "source_captured_at": timestamp,
+                "freshness_classification": "current",
+                "source_ids": [source_id],
+                "source_plan_id": plan_id,
+                "citation_excerpt": excerpt,
+            })
+        dossier = {
+            "schema_version": "jaa04.dossier.v1",
+            "job_key": source.job_key,
+            "sources": sources,
+            "source_plan": plan,
+            "claims": claims,
+            "edges": [],
+        }
+        return compile_employer_dossier_evidence(
+            dossier,
+            cache,
+            as_of=date(2030, 1, 3),
+        )
+
+
+def _release_lineage(source, employer_evidence):
+    files = tuple(
+        ArtifactFileReceipt(
+            filename,
+            hashlib.sha256(filename.encode()).hexdigest(),
+            1,
+        )
+        for filename in ARTIFACT_FILENAMES
+    )
+    artifact_set_sha256 = hashlib.sha256(
+        b"jaa13-artifact-set"
+    ).hexdigest()
+    publication = PublishedArtifactReceipt(
+        artifact_set_sha256=artifact_set_sha256,
+        source_id=source.source_id,
+        relative_directory=artifact_set_sha256,
+        files=files,
+        receipt_sha256="0" * 64,
+    )
+    publication = replace(
+        publication,
+        receipt_sha256=_hash(
+            publication.document(include_receipt_hash=False)
+        ),
+    )
+    binding = ReleaseBinding(
+        job_key=source.job_key,
+        candidate_identity_sha256=hashlib.sha256(b"candidate").hexdigest(),
+        vacancy_sha256=source.vacancy_sha256,
+        vacancy_observed_at=date(2030, 1, 1),
+        vacancy_valid_until=date(2030, 1, 31),
+        dossier_sha256=employer_evidence.dossier_sha256,
+        candidate_profile_sha256=hashlib.sha256(b"profile").hexdigest(),
+        strategy_id=source.strategy_id,
+        strategy_document_sha256=hashlib.sha256(
+            b"strategy-document"
+        ).hexdigest(),
+        application_source_id=source.source_id,
+        application_source_sha256=source.content_sha256,
+        artifact_set_sha256=publication.artifact_set_sha256,
+        artifact_receipt_sha256=publication.receipt_sha256,
+        deterministic_writer_policy_sha256=hashlib.sha256(
+            b"writer-policy"
+        ).hexdigest(),
+        model_receipt_sha256s=(),
+        work_right=WorkRightBinding(
+            "GB",
+            "employee",
+            "work-right",
+            1,
+            hashlib.sha256(b"work-right").hexdigest(),
+            date(2029, 1, 1),
+            date(2031, 1, 1),
+            True,
+        ),
+        official_route=OfficialRouteBinding(
+            "route:official",
+            "fixture-adapter",
+            "1",
+            "official:fixture",
+            hashlib.sha256(b"route-policy").hexdigest(),
+            date(2030, 1, 1),
+            date(2030, 2, 1),
+            True,
+        ),
+        evaluated_at=date(2030, 1, 2),
+        prior_application_count=0,
+    )
+    validations = tuple(
+        ValidationReceipt(
+            validator,
+            "1",
+            hashlib.sha256(f"impl:{validator}".encode()).hexdigest(),
+            binding.input_sha256,
+            binding.artifact_set_sha256,
+            "pass",
+        )
+        for validator in REQUIRED_VALIDATORS
+    )
+    manifest = compile_release_manifest(binding, validations)
+    fixture = FixtureReceipt(
+        receipt_id="0" * 64,
+        application_id=APPLICATION_ID,
+        job_key=source.job_key,
+        payload_sha256=hashlib.sha256(b"payload").hexdigest(),
+    )
+    fixture = replace(
+        fixture,
+        receipt_id=_hash(fixture.document(include_identity=False)),
+    )
+    proof = SubmissionProof(
+        release_manifest_sha256=manifest.release_manifest_sha256,
+        token_sha256=hashlib.sha256(b"token").hexdigest(),
+        receipt_id=fixture.receipt_id,
+        receipt_payload_sha256=fixture.payload_sha256,
+        screenshot_sha256=hashlib.sha256(b"screenshot").hexdigest(),
+        field_map_sha256=hashlib.sha256(b"field-map").hexdigest(),
+        submit_event_sha256=hashlib.sha256(b"submit-event").hexdigest(),
+    )
+    return manifest, publication, proof, fixture
+
+
 def _pack():
     source, _strategy = _source()
+    employer_evidence = _employer_evidence(source)
+    manifest, publication, proof, fixture = _release_lineage(
+        source,
+        employer_evidence,
+    )
     candidate_ids = tuple(
         row.sentence_id for row in source.facts if row.fact_kind == "candidate"
     )
@@ -70,9 +318,13 @@ def _pack():
     pack = compile_interview_preparation_pack(
         FROZEN_INTERVIEW_COMMUNICATION_CONTRACT,
         application_id=APPLICATION_ID,
-        released_application_sha256=RELEASED_SHA256,
         source=source,
         timeline=_timeline(),
+        release_manifest=manifest,
+        publication_receipt=publication,
+        submission_proof=proof,
+        fixture_receipt=fixture,
+        employer_evidence=employer_evidence,
         as_of=date(2030, 1, 3),
         candidate_sentence_ids=candidate_ids,
         employer_sentence_ids=employer_ids,
@@ -99,6 +351,16 @@ def test_preparation_pack_reuses_exact_fact_authority_and_current_sources() -> N
     assert replay == pack
     assert pack.application_source_id == source.source_id
     assert pack.application_source_content_sha256 == source.content_sha256
+    assert pack.release_manifest.binding.application_source_id == (
+        source.source_id
+    )
+    assert pack.publication_receipt.source_id == source.source_id
+    assert pack.submission_proof.release_manifest_sha256 == (
+        pack.release_manifest.release_manifest_sha256
+    )
+    assert pack.fixture_receipt.application_id == APPLICATION_ID
+    assert pack.timeline == _timeline()
+    assert pack.lineage_claim == "structural_lineage_only"
     assert {row.kind for row in pack.items} == {
         "candidate_story",
         "likely_objection",
@@ -157,12 +419,22 @@ def test_follow_up_plan_is_natural_fact_bound_and_non_sendable() -> None:
         pack,
         debrief,
         factual_authority_ids=facts,
-        connective_text=(
-            "Thank you for your time.",
-            "Kind regards.",
+        connective_template_ids=(
+            "thank_you_for_time",
+            "kind_regards",
         ),
     )
     assert plan.factual_authority_ids == facts
+    assert plan.connective_template_ids == (
+        "thank_you_for_time",
+        "kind_regards",
+    )
+    assert plan.connective_text == (
+        "Thank you for your time.",
+        "Kind regards.",
+    )
+    assert plan.preparation == pack
+    assert plan.debrief == debrief
     assert plan.debrief_fact_authority is False
     assert plan.operator_confirmation_required is True
     assert plan.truth_release_authority == "withheld"

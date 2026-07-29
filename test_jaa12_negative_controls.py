@@ -63,6 +63,37 @@ def test_untrusted_message_cannot_issue_instructions_or_change_facts() -> None:
     assert observation.candidate_fact_authority is False
 
 
+def test_opaque_export_cannot_be_labelled_as_a_known_status() -> None:
+    raw = compile_local_export_evidence(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id=APPLICATION_ID,
+        job_key=JOB_KEY,
+        source_kind="local_portal_export",
+        source_record_id="opaque-interview-claim",
+        raw_export_bytes=b"opaque portal bytes without a status token",
+        observed_at=BASE_TIME,
+    )
+    assert raw.parsed_status_code is None
+    with pytest.raises(ValueError, match="differs from parsed export"):
+        classify_status_evidence(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            raw,
+            explicit_status_code="interview_requested",
+        )
+
+
+def test_parsed_status_cannot_be_rehashed_to_a_different_known_code() -> None:
+    evidence, _observation = _evidence("under_review", hour=0)
+    with pytest.raises(ValueError, match="exact export bytes"):
+        replace(evidence, parsed_status_code="interview_requested")
+    with pytest.raises(ValueError, match="differs from parsed export"):
+        classify_status_evidence(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            evidence,
+            explicit_status_code="interview_requested",
+        )
+
+
 @pytest.mark.parametrize(
     "changed",
     (
@@ -116,7 +147,7 @@ def test_duplicate_source_or_observation_cannot_enter_timeline() -> None:
         job_key=JOB_KEY,
         source_kind="local_portal_export",
         source_record_id="reused-source-record",
-        raw_export_bytes=b"under review",
+        raw_export_bytes=b"under_review",
         observed_at=BASE_TIME,
     )
     second_raw = compile_local_export_evidence(
@@ -125,7 +156,7 @@ def test_duplicate_source_or_observation_cannot_enter_timeline() -> None:
         job_key=JOB_KEY,
         source_kind="local_portal_export",
         source_record_id="reused-source-record",
-        raw_export_bytes=b"interview requested",
+        raw_export_bytes=b"interview_requested",
         observed_at=BASE_TIME + timedelta(hours=1),
     )
     first_observation = classify_status_evidence(
@@ -163,7 +194,7 @@ def test_out_of_order_or_cross_application_evidence_is_rejected() -> None:
         job_key=JOB_KEY,
         source_kind="local_portal_export",
         source_record_id="other-application-status",
-        raw_export_bytes=b"under review",
+        raw_export_bytes=b"under_review",
         observed_at=BASE_TIME,
     )
     other_observation = classify_status_evidence(
@@ -187,7 +218,7 @@ def test_conflicting_same_time_observations_are_rejected() -> None:
         job_key=JOB_KEY,
         source_kind="local_portal_export",
         source_record_id="same-time-screening",
-        raw_export_bytes=b"under review",
+        raw_export_bytes=b"under_review",
         observed_at=BASE_TIME,
     )
     second_raw = compile_local_export_evidence(
@@ -196,7 +227,7 @@ def test_conflicting_same_time_observations_are_rejected() -> None:
         job_key=JOB_KEY,
         source_kind="local_message_export",
         source_record_id="same-time-interview",
-        raw_export_bytes=b"interview requested",
+        raw_export_bytes=b"interview_requested",
         observed_at=BASE_TIME,
     )
     observations = (

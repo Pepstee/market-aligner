@@ -59,11 +59,12 @@ TERMINAL_STATUS_STATES = (
     PipelineState.EXPIRED,
 )
 CLASSIFIER_POLICY: Mapping[str, object] = MappingProxyType({
-    "schema_version": "jaa12.explicit-status-classifier.v1",
+    "schema_version": "jaa12.explicit-status-classifier.v2",
     "codes": tuple(
         (key, value.value)
         for key, value in EXPLICIT_STATUS_CODES.items()
     ),
+    "raw_export_binding": "exact_utf8_token",
     "unknown_code": "abstain",
     "silence": "censored",
     "free_text_instruction_authority": False,
@@ -120,6 +121,16 @@ def _aware(value: datetime, label: str) -> datetime:
     ):
         raise ValueError(f"{label} must include a timezone")
     return value
+
+
+def _parsed_status_code(raw_export_bytes: bytes) -> str | None:
+    try:
+        text = raw_export_bytes.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return None
+    if text in EXPLICIT_STATUS_CODES:
+        return text
+    return None
 
 
 def _transition_policy_document() -> dict[str, tuple[str, ...]]:
@@ -240,13 +251,14 @@ class RawStatusEvidence:
     source_kind: str
     source_record_id: str
     source_sha256: str
+    parsed_status_code: str | None
     observed_at: str
     evidence_id: str
     source_reference_kind: str = "content_addressed_local_export"
     untrusted_content: bool = True
     instruction_authority: bool = False
     candidate_fact_authority: bool = False
-    schema_version: str = "jaa12.raw-status-evidence.v1"
+    schema_version: str = "jaa12.raw-status-evidence.v2"
 
     def __post_init__(self) -> None:
         self.verify()
@@ -260,6 +272,7 @@ class RawStatusEvidence:
             "source_kind": self.source_kind,
             "source_record_id": self.source_record_id,
             "source_sha256": self.source_sha256,
+            "parsed_status_code": self.parsed_status_code,
             "observed_at": self.observed_at,
             "source_reference_kind": "content_addressed_local_export",
             "untrusted_content": True,
@@ -286,6 +299,23 @@ class RawStatusEvidence:
             _required(value, label)
         if self.source_kind not in LOCAL_EXPORT_SOURCE_KINDS:
             raise ValueError("raw status source must be a local export")
+        if (
+            self.parsed_status_code is not None
+            and self.parsed_status_code not in EXPLICIT_STATUS_CODES
+        ):
+            raise ValueError(
+                "raw status evidence has an unsupported parsed code"
+            )
+        if (
+            self.parsed_status_code is not None
+            and hashlib.sha256(
+                self.parsed_status_code.encode()
+            ).hexdigest()
+            != self.source_sha256
+        ):
+            raise ValueError(
+                "parsed status code differs from exact export bytes"
+            )
         try:
             observed = datetime.fromisoformat(self.observed_at)
         except (TypeError, ValueError) as exc:
@@ -301,7 +331,7 @@ class RawStatusEvidence:
             raise ValueError(
                 "raw status evidence cannot carry instruction authority"
             )
-        if self.schema_version != "jaa12.raw-status-evidence.v1":
+        if self.schema_version != "jaa12.raw-status-evidence.v2":
             raise ValueError("raw status evidence schema is unsupported")
         expected = _content_hash(self.document(include_identity=False))
         if self.evidence_id != expected:
@@ -327,14 +357,16 @@ def compile_local_export_evidence(
     if not isinstance(raw_export_bytes, bytes) or not raw_export_bytes:
         raise ValueError("raw local export bytes are required")
     _aware(observed_at, "raw export observation time")
+    parsed_status_code = _parsed_status_code(raw_export_bytes)
     body = {
-        "schema_version": "jaa12.raw-status-evidence.v1",
+        "schema_version": "jaa12.raw-status-evidence.v2",
         "contract_sha256": contract.contract_sha256,
         "application_id": application_id,
         "job_key": job_key,
         "source_kind": source_kind,
         "source_record_id": source_record_id,
         "source_sha256": hashlib.sha256(raw_export_bytes).hexdigest(),
+        "parsed_status_code": parsed_status_code,
         "observed_at": observed_at.isoformat(),
         "source_reference_kind": "content_addressed_local_export",
         "untrusted_content": True,
@@ -348,6 +380,7 @@ def compile_local_export_evidence(
         source_kind=source_kind,
         source_record_id=source_record_id,
         source_sha256=str(body["source_sha256"]),
+        parsed_status_code=parsed_status_code,
         observed_at=observed_at.isoformat(),
         evidence_id=_content_hash(body),
     )
@@ -370,7 +403,7 @@ class StatusObservation:
     observation_id: str
     instruction_authority: bool = False
     candidate_fact_authority: bool = False
-    schema_version: str = "jaa12.status-observation.v1"
+    schema_version: str = "jaa12.status-observation.v2"
 
     def __post_init__(self) -> None:
         self.verify()
@@ -438,6 +471,14 @@ class StatusObservation:
         expected_state = EXPLICIT_STATUS_CODES.get(
             self.explicit_status_code
         )
+        if (
+            expected_state is not None
+            and self.raw_evidence.parsed_status_code
+            != self.explicit_status_code
+        ):
+            raise ValueError(
+                "known status code differs from parsed export bytes"
+            )
         if expected_state is None:
             if (
                 self.classified_state is not None
@@ -464,7 +505,7 @@ class StatusObservation:
             raise ValueError(
                 "status observation cannot alter instructions or facts"
             )
-        if self.schema_version != "jaa12.status-observation.v1":
+        if self.schema_version != "jaa12.status-observation.v2":
             raise ValueError("status observation schema is unsupported")
         expected = _content_hash(self.document(include_identity=False))
         if self.observation_id != expected:
@@ -493,8 +534,15 @@ def classify_status_evidence(
     if not isinstance(explicit_status_code, str):
         raise ValueError("explicit status code must be text")
     state = EXPLICIT_STATUS_CODES.get(explicit_status_code)
+    if (
+        state is not None
+        and evidence.parsed_status_code != explicit_status_code
+    ):
+        raise ValueError(
+            "known status code differs from parsed export bytes"
+        )
     body = {
-        "schema_version": "jaa12.status-observation.v1",
+        "schema_version": "jaa12.status-observation.v2",
         "raw_evidence": evidence.document(),
         "application_id": evidence.application_id,
         "job_key": evidence.job_key,

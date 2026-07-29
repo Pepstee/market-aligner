@@ -39,9 +39,7 @@ def _evidence(
         job_key=JOB_KEY,
         source_kind=source_kind,
         source_record_id=f"fixture-status-{hour}",
-        raw_export_bytes=(
-            f"untrusted fixture export {hour}: {code}"
-        ).encode(),
+        raw_export_bytes=code.encode(),
         observed_at=BASE_TIME + timedelta(hours=hour),
     )
     observation = classify_status_evidence(
@@ -86,8 +84,16 @@ def test_local_export_is_content_addressed_without_retaining_raw_text() -> None:
         "content_addressed_local_export"
     )
     assert document["untrusted_content"] is True
+    assert document["parsed_status_code"] is None
     assert document["instruction_authority"] is False
     assert document["candidate_fact_authority"] is False
+
+
+def test_known_status_is_derived_from_exact_export_bytes() -> None:
+    evidence, observation = _evidence("interview_requested", hour=0)
+    assert evidence.parsed_status_code == "interview_requested"
+    assert observation.explicit_status_code == evidence.parsed_status_code
+    assert observation.classified_state is PipelineState.INTERVIEW
 
 
 def test_explicit_statuses_compile_ordered_source_backed_timeline() -> None:
