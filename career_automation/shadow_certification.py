@@ -327,8 +327,12 @@ class InterruptionObservation:
             self.submit_click_count != 1 or self.receipt_count != 1
         ):
             raise ValueError("recovered interruption requires one click and receipt")
-        if self.outcome == "fail_closed" and self.receipt_count != 0:
-            raise ValueError("fail-closed interruption cannot produce a receipt")
+        if self.outcome == "fail_closed" and (
+            self.submit_click_count != 0 or self.receipt_count != 0
+        ):
+            raise ValueError(
+                "fail-closed interruption cannot perform a click or produce a receipt"
+            )
 
     def document(self) -> dict[str, object]:
         return {

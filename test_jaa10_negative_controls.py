@@ -140,6 +140,13 @@ def test_interruption_and_mutation_rows_fail_if_they_claim_unsafe_success() -> N
             2,
             1,
         )
+    with pytest.raises(ValueError, match="cannot perform a click"):
+        InterruptionObservation(
+            "post_mark_pre_click",
+            "fail_closed",
+            1,
+            0,
+        )
     with pytest.raises(ValueError, match="different executable test"):
         MutationObservation(
             "release_token_tamper",

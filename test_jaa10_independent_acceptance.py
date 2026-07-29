@@ -450,6 +450,7 @@ def _execute_interruption(
                         release_authority=authority,
                     )
                 resumed_browser.close()
+                assert fixture.receipt is None
                 result = InterruptionObservation(
                     injection_point,
                     "fail_closed",
