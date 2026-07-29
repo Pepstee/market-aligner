@@ -1415,6 +1415,43 @@ def _derive_promotion_fields(
         raise ValueError(
             "promotion review requires identical cohort membership by policy"
         )
+    for baseline, candidate in (
+        (locked_baseline, locked_candidate),
+        (holdout_baseline, holdout_candidate),
+    ):
+        for baseline_score, candidate_score in zip(
+            baseline.scores,
+            candidate.scores,
+            strict=True,
+        ):
+            baseline_lineage = (
+                baseline_score.application_id,
+                baseline_score.job_key,
+                baseline_score.prediction.target_state,
+                baseline_score.timeline.document(),
+                baseline_score.timeline_id,
+                baseline_score.outcome_status,
+                baseline_score.resolution_at,
+                baseline_score.actual_bp,
+                baseline_score.source_evidence_ids,
+                baseline_score.outcome_attribution,
+            )
+            candidate_lineage = (
+                candidate_score.application_id,
+                candidate_score.job_key,
+                candidate_score.prediction.target_state,
+                candidate_score.timeline.document(),
+                candidate_score.timeline_id,
+                candidate_score.outcome_status,
+                candidate_score.resolution_at,
+                candidate_score.actual_bp,
+                candidate_score.source_evidence_ids,
+                candidate_score.outcome_attribution,
+            )
+            if baseline_lineage != candidate_lineage:
+                raise ValueError(
+                    "promotion review requires exact paired outcome lineage"
+                )
     experiment_id = locked_baseline.experiment_id
     if (
         experiment_id is None

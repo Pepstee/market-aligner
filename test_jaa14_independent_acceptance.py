@@ -377,6 +377,32 @@ def test_policy_candidate_requires_locked_non_regression_and_holdout_gain() -> N
         "locked_non_regression",
         "holdout_improvement",
     )
+    for baseline, candidate in (
+        (locked_baseline, locked_candidate),
+        (holdout_baseline, holdout_candidate),
+    ):
+        assert tuple(row.timeline_id for row in baseline.scores) == tuple(
+            row.timeline_id for row in candidate.scores
+        )
+        assert tuple(
+            (
+                row.outcome_status,
+                row.resolution_at,
+                row.actual_bp,
+                row.source_evidence_ids,
+                row.outcome_attribution,
+            )
+            for row in baseline.scores
+        ) == tuple(
+            (
+                row.outcome_status,
+                row.resolution_at,
+                row.actual_bp,
+                row.source_evidence_ids,
+                row.outcome_attribution,
+            )
+            for row in candidate.scores
+        )
     assert evaluation.rollback_policy_sha256 == BASE_POLICY
     assert evaluation.promotion_authority == "withheld"
     assert evaluation.applied is False

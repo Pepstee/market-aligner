@@ -350,6 +350,8 @@ def _report(
     cohort_kind: str,
     experiment,
     experiment_arm: str,
+    *,
+    progressed: bool = True,
 ):
     return compile_calibration_report(
         FROZEN_OUTCOME_FEEDBACK_CONTRACT,
@@ -360,7 +362,7 @@ def _report(
                 probability_bp=probability,
                 cohort_id=cohort_id,
                 cohort_kind=cohort_kind,
-                progressed=True,
+                progressed=progressed,
                 experiment=experiment,
                 experiment_arm=experiment_arm,
             )
@@ -462,6 +464,110 @@ def test_promotion_requires_same_members_and_one_controlled_experiment() -> None
                 None,
             ),
         )
+
+
+def test_promotion_rejects_rehashed_reports_with_different_outcome_lineage() -> None:
+    experiment = compile_strategy_experiment(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        experiment_name="outcome lineage experiment",
+        variable_names=("positioning",),
+        baseline_value_sha256=hashlib.sha256(b"baseline").hexdigest(),
+        treatment_value_sha256=hashlib.sha256(b"treatment").hexdigest(),
+        assignment_policy_sha256=hashlib.sha256(b"assignment").hexdigest(),
+        created_at=PREDICTED_AT - timedelta(days=1),
+    )
+
+    def reports(*, aligned: bool):
+        return {
+            "locked_baseline": _report(
+                "locked-outcome-lineage",
+                BASE_POLICY,
+                8_000 if not aligned else 6_000,
+                "cohort:locked-outcome-lineage",
+                "locked",
+                experiment,
+                "baseline",
+                progressed=aligned,
+            ),
+            "locked_candidate": _report(
+                "locked-outcome-lineage",
+                CANDIDATE_POLICY,
+                8_000,
+                "cohort:locked-outcome-lineage",
+                "locked",
+                experiment,
+                "treatment",
+            ),
+            "holdout_baseline": _report(
+                "holdout-outcome-lineage",
+                BASE_POLICY,
+                8_000 if not aligned else 6_000,
+                "cohort:holdout-outcome-lineage",
+                "holdout",
+                experiment,
+                "baseline",
+                progressed=aligned,
+            ),
+            "holdout_candidate": _report(
+                "holdout-outcome-lineage",
+                CANDIDATE_POLICY,
+                8_000,
+                "cohort:holdout-outcome-lineage",
+                "holdout",
+                experiment,
+                "treatment",
+            ),
+        }
+
+    accepted = evaluate_policy_candidate(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        **reports(aligned=True),
+    )
+    mismatched = reports(aligned=False)
+    assert mismatched["locked_baseline"].mean_brier_bp == 6_400
+    assert mismatched["locked_candidate"].mean_brier_bp == 400
+    assert mismatched["holdout_baseline"].mean_brier_bp == 6_400
+    assert mismatched["holdout_candidate"].mean_brier_bp == 400
+    assert (
+        mismatched["locked_baseline"].scores[0].timeline_id
+        != mismatched["locked_candidate"].scores[0].timeline_id
+    )
+    with pytest.raises(ValueError, match="exact paired outcome lineage"):
+        evaluate_policy_candidate(
+            FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+            **mismatched,
+        )
+
+    forged_fields = {
+        **vars(accepted),
+        **mismatched,
+        "locked_baseline_report_id": mismatched[
+            "locked_baseline"
+        ].report_id,
+        "locked_candidate_report_id": mismatched[
+            "locked_candidate"
+        ].report_id,
+        "holdout_baseline_report_id": mismatched[
+            "holdout_baseline"
+        ].report_id,
+        "holdout_candidate_report_id": mismatched[
+            "holdout_candidate"
+        ].report_id,
+    }
+    identity_shell = object.__new__(type(accepted))
+    for field_name, value in forged_fields.items():
+        object.__setattr__(identity_shell, field_name, value)
+    forged_fields["evaluation_id"] = hashlib.sha256(
+        json.dumps(
+            identity_shell.document(include_identity=False),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="exact paired outcome lineage"):
+        type(accepted)(**forged_fields)
 
 
 def test_locked_regression_or_flat_holdout_cannot_be_review_eligible() -> None:
