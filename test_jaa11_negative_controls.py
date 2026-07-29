@@ -114,6 +114,8 @@ def test_fabricated_or_mismatched_receipt_trips_without_evidence() -> None:
     assert circuit.breach_code == "fabricated_receipt"
     assert result.receipt_id is None
     assert evidence is None
+    with pytest.raises(RuntimeError, match="circuit breaker is open"):
+        assess_fixture_adapter_attempt(contract, circuit, _observation())
 
     mismatched = replace(
         _observation().receipt,
@@ -135,6 +137,26 @@ def test_fabricated_or_mismatched_receipt_trips_without_evidence() -> None:
     assert circuit.breach_code == "mismatched_receipt"
     assert result.receipt_id is None
     assert evidence is None
+    with pytest.raises(RuntimeError, match="circuit breaker is open"):
+        assess_fixture_adapter_attempt(contract, circuit, _observation())
+
+
+def test_malformed_receipt_runtime_type_trips_as_fabricated() -> None:
+    contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
+    malformed = replace(_observation().receipt, receipt_id=object())
+    observation = replace(_observation(), receipt=malformed)
+    circuit, result, evidence = assess_fixture_adapter_attempt(
+        contract,
+        armed_fixture_circuit(contract),
+        observation,
+    )
+    assert circuit.state == "tripped"
+    assert circuit.breach_code == "fabricated_receipt"
+    assert result.reason_codes == ("fabricated_receipt",)
+    assert result.receipt_id is None
+    assert evidence is None
+    with pytest.raises(RuntimeError, match="circuit breaker is open"):
+        assess_fixture_adapter_attempt(contract, circuit, _observation())
 
 
 def test_changed_submission_proof_trips_without_receipt_claim() -> None:
@@ -155,6 +177,8 @@ def test_changed_submission_proof_trips_without_receipt_claim() -> None:
     assert circuit.breach_code == "changed_submission_proof"
     assert result.receipt_id is None
     assert evidence is None
+    with pytest.raises(RuntimeError, match="circuit breaker is open"):
+        assess_fixture_adapter_attempt(contract, circuit, _observation())
 
 
 def test_fixture_contract_rejects_external_or_actionable_route() -> None:
@@ -200,6 +224,21 @@ def test_noncanonical_contract_cannot_assess_or_arm() -> None:
             replacement,
             armed_fixture_circuit(contract),
             _observation(),
+        )
+
+
+def test_adapter_identifiers_must_be_canonical_without_padding() -> None:
+    contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
+    padded_id = f" {contract.adapter_id} "
+    padded_binding = replace(
+        contract.route_binding,
+        adapter_id=padded_id,
+    )
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        replace(
+            contract,
+            route_binding=padded_binding,
+            adapter_id=padded_id,
         )
 
 

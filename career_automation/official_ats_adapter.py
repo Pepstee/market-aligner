@@ -28,6 +28,8 @@ HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 FIXTURE_ROUTE_URL = (
     "http://127.0.0.1:0/applications/jaa10-frozen-platform-engineer"
 )
+FIXTURE_ROUTE_VERIFIED_AT = date(2030, 1, 1)
+FIXTURE_ROUTE_VALID_UNTIL = date(2030, 12, 31)
 BLOCKING_SIGNALS = (
     "captcha",
     "login_required",
@@ -84,6 +86,10 @@ FIXTURE_ROUTE_POLICY: Mapping[str, object] = MappingProxyType({
     "schema_version": "jaa11.fixture-route-policy.v1",
     "route_url": FIXTURE_ROUTE_URL,
     "fixture_only": True,
+    "external_route_verified": False,
+    "validity_basis": "synthetic_fixture_clock",
+    "verified_at": FIXTURE_ROUTE_VERIFIED_AT.isoformat(),
+    "valid_until": FIXTURE_ROUTE_VALID_UNTIL.isoformat(),
     "network_capability": False,
 })
 
@@ -108,9 +114,16 @@ def _digest(value: str, label: str) -> str:
 
 
 def _required(value: str, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
         raise ValueError(f"{label} is required")
-    return value
+    clean = value.strip()
+    if not clean:
+        raise ValueError(f"{label} is required")
+    if value != clean:
+        raise ValueError(
+            f"{label} must not contain surrounding whitespace"
+        )
+    return clean
 
 
 def _fixture_route(value: str, application_id: str) -> bool:
@@ -290,8 +303,8 @@ FROZEN_FIXTURE_ADAPTER_CONTRACT = FixtureAdapterContract(
         adapter_version="v1",
         source_identity=FIXTURE_ROUTE_URL,
         route_policy_sha256=ROUTE_POLICY_SHA256,
-        verified_at=date(2030, 1, 1),
-        valid_until=date(2030, 12, 31),
+        verified_at=FIXTURE_ROUTE_VERIFIED_AT,
+        valid_until=FIXTURE_ROUTE_VALID_UNTIL,
         allowed=True,
     ),
     route_url=FIXTURE_ROUTE_URL,
@@ -620,7 +633,7 @@ def _hard_breach(
         return "missing_receipt"
     try:
         receipt.verify()
-    except ValueError:
+    except (TypeError, ValueError):
         return "fabricated_receipt"
     proof = observation.submission_proof
     if (

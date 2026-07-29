@@ -87,6 +87,10 @@ def test_frozen_fixture_contract_binds_exact_upstream_and_policy() -> None:
     assert contract.route_url == FIXTURE_ROUTE_URL
     assert contract.route_binding.source_identity == FIXTURE_ROUTE_URL
     assert contract.route_binding.route_policy_sha256 == ROUTE_POLICY_SHA256
+    assert FIXTURE_ROUTE_POLICY["external_route_verified"] is False
+    assert FIXTURE_ROUTE_POLICY["validity_basis"] == (
+        "synthetic_fixture_clock"
+    )
     assert contract.environment == "fixture_only"
     assert contract.real_canary_activation == (
         "withheld_explicit_operator_approval_required"
