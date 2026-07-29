@@ -49,8 +49,9 @@ PREDICTION_POLICY: Mapping[str, object] = MappingProxyType({
     "post_hoc_prediction": False,
 })
 SCORING_POLICY: Mapping[str, object] = MappingProxyType({
-    "schema_version": "jaa14.outcome-scoring-policy.v1",
+    "schema_version": "jaa14.outcome-scoring-policy.v2",
     "metric": "integer_brier_basis_points",
+    "receipt_lineage": "typed_prediction_and_timeline",
     "explicit_negative_state": PipelineState.REJECTED.value,
     "censored_terminal_states": tuple(
         state.value for state in CENSORED_TERMINAL_STATES
@@ -656,6 +657,8 @@ def record_pre_outcome_prediction(
 
 @dataclass(frozen=True)
 class ScoredPrediction:
+    prediction: PredictionReceipt
+    timeline: StatusTimeline
     contract_sha256: str
     prediction_id: str
     application_id: str
@@ -676,7 +679,7 @@ class ScoredPrediction:
     policy_promotion_authority: str = "withheld"
     dependency_satisfied: bool = False
     certifies_slice: bool = False
-    schema_version: str = "jaa14.scored-prediction.v1"
+    schema_version: str = "jaa14.scored-prediction.v2"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -689,6 +692,8 @@ class ScoredPrediction:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
+            "prediction": self.prediction.document(),
+            "timeline": self.timeline.document(),
             "contract_sha256": self.contract_sha256,
             "prediction_id": self.prediction_id,
             "application_id": self.application_id,
@@ -714,6 +719,12 @@ class ScoredPrediction:
         return result
 
     def verify(self) -> None:
+        if not isinstance(self.prediction, PredictionReceipt):
+            raise TypeError("score requires a typed prediction receipt")
+        if not isinstance(self.timeline, StatusTimeline):
+            raise TypeError("score requires a typed status timeline")
+        self.prediction.verify()
+        self.timeline.verify()
         for value, label in (
             (self.contract_sha256, "score contract hash"),
             (self.prediction_id, "scored prediction ID"),
@@ -734,34 +745,39 @@ class ScoredPrediction:
             if self.experiment_arm not in EXPERIMENT_ARMS:
                 raise ValueError("score experiment arm is unsupported")
         _aware_iso(self.resolution_at, "score resolution time")
-        if self.outcome_status == "censored":
-            if (
-                self.actual_bp is not None
-                or self.squared_error_bp is not None
-                or self.outcome_attribution
-                not in {"censored_silence", "candidate_or_expiry_censor"}
-            ):
-                raise ValueError("censored prediction cannot carry a score")
-        elif self.outcome_status in {"progressed", "explicit_rejection"}:
-            expected_actual_bp = (
-                10_000 if self.outcome_status == "progressed" else 0
+        (
+            expected_status,
+            expected_attribution,
+            expected_actual_bp,
+            expected_error_bp,
+            expected_resolution_at,
+            expected_source_ids,
+        ) = _derive_score_fields(self.prediction, self.timeline)
+        if (
+            self.contract_sha256
+            != self.prediction.contract_sha256
+            or self.prediction_id != self.prediction.prediction_id
+            or self.application_id != self.prediction.application_id
+            or self.application_id != self.timeline.application_id
+            or self.job_key != self.prediction.job_key
+            or self.job_key != self.timeline.job_key
+            or self.predictor_policy_sha256
+            != self.prediction.predictor_policy_sha256
+            or self.cohort_id != self.prediction.cohort_id
+            or self.cohort_kind != self.prediction.cohort_kind
+            or self.experiment_id != self.prediction.experiment_id
+            or self.experiment_arm != self.prediction.experiment_arm
+            or self.timeline_id != self.timeline.timeline_id
+            or self.outcome_status != expected_status
+            or self.outcome_attribution != expected_attribution
+            or self.actual_bp != expected_actual_bp
+            or self.squared_error_bp != expected_error_bp
+            or self.resolution_at != expected_resolution_at.isoformat()
+            or self.source_evidence_ids != expected_source_ids
+        ):
+            raise ValueError(
+                "score differs from its typed prediction and timeline"
             )
-            if (
-                type(self.actual_bp) is not int
-                or self.actual_bp != expected_actual_bp
-                or type(self.squared_error_bp) is not int
-                or not 0 <= self.squared_error_bp <= 10_000
-            ):
-                raise ValueError("resolved prediction score is invalid")
-            expected_attribution = (
-                "target_stage_observed"
-                if self.outcome_status == "progressed"
-                else "explicit_employer_rejection"
-            )
-            if self.outcome_attribution != expected_attribution:
-                raise ValueError("resolved outcome attribution is invalid")
-        else:
-            raise ValueError("prediction outcome status is unsupported")
         if (
             len(self.source_evidence_ids)
             != len(set(self.source_evidence_ids))
@@ -777,7 +793,7 @@ class ScoredPrediction:
             or self.certifies_slice is not False
         ):
             raise ValueError("local score cannot promote or certify")
-        if self.schema_version != "jaa14.scored-prediction.v1":
+        if self.schema_version != "jaa14.scored-prediction.v2":
             raise ValueError("scored prediction schema is unsupported")
         if self.score_id != _content_hash(
             self.document(include_identity=False)
@@ -787,6 +803,95 @@ class ScoredPrediction:
 
 def _brier_bp(probability_bp: int, actual_bp: int) -> int:
     return ((probability_bp - actual_bp) ** 2 + 5_000) // 10_000
+
+
+def _derive_score_fields(
+    prediction: PredictionReceipt,
+    timeline: StatusTimeline,
+) -> tuple[str, str, int | None, int | None, datetime, tuple[str, ...]]:
+    prediction.verify()
+    timeline.verify()
+    if (
+        prediction.application_id != timeline.application_id
+        or prediction.job_key != timeline.job_key
+    ):
+        raise ValueError(
+            "prediction and timeline identify different applications"
+        )
+    predicted_at = datetime.fromisoformat(prediction.predicted_at)
+    evidence_times = tuple(
+        datetime.fromisoformat(value) for value in timeline.observed_at
+    )
+    if any(value <= predicted_at for value in evidence_times):
+        raise ValueError(
+            "prediction must predate every resolving evidence item"
+        )
+    path = (
+        timeline.baseline_state,
+        *(
+            PipelineState(target)
+            for _source, target in timeline.transitions
+        ),
+    )
+    reached = prediction.target_state in path
+    source_ids = timeline.evidence_ids
+    if reached:
+        if not evidence_times:
+            raise ValueError(
+                "progression requires explicit outcome evidence"
+            )
+        actual_bp = 10_000
+        return (
+            "progressed",
+            "target_stage_observed",
+            actual_bp,
+            _brier_bp(prediction.probability_bp, actual_bp),
+            evidence_times[-1],
+            source_ids,
+        )
+    if timeline.final_state is PipelineState.REJECTED:
+        if not evidence_times:
+            raise ValueError("rejection requires explicit outcome evidence")
+        actual_bp = 0
+        return (
+            "explicit_rejection",
+            "explicit_employer_rejection",
+            actual_bp,
+            _brier_bp(prediction.probability_bp, actual_bp),
+            evidence_times[-1],
+            source_ids,
+        )
+    if timeline.final_state in CENSORED_TERMINAL_STATES:
+        if not evidence_times:
+            raise ValueError(
+                "terminal censor requires explicit status evidence"
+            )
+        return (
+            "censored",
+            "candidate_or_expiry_censor",
+            None,
+            None,
+            evidence_times[-1],
+            source_ids,
+        )
+    horizon = datetime.fromisoformat(prediction.horizon_at)
+    eligible_censors = tuple(
+        datetime.fromisoformat(row.as_of)
+        for row in timeline.censored_silence
+        if datetime.fromisoformat(row.as_of) >= horizon
+    )
+    if not eligible_censors:
+        raise ValueError(
+            "outcome is unresolved; horizon censor evidence is required"
+        )
+    return (
+        "censored",
+        "censored_silence",
+        None,
+        None,
+        max(eligible_censors),
+        source_ids,
+    )
 
 
 def score_prediction(
@@ -800,71 +905,20 @@ def score_prediction(
         raise TypeError("scoring requires a PredictionReceipt")
     if not isinstance(timeline, StatusTimeline):
         raise TypeError("scoring requires a StatusTimeline")
-    prediction.verify()
-    timeline.verify()
-    if (
-        prediction.application_id != timeline.application_id
-        or prediction.job_key != timeline.job_key
-    ):
-        raise ValueError("prediction and timeline identify different applications")
-    predicted_at = datetime.fromisoformat(prediction.predicted_at)
-    evidence_times = tuple(
-        datetime.fromisoformat(value) for value in timeline.observed_at
-    )
-    if any(value <= predicted_at for value in evidence_times):
-        raise ValueError("prediction must predate every resolving evidence item")
-    path = (
-        timeline.baseline_state,
-        *(PipelineState(target) for _source, target in timeline.transitions),
-    )
-    reached = prediction.target_state in path
-    source_ids = timeline.evidence_ids
-    actual_bp: int | None
-    error_bp: int | None
-    if reached:
-        if not evidence_times:
-            raise ValueError("progression requires explicit outcome evidence")
-        outcome_status = "progressed"
-        attribution = "target_stage_observed"
-        actual_bp = 10_000
-        resolution_at = evidence_times[-1]
-        error_bp = _brier_bp(prediction.probability_bp, actual_bp)
-    elif timeline.final_state is PipelineState.REJECTED:
-        if not evidence_times:
-            raise ValueError("rejection requires explicit outcome evidence")
-        outcome_status = "explicit_rejection"
-        attribution = "explicit_employer_rejection"
-        actual_bp = 0
-        resolution_at = evidence_times[-1]
-        error_bp = _brier_bp(prediction.probability_bp, actual_bp)
-    elif timeline.final_state in CENSORED_TERMINAL_STATES:
-        if not evidence_times:
-            raise ValueError("terminal censor requires explicit status evidence")
-        outcome_status = "censored"
-        attribution = "candidate_or_expiry_censor"
-        actual_bp = None
-        error_bp = None
-        resolution_at = evidence_times[-1]
-    else:
-        horizon = datetime.fromisoformat(prediction.horizon_at)
-        eligible_censors = tuple(
-            datetime.fromisoformat(row.as_of)
-            for row in timeline.censored_silence
-            if datetime.fromisoformat(row.as_of) >= horizon
-        )
-        if not eligible_censors:
-            raise ValueError(
-                "outcome is unresolved; horizon censor evidence is required"
-            )
-        outcome_status = "censored"
-        attribution = "censored_silence"
-        actual_bp = None
-        error_bp = None
-        resolution_at = max(eligible_censors)
-    if resolution_at <= predicted_at:
+    (
+        outcome_status,
+        attribution,
+        actual_bp,
+        error_bp,
+        resolution_at,
+        source_ids,
+    ) = _derive_score_fields(prediction, timeline)
+    if resolution_at <= datetime.fromisoformat(prediction.predicted_at):
         raise ValueError("outcome resolution must postdate prediction")
     body = {
-        "schema_version": "jaa14.scored-prediction.v1",
+        "schema_version": "jaa14.scored-prediction.v2",
+        "prediction": prediction.document(),
+        "timeline": timeline.document(),
         "contract_sha256": contract.contract_sha256,
         "prediction_id": prediction.prediction_id,
         "application_id": prediction.application_id,
@@ -886,6 +940,8 @@ def score_prediction(
         "certifies_slice": False,
     }
     return ScoredPrediction(
+        prediction=prediction,
+        timeline=timeline,
         contract_sha256=contract.contract_sha256,
         prediction_id=prediction.prediction_id,
         application_id=prediction.application_id,

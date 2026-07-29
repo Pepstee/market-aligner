@@ -136,9 +136,41 @@ def test_resolved_score_direct_construction_cannot_reverse_truth() -> None:
         ).hexdigest()
         with pytest.raises(
             ValueError,
-            match="resolved prediction score is invalid",
+            match="differs from its typed prediction and timeline",
         ):
             type(accepted)(**forged_fields)
+
+
+def test_resolved_score_recomputes_squared_error_from_prediction() -> None:
+    accepted = _score(
+        "application:forged-error",
+        policy_sha256=BASE_POLICY,
+        probability_bp=6_000,
+        cohort_id="cohort:locked",
+        cohort_kind="locked",
+        progressed=True,
+    )
+    forged_fields = {
+        **vars(accepted),
+        "squared_error_bp": 0,
+    }
+    identity_shell = object.__new__(type(accepted))
+    for field_name, value in forged_fields.items():
+        object.__setattr__(identity_shell, field_name, value)
+    forged_fields["score_id"] = hashlib.sha256(
+        json.dumps(
+            identity_shell.document(include_identity=False),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(
+        ValueError,
+        match="differs from its typed prediction and timeline",
+    ):
+        type(accepted)(**forged_fields)
 
 
 def test_unresolved_timeline_requires_real_horizon_censor() -> None:
