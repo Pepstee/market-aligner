@@ -412,8 +412,75 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             assert (ROOT / relative).is_file(), f"JAA-07 declared test missing: {relative}"
 
     jaa08 = components["JAA-08"]
-    assert jaa08["increment"] == "implementation_in_progress"
-    assert "certification" not in jaa08
+    assert jaa08["increment"] == "implementation_complete"
+    assert jaa08["certification"] == {
+        "status": "certified_implementation",
+        "certified_source_git_revision": (
+            "00da24fe8e423c1b98b0d8ca1b98d71e691f2bce"
+        ),
+        "certified_source_tree": (
+            "ef1b9089e3527c9c4ad07cd44ba9ec699cf0e46d"
+        ),
+        "certified_source_content_revision": (
+            "sha256:052c9b6b91ed0ccaa2a819575195acebd"
+            "1df284ec84dcca2cb35230afb639319"
+        ),
+        "reconciliation_authority_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa08-reconciliation-gate-ruling.md"
+            ),
+            "sha256": (
+                "f972a52d8ffe23c4c9f6b9aad467def6"
+                "997b88c9b0d80bcdaa671616c6008e6b"
+            ),
+        },
+        "sonnet_reconciliation_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa08-reconciliation-review-raw.json"
+            ),
+            "sha256": (
+                "b641ad4db06851510a20892f92ba6c4be"
+                "557b57bedb74893950b01958bd0f84b"
+            ),
+        },
+        "focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa08-reconciliation-focused.log"
+            ),
+            "sha256": (
+                "cb9539ec5af489a9fb094d9941c9e1ee9"
+                "e0c713a7fcdc99d2ee76c1a09d4165c"
+            ),
+        },
+        "ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa08-reconciliation-ruff.log"
+            ),
+            "sha256": (
+                "82b3e6a6c090a57601d22943bd23fca9"
+                "218d1031dbe5a7b754092f9a156b4f18"
+            ),
+        },
+        "implementation_certification_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa08-post-reconciliation-certification-raw.json"
+            ),
+            "sha256": (
+                "d7daa41bdb51fb10a5fbf581373965860"
+                "1034971c4524cf690c0764b17a76a4c"
+            ),
+        },
+    }
     assert jaa08["evidence"] == []
     for relative in jaa08["owns"]:
         assert (ROOT / relative).is_file(), f"JAA-08 materialised path missing: {relative}"
