@@ -43,6 +43,34 @@ DIGEST = hashlib.sha256(b"jaa08-pure-contract").hexdigest()
 ROOT = Path(__file__).resolve().parent
 
 
+def _fixture_date(database) -> date:
+    with database.connection() as connection:
+        value = connection.execute(
+            """SELECT as_of FROM fit_assessment_runs
+               ORDER BY rowid DESC LIMIT 1"""
+        ).fetchone()[0]
+    return date.fromisoformat(str(value))
+
+
+def _fixture_now(database) -> datetime:
+    value = _fixture_date(database)
+    return datetime(
+        value.year,
+        value.month,
+        value.day,
+        12,
+        tzinfo=timezone.utc,
+    )
+
+
+def _release_gate(database) -> ReleaseGateStore:
+    fixed_now = _fixture_now(database)
+    return ReleaseGateStore(
+        database.path,
+        clock=lambda: fixed_now,
+    )
+
+
 def _binding(**overrides: object) -> ReleaseBinding:
     values: dict[str, object] = {
         "job_key": "locked:release-job",
@@ -111,9 +139,10 @@ def _validations(
 
 def _compilation_inputs(tmp_path: Path):
     database, run, requirement = _fit_database(tmp_path, matched=True)
+    as_of = _fixture_date(database)
     strategy = ApplicationStrategyStore(database.path).compile_and_record(
         fit_run_id=run.run_id,
-        as_of=date.today(),
+        as_of=as_of,
     )
     graph = CandidateGraph(database.path)
     contact_value = {
@@ -163,7 +192,7 @@ def _compilation_inputs(tmp_path: Path):
     }
     source = ProductionApplicationCompiler(database.path).compile(
         strategy.strategy_id,
-        as_of=date.today(),
+        as_of=as_of,
         contact=contact,
         questions=questions,
     )
@@ -191,9 +220,8 @@ def _authorized_release_inputs(
     tmp_path: Path,
     *,
     route_allowed: bool = True,
-    route_verified_at: date | None = None,
-    route_valid_until: date | None = None,
-    work_right_valid_until: date | None = None,
+    route_expired: bool = False,
+    work_right_expired: bool = False,
 ):
     values = _compilation_inputs(tmp_path)
     (
@@ -206,7 +234,7 @@ def _authorized_release_inputs(
         artifact_root,
         _receipt,
     ) = values
-    today = date.today()
+    today = _fixture_date(database)
     graph = CandidateGraph(database.path)
     graph.add_record(
         "work-right-gb",
@@ -219,8 +247,9 @@ def _authorized_release_inputs(
         contract_type="employee",
         valid_from=today.replace(year=today.year - 1).isoformat(),
         valid_until=(
-            work_right_valid_until
-            or today.replace(year=today.year + 1)
+            today.replace(year=today.year - 1)
+            if work_right_expired
+            else today.replace(year=today.year + 1)
         ).isoformat(),
     )
     graph.verify_record(
@@ -243,7 +272,7 @@ def _authorized_release_inputs(
         repository_root=ROOT,
         as_of=today,
     )
-    gate = ReleaseGateStore(database.path)
+    gate = _release_gate(database)
     route = gate.register_official_route(
         job_key=source.job_key,
         route=OfficialRouteBinding(
@@ -252,8 +281,16 @@ def _authorized_release_inputs(
             "1",
             "test:official-route-policy",
             DIGEST,
-            route_verified_at or today,
-            route_valid_until or today.replace(year=today.year + 1),
+            (
+                today.replace(year=today.year - 2)
+                if route_expired
+                else today
+            ),
+            (
+                today.replace(year=today.year - 1)
+                if route_expired
+                else today.replace(year=today.year + 1)
+            ),
             route_allowed,
         ),
     )
@@ -263,8 +300,8 @@ def _authorized_release_inputs(
 def _issued_release_inputs(tmp_path: Path):
     values = _authorized_release_inputs(tmp_path)
     (
-        _database,
-        _strategy,
+        database,
+        strategy,
         contact,
         questions,
         source,
@@ -285,7 +322,7 @@ def _issued_release_inputs(tmp_path: Path):
         repository_root=ROOT,
         jurisdiction="GB",
         contract_type="employee",
-        evaluated_at=date.today(),
+        evaluated_at=strategy.as_of,
     )
     return (*values, issued)
 
@@ -356,7 +393,7 @@ def test_compilation_registration_revalidates_external_bytes_and_advances_atomic
         questions=questions,
         artifact_root=artifact_root,
         repository_root=ROOT,
-        as_of=date.today(),
+        as_of=strategy.as_of,
     )
     assert compilation.strategy_id == strategy.strategy_id
     assert compilation.application_source_id == source.source_id
@@ -369,7 +406,7 @@ def test_compilation_registration_revalidates_external_bytes_and_advances_atomic
         questions=questions,
         artifact_root=artifact_root,
         repository_root=ROOT,
-        as_of=date.today(),
+        as_of=strategy.as_of,
     ) == compilation
     with database.connection() as connection:
         row = connection.execute(
@@ -424,7 +461,7 @@ def test_release_gate_reresolves_authority_and_issues_hash_only_token_atomically
         repository_root=ROOT,
         jurisdiction="GB",
         contract_type="employee",
-        evaluated_at=date.today(),
+        evaluated_at=_fixture_date(database),
     )
     assert isinstance(issued, IssuedRelease)
     verify_release_manifest(issued.manifest)
@@ -482,11 +519,7 @@ def test_release_token_consumes_once_only_after_exact_authority_replay(
         _route,
         issued,
     ) = _issued_release_inputs(tmp_path)
-    consumed_at = datetime.combine(
-        date.today(),
-        datetime.min.time(),
-        tzinfo=timezone.utc,
-    )
+    consumed_at = _fixture_now(database)
     consumed = gate.consume_release_token(
         release_token=issued.release_token,
         source=source,
@@ -535,11 +568,7 @@ def test_consumed_release_can_be_revalidated_without_second_consumption(
         _route,
         issued,
     ) = values
-    consumed_at = datetime.combine(
-        date.today(),
-        datetime.min.time(),
-        tzinfo=timezone.utc,
-    )
+    consumed_at = _fixture_now(database)
     consumed = gate.consume_release_token(
         release_token=issued.release_token,
         source=source,

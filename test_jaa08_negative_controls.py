@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -25,7 +25,10 @@ from test_jaa08_independent_acceptance import (
     _authorized_release_inputs,
     _binding,
     _compilation_inputs,
+    _fixture_date,
+    _fixture_now,
     _issued_release_inputs,
+    _release_gate,
     _validations,
 )
 
@@ -175,7 +178,7 @@ def test_action_capable_release_store_rejects_caller_forged_future_clock(
         gate,
         _route,
     ) = _authorized_release_inputs(tmp_path)
-    forged_date = date.today() + timedelta(days=1)
+    forged_date = _fixture_date(database) + timedelta(days=1)
     with pytest.raises(ValueError, match="trusted current UTC date"):
         gate.evaluate_and_issue(
             compilation_id=compilation.compilation_id,
@@ -218,7 +221,7 @@ def test_action_capable_release_store_requires_aware_trusted_clock(
     gate = ReleaseGateStore(
         database.path,
         clock=lambda: datetime.combine(
-            date.today(),
+            _fixture_date(database),
             datetime.min.time(),
         ),
     )
@@ -233,7 +236,7 @@ def test_action_capable_release_store_requires_aware_trusted_clock(
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -265,7 +268,7 @@ def test_compilation_registration_rejects_external_tamper_without_state_change(
             questions=questions,
             artifact_root=artifact_root,
             repository_root=ROOT,
-            as_of=date.today(),
+            as_of=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -305,7 +308,7 @@ def test_compilation_insert_failure_rolls_back_lifecycle_transition(
             questions=questions,
             artifact_root=artifact_root,
             repository_root=ROOT,
-            as_of=date.today(),
+            as_of=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -338,7 +341,7 @@ def test_compilation_register_rejects_stale_source(tmp_path) -> None:
             questions=questions,
             artifact_root=artifact_root,
             repository_root=ROOT,
-            as_of=date.today(),
+            as_of=_fixture_date(database),
         )
 
 
@@ -362,7 +365,7 @@ def test_publication_verification_never_creates_missing_root(tmp_path) -> None:
             questions=questions,
             artifact_root=missing,
             repository_root=ROOT,
-            as_of=date.today(),
+            as_of=_fixture_date(database),
         )
     assert not missing.exists()
 
@@ -396,7 +399,7 @@ def test_release_gate_rejects_external_tamper_without_token_or_release(
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -448,7 +451,7 @@ def test_blocked_attempt_insert_failure_rolls_back_blocked_state(
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -482,10 +485,10 @@ def test_release_gate_rejects_missing_work_right_without_token(tmp_path) -> None
         questions=questions,
         artifact_root=artifact_root,
         repository_root=ROOT,
-        as_of=date.today(),
+        as_of=_fixture_date(database),
     )
-    gate = ReleaseGateStore(database.path)
-    today = date.today()
+    gate = _release_gate(database)
+    today = _fixture_date(database)
     gate.register_official_route(
         job_key=source.job_key,
         route=replace(
@@ -505,7 +508,7 @@ def test_release_gate_rejects_missing_work_right_without_token(tmp_path) -> None
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=today,
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -568,7 +571,7 @@ def test_release_gate_rejects_conflicting_work_right_verification(
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -612,7 +615,7 @@ def test_release_insert_failure_rolls_back_release_transition(tmp_path) -> None:
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -656,7 +659,7 @@ def test_second_release_for_same_candidate_and_job_cannot_mint_token(
         "repository_root": ROOT,
         "jurisdiction": "GB",
         "contract_type": "employee",
-        "evaluated_at": date.today(),
+        "evaluated_at": _fixture_date(database),
     }
     gate.evaluate_and_issue(**arguments)
     with pytest.raises(ValueError):
@@ -675,24 +678,10 @@ def test_release_gate_rejects_expired_or_disallowed_authority(
     tmp_path,
     authority_failure: str,
 ) -> None:
-    today = date.today()
     options = {
         "route_allowed": authority_failure != "disallowed_route",
-        "route_verified_at": (
-            today
-            if authority_failure != "expired_route"
-            else today.replace(year=today.year - 2)
-        ),
-        "route_valid_until": (
-            today
-            if authority_failure != "expired_route"
-            else today.replace(year=today.year - 1)
-        ),
-        "work_right_valid_until": (
-            today
-            if authority_failure != "expired_work_right"
-            else today.replace(year=today.year - 1)
-        ),
+        "route_expired": authority_failure == "expired_route",
+        "work_right_expired": authority_failure == "expired_work_right",
     }
     (
         database,
@@ -707,6 +696,7 @@ def test_release_gate_rejects_expired_or_disallowed_authority(
         gate,
         _route,
     ) = _authorized_release_inputs(tmp_path, **options)
+    today = _fixture_date(database)
     with pytest.raises(ValueError):
         gate.evaluate_and_issue(
             compilation_id=compilation.compilation_id,
@@ -766,7 +756,7 @@ def test_release_gate_rejects_mismatched_compilation_identity(tmp_path) -> None:
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -817,7 +807,7 @@ def test_mismatched_compilation_audit_failure_preserves_authority_error(
             repository_root=ROOT,
             jurisdiction="GB",
             contract_type="employee",
-            evaluated_at=date.today(),
+            evaluated_at=_fixture_date(database),
         )
     with database.connection() as connection:
         assert connection.execute(
@@ -835,7 +825,7 @@ def test_mismatched_compilation_audit_failure_preserves_authority_error(
 
 def _consume_arguments(values):
     (
-        _database,
+        database,
         _strategy,
         contact,
         questions,
@@ -858,11 +848,7 @@ def _consume_arguments(values):
         "repository_root": ROOT,
         "jurisdiction": "GB",
         "contract_type": "employee",
-        "consumed_at": datetime.combine(
-            date.today(),
-            datetime.min.time(),
-            tzinfo=timezone.utc,
-        ),
+        "consumed_at": _fixture_now(database),
     }
 
 
@@ -977,10 +963,30 @@ def test_release_token_requires_timezone_aware_consumption_clock(
     database, *_, gate, _route, _issued = values
     arguments = _consume_arguments(values)
     arguments["consumed_at"] = datetime.combine(
-        date.today(),
+        _fixture_date(database),
         datetime.min.time(),
     )
     with pytest.raises(ValueError, match="timezone"):
+        gate.consume_release_token(**arguments)
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT consumed_at FROM release_tokens"
+        ).fetchone()[0] is None
+
+
+def test_backdated_trusted_clock_cannot_consume_release_token(
+    tmp_path,
+) -> None:
+    values = _issued_release_inputs(tmp_path)
+    database, *_ = values
+    backdated_now = _fixture_now(database) - timedelta(minutes=1)
+    gate = ReleaseGateStore(
+        database.path,
+        clock=lambda: backdated_now,
+    )
+    arguments = _consume_arguments(values)
+    arguments["consumed_at"] = backdated_now
+    with pytest.raises(ValueError, match="trusted release clock regressed"):
         gate.consume_release_token(**arguments)
     with database.connection() as connection:
         assert connection.execute(

@@ -771,7 +771,7 @@ class ReleaseGateStore:
         self.lifecycle = LifecycleReducer(self.path)
         self.compilations = ApplicationCompilationStore(self.path)
 
-    def _trusted_utc_date(self) -> date:
+    def _trusted_utc_now(self) -> datetime:
         current = self._clock()
         if (
             not isinstance(current, datetime)
@@ -779,16 +779,57 @@ class ReleaseGateStore:
             or current.utcoffset() is None
         ):
             raise ValueError("release-gate clock must be timezone-aware")
-        return current.astimezone(timezone.utc).date()
+        return current.astimezone(timezone.utc)
 
     def _require_current_utc_date(
         self,
         value: date,
         *,
         label: str,
-    ) -> None:
-        if value != self._trusted_utc_date():
+    ) -> datetime:
+        current = self._trusted_utc_now()
+        if value != current.date():
             raise ValueError(f"{label} must use the trusted current UTC date")
+        return current
+
+    @staticmethod
+    def _require_monotonic_release_time(
+        connection: sqlite3.Connection,
+        *,
+        job_key: str,
+        candidate_identity_sha256: str,
+        current: datetime,
+    ) -> None:
+        rows = connection.execute(
+            """SELECT attempt.evaluated_at,token.issued_at,token.consumed_at
+               FROM release_manifests manifest
+               JOIN release_gate_attempts attempt
+                 ON attempt.attempt_id=manifest.attempt_id
+               LEFT JOIN release_tokens token
+                 ON token.release_manifest_hash=
+                    manifest.release_manifest_hash
+               WHERE manifest.job_key=?
+                 AND manifest.candidate_identity_hash=?""",
+            (job_key, candidate_identity_sha256),
+        ).fetchall()
+        recorded: list[datetime] = []
+        for row in rows:
+            recorded.append(datetime.combine(
+                date.fromisoformat(str(row["evaluated_at"])),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            ))
+            for name in ("issued_at", "consumed_at"):
+                if row[name] is None:
+                    continue
+                parsed = datetime.fromisoformat(str(row[name]))
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError(
+                        "stored release timestamp must include a timezone"
+                    )
+                recorded.append(parsed.astimezone(timezone.utc))
+        if recorded and current < max(recorded):
+            raise ValueError("trusted release clock regressed")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -1412,7 +1453,7 @@ class ReleaseGateStore:
         evaluated_at: date,
     ) -> IssuedRelease:
         """Issue one token; never invoke or expose any consequential action."""
-        self._require_current_utc_date(
+        trusted_now = self._require_current_utc_date(
             evaluated_at,
             label="release evaluation",
         )
@@ -1492,6 +1533,14 @@ class ReleaseGateStore:
                 jurisdiction=jurisdiction,
                 contract_type=contract_type,
                 evaluated_at=evaluated_at,
+            )
+            self._require_monotonic_release_time(
+                connection,
+                job_key=binding.job_key,
+                candidate_identity_sha256=(
+                    binding.candidate_identity_sha256
+                ),
+                current=trusted_now,
             )
             validations = self._validations(
                 binding,
@@ -1588,11 +1637,6 @@ class ReleaseGateStore:
                         canonical_json(validation.document()),
                     ),
                 )
-            issued_at = datetime.combine(
-                evaluated_at,
-                datetime.min.time(),
-                tzinfo=timezone.utc,
-            ).isoformat()
             connection.execute(
                 """INSERT INTO release_tokens(
                      token_hash,release_manifest_hash,issued_at)
@@ -1600,7 +1644,7 @@ class ReleaseGateStore:
                 (
                     token_sha256,
                     manifest.release_manifest_sha256,
-                    issued_at,
+                    trusted_now.isoformat(),
                 ),
             )
             connection.commit()
@@ -1916,10 +1960,19 @@ class ReleaseGateStore:
                 contract_type=contract_type,
                 consumed_utc=consumed_utc,
             )
-            self._require_current_utc_date(
+            trusted_now = self._require_current_utc_date(
                 consumed_utc.date(),
                 label="release consumption",
             )
+            self._require_monotonic_release_time(
+                connection,
+                job_key=replay_manifest.binding.job_key,
+                candidate_identity_sha256=(
+                    replay_manifest.binding.candidate_identity_sha256
+                ),
+                current=trusted_now,
+            )
+            consumed_iso = trusted_now.isoformat()
             changed = connection.execute(
                 """UPDATE release_tokens SET consumed_at=?
                    WHERE token_hash=? AND consumed_at IS NULL""",
