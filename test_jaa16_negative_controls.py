@@ -106,6 +106,11 @@ def test_provider_route_set_rejects_execution_authority():
         ("restart", {"resumed_from_checkpoint": False}, "checkpoint_not_resumed"),
         ("network", {"lost_record_count": 1}, "data_loss"),
         (
+            "quota",
+            {"verification_rungs_preserved": False},
+            "verification_rung_skipped",
+        ),
+        (
             "stale_source",
             {"duplicate_consequential_actions": 1},
             "duplicate_consequential_action",
@@ -130,6 +135,7 @@ def test_drill_suite_rejects_failure_invariants(failure_kind, updates, reason):
             in {"quota", "network", "stale_source", "model_failure"},
             "resumed_from_checkpoint": kind in {"crash", "restart"},
             "fallback_schema_preserved": True,
+            "verification_rungs_preserved": True,
         }
         if kind == failure_kind:
             values.update(updates)
@@ -143,7 +149,6 @@ def test_drill_suite_rejects_failure_invariants(failure_kind, updates, reason):
                 ledger_after_sha256=digest(f"after-{kind}"),
                 checkpoint_sha256=digest(f"checkpoint-{kind}"),
                 consequential_action_ids=(),
-                verification_rungs_preserved=True,
                 fabricated_progress=False,
                 observed_at=NOW,
                 **values,
