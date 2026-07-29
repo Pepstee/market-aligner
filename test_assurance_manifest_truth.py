@@ -129,8 +129,140 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             assert (ROOT / relative).is_file(), f"JAA-05 declared test missing: {relative}"
 
     jaa06 = components["JAA-06"]
-    assert jaa06["increment"] == "implementation_complete_certification_pending"
-    assert "certification" not in jaa06
+    assert jaa06["increment"] == "implementation_complete"
+    assert jaa06["certification"] == {
+        "status": "certified_implementation",
+        "certified_source_git_revision": (
+            "8c4668a3adc7a2e95a250f1fb07a98b988491abe"
+        ),
+        "certified_source_tree": (
+            "61c3db26e98799a9726dec639a71ed8cde5ebb8e"
+        ),
+        "certified_source_content_revision": (
+            "sha256:e7f77b81907de012217f34d0202f3648"
+            "2090bdbf480b313011ec1d2ac5172405"
+        ),
+        "entry_fable_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa06-entry-gate-resume-raw.json"
+            ),
+            "sha256": (
+                "79e3ffb304b12705987f8093e48af3de"
+                "352178e0fde06101dab64632a7ff57a1"
+            ),
+        },
+        "jaa07_cascade_fable_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa06-jaa07-fixture-cascade-raw.json"
+            ),
+            "sha256": (
+                "ab9098a8949bb1da1eef77201f6583bc"
+                "b7bea41d374ef7336476ad911a55ef27"
+            ),
+        },
+        "sonnet_bounded_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa06-repair-review-raw.json"
+            ),
+            "sha256": (
+                "cb57d1fd599bb9c8c4ddba2ffa2ae9c6"
+                "4fc8cb21945535b99d81fba188157f5e"
+            ),
+        },
+        "implementation_certification_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa06-exact-source-certification-raw.json"
+            ),
+            "sha256": (
+                "56199fece01f33d226292ecebcb0a1db"
+                "5f92e99155c273f9c0867569f863c5d6"
+            ),
+        },
+        "focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/jaa06-repair-focused.log"
+            ),
+            "sha256": (
+                "47c00aa23d225b01774294afa4317dd7"
+                "bbda1960dfeb655e0ef6f4bffc9067df"
+            ),
+        },
+        "manifest_truth_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa06-repair-manifest-truth.log"
+            ),
+            "sha256": (
+                "f21802e5e24571b06b077e416af1539f"
+                "dce6ad55b407e03af6af45b03968cb3b"
+            ),
+        },
+        "locked_evaluator_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa06-repair-locked-evaluator.log"
+            ),
+            "sha256": (
+                "d5ac2ca4dc759c0996d2987a85e38b0"
+                "59133799463a02892b76b016a4e7c03ca"
+            ),
+        },
+        "production_projection_integration_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa06-repair-production-projection-integration.log"
+            ),
+            "sha256": (
+                "885e51b9026a99dadc68ff084adfa82d"
+                "0a385f6ec2f56b31c77d3e1d924515f0"
+            ),
+        },
+        "jaa07_hash_cascade_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa06-repair-jaa07-hash-cascade.log"
+            ),
+            "sha256": (
+                "6198a1ade99b2f1af4b60bfdc150b317"
+                "3fc2028bc0996f6549f044f63dca03e8"
+            ),
+        },
+        "jaa07_evaluator_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa06-repair-jaa07-evaluator.log"
+            ),
+            "sha256": (
+                "5cf1f1f5bcee57aaf8a517edb734cf9d"
+                "adf1802e44f831defd105418c41ef1fe"
+            ),
+        },
+        "full_regression_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa06-repair-cross-slice-regression-green.log"
+            ),
+            "sha256": (
+                "6c5c1525b1e9f5be88e63c5694fb42e"
+                "4425c8d381a310bf91b50804b1e66f25f"
+            ),
+        },
+    }
     for relative in jaa06["owns"]:
         assert (ROOT / relative).is_file(), f"JAA-06 materialised path missing: {relative}"
     for test in jaa06["tests"]:
