@@ -834,8 +834,58 @@
     },
     "JAA-14": {
       "claim": "Improve selection and application strategy automatically from observed funnel outcomes.",
-      "increment": "not_implemented",
+      "increment": "local_outcome_feedback_contract_complete_dependency_runtime_and_promotion_withheld",
       "depends_on": ["JAA-13"],
+      "provisional_local_contract": {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_ratification": "absent_pending_ratification",
+        "implemented_source_git_revision": "f029e05fdd0e5818e0cb30ebe3386778a1889c7e",
+        "implemented_source_tree": "a42d72c677bcb5712282b1eae3dabbae9b1eb82e",
+        "implemented_source_content_revision": "sha256:d38bfa42b998353b4ab62c74dbf38859afe182e410ae27c84290e8f8f2e0c135",
+        "upstream_dependency_satisfied": false,
+        "runtime_learning_authority": "withheld",
+        "policy_promotion_authority": "withheld",
+        "gap_mutation_authority": "withheld",
+        "candidate_fact_mutation_authority": false,
+        "connector_status": "not_connected",
+        "production_certification": "withheld",
+        "dependency_satisfied": false,
+        "deputy_authority": {
+          "path_base": "software_factory_root",
+          "relative_path": "giga-user/reports/JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md",
+          "sha256": "8199c4848468669dd908eff8f4b92226df11b82831baf04fd9e663cabc462ef3"
+        },
+        "provisional_local_contract_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA14_PROVISIONAL_LOCAL_CONTRACT_ACCEPTANCE.md",
+          "sha256": "72d6bfe99e13040c7cd1b62314d5bc4c04815b09e5448fd1e646f294f1c77d3d"
+        },
+        "sonnet_post_repair_review": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/sonnet-jaa14-post-repair-review-raw.json",
+          "sha256": "97223afd4a73aa029525c964a759707a96c4860f55f6c383cb80ceb9057d0d47"
+        },
+        "positive_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa14-definitive-positive.log",
+          "sha256": "ea1e061c27e6d298c1d2880db333e777f6b97cea348da885a5aca09ce6f354a2"
+        },
+        "negative_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa14-definitive-negative.log",
+          "sha256": "d0d5fe161f7f6a5cd079c12d188d23e76a40df672399ddaac542c3ad8486b18b"
+        },
+        "upstream_cross_slice_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa14-definitive-jaa12-cross-slice.log",
+          "sha256": "50886ddae3b374c3062fbe873c12bb786017c5a8ded064cfcd76ee5e5e79b05e"
+        },
+        "ruff_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa14-definitive-ruff.log",
+          "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        }
+      },
       "owns": ["career_automation/outcome_feedback.py"],
       "inputs": ["career_automation/status_ingestion.py", "career_automation/opportunity_calibration.py", "career_automation/gap_optimizer.py"],
       "interfaces": [],
