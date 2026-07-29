@@ -473,7 +473,7 @@
     },
     "JAA-08": {
       "claim": "The deterministic release gate binds every consequential input and cannot be bypassed probabilistically.",
-      "increment": "implementation_in_progress_dependency_blocked",
+      "increment": "implementation_in_progress",
       "depends_on": ["JAA-07"],
       "owns": ["career_automation/release_gate.py"],
       "inputs": ["career_automation/application_compiler.py", "career_automation/security.py"],

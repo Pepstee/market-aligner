@@ -412,7 +412,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             assert (ROOT / relative).is_file(), f"JAA-07 declared test missing: {relative}"
 
     jaa08 = components["JAA-08"]
-    assert jaa08["increment"] == "implementation_in_progress_dependency_blocked"
+    assert jaa08["increment"] == "implementation_in_progress"
+    assert "certification" not in jaa08
+    assert jaa08["evidence"] == []
     for relative in jaa08["owns"]:
         assert (ROOT / relative).is_file(), f"JAA-08 materialised path missing: {relative}"
     for test in jaa08["tests"]:
