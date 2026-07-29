@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 
+from career_automation.shadow_certification import MUTATION_TEST_NODES
 from tracked_source_revision import source_git_revision
 
 
@@ -628,16 +629,141 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             )
 
     jaa10 = components["JAA-10"]
-    assert jaa10["increment"] == "implementation_in_progress_dependency_blocked"
+    assert (
+        jaa10["increment"]
+        == "implementation_complete_pending_fable_ratification"
+    )
     assert jaa10["evidence"] == []
     assert "production certification is withheld" in jaa10["claim"]
-    assert "exact seven-control executable mutation cohort passes" in jaa10["claim"]
+    assert "all five submit interruption windows" in jaa10["claim"]
+    assert (
+        "exact fourteen-control executable mutation cohort passes"
+        in jaa10["claim"]
+    )
+    assert jaa10["provisional_acceptance"] == {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_certification": "absent_pending_ratification",
+        "implemented_source_git_revision": (
+            "43c3d90193e6092b430fdc59cacd7244caaf720b"
+        ),
+        "implemented_source_tree": (
+            "283a1c1051d2ced9bbbecc7eb446dcd5dafe592a"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:8962b3f02120e0b0b88b8584f0e00a7b"
+            "e56a101fd0148d323010cc124be73bef"
+        ),
+        "production_certification": "withheld",
+        "deputy_authority": {
+            "path_base": "software_factory_root",
+            "relative_path": (
+                "giga-user/reports/"
+                "JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md"
+            ),
+            "sha256": (
+                "8199c4848468669dd908eff8f4b92226d"
+                "f11b82831baf04fd9e663cabc462ef3"
+            ),
+        },
+        "provisional_acceptance_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA10_PROVISIONAL_IMPLEMENTATION_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "1508876b4a8ccffa2fde26c16a0c821c5"
+                "0c6ef978d436ae987e4f855a40f23d5"
+            ),
+        },
+        "sonnet_post_repair_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa10-sol-deputy-post-repair-review-raw.json"
+            ),
+            "sha256": (
+                "3d5e484d17b60dd8d43f8074e282b27c"
+                "b4570e855d2fd99f74457a626db68a6f"
+            ),
+        },
+        "focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa10-post-review-focused.log"
+            ),
+            "sha256": (
+                "be3607d83f81b4e789380faa09b522325"
+                "efb938c6bfab6dab70cb4c8ee48041e"
+            ),
+        },
+        "mutation_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa10-mutation-cohort.log"
+            ),
+            "sha256": (
+                "c964f2e41db90c718ffb4d189dd10f3a"
+                "0ec82af05bd0bd3bd12fb85afcaf1b40"
+            ),
+        },
+        "jaa09_restart_cross_slice_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa10-jaa09-restart-cross-slice.log"
+            ),
+            "sha256": (
+                "ffee8a9701562fced0cff6b402682cb53"
+                "87cb3f43ec696732232c80ab1f04711"
+            ),
+        },
+        "ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/jaa10-post-review-ruff.log"
+            ),
+            "sha256": (
+                "82b3e6a6c090a57601d22943bd23fca9"
+                "218d1031dbe5a7b754092f9a156b4f18"
+            ),
+        },
+    }
+    assert "certification" not in jaa10
+    for key in (
+        "deputy_authority",
+        "provisional_acceptance_receipt",
+        "sonnet_post_repair_review",
+        "focused_log",
+        "mutation_log",
+        "jaa09_restart_cross_slice_log",
+        "ruff_log",
+    ):
+        pointer = jaa10["provisional_acceptance"][key]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
     mutation_tests = [
         test for test in jaa10["tests"]
         if test["id"] == "JAA-10-mutation-cohort"
     ]
     assert len(mutation_tests) == 1
-    assert len(mutation_tests[0]["argv"][4:]) == 7
+    assert mutation_tests[0]["argv"][4:] == list(
+        MUTATION_TEST_NODES.values()
+    )
+    assert mutation_tests[0]["files"] == [
+        "test_jaa07_negative_controls.py",
+        "test_jaa08_negative_controls.py",
+        "test_jaa09_negative_controls.py",
+        "test_jaa10_negative_controls.py",
+    ]
     for relative in jaa10["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-10 materialised path missing: {relative}"

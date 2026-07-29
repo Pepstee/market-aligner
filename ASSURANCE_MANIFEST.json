@@ -573,9 +573,52 @@
       "evidence": []
     },
     "JAA-10": {
-      "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract, all three submit interruption windows recover or fail closed, and the exact seven-control executable mutation cohort passes; production certification is withheld.",
-      "increment": "implementation_in_progress_dependency_blocked",
+      "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract, all five submit interruption windows recover or fail closed, and the exact fourteen-control executable mutation cohort passes; production certification is withheld.",
+      "increment": "implementation_complete_pending_fable_ratification",
       "depends_on": ["JAA-09"],
+      "provisional_acceptance": {
+        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+        "independent_fable_certification": "absent_pending_ratification",
+        "implemented_source_git_revision": "43c3d90193e6092b430fdc59cacd7244caaf720b",
+        "implemented_source_tree": "283a1c1051d2ced9bbbecc7eb446dcd5dafe592a",
+        "implemented_source_content_revision": "sha256:8962b3f02120e0b0b88b8584f0e00a7be56a101fd0148d323010cc124be73bef",
+        "production_certification": "withheld",
+        "deputy_authority": {
+          "path_base": "software_factory_root",
+          "relative_path": "giga-user/reports/JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md",
+          "sha256": "8199c4848468669dd908eff8f4b92226df11b82831baf04fd9e663cabc462ef3"
+        },
+        "provisional_acceptance_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA10_PROVISIONAL_IMPLEMENTATION_ACCEPTANCE.md",
+          "sha256": "1508876b4a8ccffa2fde26c16a0c821c50c6ef978d436ae987e4f855a40f23d5"
+        },
+        "sonnet_post_repair_review": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/sonnet-jaa10-sol-deputy-post-repair-review-raw.json",
+          "sha256": "3d5e484d17b60dd8d43f8074e282b27cb4570e855d2fd99f74457a626db68a6f"
+        },
+        "focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa10-post-review-focused.log",
+          "sha256": "be3607d83f81b4e789380faa09b522325efb938c6bfab6dab70cb4c8ee48041e"
+        },
+        "mutation_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa10-mutation-cohort.log",
+          "sha256": "c964f2e41db90c718ffb4d189dd10f3a0ec82af05bd0bd3bd12fb85afcaf1b40"
+        },
+        "jaa09_restart_cross_slice_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa10-jaa09-restart-cross-slice.log",
+          "sha256": "ffee8a9701562fced0cff6b402682cb5387cb3f43ec696732232c80ab1f04711"
+        },
+        "ruff_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa10-post-review-ruff.log",
+          "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        }
+      },
       "owns": ["career_automation/shadow_certification.py"],
       "inputs": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
       "interfaces": [],
@@ -587,15 +630,22 @@
           "id": "JAA-10-mutation-cohort",
           "argv": [
             "{python}", "-m", "pytest", "-q",
+            "test_jaa07_negative_controls.py::test_factual_sentence_cannot_paraphrase_or_add_an_unsupported_metric",
+            "test_jaa08_negative_controls.py::test_non_bypassable_deterministic_preconditions[stale_vacancy-vacancy is stale]",
+            "test_jaa08_negative_controls.py::test_non_bypassable_deterministic_preconditions[ineligible-work right]",
+            "test_jaa08_negative_controls.py::test_non_bypassable_deterministic_preconditions[duplicate-duplicate application]",
+            "test_jaa08_negative_controls.py::test_action_capable_release_store_rejects_caller_forged_future_clock",
             "test_jaa09_negative_controls.py::test_executor_detects_upload_mutation_before_browser_materialization",
             "test_jaa09_negative_controls.py::test_executor_records_ambiguous_selector_without_advancing",
             "test_jaa10_negative_controls.py::test_frozen_field_map_drift_cannot_enter_shadow_evidence",
             "test_jaa09_negative_controls.py::test_invalid_jaa08_token_cannot_create_fixture_receipt",
+            "test_jaa09_negative_controls.py::test_self_consistent_wrong_payload_receipt_is_not_recorded",
+            "test_jaa09_negative_controls.py::test_fixture_refuses_other_loopback_host_port_or_origin",
             "test_jaa09_negative_controls.py::test_click_action_cannot_disguise_final_submission",
             "test_jaa09_negative_controls.py::test_duplicate_submit_and_second_review_produce_no_second_receipt",
             "test_jaa09_negative_controls.py::test_one_jaa08_token_cannot_prepare_two_browser_submit_runs"
           ],
-          "files": ["test_jaa09_negative_controls.py", "test_jaa10_negative_controls.py"],
+          "files": ["test_jaa07_negative_controls.py", "test_jaa08_negative_controls.py", "test_jaa09_negative_controls.py", "test_jaa10_negative_controls.py"],
           "negative_control": true
         }
       ],
