@@ -101,6 +101,8 @@ def test_style_critic_cannot_add_metrics_contacts_or_ai_cliches() -> None:
     for text in (
         "Improved delivery by 40 percent.",
         "Improved delivery by forty percent.",
+        "Ranked 3rd for service.",
+        "A 21st-century approach.",
         "Contact alex@example.test for details.",
         "This is a pivotal opportunity.",
         "Results matter — especially here.",
@@ -223,6 +225,11 @@ def test_style_proposal_cannot_target_changed_or_unknown_source_slot() -> None:
     )
     with pytest.raises(ValueError, match="exact content|exact source"):
         apply_style_proposal(changed, proposal)
+    with pytest.raises(ValueError, match="identity differs"):
+        apply_style_proposal(
+            replace(source, role_title="Different Role"),
+            proposal,
+        )
 
 
 def test_employer_sentence_must_match_hashed_fact_not_caller_label() -> None:
@@ -356,6 +363,33 @@ def test_artifact_tamper_and_changed_set_identity_never_overwrite(
         publish_application_artifacts(
             source,
             replace(artifacts, artifact_set_sha256="0" * 64),
+            root=root,
+            repository_root=ROOT,
+        )
+
+
+@pytest.mark.parametrize("attack", ("missing", "symlink"))
+def test_missing_or_symlinked_published_artifact_fails_closed(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    root = tmp_path / "artifacts"
+    receipt = publish_application_artifacts(
+        source,
+        artifacts,
+        root=root,
+        repository_root=ROOT,
+    )
+    directory = root / receipt.relative_directory
+    target = directory / "cv.txt"
+    target.unlink()
+    if attack == "symlink":
+        target.symlink_to(directory / "cover-letter.txt")
+    with pytest.raises(ValueError, match="missing or unsafe"):
+        load_published_artifacts(
+            artifacts.artifact_set_sha256,
             root=root,
             repository_root=ROOT,
         )

@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from career_automation.application_compiler import (
     CV_SECTION_ORDER,
     ApplicationSource,
@@ -31,6 +33,7 @@ from career_automation.application_artifacts import (
     ARTIFACT_FILENAMES,
     load_published_artifacts,
     publish_application_artifacts,
+    verify_published_application_artifacts,
 )
 from career_automation.application_strategy import (
     ApplicationStrategy,
@@ -314,7 +317,15 @@ def test_style_proposal_is_non_authoritative_atomic_and_rehashes_source() -> Non
     assert revised.source_id != source.source_id
     assert revised.facts == source.facts
     assert revised.contact == source.contact
-    assert replace(revised, style_slots=source.style_slots) != source
+    assert (
+        replace(
+            revised,
+            style_slots=source.style_slots,
+            source_id=source.source_id,
+            content_sha256=source.content_sha256,
+        )
+        == source
+    )
 
 
 def test_pdf_artifacts_are_two_page_cv_one_page_letter_and_parse_exactly() -> None:
@@ -384,6 +395,47 @@ def test_artifacts_publish_externally_once_with_private_exact_receipts(
         root=root,
         repository_root=ROOT,
     ) == receipt
+
+
+def test_published_artifacts_verify_without_file_changes_and_reject_absence(
+    tmp_path: Path,
+) -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    root = tmp_path / "published"
+    receipt = publish_application_artifacts(
+        source,
+        artifacts,
+        root=root,
+        repository_root=ROOT,
+    )
+    before = {
+        path.relative_to(root): (path.stat().st_mtime_ns, path.read_bytes())
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    assert verify_published_application_artifacts(
+        source,
+        artifacts,
+        root=root,
+        repository_root=ROOT,
+    ) == receipt
+    after = {
+        path.relative_to(root): (path.stat().st_mtime_ns, path.read_bytes())
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+    absent_root = tmp_path / "absent"
+    absent_root.mkdir()
+    with pytest.raises(KeyError):
+        verify_published_application_artifacts(
+            source,
+            artifacts,
+            root=absent_root,
+            repository_root=ROOT,
+        )
 
 
 def test_production_compiler_resolves_vacancy_contact_claim_and_employer_authority(

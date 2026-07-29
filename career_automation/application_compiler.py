@@ -35,6 +35,10 @@ WORD_FACT_TOKEN = re.compile(
     r"twelve|dozen|hundred|thousand|million|billion|percent|percentage)\b",
     re.IGNORECASE,
 )
+ORDINAL_FACT_TOKEN = re.compile(
+    r"\b\d+(?:st|nd|rd|th)\b",
+    re.IGNORECASE,
+)
 FORBIDDEN_MARKUP = (
     "<table",
     "</table",
@@ -402,7 +406,11 @@ class ApplicationSource:
 
 def validate_style_text(text: str) -> None:
     clean = _safe_plain_text(text, "style text")
-    if FACT_TOKEN.search(clean) or WORD_FACT_TOKEN.search(clean):
+    if (
+        FACT_TOKEN.search(clean)
+        or WORD_FACT_TOKEN.search(clean)
+        or ORDINAL_FACT_TOKEN.search(clean)
+    ):
         raise ValueError("style text cannot contain fact-like tokens")
     folded = clean.casefold()
     if any(pattern in folded for pattern in AI_STYLE_PATTERNS):
