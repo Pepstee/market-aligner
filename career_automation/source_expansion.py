@@ -1283,6 +1283,11 @@ def record_adapter_quality_snapshot(
 
 @dataclass(frozen=True)
 class AdapterExpansionEvaluation:
+    candidate: AdapterCandidate
+    measurement: AdapterMeasurement
+    evidence: tuple[AdapterEvidenceReference, ...]
+    baseline_quality: AdapterQualitySnapshot
+    candidate_quality: AdapterQualitySnapshot
     contract_sha256: str
     candidate_id: str
     adapter_id: str
@@ -1314,6 +1319,11 @@ class AdapterExpansionEvaluation:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
+            "candidate": self.candidate.document(),
+            "measurement": self.measurement.document(),
+            "evidence": tuple(row.document() for row in self.evidence),
+            "baseline_quality": self.baseline_quality.document(),
+            "candidate_quality": self.candidate_quality.document(),
             "contract_sha256": self.contract_sha256,
             "candidate_id": self.candidate_id,
             "adapter_id": self.adapter_id,
@@ -1346,6 +1356,13 @@ class AdapterExpansionEvaluation:
         return result
 
     def verify(self) -> None:
+        derived = _expected_adapter_evaluation_fields(
+            self.candidate,
+            self.measurement,
+            self.evidence,
+            baseline_quality=self.baseline_quality,
+            candidate_quality=self.candidate_quality,
+        )
         for value, label in (
             (self.contract_sha256, "evaluation contract hash"),
             (self.candidate_id, "evaluation candidate ID"),
@@ -1411,6 +1428,10 @@ class AdapterExpansionEvaluation:
             raise ValueError(
                 "eligible adapter lacks all required evidence kinds"
             )
+        if {key: getattr(self, key) for key in derived} != derived:
+            raise ValueError(
+                "adapter evaluation differs from its typed lineage"
+            )
         if (
             self.contract_sha256
             != FROZEN_SOURCE_EXPANSION_CONTRACT.contract_sha256
@@ -1427,6 +1448,148 @@ class AdapterExpansionEvaluation:
             self.document(include_identity=False)
         ):
             raise ValueError("adapter evaluation identity is invalid")
+
+
+def _expected_adapter_evaluation_fields(
+    candidate: AdapterCandidate,
+    measurement: AdapterMeasurement,
+    evidence: tuple[AdapterEvidenceReference, ...],
+    *,
+    baseline_quality: AdapterQualitySnapshot,
+    candidate_quality: AdapterQualitySnapshot,
+) -> dict[str, object]:
+    if not isinstance(candidate, AdapterCandidate):
+        raise TypeError("evaluation requires a typed adapter candidate")
+    if not isinstance(measurement, AdapterMeasurement):
+        raise TypeError("evaluation requires a typed adapter measurement")
+    if not evidence or not all(
+        isinstance(row, AdapterEvidenceReference) for row in evidence
+    ):
+        raise TypeError("evaluation requires typed adapter evidence")
+    if not isinstance(
+        baseline_quality, AdapterQualitySnapshot
+    ) or not isinstance(candidate_quality, AdapterQualitySnapshot):
+        raise TypeError("evaluation requires typed quality snapshots")
+    candidate.verify()
+    measurement.verify()
+    baseline_quality.verify()
+    candidate_quality.verify()
+    expected_candidate = (
+        candidate.candidate_id,
+        candidate.adapter_id,
+    )
+    if (
+        (measurement.candidate_id, measurement.adapter_id)
+        != expected_candidate
+        or (
+            baseline_quality.candidate_id,
+            baseline_quality.adapter_id,
+        )
+        != expected_candidate
+        or (
+            candidate_quality.candidate_id,
+            candidate_quality.adapter_id,
+        )
+        != expected_candidate
+    ):
+        raise ValueError("evaluation mixes adapter candidates")
+    if (
+        measurement.adapter_version != candidate.adapter_version
+        or baseline_quality.phase != "baseline"
+        or baseline_quality.evaluated_adapter_version
+        != candidate.rollback_adapter_version
+        or candidate_quality.phase != "candidate"
+        or candidate_quality.evaluated_adapter_version
+        != candidate.adapter_version
+    ):
+        raise ValueError("evaluation mixes workflow or rollback versions")
+    for snapshot in (baseline_quality, candidate_quality):
+        if (
+            snapshot.eligibility_policy_sha256
+            != candidate.eligibility_policy_sha256
+            or snapshot.payroll_policy_sha256
+            != candidate.payroll_policy_sha256
+        ):
+            raise ValueError("evaluation mixes eligibility or payroll policy")
+    if baseline_quality.sample_ids != candidate_quality.sample_ids:
+        raise ValueError("quality comparison requires identical membership")
+    evidence_ids: list[str] = []
+    evidence_kinds: list[str] = []
+    for row in evidence:
+        row.verify()
+        if (
+            row.candidate_id != candidate.candidate_id
+            or row.adapter_id != candidate.adapter_id
+            or row.adapter_version != candidate.adapter_version
+            or row.workflow_sha256 != candidate.workflow_sha256
+            or row.extraction_policy_sha256
+            != candidate.extraction_policy_sha256
+            or row.selector_policy_sha256
+            != candidate.selector_policy_sha256
+            or row.route_policy_sha256 != candidate.route_policy_sha256
+            or row.eligibility_policy_sha256
+            != candidate.eligibility_policy_sha256
+            or row.payroll_policy_sha256 != candidate.payroll_policy_sha256
+        ):
+            raise ValueError(
+                "adapter evidence belongs to another adapter or policy"
+            )
+        if (
+            datetime.fromisoformat(row.observed_at)
+            < datetime.fromisoformat(measurement.measurement_window_end)
+        ):
+            raise ValueError(
+                "adapter evidence must follow the measurement window"
+            )
+        evidence_ids.append(row.evidence_id)
+        evidence_kinds.append(row.evidence_kind)
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError("evaluation cannot reuse adapter evidence")
+    kinds = frozenset(evidence_kinds)
+    reasons: list[str] = []
+    if candidate.route_status == "unsupported":
+        reasons.append("unsupported_route")
+    if measurement.value_score <= 0:
+        reasons.append("non_positive_incremental_value")
+    for kind in EVIDENCE_KINDS:
+        if kind not in kinds:
+            reasons.append(f"missing_{kind}_evidence")
+    if (
+        candidate_quality.freshness_pass_rate_bp
+        < baseline_quality.freshness_pass_rate_bp
+    ):
+        reasons.append("source_freshness_regression")
+    if any(baseline_quality.hard_quality_values):
+        reasons.append("baseline_hard_quality_not_clean")
+    if any(candidate_quality.hard_quality_values):
+        reasons.append("candidate_hard_quality_regression")
+    reason_codes = tuple(
+        reason for reason in REASON_ORDER if reason in reasons
+    )
+    sorted_evidence = tuple(
+        sorted(evidence, key=lambda row: (row.evidence_kind, row.evidence_id))
+    )
+    return {
+        "contract_sha256": FROZEN_SOURCE_EXPANSION_CONTRACT.contract_sha256,
+        "candidate_id": candidate.candidate_id,
+        "adapter_id": candidate.adapter_id,
+        "adapter_version": candidate.adapter_version,
+        "rollback_adapter_version": candidate.rollback_adapter_version,
+        "measurement_id": measurement.measurement_id,
+        "cohort_id": measurement.cohort_id,
+        "measurement_window_start": measurement.measurement_window_start,
+        "measurement_window_end": measurement.measurement_window_end,
+        "value_score": measurement.value_score,
+        "baseline_quality_snapshot_id": baseline_quality.snapshot_id,
+        "candidate_quality_snapshot_id": candidate_quality.snapshot_id,
+        "evidence_ids": tuple(row.evidence_id for row in sorted_evidence),
+        "evidence_kinds": tuple(
+            sorted({row.evidence_kind for row in sorted_evidence})
+        ),
+        "reason_codes": reason_codes,
+        "eligible_for_review": not reason_codes,
+        "visible": True,
+    }
 
 
 def evaluate_adapter_candidate(
@@ -1554,6 +1717,11 @@ def evaluate_adapter_candidate(
     )
     body = {
         "schema_version": "jaa15.adapter-expansion-evaluation.v1",
+        "candidate": candidate.document(),
+        "measurement": measurement.document(),
+        "evidence": tuple(row.document() for row in sorted_evidence),
+        "baseline_quality": baseline_quality.document(),
+        "candidate_quality": candidate_quality.document(),
         "contract_sha256": contract.contract_sha256,
         "candidate_id": candidate.candidate_id,
         "adapter_id": candidate.adapter_id,
@@ -1580,13 +1748,37 @@ def evaluate_adapter_candidate(
         "certifies_slice": False,
     }
     return AdapterExpansionEvaluation(
-        **body,
+        candidate=candidate,
+        measurement=measurement,
+        evidence=sorted_evidence,
+        baseline_quality=baseline_quality,
+        candidate_quality=candidate_quality,
+        contract_sha256=contract.contract_sha256,
+        candidate_id=candidate.candidate_id,
+        adapter_id=candidate.adapter_id,
+        adapter_version=candidate.adapter_version,
+        rollback_adapter_version=candidate.rollback_adapter_version,
+        measurement_id=measurement.measurement_id,
+        cohort_id=measurement.cohort_id,
+        measurement_window_start=measurement.measurement_window_start,
+        measurement_window_end=measurement.measurement_window_end,
+        value_score=measurement.value_score,
+        baseline_quality_snapshot_id=baseline_quality.snapshot_id,
+        candidate_quality_snapshot_id=candidate_quality.snapshot_id,
+        evidence_ids=tuple(row.evidence_id for row in sorted_evidence),
+        evidence_kinds=tuple(
+            sorted({row.evidence_kind for row in sorted_evidence})
+        ),
+        reason_codes=reason_codes,
+        eligible_for_review=not reason_codes,
+        visible=True,
         evaluation_id=_content_hash(body),
     )
 
 
 @dataclass(frozen=True)
 class RankedAdapter:
+    evaluation: AdapterExpansionEvaluation
     rank: int
     candidate_id: str
     evaluation_id: str
@@ -1604,6 +1796,7 @@ class RankedAdapter:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
+            "evaluation": self.evaluation.document(),
             "rank": self.rank,
             "candidate_id": self.candidate_id,
             "evaluation_id": self.evaluation_id,
@@ -1618,6 +1811,9 @@ class RankedAdapter:
         return result
 
     def verify(self) -> None:
+        if not isinstance(self.evaluation, AdapterExpansionEvaluation):
+            raise TypeError("ranked adapter requires a typed evaluation")
+        self.evaluation.verify()
         if type(self.rank) is not int or self.rank < 1:
             raise ValueError("adapter rank must be positive")
         if type(self.value_score) is not int:
@@ -1641,6 +1837,30 @@ class RankedAdapter:
             not self.reason_codes
         ):
             raise ValueError("ranked adapter status differs from reasons")
+        expected = (
+            self.evaluation.candidate_id,
+            self.evaluation.evaluation_id,
+            self.evaluation.adapter_id,
+            self.evaluation.adapter_version,
+            self.evaluation.value_score,
+            (
+                "eligible_for_review"
+                if self.evaluation.eligible_for_review
+                else "blocked"
+            ),
+            self.evaluation.reason_codes,
+        )
+        actual = (
+            self.candidate_id,
+            self.evaluation_id,
+            self.adapter_id,
+            self.adapter_version,
+            self.value_score,
+            self.status,
+            self.reason_codes,
+        )
+        if actual != expected:
+            raise ValueError("ranked adapter differs from its evaluation")
         if (
             self.schema_version != "jaa15.ranked-adapter.v1"
             or self.entry_id
@@ -1771,6 +1991,7 @@ def rank_expansion_candidates(
     for rank, evaluation in enumerate(ordered, start=1):
         body = {
             "schema_version": "jaa15.ranked-adapter.v1",
+            "evaluation": evaluation.document(),
             "rank": rank,
             "candidate_id": evaluation.candidate_id,
             "evaluation_id": evaluation.evaluation_id,
@@ -1784,7 +2005,22 @@ def rank_expansion_candidates(
             ),
             "reason_codes": evaluation.reason_codes,
         }
-        entries.append(RankedAdapter(**body, entry_id=_content_hash(body)))
+        entries.append(RankedAdapter(
+            evaluation=evaluation,
+            rank=rank,
+            candidate_id=evaluation.candidate_id,
+            evaluation_id=evaluation.evaluation_id,
+            adapter_id=evaluation.adapter_id,
+            adapter_version=evaluation.adapter_version,
+            value_score=evaluation.value_score,
+            status=(
+                "eligible_for_review"
+                if evaluation.eligible_for_review
+                else "blocked"
+            ),
+            reason_codes=evaluation.reason_codes,
+            entry_id=_content_hash(body),
+        ))
     window_start, window_end = next(iter(windows))
     body = {
         "schema_version": "jaa15.expansion-portfolio.v1",

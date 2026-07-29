@@ -15,9 +15,12 @@ from career_automation.outcome_feedback import (
     record_pre_outcome_prediction,
 )
 from career_automation.source_expansion import (
+    AdapterExpansionEvaluation,
     AdapterMeasurement,
     AdapterValueObservation,
     FROZEN_SOURCE_EXPANSION_CONTRACT,
+    REQUIRED_EVIDENCE_KINDS,
+    RankedAdapter,
     SourceExpansionContract,
     _content_hash,
     compile_adapter_measurement,
@@ -306,6 +309,51 @@ def test_non_positive_value_is_visible_but_blocked() -> None:
     assert evaluation.value_score < 0
     assert evaluation.eligible_for_review is False
     assert evaluation.reason_codes == ("non_positive_incremental_value",)
+
+
+def test_evaluation_cannot_rehash_away_missing_runtime_evidence() -> None:
+    accepted = _evaluation(
+        _candidate("adapter:evaluation-lineage"),
+        include_real=False,
+    )
+    fields = {
+        **vars(accepted),
+        "evidence_ids": tuple(
+            _hash(f"forged-{kind}")
+            for kind in sorted(REQUIRED_EVIDENCE_KINDS)
+        ),
+        "evidence_kinds": tuple(sorted(REQUIRED_EVIDENCE_KINDS)),
+        "reason_codes": (),
+        "eligible_for_review": True,
+    }
+    shell = object.__new__(AdapterExpansionEvaluation)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["evaluation_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its typed lineage"):
+        AdapterExpansionEvaluation(**fields)
+
+
+def test_ranked_entry_cannot_rehash_a_detached_evaluation_summary() -> None:
+    evaluation = _evaluation(_candidate("adapter:ranked-lineage"))
+    entry = rank_expansion_candidates(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        (evaluation,),
+    ).entries[0]
+    fields = {
+        **vars(entry),
+        "candidate_id": _hash("detached-ranked-candidate"),
+    }
+    shell = object.__new__(RankedAdapter)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["entry_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its evaluation"):
+        RankedAdapter(**fields)
 
 
 def test_quality_snapshot_cannot_change_policy_or_phase() -> None:

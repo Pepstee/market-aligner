@@ -232,6 +232,13 @@ def test_complete_adapter_gate_is_review_only_and_preserves_quality() -> None:
         "independent_test",
         "real_runtime",
     )
+    assert evaluation.candidate == candidate
+    assert evaluation.measurement.candidate_id == candidate.candidate_id
+    assert tuple(
+        row.evidence_id for row in evaluation.evidence
+    ) == evaluation.evidence_ids
+    assert evaluation.baseline_quality.phase == "baseline"
+    assert evaluation.candidate_quality.phase == "candidate"
     assert evaluation.rollback_adapter_version == "v1"
     assert evaluation.activation_authority == "withheld"
     assert evaluation.production_certification == "withheld"
@@ -269,6 +276,9 @@ def test_portfolio_ranks_value_and_keeps_blocked_routes_visible() -> None:
         "missing_real_runtime_evidence",
     )
     assert portfolio.entries[2].reason_codes == ("unsupported_route",)
+    assert tuple(
+        row.evaluation.evaluation_id for row in portfolio.entries
+    ) == tuple(row.evaluation_id for row in portfolio.entries)
     assert portfolio.blocked_candidates_visible is True
     assert portfolio.activation_authority == "withheld"
     assert portfolio.certifies_slice is False
