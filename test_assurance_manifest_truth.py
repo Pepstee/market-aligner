@@ -270,7 +270,141 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             assert (ROOT / relative).is_file(), f"JAA-06 declared test missing: {relative}"
 
     jaa07 = components["JAA-07"]
-    assert jaa07["increment"] == "implementation_in_progress"
+    assert jaa07["increment"] == "implementation_complete"
+    assert jaa07["certification"] == {
+        "status": "certified_implementation",
+        "certified_source_git_revision": (
+            "8973ae3d473c43eeed397d273ef7088e2217b74b"
+        ),
+        "certified_source_tree": (
+            "428f8c94e5de133e81dfc33e56ac7f32d1797848"
+        ),
+        "certified_source_content_revision": (
+            "sha256:a701e3f0b00d1b2aab602ac2df274992"
+            "8fe2f4c741472f4add1131909ece0ea4"
+        ),
+        "jaa06_authority_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa06-post-finalization-raw.json"
+            ),
+            "sha256": (
+                "81d800b5aa70b3557b723d0023053b4d"
+                "bc6a913f05362704d8bfe99e22707aa3"
+            ),
+        },
+        "entry_fable_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa07-entry-gate-ruling.md"
+            ),
+            "sha256": (
+                "560d9116b1180bff650810e9e6a766ad"
+                "3c7948cac102352f3a655bca67f02237"
+            ),
+        },
+        "sonnet_exact_head_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa07-exact-head-review-raw.json"
+            ),
+            "sha256": (
+                "d109ae05082d74d9b26e92299fe47c5f"
+                "166d4f5baab49ac7ec9ecce8d6f26a74"
+            ),
+        },
+        "implementation_gate_fable_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa07-implementation-gate-raw.json"
+            ),
+            "sha256": (
+                "f3646ff08de5421146ac3ed94ee14b175"
+                "77d45265067c79bd1be847ffa598820"
+            ),
+        },
+        "sonnet_post_repair_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa07-post-repair-review-raw.json"
+            ),
+            "sha256": (
+                "b9e9aaed8222902acee9eadb6d4d8c38"
+                "d38113a88c66503661945cd951b735cc"
+            ),
+        },
+        "implementation_certification_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa07-post-repair-certification-raw.json"
+            ),
+            "sha256": (
+                "bdbf82c56b94afd3301d6003e5d6673e"
+                "94c8e009be08d1e2692d3528fc2b402c"
+            ),
+        },
+        "focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa07-post-review-repair-focused.log"
+            ),
+            "sha256": (
+                "a8cef484db468214d4b1b439333a4fbfe"
+                "3b534c841fe03219d8b8142b946efa8"
+            ),
+        },
+        "cross_slice_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa07-post-review-repair-cross-slice.log"
+            ),
+            "sha256": (
+                "d40086ee7c5ab09afff73766962f8c3a"
+                "56f0e612418e691fb91b51c9c0d7ef83"
+            ),
+        },
+        "evaluator_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa07-post-review-repair-evaluator.log"
+            ),
+            "sha256": (
+                "5cf1f1f5bcee57aaf8a517edb734cf9d"
+                "adf1802e44f831defd105418c41ef1fe"
+            ),
+        },
+        "ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa07-post-review-repair-ruff.log"
+            ),
+            "sha256": (
+                "82b3e6a6c090a57601d22943bd23fca9"
+                "218d1031dbe5a7b754092f9a156b4f18"
+            ),
+        },
+        "full_regression_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa07-finalization-cross-slice-regression-green.log"
+            ),
+            "sha256": (
+                "edfaa02171a0abda58b2a3acd0c73542"
+                "fff28be171517101852b9778753369c0"
+            ),
+        },
+    }
     for relative in jaa07["owns"]:
         assert (ROOT / relative).is_file(), f"JAA-07 materialised path missing: {relative}"
     for test in jaa07["tests"]:
