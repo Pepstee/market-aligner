@@ -159,6 +159,37 @@ def test_stale_or_future_employer_guidance_requires_refresh() -> None:
         )
 
 
+def test_direct_pack_construction_cannot_bypass_freshness_policy() -> None:
+    pack, _source_row = _pack()
+    with pytest.raises(ValueError, match="deadline differs from policy"):
+        replace(
+            pack.employer_authorities[0],
+            freshness_deadline="2032-01-02",
+        )
+
+    for as_of, message in (
+        ("2029-01-03", "future employer evidence"),
+        ("2032-01-03", "stale.*refresh"),
+    ):
+        body = pack.document(include_identity=False)
+        body["as_of"] = as_of
+        pack_id = hashlib.sha256(
+            json.dumps(
+                body,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        with pytest.raises(ValueError, match=message):
+            type(pack)(**{
+                **vars(pack),
+                "as_of": as_of,
+                "pack_id": pack_id,
+            })
+
+
 def test_preparation_pack_tamper_cannot_claim_action_or_new_authority() -> None:
     pack, _source_row = _pack()
     with pytest.raises(ValueError, match="cannot act or certify"):

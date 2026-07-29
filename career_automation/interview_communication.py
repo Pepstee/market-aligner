@@ -264,7 +264,7 @@ class EmployerGuidanceAuthority:
         ):
             _digest(value, label)
         _required(self.employer_claim_id, "employer claim ID")
-        IntelligenceKind(self.intelligence_kind)
+        kind = IntelligenceKind(self.intelligence_kind)
         if (
             not self.source_ids
             or len(self.source_ids) != len(set(self.source_ids))
@@ -281,8 +281,13 @@ class EmployerGuidanceAuthority:
         observed = datetime.fromisoformat(self.observed_at)
         deadline = date.fromisoformat(self.freshness_deadline)
         _aware(observed, "employer guidance observation time")
-        if deadline < observed.date():
-            raise ValueError("employer guidance freshness deadline is invalid")
+        expected_deadline = observed.date() + timedelta(
+            days=FRESHNESS_DAYS[kind]
+        )
+        if deadline != expected_deadline:
+            raise ValueError(
+                "employer guidance freshness deadline differs from policy"
+            )
 
     def document(self) -> dict[str, object]:
         return {
@@ -413,7 +418,7 @@ class InterviewPreparationPack:
             _digest(value, label)
         _required(self.application_id, "preparation application ID")
         _required(self.job_key, "preparation job key")
-        date.fromisoformat(self.as_of)
+        as_of = date.fromisoformat(self.as_of)
         if (
             self.contract_sha256
             != FROZEN_INTERVIEW_COMMUNICATION_CONTRACT.contract_sha256
@@ -432,6 +437,17 @@ class InterviewPreparationPack:
             or len(employer_ids) != len(set(employer_ids))
         ):
             raise ValueError("preparation authority must be non-empty and unique")
+        for row in self.employer_authorities:
+            observed = datetime.fromisoformat(row.observed_at)
+            deadline = date.fromisoformat(row.freshness_deadline)
+            if observed.date() > as_of:
+                raise ValueError(
+                    "future employer evidence cannot guide preparation"
+                )
+            if as_of > deadline:
+                raise ValueError(
+                    "employer guidance is stale; source refresh is required"
+                )
         allowed = set(candidate_ids) | set(employer_ids)
         item_ids = tuple(row.item_id for row in self.items)
         if not item_ids or len(item_ids) != len(set(item_ids)):
