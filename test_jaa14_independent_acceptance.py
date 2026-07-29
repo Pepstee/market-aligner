@@ -279,6 +279,11 @@ def test_calibration_excludes_censoring_from_score_arithmetic() -> None:
         FROZEN_OUTCOME_FEEDBACK_CONTRACT,
         (resolved, censored),
     )
+    assert report.scores == (resolved, censored)
+    assert report.document()["scores"] == (
+        resolved.document(),
+        censored.document(),
+    )
     assert report.resolved_count == 1
     assert report.censored_count == 1
     assert report.mean_brier_bp == resolved.squared_error_bp
@@ -359,6 +364,13 @@ def test_policy_candidate_requires_locked_non_regression_and_holdout_gain() -> N
         locked_candidate=locked_candidate,
         holdout_baseline=holdout_baseline,
         holdout_candidate=holdout_candidate,
+    )
+    assert evaluation.locked_baseline is locked_baseline
+    assert evaluation.locked_candidate is locked_candidate
+    assert evaluation.holdout_baseline is holdout_baseline
+    assert evaluation.holdout_candidate is holdout_candidate
+    assert evaluation.document()["locked_baseline"] == (
+        locked_baseline.document()
     )
     assert evaluation.eligible_for_review is True
     assert evaluation.reason_codes == (

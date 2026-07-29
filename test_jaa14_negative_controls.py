@@ -304,6 +304,44 @@ def test_calibration_report_rejects_duplicates_and_mixed_cohorts() -> None:
         )
 
 
+def test_calibration_report_recomputes_aggregates_from_typed_scores() -> None:
+    report = compile_calibration_report(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        (
+            _score(
+                "application:report-forgery",
+                policy_sha256=BASE_POLICY,
+                probability_bp=5_000,
+                cohort_id="cohort:report-forgery",
+                cohort_kind="locked",
+                progressed=True,
+            ),
+        ),
+    )
+    assert report.mean_brier_bp == 2_500
+    forged_fields = {
+        **vars(report),
+        "mean_brier_bp": 0,
+    }
+    identity_shell = object.__new__(type(report))
+    for field_name, value in forged_fields.items():
+        object.__setattr__(identity_shell, field_name, value)
+    forged_fields["report_id"] = hashlib.sha256(
+        json.dumps(
+            identity_shell.document(include_identity=False),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(
+        ValueError,
+        match="differs from its typed scores",
+    ):
+        type(report)(**forged_fields)
+
+
 def _report(
     member_prefix: str,
     policy: str,
@@ -482,6 +520,83 @@ def test_locked_regression_or_flat_holdout_cannot_be_review_eligible() -> None:
     )
     assert evaluation.promotion_authority == "withheld"
     assert evaluation.applied is False
+
+
+def test_promotion_review_recomputes_verdict_from_typed_reports() -> None:
+    experiment = compile_strategy_experiment(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        experiment_name="forged promotion experiment",
+        variable_names=("positioning",),
+        baseline_value_sha256=hashlib.sha256(b"baseline").hexdigest(),
+        treatment_value_sha256=hashlib.sha256(b"treatment").hexdigest(),
+        assignment_policy_sha256=hashlib.sha256(b"assignment").hexdigest(),
+        created_at=PREDICTED_AT - timedelta(days=1),
+    )
+    evaluation = evaluate_policy_candidate(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        locked_baseline=_report(
+            "locked-forgery",
+            BASE_POLICY,
+            8_000,
+            "cohort:locked-forgery",
+            "locked",
+            experiment,
+            "baseline",
+        ),
+        locked_candidate=_report(
+            "locked-forgery",
+            CANDIDATE_POLICY,
+            4_000,
+            "cohort:locked-forgery",
+            "locked",
+            experiment,
+            "treatment",
+        ),
+        holdout_baseline=_report(
+            "holdout-forgery",
+            BASE_POLICY,
+            7_000,
+            "cohort:holdout-forgery",
+            "holdout",
+            experiment,
+            "baseline",
+        ),
+        holdout_candidate=_report(
+            "holdout-forgery",
+            CANDIDATE_POLICY,
+            7_000,
+            "cohort:holdout-forgery",
+            "holdout",
+            experiment,
+            "treatment",
+        ),
+    )
+    assert evaluation.eligible_for_review is False
+    forged_fields = {
+        **vars(evaluation),
+        "eligible_for_review": True,
+        "reason_codes": (
+            "locked_non_regression",
+            "holdout_improvement",
+        ),
+    }
+    identity_shell = object.__new__(type(evaluation))
+    for field_name, value in forged_fields.items():
+        object.__setattr__(identity_shell, field_name, value)
+    forged_fields["evaluation_id"] = hashlib.sha256(
+        json.dumps(
+            identity_shell.document(include_identity=False),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(
+        ValueError,
+        match="differs from typed calibration reports",
+    ):
+        type(evaluation)(**forged_fields)
 
 
 def test_promotion_evaluation_cannot_apply_or_claim_certification() -> None:

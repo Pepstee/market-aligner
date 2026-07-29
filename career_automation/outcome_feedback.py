@@ -964,6 +964,7 @@ def score_prediction(
 
 @dataclass(frozen=True)
 class CalibrationReport:
+    scores: tuple[ScoredPrediction, ...]
     contract_sha256: str
     predictor_policy_sha256: str
     cohort_id: str
@@ -978,9 +979,10 @@ class CalibrationReport:
     report_id: str
     policy_promotion_authority: str = "withheld"
     dependency_satisfied: bool = False
-    schema_version: str = "jaa14.calibration-report.v1"
+    schema_version: str = "jaa14.calibration-report.v2"
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "scores", tuple(self.scores))
         object.__setattr__(
             self,
             "application_ids",
@@ -992,6 +994,7 @@ class CalibrationReport:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
+            "scores": tuple(row.document() for row in self.scores),
             "contract_sha256": self.contract_sha256,
             "predictor_policy_sha256": self.predictor_policy_sha256,
             "cohort_id": self.cohort_id,
@@ -1011,6 +1014,12 @@ class CalibrationReport:
         return result
 
     def verify(self) -> None:
+        if not self.scores or not all(
+            isinstance(row, ScoredPrediction) for row in self.scores
+        ):
+            raise TypeError("calibration report requires typed scores")
+        for row in self.scores:
+            row.verify()
         for value, label in (
             (self.contract_sha256, "report contract hash"),
             (self.predictor_policy_sha256, "report predictor policy hash"),
@@ -1071,21 +1080,55 @@ class CalibrationReport:
             or self.dependency_satisfied is not False
         ):
             raise ValueError("local calibration report cannot promote")
-        if self.schema_version != "jaa14.calibration-report.v1":
+        if self.schema_version != "jaa14.calibration-report.v2":
             raise ValueError("calibration report schema is unsupported")
+        (
+            expected_policy_id,
+            expected_cohort_id,
+            expected_cohort_kind,
+            expected_experiment_id,
+            expected_experiment_arm,
+            expected_application_ids,
+            expected_score_ids,
+            expected_resolved_count,
+            expected_censored_count,
+            expected_mean_brier,
+        ) = _derive_calibration_fields(self.scores)
+        if (
+            self.predictor_policy_sha256 != expected_policy_id
+            or self.cohort_id != expected_cohort_id
+            or self.cohort_kind != expected_cohort_kind
+            or self.experiment_id != expected_experiment_id
+            or self.experiment_arm != expected_experiment_arm
+            or self.application_ids != expected_application_ids
+            or self.score_ids != expected_score_ids
+            or self.resolved_count != expected_resolved_count
+            or self.censored_count != expected_censored_count
+            or self.mean_brier_bp != expected_mean_brier
+        ):
+            raise ValueError(
+                "calibration report differs from its typed scores"
+            )
         if self.report_id != _content_hash(
             self.document(include_identity=False)
         ):
             raise ValueError("calibration report differs from exact scores")
 
 
-def compile_calibration_report(
-    contract: OutcomeFeedbackContract,
-    scores: Iterable[ScoredPrediction],
-) -> CalibrationReport:
-    if contract != FROZEN_OUTCOME_FEEDBACK_CONTRACT:
-        raise ValueError("report requires the canonical outcome contract")
-    rows = tuple(scores)
+def _derive_calibration_fields(
+    rows: tuple[ScoredPrediction, ...],
+) -> tuple[
+    str,
+    str,
+    str,
+    str | None,
+    str | None,
+    tuple[str, ...],
+    tuple[str, ...],
+    int,
+    int,
+    int | None,
+]:
     if not rows or not all(isinstance(row, ScoredPrediction) for row in rows):
         raise TypeError("calibration report requires typed scores")
     for row in rows:
@@ -1125,13 +1168,42 @@ def compile_calibration_report(
         )
         // len(resolved)
     )
-    policy_id = next(iter(policy_ids))
-    cohort_id = next(iter(cohort_ids))
-    cohort_kind = next(iter(cohort_kinds))
-    experiment_id = next(iter(experiment_ids))
-    experiment_arm = next(iter(experiment_arms))
+    return (
+        next(iter(policy_ids)),
+        next(iter(cohort_ids)),
+        next(iter(cohort_kinds)),
+        next(iter(experiment_ids)),
+        next(iter(experiment_arms)),
+        application_ids,
+        tuple(row.score_id for row in rows),
+        len(resolved),
+        censored_count,
+        mean_brier,
+    )
+
+
+def compile_calibration_report(
+    contract: OutcomeFeedbackContract,
+    scores: Iterable[ScoredPrediction],
+) -> CalibrationReport:
+    if contract != FROZEN_OUTCOME_FEEDBACK_CONTRACT:
+        raise ValueError("report requires the canonical outcome contract")
+    rows = tuple(scores)
+    (
+        policy_id,
+        cohort_id,
+        cohort_kind,
+        experiment_id,
+        experiment_arm,
+        application_ids,
+        score_ids,
+        resolved_count,
+        censored_count,
+        mean_brier,
+    ) = _derive_calibration_fields(rows)
     body = {
-        "schema_version": "jaa14.calibration-report.v1",
+        "schema_version": "jaa14.calibration-report.v2",
+        "scores": tuple(row.document() for row in rows),
         "contract_sha256": contract.contract_sha256,
         "predictor_policy_sha256": policy_id,
         "cohort_id": cohort_id,
@@ -1139,14 +1211,15 @@ def compile_calibration_report(
         "experiment_id": experiment_id,
         "experiment_arm": experiment_arm,
         "application_ids": application_ids,
-        "score_ids": tuple(row.score_id for row in rows),
-        "resolved_count": len(resolved),
+        "score_ids": score_ids,
+        "resolved_count": resolved_count,
         "censored_count": censored_count,
         "mean_brier_bp": mean_brier,
         "policy_promotion_authority": "withheld",
         "dependency_satisfied": False,
     }
     return CalibrationReport(
+        scores=rows,
         contract_sha256=contract.contract_sha256,
         predictor_policy_sha256=policy_id,
         cohort_id=cohort_id,
@@ -1154,8 +1227,8 @@ def compile_calibration_report(
         experiment_id=experiment_id,
         experiment_arm=experiment_arm,
         application_ids=application_ids,
-        score_ids=tuple(body["score_ids"]),
-        resolved_count=len(resolved),
+        score_ids=score_ids,
+        resolved_count=resolved_count,
         censored_count=censored_count,
         mean_brier_bp=mean_brier,
         report_id=_content_hash(body),
@@ -1164,6 +1237,10 @@ def compile_calibration_report(
 
 @dataclass(frozen=True)
 class PromotionEvaluation:
+    locked_baseline: CalibrationReport
+    locked_candidate: CalibrationReport
+    holdout_baseline: CalibrationReport
+    holdout_candidate: CalibrationReport
     contract_sha256: str
     baseline_policy_sha256: str
     candidate_policy_sha256: str
@@ -1179,7 +1256,7 @@ class PromotionEvaluation:
     applied: bool = False
     dependency_satisfied: bool = False
     certifies_slice: bool = False
-    schema_version: str = "jaa14.promotion-evaluation.v1"
+    schema_version: str = "jaa14.promotion-evaluation.v2"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
@@ -1188,6 +1265,10 @@ class PromotionEvaluation:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
+            "locked_baseline": self.locked_baseline.document(),
+            "locked_candidate": self.locked_candidate.document(),
+            "holdout_baseline": self.holdout_baseline.document(),
+            "holdout_candidate": self.holdout_candidate.document(),
             "contract_sha256": self.contract_sha256,
             "baseline_policy_sha256": self.baseline_policy_sha256,
             "candidate_policy_sha256": self.candidate_policy_sha256,
@@ -1208,6 +1289,18 @@ class PromotionEvaluation:
         return result
 
     def verify(self) -> None:
+        reports = (
+            self.locked_baseline,
+            self.locked_candidate,
+            self.holdout_baseline,
+            self.holdout_candidate,
+        )
+        if not all(isinstance(row, CalibrationReport) for row in reports):
+            raise TypeError(
+                "promotion review requires typed calibration reports"
+            )
+        for row in reports:
+            row.verify()
         for value, label in (
             (self.contract_sha256, "promotion contract hash"),
             (self.baseline_policy_sha256, "baseline policy hash"),
@@ -1254,24 +1347,44 @@ class PromotionEvaluation:
             or self.certifies_slice is not False
         ):
             raise ValueError("local promotion evaluation cannot apply policy")
-        if self.schema_version != "jaa14.promotion-evaluation.v1":
+        if self.schema_version != "jaa14.promotion-evaluation.v2":
             raise ValueError("promotion evaluation schema is unsupported")
+        (
+            expected_baseline_policy,
+            expected_candidate_policy,
+            expected_eligible,
+            expected_reasons,
+        ) = _derive_promotion_fields(*reports)
+        if (
+            self.baseline_policy_sha256 != expected_baseline_policy
+            or self.candidate_policy_sha256 != expected_candidate_policy
+            or self.locked_baseline_report_id
+            != self.locked_baseline.report_id
+            or self.locked_candidate_report_id
+            != self.locked_candidate.report_id
+            or self.holdout_baseline_report_id
+            != self.holdout_baseline.report_id
+            or self.holdout_candidate_report_id
+            != self.holdout_candidate.report_id
+            or self.rollback_policy_sha256 != expected_baseline_policy
+            or self.eligible_for_review is not expected_eligible
+            or self.reason_codes != expected_reasons
+        ):
+            raise ValueError(
+                "promotion evaluation differs from typed calibration reports"
+            )
         if self.evaluation_id != _content_hash(
             self.document(include_identity=False)
         ):
             raise ValueError("promotion evaluation differs from exact reports")
 
 
-def evaluate_policy_candidate(
-    contract: OutcomeFeedbackContract,
-    *,
+def _derive_promotion_fields(
     locked_baseline: CalibrationReport,
     locked_candidate: CalibrationReport,
     holdout_baseline: CalibrationReport,
     holdout_candidate: CalibrationReport,
-) -> PromotionEvaluation:
-    if contract != FROZEN_OUTCOME_FEEDBACK_CONTRACT:
-        raise ValueError("promotion review requires the canonical contract")
+) -> tuple[str, str, bool, tuple[str, ...]]:
     reports = (
         locked_baseline,
         locked_candidate,
@@ -1347,8 +1460,36 @@ def evaluate_policy_candidate(
             if not holdout_ok:
                 reason_rows.append("holdout_not_improved")
             reasons = tuple(reason_rows)
+    return baseline_policy, candidate_policy, eligible, reasons
+
+
+def evaluate_policy_candidate(
+    contract: OutcomeFeedbackContract,
+    *,
+    locked_baseline: CalibrationReport,
+    locked_candidate: CalibrationReport,
+    holdout_baseline: CalibrationReport,
+    holdout_candidate: CalibrationReport,
+) -> PromotionEvaluation:
+    if contract != FROZEN_OUTCOME_FEEDBACK_CONTRACT:
+        raise ValueError("promotion review requires the canonical contract")
+    (
+        baseline_policy,
+        candidate_policy,
+        eligible,
+        reasons,
+    ) = _derive_promotion_fields(
+        locked_baseline,
+        locked_candidate,
+        holdout_baseline,
+        holdout_candidate,
+    )
     body = {
-        "schema_version": "jaa14.promotion-evaluation.v1",
+        "schema_version": "jaa14.promotion-evaluation.v2",
+        "locked_baseline": locked_baseline.document(),
+        "locked_candidate": locked_candidate.document(),
+        "holdout_baseline": holdout_baseline.document(),
+        "holdout_candidate": holdout_candidate.document(),
         "contract_sha256": contract.contract_sha256,
         "baseline_policy_sha256": baseline_policy,
         "candidate_policy_sha256": candidate_policy,
@@ -1365,6 +1506,10 @@ def evaluate_policy_candidate(
         "certifies_slice": False,
     }
     return PromotionEvaluation(
+        locked_baseline=locked_baseline,
+        locked_candidate=locked_candidate,
+        holdout_baseline=holdout_baseline,
+        holdout_candidate=holdout_candidate,
         contract_sha256=contract.contract_sha256,
         baseline_policy_sha256=baseline_policy,
         candidate_policy_sha256=candidate_policy,
