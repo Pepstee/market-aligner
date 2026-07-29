@@ -14,7 +14,16 @@ from career_automation.application_artifacts import (
     PublishedArtifactReceipt,
 )
 from career_automation.ats_fixture import FixtureReceipt
-from career_automation.browser_workflows import SubmissionProof
+from career_automation.browser_workflows import (
+    ActionKind,
+    BrowserAction,
+    BrowserWorkflow,
+    SelectorCandidate,
+    SelectorPlan,
+    SelectorStrategy,
+    SubmissionProof,
+    fixture_submit_event_sha256,
+)
 from career_automation.employer_research import (
     FRESHNESS_DAYS,
     RawResponseCache,
@@ -24,6 +33,7 @@ from career_automation.interview_communication import (
     compile_employer_dossier_evidence,
     compile_follow_up_draft_plan,
     compile_interview_preparation_pack,
+    compile_local_submission_context,
     compile_local_debrief_evidence,
 )
 from career_automation.models import PipelineState
@@ -46,6 +56,32 @@ from test_jaa07_independent_acceptance import _source
 
 APPLICATION_ID = "application:local-interview-fixture"
 BASE_TIME = datetime(2030, 1, 2, 9, 0, tzinfo=timezone.utc)
+SUBMISSION_RUN_ID = "run:local-interview-fixture"
+SUBMISSION_STEP_ID = "submit"
+SUBMISSION_WORKFLOW = BrowserWorkflow(
+    "jaa13_local_fixture_submission",
+    (
+        BrowserAction(
+            SUBMISSION_STEP_ID,
+            ActionKind.SUBMIT,
+            selectors=SelectorPlan(
+                (
+                    SelectorCandidate(
+                        SelectorStrategy.TEST_ID,
+                        "final-submit",
+                    ),
+                )
+            ),
+            required_output_keys=(
+                "receipt_id",
+                "receipt_payload_sha256",
+                "screenshot_sha256",
+                "field_map_sha256",
+                "submit_event_sha256",
+            ),
+        ),
+    ),
+)
 KINDS = ("company", "role", "product", "hiring", "operational_health")
 EXCERPTS = {
     "company": (
@@ -290,22 +326,45 @@ def _release_lineage(source, employer_evidence):
         fixture,
         receipt_id=_hash(fixture.document(include_identity=False)),
     )
+    token_sha256 = hashlib.sha256(b"token").hexdigest()
+    screenshot_sha256 = hashlib.sha256(b"screenshot").hexdigest()
+    field_map_sha256 = hashlib.sha256(b"field-map").hexdigest()
+    submission_context = compile_local_submission_context(
+        FROZEN_INTERVIEW_COMMUNICATION_CONTRACT,
+        run_id=SUBMISSION_RUN_ID,
+        workflow=SUBMISSION_WORKFLOW,
+        step_id=SUBMISSION_STEP_ID,
+        release_manifest_sha256=manifest.release_manifest_sha256,
+        token_sha256=token_sha256,
+        field_map_sha256=field_map_sha256,
+    )
     proof = SubmissionProof(
         release_manifest_sha256=manifest.release_manifest_sha256,
-        token_sha256=hashlib.sha256(b"token").hexdigest(),
+        token_sha256=token_sha256,
         receipt_id=fixture.receipt_id,
         receipt_payload_sha256=fixture.payload_sha256,
-        screenshot_sha256=hashlib.sha256(b"screenshot").hexdigest(),
-        field_map_sha256=hashlib.sha256(b"field-map").hexdigest(),
-        submit_event_sha256=hashlib.sha256(b"submit-event").hexdigest(),
+        screenshot_sha256=screenshot_sha256,
+        field_map_sha256=field_map_sha256,
+        submit_event_sha256=fixture_submit_event_sha256(
+            run_id=submission_context.run_id,
+            workflow_sha256=submission_context.workflow_sha256,
+            step_id=submission_context.step_id,
+            release_manifest_sha256=(
+                submission_context.release_manifest_sha256
+            ),
+            receipt_id=fixture.receipt_id,
+            receipt_payload_sha256=fixture.payload_sha256,
+            screenshot_sha256=screenshot_sha256,
+            field_map_sha256=submission_context.field_map_sha256,
+        ),
     )
-    return manifest, publication, proof, fixture
+    return manifest, publication, submission_context, proof, fixture
 
 
 def _pack():
     source, _strategy = _source()
     employer_evidence = _employer_evidence(source)
-    manifest, publication, proof, fixture = _release_lineage(
+    manifest, publication, submission_context, proof, fixture = _release_lineage(
         source,
         employer_evidence,
     )
@@ -322,6 +381,7 @@ def _pack():
         timeline=_timeline(),
         release_manifest=manifest,
         publication_receipt=publication,
+        submission_context=submission_context,
         submission_proof=proof,
         fixture_receipt=fixture,
         employer_evidence=employer_evidence,
@@ -357,6 +417,26 @@ def test_preparation_pack_reuses_exact_fact_authority_and_current_sources() -> N
     assert pack.publication_receipt.source_id == source.source_id
     assert pack.submission_proof.release_manifest_sha256 == (
         pack.release_manifest.release_manifest_sha256
+    )
+    assert pack.submission_proof.token_sha256 == (
+        pack.submission_context.token_sha256
+    )
+    assert pack.submission_proof.field_map_sha256 == (
+        pack.submission_context.field_map_sha256
+    )
+    assert pack.submission_proof.submit_event_sha256 == (
+        fixture_submit_event_sha256(
+            run_id=pack.submission_context.run_id,
+            workflow_sha256=pack.submission_context.workflow_sha256,
+            step_id=pack.submission_context.step_id,
+            release_manifest_sha256=(
+                pack.submission_context.release_manifest_sha256
+            ),
+            receipt_id=pack.fixture_receipt.receipt_id,
+            receipt_payload_sha256=pack.fixture_receipt.payload_sha256,
+            screenshot_sha256=pack.submission_proof.screenshot_sha256,
+            field_map_sha256=pack.submission_context.field_map_sha256,
+        )
     )
     assert pack.fixture_receipt.application_id == APPLICATION_ID
     assert pack.timeline == _timeline()

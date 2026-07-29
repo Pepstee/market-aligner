@@ -10,6 +10,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from career_automation.browser_workflows import fixture_submit_event_sha256
 from career_automation.interview_communication import (
     EmbeddedPublicCapture,
     EmployerDossierEvidence,
@@ -19,6 +20,7 @@ from career_automation.interview_communication import (
     compile_follow_up_draft_plan,
     compile_interview_preparation_pack,
     compile_local_debrief_evidence,
+    compile_local_submission_context,
 )
 from career_automation.models import PipelineState
 from career_automation.release_gate import (
@@ -33,6 +35,9 @@ from career_automation.status_ingestion import (
 from test_jaa13_independent_acceptance import (
     APPLICATION_ID,
     BASE_TIME,
+    SUBMISSION_RUN_ID,
+    SUBMISSION_STEP_ID,
+    SUBMISSION_WORKFLOW,
     _canonical_json,
     _hash,
     _pack,
@@ -60,6 +65,7 @@ def _preparation_base():
         "timeline": pack.timeline,
         "release_manifest": pack.release_manifest,
         "publication_receipt": pack.publication_receipt,
+        "submission_context": pack.submission_context,
         "submission_proof": pack.submission_proof,
         "fixture_receipt": pack.fixture_receipt,
         "employer_evidence": pack.employer_evidence,
@@ -123,6 +129,90 @@ def test_preparation_requires_matching_interview_stage_inputs() -> None:
             **{
                 **base,
                 "application_id": "another-application",
+            },
+            candidate_sentence_ids=candidate_ids,
+            employer_sentence_ids=employer_ids,
+        )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"token_sha256": "e" * 64},
+        {"screenshot_sha256": "d" * 64},
+        {"field_map_sha256": "c" * 64},
+        {"submit_event_sha256": "f" * 64},
+    ),
+)
+def test_preparation_rejects_inconsistent_submission_proof(
+    changes: dict[str, str],
+) -> None:
+    _pack_row, _source_row, candidate_ids, employer_ids = _selections()
+    base = _preparation_base()
+    with pytest.raises(
+        ValueError,
+        match="submission proof differs|submit event differs",
+    ):
+        compile_interview_preparation_pack(
+            **{
+                **base,
+                "submission_proof": replace(
+                    base["submission_proof"],
+                    **changes,
+                ),
+            },
+            candidate_sentence_ids=candidate_ids,
+            employer_sentence_ids=employer_ids,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("run_id", "workflow", "step_id"),
+)
+def test_preparation_rederives_event_from_exact_jaa09_context(
+    field: str,
+) -> None:
+    _pack_row, _source_row, candidate_ids, employer_ids = _selections()
+    base = _preparation_base()
+    context_values = {
+        "run_id": SUBMISSION_RUN_ID,
+        "workflow": SUBMISSION_WORKFLOW,
+        "step_id": SUBMISSION_STEP_ID,
+        "release_manifest_sha256": (
+            base["submission_context"].release_manifest_sha256
+        ),
+        "token_sha256": base["submission_context"].token_sha256,
+        "field_map_sha256": base["submission_context"].field_map_sha256,
+    }
+    if field == "run_id":
+        context_values["run_id"] = "run:different-local-fixture"
+    elif field == "workflow":
+        context_values["workflow"] = replace(
+            SUBMISSION_WORKFLOW,
+            name="jaa13_different_local_fixture_submission",
+        )
+    else:
+        changed_step_id = "different-submit-step"
+        context_values["workflow"] = replace(
+            SUBMISSION_WORKFLOW,
+            actions=(
+                replace(
+                    SUBMISSION_WORKFLOW.actions[0],
+                    step_id=changed_step_id,
+                ),
+            ),
+        )
+        context_values["step_id"] = changed_step_id
+    context = compile_local_submission_context(
+        FROZEN_INTERVIEW_COMMUNICATION_CONTRACT,
+        **context_values,
+    )
+    with pytest.raises(ValueError, match="submit event differs"):
+        compile_interview_preparation_pack(
+            **{
+                **base,
+                "submission_context": context,
             },
             candidate_sentence_ids=candidate_ids,
             employer_sentence_ids=employer_ids,
@@ -277,14 +367,27 @@ def test_release_publication_proof_and_receipt_lineage_cannot_drift() -> None:
         fixture,
         receipt_id=_hash(fixture.document(include_identity=False)),
     )
+    changed_proof = replace(
+        pack.submission_proof,
+        receipt_id=fixture.receipt_id,
+        submit_event_sha256=fixture_submit_event_sha256(
+            run_id=pack.submission_context.run_id,
+            workflow_sha256=pack.submission_context.workflow_sha256,
+            step_id=pack.submission_context.step_id,
+            release_manifest_sha256=(
+                pack.submission_context.release_manifest_sha256
+            ),
+            receipt_id=fixture.receipt_id,
+            receipt_payload_sha256=fixture.payload_sha256,
+            screenshot_sha256=pack.submission_proof.screenshot_sha256,
+            field_map_sha256=pack.submission_context.field_map_sha256,
+        ),
+    )
     with pytest.raises(ValueError, match="different application"):
         replace(
             pack,
             fixture_receipt=fixture,
-            submission_proof=replace(
-                pack.submission_proof,
-                receipt_id=fixture.receipt_id,
-            ),
+            submission_proof=changed_proof,
         )
 
 

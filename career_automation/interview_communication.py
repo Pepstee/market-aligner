@@ -27,7 +27,12 @@ from .application_compiler import (
     verify_application_source,
 )
 from .ats_fixture import FixtureReceipt
-from .browser_workflows import SubmissionProof
+from .browser_workflows import (
+    ActionKind,
+    BrowserWorkflow,
+    SubmissionProof,
+    fixture_submit_event_sha256,
+)
 from .employer_research import (
     FRESHNESS_DAYS,
     PROTECTED_FIELDS,
@@ -673,6 +678,110 @@ def _submission_proof_document(
     }
 
 
+@dataclass(frozen=True)
+class LocalSubmissionContext:
+    run_id: str
+    workflow: BrowserWorkflow
+    step_id: str
+    release_manifest_sha256: str
+    token_sha256: str
+    field_map_sha256: str
+    context_id: str
+    schema_version: str = "jaa13.local-submission-context.v1"
+
+    def __post_init__(self) -> None:
+        self.verify()
+
+    @property
+    def workflow_sha256(self) -> str:
+        return self.workflow.content_hash
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        result = {
+            "schema_version": self.schema_version,
+            "run_id": self.run_id,
+            "workflow_sha256": self.workflow_sha256,
+            "workflow": self.workflow.to_dict(),
+            "step_id": self.step_id,
+            "release_manifest_sha256": self.release_manifest_sha256,
+            "token_sha256": self.token_sha256,
+            "field_map_sha256": self.field_map_sha256,
+        }
+        if include_identity:
+            result["context_id"] = self.context_id
+        return result
+
+    def verify(self) -> None:
+        _required(self.run_id, "submission run ID")
+        _required(self.step_id, "submission step ID")
+        if not isinstance(self.workflow, BrowserWorkflow):
+            raise TypeError("submission context requires a typed workflow")
+        submit_actions = tuple(
+            row
+            for row in self.workflow.actions
+            if row.step_id == self.step_id
+        )
+        if (
+            len(submit_actions) != 1
+            or submit_actions[0].kind is not ActionKind.SUBMIT
+        ):
+            raise ValueError(
+                "submission context requires its exact JAA-09 submit step"
+            )
+        for value, label in (
+            (self.workflow_sha256, "submission workflow hash"),
+            (
+                self.release_manifest_sha256,
+                "submission release manifest hash",
+            ),
+            (self.token_sha256, "submission token hash"),
+            (self.field_map_sha256, "submission field-map hash"),
+            (self.context_id, "submission context ID"),
+        ):
+            _digest(value, label)
+        if self.schema_version != "jaa13.local-submission-context.v1":
+            raise ValueError("submission context schema is unsupported")
+        if self.context_id != _content_hash(
+            self.document(include_identity=False)
+        ):
+            raise ValueError("submission context differs from exact content")
+
+
+def compile_local_submission_context(
+    contract: InterviewCommunicationContract,
+    *,
+    run_id: str,
+    workflow: BrowserWorkflow,
+    step_id: str,
+    release_manifest_sha256: str,
+    token_sha256: str,
+    field_map_sha256: str,
+) -> LocalSubmissionContext:
+    if contract != FROZEN_INTERVIEW_COMMUNICATION_CONTRACT:
+        raise ValueError("submission context requires the canonical contract")
+    if not isinstance(workflow, BrowserWorkflow):
+        raise TypeError("submission context requires a BrowserWorkflow")
+    body = {
+        "schema_version": "jaa13.local-submission-context.v1",
+        "run_id": run_id,
+        "workflow_sha256": workflow.content_hash,
+        "workflow": workflow.to_dict(),
+        "step_id": step_id,
+        "release_manifest_sha256": release_manifest_sha256,
+        "token_sha256": token_sha256,
+        "field_map_sha256": field_map_sha256,
+    }
+    return LocalSubmissionContext(
+        run_id=run_id,
+        workflow=workflow,
+        step_id=step_id,
+        release_manifest_sha256=release_manifest_sha256,
+        token_sha256=token_sha256,
+        field_map_sha256=field_map_sha256,
+        context_id=_content_hash(body),
+    )
+
+
 def _verify_publication_receipt(
     receipt: PublishedArtifactReceipt,
 ) -> None:
@@ -711,6 +820,7 @@ class InterviewPreparationPack:
     timeline: StatusTimeline
     release_manifest: ReleaseManifest
     publication_receipt: PublishedArtifactReceipt
+    submission_context: LocalSubmissionContext
     submission_proof: SubmissionProof
     fixture_receipt: FixtureReceipt
     employer_evidence: EmployerDossierEvidence
@@ -725,7 +835,7 @@ class InterviewPreparationPack:
     production_certification: str = "withheld"
     certifies_slice: bool = False
     lineage_claim: str = "structural_lineage_only"
-    schema_version: str = "jaa13.interview-preparation-pack.v2"
+    schema_version: str = "jaa13.interview-preparation-pack.v3"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -777,6 +887,7 @@ class InterviewPreparationPack:
             "timeline": self.timeline.document(),
             "release_manifest": self.release_manifest.document(),
             "publication_receipt": self.publication_receipt.document(),
+            "submission_context": self.submission_context.document(),
             "submission_proof": _submission_proof_document(
                 self.submission_proof
             ),
@@ -826,6 +937,13 @@ class InterviewPreparationPack:
             raise TypeError(
                 "preparation pack requires a typed release manifest"
             )
+        if not isinstance(
+            self.submission_context,
+            LocalSubmissionContext,
+        ):
+            raise TypeError(
+                "preparation pack requires typed submission context"
+            )
         if not isinstance(self.submission_proof, SubmissionProof):
             raise TypeError(
                 "preparation pack requires a typed submission proof"
@@ -842,6 +960,7 @@ class InterviewPreparationPack:
         self.timeline.verify()
         verify_release_manifest(self.release_manifest)
         _verify_publication_receipt(self.publication_receipt)
+        self.submission_context.verify()
         self.fixture_receipt.verify()
         self.employer_evidence.verify()
         binding = self.release_manifest.binding
@@ -860,15 +979,40 @@ class InterviewPreparationPack:
                 "preparation release lineage identifies different source bytes"
             )
         if (
-            self.submission_proof.release_manifest_sha256
+            self.submission_context.release_manifest_sha256
             != self.release_manifest.release_manifest_sha256
+            or self.submission_proof.release_manifest_sha256
+            != self.submission_context.release_manifest_sha256
+            or self.submission_proof.token_sha256
+            != self.submission_context.token_sha256
+            or self.submission_proof.field_map_sha256
+            != self.submission_context.field_map_sha256
             or self.submission_proof.receipt_id
             != self.fixture_receipt.receipt_id
             or self.submission_proof.receipt_payload_sha256
             != self.fixture_receipt.payload_sha256
         ):
             raise ValueError(
-                "preparation submission proof differs from release receipt"
+                "preparation submission proof differs from context or receipt"
+            )
+        expected_submit_event_sha256 = fixture_submit_event_sha256(
+            run_id=self.submission_context.run_id,
+            workflow_sha256=self.submission_context.workflow_sha256,
+            step_id=self.submission_context.step_id,
+            release_manifest_sha256=(
+                self.submission_context.release_manifest_sha256
+            ),
+            receipt_id=self.fixture_receipt.receipt_id,
+            receipt_payload_sha256=self.fixture_receipt.payload_sha256,
+            screenshot_sha256=self.submission_proof.screenshot_sha256,
+            field_map_sha256=self.submission_context.field_map_sha256,
+        )
+        if (
+            self.submission_proof.submit_event_sha256
+            != expected_submit_event_sha256
+        ):
+            raise ValueError(
+                "preparation submit event differs from its JAA-09 context"
             )
         if (
             self.timeline.application_id != self.application_id
@@ -976,7 +1120,7 @@ class InterviewPreparationPack:
             or self.lineage_claim != "structural_lineage_only"
         ):
             raise ValueError("local preparation pack cannot act or certify")
-        if self.schema_version != "jaa13.interview-preparation-pack.v2":
+        if self.schema_version != "jaa13.interview-preparation-pack.v3":
             raise ValueError("preparation pack schema is unsupported")
         if self.pack_id != _content_hash(self.document(include_identity=False)):
             raise ValueError("preparation pack differs from exact content")
@@ -1136,6 +1280,7 @@ def compile_interview_preparation_pack(
     timeline: StatusTimeline,
     release_manifest: ReleaseManifest,
     publication_receipt: PublishedArtifactReceipt,
+    submission_context: LocalSubmissionContext,
     submission_proof: SubmissionProof,
     fixture_receipt: FixtureReceipt,
     employer_evidence: EmployerDossierEvidence,
@@ -1155,6 +1300,8 @@ def compile_interview_preparation_pack(
         raise TypeError(
             "preparation requires a PublishedArtifactReceipt"
         )
+    if not isinstance(submission_context, LocalSubmissionContext):
+        raise TypeError("preparation requires a LocalSubmissionContext")
     if not isinstance(submission_proof, SubmissionProof):
         raise TypeError("preparation requires a SubmissionProof")
     if not isinstance(fixture_receipt, FixtureReceipt):
@@ -1222,7 +1369,7 @@ def compile_interview_preparation_pack(
         ),
     )
     body = {
-        "schema_version": "jaa13.interview-preparation-pack.v2",
+        "schema_version": "jaa13.interview-preparation-pack.v3",
         "contract_sha256": contract.contract_sha256,
         "application_id": application_id,
         "job_key": source.job_key,
@@ -1236,6 +1383,7 @@ def compile_interview_preparation_pack(
         "timeline": timeline.document(),
         "release_manifest": release_manifest.document(),
         "publication_receipt": publication_receipt.document(),
+        "submission_context": submission_context.document(),
         "submission_proof": _submission_proof_document(
             submission_proof
         ),
@@ -1259,6 +1407,7 @@ def compile_interview_preparation_pack(
         timeline=timeline,
         release_manifest=release_manifest,
         publication_receipt=publication_receipt,
+        submission_context=submission_context,
         submission_proof=submission_proof,
         fixture_receipt=fixture_receipt,
         employer_evidence=employer_evidence,
