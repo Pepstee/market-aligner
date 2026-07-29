@@ -73,6 +73,63 @@ def test_missing_or_duplicate_time_separation_cannot_compile() -> None:
                 _observation("shadow-002", observed_at),
             ),
         )
+    with pytest.raises(ValueError, match="at least 24 hours"):
+        compile_withheld_shadow_evidence(
+            FROZEN_SHADOW_CONTRACT,
+            (
+                first,
+                _observation(
+                    "shadow-002",
+                    observed_at + timedelta(hours=23, minutes=59),
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="IDs must be unique"):
+        compile_withheld_shadow_evidence(
+            FROZEN_SHADOW_CONTRACT,
+            (
+                first,
+                _observation(
+                    "shadow-001",
+                    observed_at + timedelta(days=1),
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="distinct release manifests"):
+        compile_withheld_shadow_evidence(
+            FROZEN_SHADOW_CONTRACT,
+            (
+                first,
+                replace(
+                    _observation(
+                        "shadow-002",
+                        observed_at + timedelta(days=1),
+                    ),
+                    release_manifest_sha256=(
+                        first.release_manifest_sha256
+                    ),
+                ),
+            ),
+        )
+
+
+def test_caller_defined_shadow_contract_cannot_replace_frozen_authority() -> None:
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    replacement = replace(
+        FROZEN_SHADOW_CONTRACT,
+        application_id="caller-defined-fixture",
+    )
+    with pytest.raises(ValueError, match="canonical frozen contract"):
+        compile_withheld_shadow_evidence(
+            replacement,
+            (
+                _observation("shadow-001", observed_at),
+                _observation(
+                    "shadow-002",
+                    observed_at + timedelta(days=1),
+                ),
+            ),
+        )
 
 
 def test_interruption_and_mutation_rows_fail_if_they_claim_unsafe_success() -> None:
@@ -141,3 +198,17 @@ def test_shadow_evidence_has_no_certifying_or_action_capability() -> None:
         "certifies_slice: bool = True",
     ):
         assert forbidden not in text
+
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    evidence = compile_withheld_shadow_evidence(
+        FROZEN_SHADOW_CONTRACT,
+        (
+            _observation("shadow-001", observed_at),
+            _observation(
+                "shadow-002",
+                observed_at + timedelta(days=1),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="cannot certify production"):
+        replace(evidence, certifies_slice=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,7 +51,9 @@ def _observation(
         observation_id=identifier,
         observed_at=observed_at.isoformat(),
         workflow_sha256=golden.workflow_sha256,
-        release_manifest_sha256="1" * 64,
+        release_manifest_sha256=hashlib.sha256(
+            f"shadow-release:{identifier}".encode()
+        ).hexdigest(),
         receipt_id=golden.receipt_id,
         receipt_payload_sha256=golden.receipt_payload_sha256,
         field_map_sha256=golden.field_map_sha256,
@@ -68,11 +71,11 @@ def _observation(
                 point,
                 (
                     "recovered"
-                    if point == "post_click_pre_checkpoint"
+                    if point != "post_mark_pre_click"
                     else "fail_closed"
                 ),
-                1 if point == "post_click_pre_checkpoint" else 0,
-                1 if point == "post_click_pre_checkpoint" else 0,
+                0 if point == "post_mark_pre_click" else 1,
+                0 if point == "post_mark_pre_click" else 1,
             )
             for point in REQUIRED_INTERRUPTION_POINTS
         ),
@@ -289,11 +292,79 @@ def _execute_interruption(
                 browser.close()
                 assert store.submit_dispatch(run_id)["state"] == "prepared"  # type: ignore[index]
                 assert fixture.receipt is None
+                resumed = LocalBrowserExecutor(
+                    store,
+                    repository_root=ROOT,
+                )
+                resumed_browser = playwright.chromium.launch(headless=True)
+                resumed_page = resumed_browser.new_page()
+                resumed.execute_next(
+                    resumed_page,
+                    run_id=run_id,
+                    worker_id="jaa10_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+                resumed_browser.close()
+                assert fixture.receipt is not None
                 result = InterruptionObservation(
                     injection_point,
-                    "fail_closed",
-                    0,
-                    0,
+                    "recovered",
+                    1,
+                    1,
+                )
+            elif injection_point == "post_consume_pre_reconcile":
+                original_reconcile = store.reconcile_release_consumed
+
+                def stop_before_reconcile(*_args, **_kwargs):
+                    raise RuntimeError("injected before consumption reconcile")
+
+                store.reconcile_release_consumed = stop_before_reconcile  # type: ignore[method-assign]
+                with pytest.raises(
+                    RuntimeError,
+                    match="before consumption reconcile",
+                ):
+                    executor.execute_next(
+                        page,
+                        run_id=run_id,
+                        worker_id="jaa10_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=authority,
+                    )
+                store.reconcile_release_consumed = original_reconcile  # type: ignore[method-assign]
+                browser.close()
+                assert store.submit_dispatch(run_id)["state"] == "prepared"  # type: ignore[index]
+                with database.connection() as connection:
+                    consumed_at = connection.execute(
+                        """SELECT consumed_at FROM release_tokens
+                           WHERE token_hash=?""",
+                        (issued.token_sha256,),
+                    ).fetchone()[0]
+                assert consumed_at is not None
+                assert fixture.receipt is None
+                resumed = LocalBrowserExecutor(
+                    store,
+                    repository_root=ROOT,
+                )
+                resumed_browser = playwright.chromium.launch(headless=True)
+                resumed_page = resumed_browser.new_page()
+                resumed.execute_next(
+                    resumed_page,
+                    run_id=run_id,
+                    worker_id="jaa10_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+                resumed_browser.close()
+                assert fixture.receipt is not None
+                result = InterruptionObservation(
+                    injection_point,
+                    "recovered",
+                    1,
+                    1,
                 )
             elif injection_point == "post_consume_pre_click":
                 original_mark = store.mark_submit_started
@@ -320,9 +391,55 @@ def _execute_interruption(
                 resumed = LocalBrowserExecutor(store, repository_root=ROOT)
                 resumed_browser = playwright.chromium.launch(headless=True)
                 resumed_page = resumed_browser.new_page()
+                resumed.execute_next(
+                    resumed_page,
+                    run_id=run_id,
+                    worker_id="jaa10_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+                resumed_browser.close()
+                assert fixture.receipt is not None
+                result = InterruptionObservation(
+                    injection_point,
+                    "recovered",
+                    1,
+                    1,
+                )
+            elif injection_point == "post_mark_pre_click":
+                original_mark = store.mark_submit_started
+
+                def stop_after_mark(*args, **kwargs):
+                    original_mark(*args, **kwargs)
+                    raise RuntimeError("injected after click intent")
+
+                store.mark_submit_started = stop_after_mark  # type: ignore[method-assign]
+                with pytest.raises(RuntimeError, match="after click intent"):
+                    executor.execute_next(
+                        page,
+                        run_id=run_id,
+                        worker_id="jaa10_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=authority,
+                    )
+                store.mark_submit_started = original_mark  # type: ignore[method-assign]
+                browser.close()
+                assert (
+                    store.submit_dispatch(run_id)["state"]  # type: ignore[index]
+                    == "click_started"
+                )
+                assert fixture.receipt is None
+                resumed = LocalBrowserExecutor(
+                    store,
+                    repository_root=ROOT,
+                )
+                resumed_browser = playwright.chromium.launch(headless=True)
+                resumed_page = resumed_browser.new_page()
                 with pytest.raises(
                     SubmissionIndeterminateError,
-                    match="cannot be reconstructed",
+                    match="no recoverable official receipt",
                 ):
                     resumed.execute_next(
                         resumed_page,
@@ -333,7 +450,6 @@ def _execute_interruption(
                         release_authority=authority,
                     )
                 resumed_browser.close()
-                assert fixture.receipt is None
                 result = InterruptionObservation(
                     injection_point,
                     "fail_closed",
@@ -394,17 +510,22 @@ def _execute_interruption(
                     1,
                 )
         events = store.events(run_id)
-        assert sum(
+        click_intent_count = sum(
             row["event_type"] == "submit_click_started"
             for row in events
-        ) == result.submit_click_count
+        )
+        if injection_point == "post_mark_pre_click":
+            assert click_intent_count == 1
+            assert result.submit_click_count == 0
+        else:
+            assert click_intent_count == result.submit_click_count
         return result
 
 
 def test_frozen_shadow_contract_binds_exact_accepted_jaa09_golden_set() -> None:
     golden = FROZEN_SHADOW_CONTRACT
     assert golden.baseline_revision == (
-        "6e627e3ae07744e2c658a2046f0cd3121b7c2254"
+        "ccc1d14bb65c7f3654359d6b4e08939c524b3161"
     )
     assert golden.workflow_sha256 == (
         "ec9329ec86534bc2a1fa37c0f12034806cdedbdd0ba472d34fc74b2ae69961da"
@@ -428,15 +549,19 @@ def test_time_separated_shadow_evidence_is_content_addressed_and_withheld() -> N
         observations,
     )
     evidence.verify()
-    assert evidence.hard_quality_metrics == HARD_QUALITY_TARGETS
+    assert evidence.hard_quality_targets == HARD_QUALITY_TARGETS
+    assert evidence.metrics_evaluated is False
     assert evidence.production_certification == "withheld"
     assert evidence.certifies_slice is False
     assert evidence.evidence_kind == "synthetic_shadow"
     assert tuple(
         row.observation_sha256 for row in observations
     ) == evidence.observation_sha256s
-    assert evidence.release_manifest_sha256s == ("1" * 64, "1" * 64)
+    assert evidence.release_manifest_sha256s == tuple(
+        row.release_manifest_sha256 for row in observations
+    )
     assert "receipt" not in evidence.document()
+    assert "hard_quality_metrics" not in evidence.document()
     assert "model_cost_microusd" not in evidence.document()
 
 
@@ -450,7 +575,7 @@ def test_observation_identity_changes_with_runtime_metrics() -> None:
     assert first.observation_sha256 != changed.observation_sha256
 
 
-def test_actual_time_separated_frozen_runs_and_interruption_drills_compile(
+def test_two_frozen_fixture_runs_with_synthetic_shadow_times_compile(
     tmp_path: Path,
 ) -> None:
     interruptions = tuple(

@@ -12,29 +12,62 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
-BASELINE_REVISION = "6e627e3ae07744e2c658a2046f0cd3121b7c2254"
+BASELINE_REVISION = "ccc1d14bb65c7f3654359d6b4e08939c524b3161"
+MINIMUM_SHADOW_SEPARATION = timedelta(hours=24)
 REQUIRED_INTERRUPTION_POINTS = (
     "post_prepare_pre_consume",
+    "post_consume_pre_reconcile",
     "post_consume_pre_click",
+    "post_mark_pre_click",
     "post_click_pre_checkpoint",
 )
 REQUIRED_MUTATION_CONTROLS = (
+    "unsupported_metric",
+    "stale_vacancy",
+    "ineligible_contract",
+    "duplicate_release",
+    "release_clock_forgery",
     "upload_byte_drift",
     "selector_drift",
     "field_map_drift",
     "release_token_tamper",
+    "receipt_payload_fabrication",
+    "local_origin_drift",
     "disguised_submit",
     "duplicate_submit",
     "concurrent_submit",
 )
 MUTATION_TEST_NODES: Mapping[str, str] = MappingProxyType({
+    "unsupported_metric": (
+        "test_jaa07_negative_controls.py::"
+        "test_factual_sentence_cannot_paraphrase_or_add_an_unsupported_metric"
+    ),
+    "stale_vacancy": (
+        "test_jaa08_negative_controls.py::"
+        "test_non_bypassable_deterministic_preconditions"
+        "[stale_vacancy-vacancy is stale]"
+    ),
+    "ineligible_contract": (
+        "test_jaa08_negative_controls.py::"
+        "test_non_bypassable_deterministic_preconditions"
+        "[ineligible-work right]"
+    ),
+    "duplicate_release": (
+        "test_jaa08_negative_controls.py::"
+        "test_non_bypassable_deterministic_preconditions"
+        "[duplicate-duplicate application]"
+    ),
+    "release_clock_forgery": (
+        "test_jaa08_negative_controls.py::"
+        "test_action_capable_release_store_rejects_caller_forged_future_clock"
+    ),
     "upload_byte_drift": (
         "test_jaa09_negative_controls.py::"
         "test_executor_detects_upload_mutation_before_browser_materialization"
@@ -50,6 +83,14 @@ MUTATION_TEST_NODES: Mapping[str, str] = MappingProxyType({
     "release_token_tamper": (
         "test_jaa09_negative_controls.py::"
         "test_invalid_jaa08_token_cannot_create_fixture_receipt"
+    ),
+    "receipt_payload_fabrication": (
+        "test_jaa09_negative_controls.py::"
+        "test_self_consistent_wrong_payload_receipt_is_not_recorded"
+    ),
+    "local_origin_drift": (
+        "test_jaa09_negative_controls.py::"
+        "test_fixture_refuses_other_loopback_host_port_or_origin"
     ),
     "disguised_submit": (
         "test_jaa09_negative_controls.py::"
@@ -77,7 +118,7 @@ REQUIRED_ACTIONS = (
     "review",
     "submit",
 )
-HARD_QUALITY_TARGETS = {
+HARD_QUALITY_TARGETS: Mapping[str, int] = MappingProxyType({
     "ats_parse_success_bp": 10_000,
     "confirmed_without_receipt": 0,
     "deterministic_replay_mismatch": 0,
@@ -85,7 +126,7 @@ HARD_QUALITY_TARGETS = {
     "ineligible_submissions": 0,
     "released_employer_claims_without_citations": 0,
     "unsupported_released_claims": 0,
-}
+})
 
 
 def _canonical_json(value: object) -> str:
@@ -199,6 +240,17 @@ class FrozenShadowContract:
             _digest(value, label)
         if self.schema_version != "jaa10.frozen-shadow-contract.v1":
             raise ValueError("shadow contract schema is unsupported")
+        expected_submit_event = normalized_submit_event_sha256(
+            workflow_sha256=self.workflow_sha256,
+            receipt_id=self.receipt_id,
+            receipt_payload_sha256=self.receipt_payload_sha256,
+            screenshot_sha256=self.screenshot_sha256,
+            field_map_sha256=self.field_map_sha256,
+        )
+        if self.submit_event_sha256 != expected_submit_event:
+            raise ValueError(
+                "shadow submit-event hash differs from its frozen inputs"
+            )
 
     def document(self) -> dict[str, object]:
         return {
@@ -212,7 +264,15 @@ class FrozenShadowContract:
             "field_map_sha256": self.field_map_sha256,
             "screenshot_sha256": self.screenshot_sha256,
             "submit_event_sha256": self.submit_event_sha256,
+            "minimum_shadow_separation_seconds": int(
+                MINIMUM_SHADOW_SEPARATION.total_seconds()
+            ),
+            "required_actions": REQUIRED_ACTIONS,
+            "required_interruption_points": REQUIRED_INTERRUPTION_POINTS,
             "mutation_test_nodes": dict(sorted(MUTATION_TEST_NODES.items())),
+            "hard_quality_targets": dict(
+                sorted(HARD_QUALITY_TARGETS.items())
+            ),
         }
 
     @property
@@ -416,13 +476,22 @@ class WithheldShadowEvidence:
     contract_sha256: str
     observation_sha256s: tuple[str, ...]
     release_manifest_sha256s: tuple[str, ...]
-    hard_quality_metrics: Mapping[str, int]
+    hard_quality_targets: Mapping[str, int]
     evidence_id: str
+    metrics_evaluated: bool = False
     production_certification: str = "withheld"
     withheld_reason: str = "upstream_jaa04_authentic_authority_blocked"
     evidence_kind: str = "synthetic_shadow"
     certifies_slice: bool = False
-    schema_version: str = "jaa10.withheld-shadow-evidence.v1"
+    schema_version: str = "jaa10.withheld-shadow-evidence.v2"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "hard_quality_targets",
+            MappingProxyType(dict(self.hard_quality_targets)),
+        )
+        self.verify()
 
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
@@ -430,7 +499,10 @@ class WithheldShadowEvidence:
             "contract_sha256": self.contract_sha256,
             "observation_sha256s": self.observation_sha256s,
             "release_manifest_sha256s": self.release_manifest_sha256s,
-            "hard_quality_metrics": dict(sorted(self.hard_quality_metrics.items())),
+            "hard_quality_targets": dict(
+                sorted(self.hard_quality_targets.items())
+            ),
+            "metrics_evaluated": False,
             "production_certification": "withheld",
             "withheld_reason": self.withheld_reason,
             "evidence_kind": "synthetic_shadow",
@@ -458,17 +530,18 @@ class WithheldShadowEvidence:
             self.observation_sha256s
         ):
             raise ValueError("shadow observation identities must be unique")
-        if dict(self.hard_quality_metrics) != HARD_QUALITY_TARGETS:
-            raise ValueError("shadow hard-quality metrics differ from policy")
+        if dict(self.hard_quality_targets) != HARD_QUALITY_TARGETS:
+            raise ValueError("shadow hard-quality targets differ from policy")
         if (
-            self.production_certification != "withheld"
+            self.metrics_evaluated is not False
+            or self.production_certification != "withheld"
             or self.withheld_reason
             != "upstream_jaa04_authentic_authority_blocked"
             or self.evidence_kind != "synthetic_shadow"
             or self.certifies_slice is not False
         ):
             raise ValueError("shadow evidence cannot certify production")
-        if self.schema_version != "jaa10.withheld-shadow-evidence.v1":
+        if self.schema_version != "jaa10.withheld-shadow-evidence.v2":
             raise ValueError("withheld shadow schema is unsupported")
         expected = _content_hash(self.document(include_identity=False))
         if self.evidence_id != expected:
@@ -482,6 +555,10 @@ def compile_withheld_shadow_evidence(
     """Compile exact synthetic evidence while structurally withholding certification."""
     if not isinstance(contract, FrozenShadowContract):
         raise TypeError("shadow compilation requires a frozen contract")
+    if contract != FROZEN_SHADOW_CONTRACT:
+        raise ValueError(
+            "shadow compilation requires the canonical frozen contract"
+        )
     if len(observations) < 2 or not all(
         isinstance(row, ShadowObservation) for row in observations
     ):
@@ -489,6 +566,21 @@ def compile_withheld_shadow_evidence(
     times = tuple(datetime.fromisoformat(row.observed_at) for row in observations)
     if tuple(sorted(times)) != times or len(set(times)) != len(times):
         raise ValueError("shadow observations must be time-separated and ordered")
+    if any(
+        later - earlier < MINIMUM_SHADOW_SEPARATION
+        for earlier, later in zip(times, times[1:], strict=False)
+    ):
+        raise ValueError(
+            "shadow observations must be separated by at least 24 hours"
+        )
+    if len({row.observation_id for row in observations}) != len(observations):
+        raise ValueError("shadow observation IDs must be unique")
+    if len({
+        row.release_manifest_sha256 for row in observations
+    }) != len(observations):
+        raise ValueError(
+            "shadow observations require distinct release manifests"
+        )
     for row in observations:
         actual = (
             row.workflow_sha256,
@@ -509,7 +601,7 @@ def compile_withheld_shadow_evidence(
         if actual != expected:
             raise ValueError("shadow observation differs from its frozen golden set")
     body = {
-        "schema_version": "jaa10.withheld-shadow-evidence.v1",
+        "schema_version": "jaa10.withheld-shadow-evidence.v2",
         "contract_sha256": contract.contract_sha256,
         "observation_sha256s": tuple(
             row.observation_sha256 for row in observations
@@ -517,7 +609,8 @@ def compile_withheld_shadow_evidence(
         "release_manifest_sha256s": tuple(
             row.release_manifest_sha256 for row in observations
         ),
-        "hard_quality_metrics": HARD_QUALITY_TARGETS,
+        "hard_quality_targets": dict(HARD_QUALITY_TARGETS),
+        "metrics_evaluated": False,
         "production_certification": "withheld",
         "withheld_reason": "upstream_jaa04_authentic_authority_blocked",
         "evidence_kind": "synthetic_shadow",
@@ -529,7 +622,7 @@ def compile_withheld_shadow_evidence(
         release_manifest_sha256s=tuple(
             body["release_manifest_sha256s"]
         ),
-        hard_quality_metrics=HARD_QUALITY_TARGETS,
+        hard_quality_targets=dict(HARD_QUALITY_TARGETS),
         evidence_id=_content_hash(body),
     )
     result.verify()
