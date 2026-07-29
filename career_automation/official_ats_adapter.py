@@ -713,6 +713,24 @@ def assess_fixture_adapter_attempt(
 
     attempt_count = circuit.assessed_attempts + 1
     breach = _hard_breach(contract, observation)
+    if (
+        observation.blocking_signals
+        and observation.submit_dispatch_count == 0
+        and observation.receipt is None
+        and breach == "missing_submit_dispatch"
+    ):
+        next_circuit = AdapterCircuitBreaker(
+            contract.contract_sha256,
+            assessed_attempts=attempt_count,
+        )
+        result = AdapterAttemptResult(
+            outcome="parked",
+            reason_codes=observation.blocking_signals,
+            evidence_id=None,
+            receipt_id=None,
+            halts_canaries=False,
+        )
+        return next_circuit, result, None
     if breach is not None:
         next_circuit = AdapterCircuitBreaker(
             contract.contract_sha256,
@@ -730,18 +748,9 @@ def assess_fixture_adapter_attempt(
         return next_circuit, result, None
 
     if observation.blocking_signals:
-        next_circuit = AdapterCircuitBreaker(
-            contract.contract_sha256,
-            assessed_attempts=attempt_count,
+        raise ValueError(
+            "blocking signals cannot follow a completed submit dispatch"
         )
-        result = AdapterAttemptResult(
-            outcome="parked",
-            reason_codes=observation.blocking_signals,
-            evidence_id=None,
-            receipt_id=None,
-            halts_canaries=False,
-        )
-        return next_circuit, result, None
 
     proof = observation.submission_proof
     body = {

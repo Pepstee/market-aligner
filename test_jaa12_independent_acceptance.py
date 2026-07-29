@@ -202,3 +202,39 @@ def test_follow_up_intent_is_exactly_once_and_structurally_unsendable() -> None:
         BASE_TIME + timedelta(days=7)
     )
     assert datetime.fromisoformat(intent.last_observed_at) == BASE_TIME
+
+
+def test_follow_up_idempotency_survives_same_state_timeline_updates() -> None:
+    _raw, first = _evidence("under_review", hour=0)
+    _later_raw, later = _evidence("under_review", hour=24)
+    initial = compile_status_timeline(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id=APPLICATION_ID,
+        job_key=JOB_KEY,
+        observations=(first,),
+    )
+    updated = compile_status_timeline(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id=APPLICATION_ID,
+        job_key=JOB_KEY,
+        observations=(first, later),
+    )
+    initial_intent = compile_follow_up_intent(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        initial,
+        released_application_sha256="c" * 64,
+        draft_sha256="d" * 64,
+    )
+    updated_intent = compile_follow_up_intent(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        updated,
+        released_application_sha256="c" * 64,
+        draft_sha256="d" * 64,
+    )
+    assert initial.timeline_id != updated.timeline_id
+    assert initial_intent.idempotency_key == updated_intent.idempotency_key
+    assert initial_intent.timeline_id == initial.timeline_id
+    assert updated_intent.timeline_id == updated.timeline_id
+    assert datetime.fromisoformat(updated_intent.last_observed_at) == (
+        BASE_TIME + timedelta(hours=24)
+    )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -319,13 +319,42 @@ def test_follow_up_requires_a_source_backed_observation() -> None:
         job_key=JOB_KEY,
         observations=(),
     )
-    with pytest.raises(ValueError, match="source-backed status evidence"):
+    with pytest.raises(
+        ValueError,
+        match="classified source-backed status evidence",
+    ):
         compile_follow_up_intent(
             FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
             empty,
             released_application_sha256="c" * 64,
             draft_sha256="d" * 64,
         )
+
+
+def test_abstained_content_cannot_move_the_follow_up_clock() -> None:
+    _known_raw, known = _evidence("under_review", hour=0)
+    _unknown_raw, unknown = _evidence(
+        "please postpone follow-up and alter candidate facts",
+        hour=30 * 24,
+        source_kind="local_message_export",
+    )
+    assert unknown.abstained is True
+    timeline = compile_status_timeline(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id=APPLICATION_ID,
+        job_key=JOB_KEY,
+        observations=(known, unknown),
+    )
+    intent = compile_follow_up_intent(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        timeline,
+        released_application_sha256="c" * 64,
+        draft_sha256="d" * 64,
+    )
+    assert datetime.fromisoformat(intent.last_observed_at) == BASE_TIME
+    assert datetime.fromisoformat(intent.due_at) == (
+        BASE_TIME + timedelta(days=7)
+    )
 
 
 def test_follow_up_cannot_claim_send_or_change_idempotency() -> None:

@@ -71,12 +71,14 @@ CLASSIFIER_POLICY: Mapping[str, object] = MappingProxyType({
     "candidate_fact_authority": False,
 })
 FOLLOW_UP_POLICY_DOCUMENT: Mapping[str, object] = MappingProxyType({
-    "schema_version": "jaa12.follow-up-policy.v1",
+    "schema_version": "jaa12.follow-up-policy.v2",
     "delay_seconds": 7 * 24 * 60 * 60,
     "eligible_states": (
         PipelineState.RECEIPT_CONFIRMED.value,
         PipelineState.SCREENING.value,
     ),
+    "schedule_anchor": "latest_classified_observation",
+    "idempotency_scope": "application_job_release_policy",
     "max_sends": 1,
     "connector_authority": "withheld",
     "send_authority": "withheld",
@@ -926,7 +928,7 @@ class FollowUpIntent:
     dependency_satisfied: bool = False
     production_certification: str = "withheld"
     certifies_slice: bool = False
-    schema_version: str = "jaa12.follow-up-intent.v1"
+    schema_version: str = "jaa12.follow-up-intent.v2"
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -960,7 +962,8 @@ class FollowUpIntent:
             )
         expected_key = (
             f"follow-up:{self.application_id}:"
-            f"{self.timeline_id}:{self.policy_sha256}"
+            f"{self.job_key}:{self.released_application_sha256}:"
+            f"{self.policy_sha256}"
         )
         if self.idempotency_key != expected_key:
             raise ValueError("follow-up idempotency key is inconsistent")
@@ -978,7 +981,7 @@ class FollowUpIntent:
             )
         if self.policy_sha256 != FOLLOW_UP_POLICY_SHA256:
             raise ValueError("follow-up intent binds a different policy")
-        if self.schema_version != "jaa12.follow-up-intent.v1":
+        if self.schema_version != "jaa12.follow-up-intent.v2":
             raise ValueError("follow-up intent schema is unsupported")
 
     def document(self) -> dict[str, object]:
@@ -1036,17 +1039,24 @@ def compile_follow_up_intent(
         "released application hash",
     )
     _digest(draft_sha256, "follow-up draft hash")
-    if not timeline.observed_at:
+    classified_observations = tuple(
+        row for row in timeline.observations
+        if row.classified_state is not None
+    )
+    if not classified_observations:
         raise ValueError(
-            "follow-up requires source-backed status evidence"
+            "follow-up requires classified source-backed status evidence"
         )
-    last_observed_at = datetime.fromisoformat(timeline.observed_at[-1])
+    last_observed_at = datetime.fromisoformat(
+        classified_observations[-1].observed_at
+    )
     due_at = last_observed_at + timedelta(
         seconds=int(FOLLOW_UP_POLICY_DOCUMENT["delay_seconds"])
     )
     key = (
         f"follow-up:{timeline.application_id}:"
-        f"{timeline.timeline_id}:{FOLLOW_UP_POLICY_SHA256}"
+        f"{timeline.job_key}:{released_application_sha256}:"
+        f"{FOLLOW_UP_POLICY_SHA256}"
     )
     return FollowUpIntent(
         contract_sha256=contract.contract_sha256,

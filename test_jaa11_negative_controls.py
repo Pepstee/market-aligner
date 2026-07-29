@@ -23,7 +23,12 @@ def test_unknown_or_prohibited_interaction_parks_without_evidence(
     signal: str,
 ) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
-    observation = replace(_observation(), blocking_signals=(signal,))
+    observation = replace(
+        _observation(),
+        blocking_signals=(signal,),
+        submit_dispatch_count=0,
+        receipt=None,
+    )
     circuit, result, evidence = assess_fixture_adapter_attempt(
         contract,
         armed_fixture_circuit(contract),
@@ -37,6 +42,23 @@ def test_unknown_or_prohibited_interaction_parks_without_evidence(
     assert result.receipt_id is None
     assert result.halts_canaries is False
     assert evidence is None
+
+
+def test_blocker_cannot_relabel_a_completed_submit_as_parked() -> None:
+    contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
+    observation = replace(
+        _observation(),
+        blocking_signals=("captcha",),
+    )
+    with pytest.raises(
+        ValueError,
+        match="cannot follow a completed submit dispatch",
+    ):
+        assess_fixture_adapter_attempt(
+            contract,
+            armed_fixture_circuit(contract),
+            observation,
+        )
 
 
 @pytest.mark.parametrize(
