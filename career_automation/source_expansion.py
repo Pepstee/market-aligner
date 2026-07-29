@@ -1869,6 +1869,23 @@ class RankedAdapter:
             raise ValueError("ranked adapter identity is invalid")
 
 
+def _canonical_portfolio_order(
+    evaluations: tuple[AdapterExpansionEvaluation, ...],
+) -> tuple[AdapterExpansionEvaluation, ...]:
+    return tuple(
+        sorted(
+            evaluations,
+            key=lambda row: (
+                not row.eligible_for_review,
+                -row.value_score,
+                row.adapter_id,
+                row.adapter_version,
+                row.candidate_id,
+            ),
+        )
+    )
+
+
 @dataclass(frozen=True)
 class ExpansionPortfolio:
     contract_sha256: str
@@ -1936,6 +1953,11 @@ class ExpansionPortfolio:
             != len(self.entries)
         ):
             raise ValueError("portfolio candidates must be unique")
+        actual_evaluations = tuple(row.evaluation for row in self.entries)
+        if actual_evaluations != _canonical_portfolio_order(
+            actual_evaluations
+        ):
+            raise ValueError("portfolio entries are not in canonical order")
         if (
             self.contract_sha256
             != FROZEN_SOURCE_EXPANSION_CONTRACT.contract_sha256
@@ -1978,15 +2000,7 @@ def rank_expansion_candidates(
     }
     if len(cohorts) != 1 or len(windows) != 1:
         raise ValueError("portfolio candidates must share cohort and window")
-    ordered = tuple(sorted(
-        evaluations,
-        key=lambda row: (
-            not row.eligible_for_review,
-            -row.value_score,
-            row.adapter_id,
-            row.adapter_version,
-        ),
-    ))
+    ordered = _canonical_portfolio_order(evaluations)
     entries: list[RankedAdapter] = []
     for rank, evaluation in enumerate(ordered, start=1):
         body = {

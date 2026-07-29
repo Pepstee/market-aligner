@@ -144,12 +144,16 @@ def prior_certifications():
     )
 
 
-def release_evidence(*, independently_verified: bool = True):
+def release_evidence(
+    *,
+    independently_verified: bool = True,
+    artifact_version: str = "0.1.0-candidate",
+):
     return tuple(
         record_release_evidence_reference(
             FROZEN_RELEASE_CERTIFICATION_CONTRACT,
             evidence_kind=evidence_kind,
-            artifact_version="0.1.0-candidate",
+            artifact_version=artifact_version,
             environment="supported-mac-clean-install",
             evidence_sha256=digest(f"evidence-{evidence_kind}"),
             observed_at=NOW,
@@ -280,12 +284,17 @@ def test_current_local_candidate_names_every_missing_release_requirement():
 
 
 def test_complete_synthetic_references_cannot_bypass_unsatisfied_dependency():
+    candidate = release_candidate(
+        priors=prior_certifications(),
+        evidence=release_evidence(),
+    )
     assessment = assess_release_candidate(
         FROZEN_RELEASE_CERTIFICATION_CONTRACT,
-        release_candidate(
-            priors=prior_certifications(),
-            evidence=release_evidence(),
-        ),
+        candidate,
+    )
+    assert all(
+        row.artifact_version == candidate.artifact_version
+        for row in candidate.release_evidence
     )
     assert assessment.reason_codes == (
         "operations_plan_dependency_unsatisfied",

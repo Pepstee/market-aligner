@@ -282,3 +282,26 @@ def test_portfolio_ranks_value_and_keeps_blocked_routes_visible() -> None:
     assert portfolio.blocked_candidates_visible is True
     assert portfolio.activation_authority == "withheld"
     assert portfolio.certifies_slice is False
+
+
+def test_portfolio_rederives_highest_value_first_for_reviewable_entries() -> None:
+    lower_value = _evaluation(
+        _candidate("adapter:lower-value"),
+        cost=100,
+        friction=100,
+    )
+    higher_value = _evaluation(
+        _candidate("adapter:higher-value"),
+        cost=1,
+        friction=1,
+    )
+    portfolio = rank_expansion_candidates(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        (lower_value, higher_value),
+    )
+
+    assert tuple(row.evaluation for row in portfolio.entries) == (
+        higher_value,
+        lower_value,
+    )
+    portfolio.verify()

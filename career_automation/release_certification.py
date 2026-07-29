@@ -523,6 +523,13 @@ class ReleaseCandidate:
             row.verify()
         for row in self.release_evidence:
             row.verify()
+        if any(
+            row.artifact_version != self.artifact_version
+            for row in self.release_evidence
+        ):
+            raise ValueError(
+                "release evidence must bind candidate artifact version"
+            )
         if (
             self.drill_assessment.plan_id != self.operations_plan.plan_id
             or self.distribution_scan.artifact_version

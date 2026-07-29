@@ -392,6 +392,19 @@ def test_candidate_rejects_artifact_scan_mismatch():
         )
 
 
+def test_candidate_rejects_release_evidence_for_another_artifact_version():
+    with pytest.raises(
+        ValueError,
+        match="release evidence must bind candidate artifact version",
+    ):
+        release_candidate(
+            priors=prior_certifications(),
+            evidence=release_evidence(
+                artifact_version="0.2.0-different-candidate"
+            ),
+        )
+
+
 def test_release_evidence_rejects_unknown_kind_and_naive_time():
     with pytest.raises(ValueError, match="invalid"):
         record_release_evidence_reference(

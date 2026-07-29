@@ -18,6 +18,7 @@ from career_automation.source_expansion import (
     AdapterExpansionEvaluation,
     AdapterMeasurement,
     AdapterValueObservation,
+    ExpansionPortfolio,
     FROZEN_SOURCE_EXPANSION_CONTRACT,
     REQUIRED_EVIDENCE_KINDS,
     RankedAdapter,
@@ -354,6 +355,46 @@ def test_ranked_entry_cannot_rehash_a_detached_evaluation_summary() -> None:
     )
     with pytest.raises(ValueError, match="differs from its evaluation"):
         RankedAdapter(**fields)
+
+
+def test_portfolio_cannot_rehash_a_reversed_value_order() -> None:
+    lower_value = _evaluation(
+        _candidate("adapter:forged-lower-value"),
+        cost=100,
+        friction=100,
+    )
+    higher_value = _evaluation(
+        _candidate("adapter:forged-higher-value"),
+        cost=1,
+        friction=1,
+    )
+    accepted = rank_expansion_candidates(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        (lower_value, higher_value),
+    )
+    reversed_entries = []
+    for rank, entry in enumerate(reversed(accepted.entries), start=1):
+        entry_fields = {**vars(entry), "rank": rank}
+        entry_shell = object.__new__(RankedAdapter)
+        for field_name, value in entry_fields.items():
+            object.__setattr__(entry_shell, field_name, value)
+        entry_fields["entry_id"] = _content_hash(
+            entry_shell.document(include_identity=False)
+        )
+        reversed_entries.append(RankedAdapter(**entry_fields))
+    portfolio_fields = {
+        **vars(accepted),
+        "entries": tuple(reversed_entries),
+    }
+    portfolio_shell = object.__new__(ExpansionPortfolio)
+    for field_name, value in portfolio_fields.items():
+        object.__setattr__(portfolio_shell, field_name, value)
+    portfolio_fields["portfolio_id"] = _content_hash(
+        portfolio_shell.document(include_identity=False)
+    )
+
+    with pytest.raises(ValueError, match="not in canonical order"):
+        ExpansionPortfolio(**portfolio_fields)
 
 
 def test_quality_snapshot_cannot_change_policy_or_phase() -> None:
