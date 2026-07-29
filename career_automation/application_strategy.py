@@ -152,8 +152,16 @@ class RequirementCoverage:
     reason_code: str
 
     def __post_init__(self) -> None:
+        _required(self.requirement_id, "coverage requirement ID")
+        _required(self.reason_code, "coverage reason code")
         if self.state not in COVERAGE_STATES:
             raise ValueError("requirement coverage state is invalid")
+        if (
+            len(set(self.candidate_claim_ids)) != len(self.candidate_claim_ids)
+            or len(set(self.candidate_evidence_ids))
+            != len(self.candidate_evidence_ids)
+        ):
+            raise ValueError("requirement coverage authorities must be unique")
         if self.state == "covered":
             if not self.candidate_claim_ids or not self.candidate_evidence_ids:
                 raise ValueError("covered requirements require claim and evidence IDs")
@@ -233,6 +241,35 @@ class ApplicationStrategy:
             expected = len(self.coverage) * len(ELEMENT_KINDS)
             if len(self.elements) != expected:
                 raise ValueError("apply-now strategy has incomplete document directives")
+            if len({row.element_id for row in self.elements}) != len(self.elements):
+                raise ValueError("strategy element identities must be unique")
+            coverage_by_id = {
+                row.requirement_id: row for row in self.coverage
+            }
+            for requirement_id, coverage in coverage_by_id.items():
+                relevant = tuple(
+                    row for row in self.elements
+                    if row.requirement_id == requirement_id
+                )
+                if (
+                    len(relevant) != len(ELEMENT_KINDS)
+                    or {row.kind for row in relevant} != set(ELEMENT_KINDS)
+                    or any(
+                        row.candidate_claim_id
+                        not in coverage.candidate_claim_ids
+                        or row.candidate_evidence_id
+                        not in coverage.candidate_evidence_ids
+                        for row in relevant
+                    )
+                ):
+                    raise ValueError(
+                        "covered requirement lacks exact strategy directives"
+                    )
+            if any(
+                row.requirement_id not in coverage_by_id
+                for row in self.elements
+            ):
+                raise ValueError("strategy element cites an unknown requirement")
         elif self.elements:
             raise ValueError("non-apply strategy cannot emit application directives")
 
@@ -304,7 +341,9 @@ def _requirement_document(requirement: Requirement) -> dict[str, object]:
         "text_sha256": hashlib.sha256(requirement.text.encode("utf-8")).hexdigest(),
         "essential": requirement.essential,
         "gap_kind": requirement.gap_kind,
+        "bridge_policy": requirement.bridge_policy,
         "accepted_proof_classes": requirement.accepted_proof_classes,
+        "opportunity_weight_bp": requirement.opportunity_weight_bp,
         "source_identity": requirement.source_identity,
         "source_span": requirement.source_span,
     }
@@ -316,8 +355,23 @@ def _result_document(result: MatchResult) -> dict[str, object]:
         "decision": result.decision,
         "evidence_ids": result.evidence_ids,
         "confidence_bp": result.confidence_bp,
+        "reason": result.reason,
         "policy_sha256": result.policy_sha256,
         "proposal_sha256": result.proposal_sha256,
+        "receipt": (
+            None
+            if result.receipt is None
+            else {
+                "provider": result.receipt.provider,
+                "model": result.receipt.model,
+                "prompt_sha256": result.receipt.prompt_sha256,
+                "policy_sha256": result.receipt.policy_sha256,
+                "candidate_profile_sha256": (
+                    result.receipt.candidate_profile_sha256
+                ),
+                "input_sha256": result.receipt.input_sha256,
+            }
+        ),
     }
 
 
@@ -352,6 +406,8 @@ def compile_application_strategy(
         employer_facts,
         key=lambda row: (RESEARCH_KIND_PRIORITY[row.kind], row.claim_id),
     ))
+    if len({row.claim_id for row in fact_rows}) != len(fact_rows):
+        raise ValueError("employer research fact identities must be unique")
     requirement_by_id = {row.requirement_id: row for row in requirement_rows}
     result_by_id = {row.requirement_id: row for row in result_rows}
     if (
@@ -851,8 +907,11 @@ class ApplicationStrategyStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                """SELECT run.status,run.document_hash,job.state AS job_state,
-                          dossier.dossier_hash,reassessment.decision AS opportunity_decision
+                """SELECT run.status,run.document_hash,
+                          run.candidate_profile_hash AS fit_profile_hash,
+                          job.state AS job_state,dossier.dossier_json,
+                          dossier.dossier_hash,
+                          reassessment.decision AS opportunity_decision
                    FROM fit_assessment_runs run
                    JOIN pipeline_jobs job ON job.job_key=run.job_key
                    JOIN employer_dossiers dossier ON dossier.job_key=run.job_key
@@ -868,6 +927,63 @@ class ApplicationStrategyStore:
                 or str(row["opportunity_decision"]) != "pass"
             ):
                 raise ValueError("strategy upstream authority changed before commit")
+            try:
+                dossier = json.loads(str(row["dossier_json"]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "strategy dossier is invalid at commit"
+                ) from exc
+            if (
+                not isinstance(dossier, dict)
+                or content_hash(dossier) != strategy.dossier_hash
+            ):
+                raise ValueError("strategy dossier changed before commit")
+            current_evidence = candidate_graph_evidence(
+                self.path,
+                as_of=strategy.as_of,
+            )
+            current_profile_hash = evidence_projection_hash(current_evidence)
+            if (
+                current_profile_hash != strategy.candidate_profile_hash
+                or current_profile_hash != str(row["fit_profile_hash"])
+            ):
+                raise ValueError("candidate graph changed before strategy commit")
+            current_requirements = self._requirements(
+                connection,
+                strategy.fit_run_id,
+            )
+            current_results = self._results(
+                connection,
+                strategy.fit_run_id,
+                current_profile_hash,
+            )
+            current_support = self._candidate_support(
+                connection,
+                current_requirements,
+                current_results,
+                current_evidence,
+                strategy.as_of,
+            )
+            current_facts = self._employer_facts(
+                connection,
+                job_key=job_key,
+                dossier=dossier,
+                as_of=strategy.as_of,
+            )
+            current_strategy = compile_application_strategy(
+                fit_run_id=strategy.fit_run_id,
+                dossier_hash=strategy.dossier_hash,
+                candidate_profile_hash=current_profile_hash,
+                requirements=current_requirements,
+                match_results=current_results,
+                candidate_support=current_support,
+                employer_facts=current_facts,
+                as_of=strategy.as_of,
+            )
+            if current_strategy != strategy:
+                raise ValueError(
+                    "strategy no longer matches upstream authority at commit"
+                )
             expected_state = {
                 "apply_now": (
                     PipelineState.FIT_REASSESSED

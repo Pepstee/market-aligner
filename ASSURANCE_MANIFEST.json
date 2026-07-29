@@ -306,7 +306,7 @@
     },
     "JAA-06": {
       "claim": "The application strategy compiler emits reproducible, evidence-linked positioning plans.",
-      "increment": "implementation_in_progress_dependency_blocked",
+      "increment": "implementation_complete_certification_pending",
       "depends_on": ["JAA-05"],
       "owns": [
         "career_automation/application_strategy.py",

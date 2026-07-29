@@ -4,7 +4,7 @@
   "examples_hash": "e51d46b9aefd352c2cee438f99b31682b9689fb96cb2823fae41a16fcfa7b7f1",
   "limitations": [
     "synthetic software vectors are not production calibration",
-    "does not certify JAA-06 while JAA-05 and JAA-04 remain dependency-blocked",
+    "does not certify JAA-06 as the offline evaluator covers only synthetic software vectors",
     "does not measure generated document quality or employer outcomes"
   ],
   "examples": [

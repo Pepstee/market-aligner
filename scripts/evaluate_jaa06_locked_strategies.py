@@ -10,6 +10,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from career_automation.application_strategy import (
     CandidateSupport,
     EmployerResearchFact,
@@ -19,11 +23,10 @@ from career_automation.application_strategy import (
 from career_automation.evidence_matching import MatchResult, Requirement, content_hash
 
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SET = ROOT / "career_automation/fixtures/jaa06_locked_strategies.json"
 LIMITATIONS = {
     "synthetic software vectors are not production calibration",
-    "does not certify JAA-06 while JAA-05 and JAA-04 remain dependency-blocked",
+    "does not certify JAA-06 as the offline evaluator covers only synthetic software vectors",
     "does not measure generated document quality or employer outcomes",
 }
 

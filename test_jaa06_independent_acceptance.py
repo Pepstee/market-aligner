@@ -555,6 +555,122 @@ def test_candidate_graph_drift_after_fit_suppresses_strategy_receipt(
     assert state == "fit_assessed"
 
 
+def test_strategy_commit_rejects_candidate_drift_after_compilation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, run, _requirement_row = _fit_database(tmp_path, matched=True)
+    original_compile = compile_application_strategy
+    injected = False
+
+    def compile_with_interleaved_drift(**arguments: object):
+        nonlocal injected
+        strategy = original_compile(**arguments)
+        if not injected:
+            injected = True
+            graph = CandidateGraph(database.path)
+            graph.add_evidence(
+                "interleaved-evidence",
+                statement="A newly approved profile fact.",
+                source_identity="test:interleaved-evidence",
+                state="evidence",
+                evidence_kind="portfolio_artifact",
+                valid_until="2035-01-01",
+            )
+            graph.verify_evidence(
+                "interleaved-evidence",
+                1,
+                decision="approved",
+                verifier_kind="deterministic",
+                policy_id="test:interleaved-review",
+                policy_version="1",
+                policy_hash=DIGEST,
+                reason="interleaved artefact reviewed",
+                source_identity="test:interleaved-reviewer",
+            )
+            graph.add_claim(
+                "interleaved-claim",
+                statement="Newly approved candidate claim.",
+                claim_type="achievement",
+                state="evidence",
+                source_identity="test:interleaved-claim",
+                valid_until="2035-01-01",
+            )
+            graph.link_claim_evidence(
+                "interleaved-claim",
+                "interleaved-evidence",
+                source_identity="test:interleaved-edge",
+                edge_type="demonstrated_by",
+            )
+            graph.approve_claim("interleaved-claim")
+        return strategy
+
+    monkeypatch.setattr(
+        "career_automation.application_strategy.compile_application_strategy",
+        compile_with_interleaved_drift,
+    )
+    store = ApplicationStrategyStore(database.path)
+    with pytest.raises(
+        ValueError,
+        match="candidate graph changed before strategy commit",
+    ):
+        store.compile_and_record(fit_run_id=run.run_id, as_of=date.today())
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM application_strategies"
+        ).fetchone()[0] == 0
+        state = str(connection.execute(
+            """SELECT job.state FROM fit_assessment_runs run
+               JOIN pipeline_jobs job ON job.job_key=run.job_key
+               WHERE run.run_id=?""",
+            (run.run_id,),
+        ).fetchone()[0])
+    assert state == "fit_assessed"
+
+
+def test_strategy_commit_rejects_employer_fact_drift_after_compilation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, run, _requirement_row = _fit_database(tmp_path, matched=True)
+    original_compile = compile_application_strategy
+    injected = False
+
+    def compile_with_interleaved_drift(**arguments: object):
+        nonlocal injected
+        strategy = original_compile(**arguments)
+        if not injected:
+            injected = True
+            with database.connection() as connection:
+                connection.execute(
+                    """UPDATE employer_intelligence
+                       SET claim_json='{"classification":"fact","kind":"role"}'"""
+                )
+        return strategy
+
+    monkeypatch.setattr(
+        "career_automation.application_strategy.compile_application_strategy",
+        compile_with_interleaved_drift,
+    )
+    store = ApplicationStrategyStore(database.path)
+    with pytest.raises(
+        ValueError,
+        match="employer fact differs from the durable dossier",
+    ):
+        store.compile_and_record(fit_run_id=run.run_id, as_of=date.today())
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM application_strategies"
+        ).fetchone()[0] == 0
+        state = str(connection.execute(
+            """SELECT job.state FROM fit_assessment_runs run
+               JOIN pipeline_jobs job ON job.job_key=run.job_key
+               WHERE run.run_id=?""",
+            (run.run_id,),
+        ).fetchone()[0])
+    assert state == "fit_assessed"
+
+
 def test_dossier_tamper_after_fit_suppresses_strategy_and_transition(
     tmp_path: Path,
 ) -> None:
@@ -637,6 +753,14 @@ def test_synthetic_locked_strategy_evaluation_is_noncertifying() -> None:
     assert result["certifies_slice"] is False
     assert result["dependency_gate"] == "JAA-05"
     assert result["transitive_dependency_gate"] == "JAA-04"
+    assert sorted(result["limitations"]) == sorted([
+        "synthetic software vectors are not production calibration",
+        (
+            "does not certify JAA-06 as the offline evaluator covers only "
+            "synthetic software vectors"
+        ),
+        "does not measure generated document quality or employer outcomes",
+    ])
     assert result["metrics"] == {
         "exact_accuracy_bp": 10_000,
         "linkage_completeness_bp": 10_000,
