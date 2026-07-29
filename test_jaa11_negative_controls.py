@@ -159,11 +159,21 @@ def test_malformed_receipt_runtime_type_trips_as_fabricated() -> None:
         assess_fixture_adapter_attempt(contract, circuit, _observation())
 
 
-def test_changed_submission_proof_trips_without_receipt_claim() -> None:
+@pytest.mark.parametrize(
+    "changed",
+    (
+        {"release_manifest_sha256": "0" * 64},
+        {"token_sha256": "0" * 64},
+        {"submit_event_sha256": "0" * 64},
+    ),
+)
+def test_changed_submission_proof_trips_without_receipt_claim(
+    changed: dict[str, str],
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     changed_proof = replace(
         _observation().submission_proof,
-        submit_event_sha256="0" * 64,
+        **changed,
     )
     observation = replace(
         _observation(),

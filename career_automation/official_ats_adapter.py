@@ -30,6 +30,12 @@ FIXTURE_ROUTE_URL = (
 )
 FIXTURE_ROUTE_VERIFIED_AT = date(2030, 1, 1)
 FIXTURE_ROUTE_VALID_UNTIL = date(2030, 12, 31)
+FIXTURE_RELEASE_MANIFEST_SHA256 = hashlib.sha256(
+    b"jaa11-fixture-release-manifest"
+).hexdigest()
+FIXTURE_TOKEN_SHA256 = hashlib.sha256(
+    b"jaa11-fixture-release-token"
+).hexdigest()
 BLOCKING_SIGNALS = (
     "captcha",
     "login_required",
@@ -166,6 +172,8 @@ class FixtureAdapterContract:
     job_key: str
     workflow_sha256: str
     upstream_shadow_contract_sha256: str
+    release_manifest_sha256: str
+    token_sha256: str
     form_schema_sha256: str
     selector_set_sha256: str
     receipt_semantics_sha256: str
@@ -216,6 +224,11 @@ class FixtureAdapterContract:
                 self.upstream_shadow_contract_sha256,
                 "upstream shadow contract hash",
             ),
+            (
+                self.release_manifest_sha256,
+                "fixture release-manifest hash",
+            ),
+            (self.token_sha256, "fixture release-token hash"),
             (self.form_schema_sha256, "form-schema hash"),
             (self.selector_set_sha256, "selector-set hash"),
             (self.receipt_semantics_sha256, "receipt-semantics hash"),
@@ -230,6 +243,8 @@ class FixtureAdapterContract:
             FROZEN_SHADOW_CONTRACT.job_key,
             FROZEN_SHADOW_CONTRACT.workflow_sha256,
             FROZEN_SHADOW_CONTRACT.contract_sha256,
+            FIXTURE_RELEASE_MANIFEST_SHA256,
+            FIXTURE_TOKEN_SHA256,
             FORM_SCHEMA_SHA256,
             SELECTOR_SET_SHA256,
             RECEIPT_SEMANTICS_SHA256,
@@ -240,6 +255,8 @@ class FixtureAdapterContract:
             self.job_key,
             self.workflow_sha256,
             self.upstream_shadow_contract_sha256,
+            self.release_manifest_sha256,
+            self.token_sha256,
             self.form_schema_sha256,
             self.selector_set_sha256,
             self.receipt_semantics_sha256,
@@ -275,6 +292,8 @@ class FixtureAdapterContract:
             "upstream_shadow_contract_sha256": (
                 self.upstream_shadow_contract_sha256
             ),
+            "release_manifest_sha256": self.release_manifest_sha256,
+            "token_sha256": self.token_sha256,
             "form_schema_sha256": self.form_schema_sha256,
             "selector_set_sha256": self.selector_set_sha256,
             "receipt_semantics_sha256": self.receipt_semantics_sha256,
@@ -314,6 +333,8 @@ FROZEN_FIXTURE_ADAPTER_CONTRACT = FixtureAdapterContract(
     upstream_shadow_contract_sha256=(
         FROZEN_SHADOW_CONTRACT.contract_sha256
     ),
+    release_manifest_sha256=FIXTURE_RELEASE_MANIFEST_SHA256,
+    token_sha256=FIXTURE_TOKEN_SHA256,
     form_schema_sha256=FORM_SCHEMA_SHA256,
     selector_set_sha256=SELECTOR_SET_SHA256,
     receipt_semantics_sha256=RECEIPT_SEMANTICS_SHA256,
@@ -644,7 +665,10 @@ def _hard_breach(
     ):
         return "mismatched_receipt"
     if (
-        proof.receipt_id != FROZEN_SHADOW_CONTRACT.receipt_id
+        proof.release_manifest_sha256
+        != contract.release_manifest_sha256
+        or proof.token_sha256 != contract.token_sha256
+        or proof.receipt_id != FROZEN_SHADOW_CONTRACT.receipt_id
         or proof.receipt_payload_sha256
         != FROZEN_SHADOW_CONTRACT.receipt_payload_sha256
         or proof.field_map_sha256

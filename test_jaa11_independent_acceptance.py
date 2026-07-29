@@ -40,9 +40,10 @@ def _content_hash(value: object) -> str:
 
 def _proof() -> SubmissionProof:
     golden = FROZEN_SHADOW_CONTRACT
+    contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     return SubmissionProof(
-        release_manifest_sha256="a" * 64,
-        token_sha256="b" * 64,
+        release_manifest_sha256=contract.release_manifest_sha256,
+        token_sha256=contract.token_sha256,
         receipt_id=golden.receipt_id,
         receipt_payload_sha256=golden.receipt_payload_sha256,
         screenshot_sha256=golden.screenshot_sha256,
@@ -81,6 +82,8 @@ def test_frozen_fixture_contract_binds_exact_upstream_and_policy() -> None:
     assert contract.upstream_shadow_contract_sha256 == (
         FROZEN_SHADOW_CONTRACT.contract_sha256
     )
+    assert contract.release_manifest_sha256 == _proof().release_manifest_sha256
+    assert contract.token_sha256 == _proof().token_sha256
     assert contract.workflow_sha256 == (
         FROZEN_SHADOW_CONTRACT.workflow_sha256
     )
