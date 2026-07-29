@@ -180,6 +180,46 @@ def test_out_of_order_or_cross_application_evidence_is_rejected() -> None:
         )
 
 
+def test_conflicting_same_time_observations_are_rejected() -> None:
+    first_raw = compile_local_export_evidence(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id=APPLICATION_ID,
+        job_key=JOB_KEY,
+        source_kind="local_portal_export",
+        source_record_id="same-time-screening",
+        raw_export_bytes=b"under review",
+        observed_at=BASE_TIME,
+    )
+    second_raw = compile_local_export_evidence(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id=APPLICATION_ID,
+        job_key=JOB_KEY,
+        source_kind="local_message_export",
+        source_record_id="same-time-interview",
+        raw_export_bytes=b"interview requested",
+        observed_at=BASE_TIME,
+    )
+    observations = (
+        classify_status_evidence(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            first_raw,
+            explicit_status_code="under_review",
+        ),
+        classify_status_evidence(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            second_raw,
+            explicit_status_code="interview_requested",
+        ),
+    )
+    with pytest.raises(ValueError, match="unique and ordered"):
+        compile_status_timeline(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            application_id=APPLICATION_ID,
+            job_key=JOB_KEY,
+            observations=observations,
+        )
+
+
 @pytest.mark.parametrize(
     "codes",
     (
@@ -237,6 +277,22 @@ def test_follow_up_is_blocked_after_progress_or_terminal_state() -> None:
                 released_application_sha256="c" * 64,
                 draft_sha256="d" * 64,
             )
+
+
+def test_follow_up_requires_a_source_backed_observation() -> None:
+    empty = compile_status_timeline(
+        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+        application_id=APPLICATION_ID,
+        job_key=JOB_KEY,
+        observations=(),
+    )
+    with pytest.raises(ValueError, match="source-backed status evidence"):
+        compile_follow_up_intent(
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
+            empty,
+            released_application_sha256="c" * 64,
+            draft_sha256="d" * 64,
+        )
 
 
 def test_follow_up_cannot_claim_send_or_change_idempotency() -> None:

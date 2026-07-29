@@ -85,6 +85,7 @@ FOLLOW_UP_POLICY_DOCUMENT: Mapping[str, object] = MappingProxyType({
 def _canonical_json(value: object) -> str:
     return json.dumps(
         value,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -646,6 +647,10 @@ class StatusTimeline:
             parsed_times.append(
                 _aware(parsed, "status timeline observation time")
             )
+        if len(parsed_times) != len(set(parsed_times)):
+            raise ValueError(
+                "status timeline observation times must be unique and ordered"
+            )
         if tuple(sorted(parsed_times)) != tuple(parsed_times):
             raise ValueError(
                 "status timeline observation times must be ordered"
@@ -726,11 +731,6 @@ def compile_status_timeline(
         isinstance(row, CensoredSilence) for row in censored_silence
     ):
         raise TypeError("status timeline requires typed censor records")
-    observation_times = tuple(
-        datetime.fromisoformat(row.observed_at) for row in observations
-    )
-    if tuple(sorted(observation_times)) != observation_times:
-        raise ValueError("status observations must be chronologically ordered")
     if (
         len({row.observation_id for row in observations})
         != len(observations)
@@ -738,6 +738,15 @@ def compile_status_timeline(
         != len(observations)
     ):
         raise ValueError("status observations must be deduplicated")
+    observation_times = tuple(
+        datetime.fromisoformat(row.observed_at) for row in observations
+    )
+    if len(observation_times) != len(set(observation_times)):
+        raise ValueError(
+            "status observations must be chronologically unique and ordered"
+        )
+    if tuple(sorted(observation_times)) != observation_times:
+        raise ValueError("status observations must be chronologically ordered")
     for row in observations:
         row.verify()
         if row.application_id != application_id or row.job_key != job_key:
