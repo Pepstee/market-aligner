@@ -743,9 +743,12 @@ class ScoredPrediction:
             ):
                 raise ValueError("censored prediction cannot carry a score")
         elif self.outcome_status in {"progressed", "explicit_rejection"}:
+            expected_actual_bp = (
+                10_000 if self.outcome_status == "progressed" else 0
+            )
             if (
                 type(self.actual_bp) is not int
-                or self.actual_bp not in {0, 10_000}
+                or self.actual_bp != expected_actual_bp
                 or type(self.squared_error_bp) is not int
                 or not 0 <= self.squared_error_bp <= 10_000
             ):

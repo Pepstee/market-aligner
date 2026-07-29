@@ -216,6 +216,33 @@ def test_explicit_progression_rejection_and_silence_are_distinct() -> None:
     assert censored.squared_error_bp is None
 
 
+def test_candidate_terminal_states_are_censored_not_negative() -> None:
+    for codes in (
+        (
+            "under_review",
+            "interview_requested",
+            "final_stage",
+            "offer",
+            "declined_by_candidate",
+        ),
+        ("under_review", "withdrawn_by_candidate"),
+        ("under_review", "expired"),
+    ):
+        application_id = f"application:terminal-censor:{codes[-1]}"
+        censored = score_prediction(
+            FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+            _prediction(
+                application_id,
+                target_state=PipelineState.ACCEPTED,
+            ),
+            _timeline(application_id, codes),
+        )
+        assert censored.outcome_status == "censored"
+        assert censored.actual_bp is None
+        assert censored.squared_error_bp is None
+        assert censored.outcome_attribution == "candidate_or_expiry_censor"
+
+
 def test_calibration_excludes_censoring_from_score_arithmetic() -> None:
     resolved = _score(
         "application:report:resolved",

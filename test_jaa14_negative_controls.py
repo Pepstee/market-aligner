@@ -104,6 +104,43 @@ def test_prediction_and_timeline_cannot_mix_applications() -> None:
         )
 
 
+def test_resolved_score_direct_construction_cannot_reverse_truth() -> None:
+    for progressed, forged_actual_bp in ((True, 0), (False, 10_000)):
+        accepted = _score(
+            f"application:forged-score:{progressed}",
+            policy_sha256=BASE_POLICY,
+            probability_bp=6_000,
+            cohort_id="cohort:locked",
+            cohort_kind="locked",
+            progressed=progressed,
+        )
+        forged_fields = {
+            **vars(accepted),
+            "actual_bp": forged_actual_bp,
+            "squared_error_bp": (
+                (6_000 - forged_actual_bp) ** 2 + 5_000
+            )
+            // 10_000,
+        }
+        identity_shell = object.__new__(type(accepted))
+        for field_name, value in forged_fields.items():
+            object.__setattr__(identity_shell, field_name, value)
+        forged_fields["score_id"] = hashlib.sha256(
+            json.dumps(
+                identity_shell.document(include_identity=False),
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        with pytest.raises(
+            ValueError,
+            match="resolved prediction score is invalid",
+        ):
+            type(accepted)(**forged_fields)
+
+
 def test_unresolved_timeline_requires_real_horizon_censor() -> None:
     timeline = compile_status_timeline(
         FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
