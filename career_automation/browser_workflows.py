@@ -33,6 +33,35 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def fixture_submit_event_sha256(
+    *,
+    run_id: str,
+    workflow_sha256: str,
+    step_id: str,
+    release_manifest_sha256: str,
+    receipt_id: str,
+    receipt_payload_sha256: str,
+    screenshot_sha256: str,
+    field_map_sha256: str,
+) -> str:
+    """Bind one local fixture submit event to its complete durable context."""
+    return _sha256(
+        _canonical_json(
+            {
+                "contract": "jaa09.fixture-submit-event.v1",
+                "run_id": run_id,
+                "workflow_hash": workflow_sha256,
+                "step_id": step_id,
+                "release_manifest_sha256": release_manifest_sha256,
+                "receipt_id": receipt_id,
+                "receipt_payload_sha256": receipt_payload_sha256,
+                "screenshot_sha256": screenshot_sha256,
+                "field_map_sha256": field_map_sha256,
+            }
+        )
+    )
+
+
 class WorkflowError(RuntimeError):
     """Base error for workflow validation or execution state violations."""
 
@@ -1407,6 +1436,27 @@ class BrowserWorkflowStore:
                 if dict(result.outputs) != proof_outputs:
                     raise ReleaseGateError(
                         "submission outputs differ from their proof"
+                    )
+                expected_submit_event_sha256 = fixture_submit_event_sha256(
+                    run_id=str(run["run_id"]),
+                    workflow_sha256=str(run["workflow_hash"]),
+                    step_id=step_id,
+                    release_manifest_sha256=(
+                        submission_proof.release_manifest_sha256
+                    ),
+                    receipt_id=submission_proof.receipt_id,
+                    receipt_payload_sha256=(
+                        submission_proof.receipt_payload_sha256
+                    ),
+                    screenshot_sha256=submission_proof.screenshot_sha256,
+                    field_map_sha256=submission_proof.field_map_sha256,
+                )
+                if (
+                    submission_proof.submit_event_sha256
+                    != expected_submit_event_sha256
+                ):
+                    raise ReleaseGateError(
+                        "submission event identity differs from its durable context"
                     )
             elif submission_proof is not None:
                 raise WorkflowError(

@@ -31,6 +31,7 @@ from career_automation.browser_workflows import (
     SelectorPlan,
     ValueReference,
     ValueSource,
+    fixture_submit_event_sha256,
 )
 from test_jaa08_independent_acceptance import (
     _fixture_now,
@@ -569,6 +570,20 @@ def test_real_browser_consumes_jaa08_token_and_records_official_receipt(
             "submit_event_sha256",
         ):
             assert re.fullmatch(r"[0-9a-f]{64}", str(outputs[key]))
+        assert outputs["submit_event_sha256"] == fixture_submit_event_sha256(
+            run_id=run_id,
+            workflow_sha256=workflow.content_hash,
+            step_id="submit",
+            release_manifest_sha256=(
+                issued.manifest.release_manifest_sha256
+            ),
+            receipt_id=str(outputs["receipt_id"]),
+            receipt_payload_sha256=str(
+                outputs["receipt_payload_sha256"]
+            ),
+            screenshot_sha256=str(outputs["screenshot_sha256"]),
+            field_map_sha256=str(outputs["field_map_sha256"]),
+        )
         snapshot = store.run_snapshot(run_id)
         assert snapshot["status"] == "completed"
         assert snapshot["checkpoint_count"] == len(workflow.actions)

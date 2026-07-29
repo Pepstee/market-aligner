@@ -39,6 +39,8 @@ from career_automation.browser_workflows import (
     SelectorOutcome,
     SelectorPlan,
     SelectorStrategy,
+    StepResult,
+    SubmissionProof,
 )
 from career_automation.release_gate import ReleaseGateStore
 from playwright.sync_api import sync_playwright
@@ -1245,6 +1247,108 @@ def test_self_consistent_wrong_payload_receipt_is_not_recorded(
         assert "submit" not in store.checkpoint_outputs(run_id)
         assert fixture.receipt is not None
         assert fixture.receipt.payload_sha256 == "0" * 64
+
+
+def test_store_rejects_rehashed_submit_event_without_durable_lineage(
+    tmp_path,
+) -> None:
+    release_inputs = _issued_release_inputs(tmp_path)
+    source = release_inputs[4]
+    vacancy = FixtureVacancy(
+        "rehashed-submit-event",
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.answers[0].question,
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: NONCE,
+        form_token=FORM_TOKEN,
+    ) as fixture:
+        (
+            database,
+            workflow,
+            approvals,
+            values,
+            authority,
+            issued,
+        ) = _released_browser_inputs(
+            fixture,
+            tmp_path,
+            release_inputs,
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("local_worker", run_id=run_id) is not None
+        store.authorize_release(
+            run_id,
+            token=issued.release_token,
+            authorization_reference=(
+                f"JAA08:{issued.manifest.release_manifest_sha256}"
+            ),
+            idempotency_key=issued.manifest.release_manifest_sha256,
+        )
+        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            for _action in workflow.actions[:-1]:
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+
+            authentic_complete = store.complete_step
+
+            def rehash_event(
+                *args: object,
+                submission_proof: SubmissionProof | None = None,
+                **kwargs: object,
+            ) -> bool:
+                assert submission_proof is not None
+                result = kwargs["result"]
+                assert isinstance(result, StepResult)
+                forged_identity = "0" * 64
+                forged_outputs = dict(result.outputs)
+                forged_outputs["submit_event_sha256"] = forged_identity
+                kwargs["result"] = StepResult(
+                    forged_outputs,
+                    result.selector_report,
+                )
+                return authentic_complete(
+                    *args,
+                    submission_proof=replace(
+                        submission_proof,
+                        submit_event_sha256=forged_identity,
+                    ),
+                    **kwargs,
+                )
+
+            store.complete_step = rehash_event  # type: ignore[method-assign]
+            with pytest.raises(
+                ReleaseGateError,
+                match="differs from its durable context",
+            ):
+                executor.execute_next(
+                    page,
+                    run_id=run_id,
+                    worker_id="local_worker",
+                    approved_values=approvals,
+                    materialized_values=values,
+                    release_authority=authority,
+                )
+            browser.close()
+
+        dispatch = store.submit_dispatch(run_id)
+        assert dispatch is not None
+        assert dispatch["state"] == "click_started"
+        assert dispatch["receipt_id"] is None
+        assert "submit" not in store.checkpoint_outputs(run_id)
 
 
 def test_one_jaa08_token_cannot_prepare_two_browser_submit_runs(

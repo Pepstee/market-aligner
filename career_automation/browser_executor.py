@@ -40,6 +40,7 @@ from .browser_workflows import (
     SubmissionProof,
     ValueReference,
     WorkflowError,
+    fixture_submit_event_sha256,
 )
 from .release_gate import ReleaseGateStore
 from .rendering import ApplicationArtifacts
@@ -863,25 +864,16 @@ class LocalBrowserExecutor:
         field_map_sha256 = str(dispatch["field_map_hash"])
         release_manifest_sha256 = str(dispatch["release_manifest_hash"])
         token_sha256 = str(dispatch["release_token_hash"])
-        submit_event_sha256 = hashlib.sha256(
-            json.dumps(
-                {
-                    "contract": "jaa09.fixture-submit-event.v1",
-                    "run_id": pending.run_id,
-                    "workflow_hash": pending.workflow_hash,
-                    "step_id": action.step_id,
-                    "release_manifest_sha256": (
-                        release_manifest_sha256
-                    ),
-                    "receipt_id": receipt_id,
-                    "receipt_payload_sha256": payload_sha256,
-                    "screenshot_sha256": screenshot_sha256,
-                    "field_map_sha256": field_map_sha256,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+        submit_event_sha256 = fixture_submit_event_sha256(
+            run_id=pending.run_id,
+            workflow_sha256=pending.workflow_hash,
+            step_id=action.step_id,
+            release_manifest_sha256=release_manifest_sha256,
+            receipt_id=receipt_id,
+            receipt_payload_sha256=payload_sha256,
+            screenshot_sha256=screenshot_sha256,
+            field_map_sha256=field_map_sha256,
+        )
         proof = SubmissionProof(
             release_manifest_sha256=release_manifest_sha256,
             token_sha256=token_sha256,
