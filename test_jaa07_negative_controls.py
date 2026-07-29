@@ -131,6 +131,40 @@ def test_style_receipt_and_exact_target_are_mandatory() -> None:
         )
 
 
+def test_style_proposal_must_change_its_exact_target() -> None:
+    source, _ = _source()
+    slot = source.style_slots[0]
+    text_sha256 = hashlib.sha256(slot.text.encode()).hexdigest()
+    receipt = ModelReceipt(
+        "provider",
+        "critic",
+        DIGEST,
+        DIGEST,
+        text_sha256,
+        text_sha256,
+    )
+    proposal_id = content_hash(
+        {
+            "contract": "jaa07.style-proposal.v1",
+            "slot_id": slot.slot_id,
+            "input_sha256": receipt.input_sha256,
+            "output_sha256": receipt.output_sha256,
+            "provider": receipt.provider,
+            "model": receipt.model,
+            "prompt_sha256": receipt.prompt_sha256,
+            "policy_sha256": receipt.policy_sha256,
+        }
+    )
+    with pytest.raises(ValueError, match="must change"):
+        StyleProposal(
+            proposal_id,
+            slot.slot_id,
+            slot.text,
+            slot.text,
+            receipt,
+        )
+
+
 def test_tampered_source_and_contact_privacy_fields_fail_closed() -> None:
     source, _ = _source()
     with pytest.raises(ValueError, match="identity differs"):

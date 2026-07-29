@@ -11,7 +11,11 @@ from datetime import date
 from pathlib import Path
 from typing import Mapping
 
-from career_automation.application_compiler import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from career_automation.application_compiler import (  # noqa: E402
     ApplicationSource,
     CandidateContact,
     DocumentSection,
@@ -21,22 +25,21 @@ from career_automation.application_compiler import (
     StyleSlot,
     compile_application_source,
 )
-from career_automation.application_strategy import (
+from career_automation.application_strategy import (  # noqa: E402
     CandidateSupport,
     EmployerResearchFact,
     compile_application_strategy,
 )
-from career_automation.evidence_matching import (
+from career_automation.evidence_matching import (  # noqa: E402
     MatchResult,
     MatchingPolicy,
     Requirement,
     canonical_json,
     content_hash,
 )
-from career_automation.rendering import render_pdf_artifacts
+from career_automation.rendering import render_pdf_artifacts  # noqa: E402
 
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = (
     ROOT / "career_automation/fixtures/jaa07_locked_application_packs.json"
 )
