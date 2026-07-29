@@ -15,8 +15,11 @@ from career_automation.outcome_feedback import (
     record_pre_outcome_prediction,
 )
 from career_automation.source_expansion import (
+    AdapterMeasurement,
+    AdapterValueObservation,
     FROZEN_SOURCE_EXPANSION_CONTRACT,
     SourceExpansionContract,
+    _content_hash,
     compile_adapter_measurement,
     evaluate_adapter_candidate,
     rank_expansion_candidates,
@@ -75,12 +78,50 @@ def test_candidate_policy_or_identity_tampering_fails() -> None:
 
 def test_value_observation_rejects_post_window_prediction() -> None:
     candidate = _candidate("adapter:post-window")
-    observation = _observation(candidate, 0)
+    prediction = record_pre_outcome_prediction(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        application_id="application:post-window",
+        job_key="job:post-window",
+        predictor_kind="configured_model",
+        predictor_id="predictor:jaa15-fixture",
+        predictor_version="1",
+        predictor_policy_sha256=PREDICTOR_POLICY,
+        input_snapshot_sha256=_hash("post-window-input"),
+        strategy_id=_hash("post-window-strategy"),
+        cohort_id="cohort:jaa15-locked",
+        cohort_kind="locked",
+        target_state=PipelineState.INTERVIEW,
+        probability_bp=6_000,
+        predicted_at=WINDOW_END + timedelta(seconds=1),
+        horizon_at=WINDOW_END + timedelta(days=30),
+    )
     with pytest.raises(ValueError, match="inside the measurement window"):
-        replace(
-            observation,
-            predicted_at=(WINDOW_END + timedelta(seconds=1)).isoformat(),
+        record_adapter_value_observation(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            candidate,
+            prediction,
+            source_snapshot_sha256=_hash("post-window-source"),
+            viability_receipt_sha256=_hash("post-window-viability"),
+            worthwhile_vacancy=True,
+            measurement_window_start=WINDOW_START,
+            measurement_window_end=WINDOW_END,
         )
+
+
+def test_value_observation_cannot_rehash_a_different_prediction_value() -> None:
+    accepted = _observation(_candidate("adapter:prediction-rehash"), 0)
+    fields = {
+        **vars(accepted),
+        "expected_interview_bp": accepted.expected_interview_bp + 1,
+    }
+    shell = object.__new__(AdapterValueObservation)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["observation_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its prediction receipt"):
+        AdapterValueObservation(**fields)
 
 
 def test_expected_interviews_require_an_interview_target_prediction() -> None:
@@ -147,6 +188,29 @@ def test_measurement_score_cannot_be_rehashed_to_another_formula() -> None:
             value_score=measurement.value_score + 1,
             measurement_id=hashlib.sha256(b"forged-measurement").hexdigest(),
         )
+
+
+def test_measurement_rehash_cannot_inflate_derived_aggregates() -> None:
+    accepted = _measurement(_candidate("adapter:aggregate-rehash"))
+    fields = {
+        **vars(accepted),
+        "worthwhile_vacancies": accepted.sample_count,
+        "expected_interviews_bp": accepted.sample_count * 10_000,
+    }
+    fields["value_score"] = (
+        fields["worthwhile_vacancies"] * 10_000
+        + fields["expected_interviews_bp"]
+        - fields["implementation_cost_points"] * 100
+        - fields["operational_friction_points"] * 100
+    )
+    shell = object.__new__(AdapterMeasurement)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["measurement_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="measurement aggregate is invalid"):
+        AdapterMeasurement(**fields)
 
 
 def test_adapter_cannot_inherit_another_policy_or_evidence() -> None:

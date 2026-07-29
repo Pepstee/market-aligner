@@ -481,6 +481,7 @@ class AdapterValueObservation:
     candidate_id: str
     adapter_id: str
     adapter_version: str
+    prediction: PredictionReceipt
     job_key: str
     application_id: str
     source_snapshot_sha256: str
@@ -510,6 +511,7 @@ class AdapterValueObservation:
             "candidate_id": self.candidate_id,
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
+            "prediction": self.prediction.document(),
             "job_key": self.job_key,
             "application_id": self.application_id,
             "source_snapshot_sha256": self.source_snapshot_sha256,
@@ -532,6 +534,11 @@ class AdapterValueObservation:
         return result
 
     def verify(self) -> None:
+        if not isinstance(self.prediction, PredictionReceipt):
+            raise TypeError(
+                "value observation requires a typed prediction receipt"
+            )
+        self.prediction.verify()
         for value, label in (
             (self.contract_sha256, "observation contract hash"),
             (self.candidate_id, "observation candidate ID"),
@@ -555,6 +562,32 @@ class AdapterValueObservation:
         if self.prediction_target_state != PipelineState.INTERVIEW.value:
             raise ValueError(
                 "expansion value requires an interview-target prediction"
+            )
+        expected_prediction_fields = (
+            self.job_key,
+            self.application_id,
+            self.prediction_id,
+            self.prediction_policy_sha256,
+            self.prediction_cohort_id,
+            self.prediction_cohort_kind,
+            self.prediction_target_state,
+            self.predicted_at,
+            self.expected_interview_bp,
+        )
+        actual_prediction_fields = (
+            self.prediction.job_key,
+            self.prediction.application_id,
+            self.prediction.prediction_id,
+            self.prediction.predictor_policy_sha256,
+            self.prediction.cohort_id,
+            self.prediction.cohort_kind,
+            self.prediction.target_state.value,
+            self.prediction.predicted_at,
+            self.prediction.probability_bp,
+        )
+        if expected_prediction_fields != actual_prediction_fields:
+            raise ValueError(
+                "value observation differs from its prediction receipt"
             )
         start = _aware_iso(
             self.measurement_window_start,
@@ -626,6 +659,7 @@ def record_adapter_value_observation(
         "candidate_id": candidate.candidate_id,
         "adapter_id": candidate.adapter_id,
         "adapter_version": candidate.adapter_version,
+        "prediction": prediction.document(),
         "job_key": prediction.job_key,
         "application_id": prediction.application_id,
         "source_snapshot_sha256": source_snapshot_sha256,
@@ -644,7 +678,25 @@ def record_adapter_value_observation(
         "certifies_slice": False,
     }
     return AdapterValueObservation(
-        **body,
+        contract_sha256=contract.contract_sha256,
+        candidate_id=candidate.candidate_id,
+        adapter_id=candidate.adapter_id,
+        adapter_version=candidate.adapter_version,
+        prediction=prediction,
+        job_key=prediction.job_key,
+        application_id=prediction.application_id,
+        source_snapshot_sha256=source_snapshot_sha256,
+        viability_receipt_sha256=viability_receipt_sha256,
+        prediction_id=prediction.prediction_id,
+        prediction_policy_sha256=prediction.predictor_policy_sha256,
+        prediction_cohort_id=prediction.cohort_id,
+        prediction_cohort_kind=prediction.cohort_kind,
+        prediction_target_state=prediction.target_state.value,
+        predicted_at=prediction.predicted_at,
+        expected_interview_bp=prediction.probability_bp,
+        worthwhile_vacancy=worthwhile_vacancy,
+        measurement_window_start=start.isoformat(),
+        measurement_window_end=end.isoformat(),
         observation_id=_content_hash(body),
     )
 
@@ -658,6 +710,7 @@ class AdapterMeasurement:
     cohort_id: str
     measurement_window_start: str
     measurement_window_end: str
+    observations: tuple[AdapterValueObservation, ...]
     observation_ids: tuple[str, ...]
     job_keys: tuple[str, ...]
     sample_count: int
@@ -685,6 +738,9 @@ class AdapterMeasurement:
             "cohort_id": self.cohort_id,
             "measurement_window_start": self.measurement_window_start,
             "measurement_window_end": self.measurement_window_end,
+            "observations": tuple(
+                row.document() for row in self.observations
+            ),
             "observation_ids": self.observation_ids,
             "job_keys": self.job_keys,
             "sample_count": self.sample_count,
@@ -726,6 +782,45 @@ class AdapterMeasurement:
         )
         if start >= end:
             raise ValueError("measurement window must be ordered")
+        if not self.observations or not all(
+            isinstance(row, AdapterValueObservation)
+            for row in self.observations
+        ):
+            raise TypeError(
+                "measurement requires typed embedded observations"
+            )
+        for row in self.observations:
+            row.verify()
+            if (
+                row.contract_sha256 != self.contract_sha256
+                or row.candidate_id != self.candidate_id
+                or row.adapter_id != self.adapter_id
+                or row.adapter_version != self.adapter_version
+            ):
+                raise ValueError(
+                    "measurement observations differ from its candidate"
+                )
+            if (
+                row.measurement_window_start
+                != self.measurement_window_start
+                or row.measurement_window_end
+                != self.measurement_window_end
+                or row.prediction_cohort_id != self.cohort_id
+            ):
+                raise ValueError(
+                    "measurement observations differ from its window or cohort"
+                )
+        derived_observation_ids = tuple(
+            row.observation_id for row in self.observations
+        )
+        derived_job_keys = tuple(row.job_key for row in self.observations)
+        if (
+            self.observation_ids != derived_observation_ids
+            or self.job_keys != derived_job_keys
+        ):
+            raise ValueError(
+                "measurement identities differ from embedded observations"
+            )
         if (
             not self.observation_ids
             or len(self.observation_ids) != len(set(self.observation_ids))
@@ -749,16 +844,30 @@ class AdapterMeasurement:
         ):
             if type(value) is not int:
                 raise ValueError(f"{label} must be an integer")
+        derived_worthwhile = tuple(
+            row for row in self.observations if row.worthwhile_vacancy
+        )
+        derived_expected_interviews = sum(
+            row.expected_interview_bp for row in derived_worthwhile
+        )
         if (
-            self.sample_count != len(self.observation_ids)
-            or not 0 <= self.worthwhile_vacancies <= self.sample_count
-            or not 0
-            <= self.expected_interviews_bp
-            <= self.worthwhile_vacancies * 10_000
+            self.sample_count != len(self.observations)
+            or self.worthwhile_vacancies != len(derived_worthwhile)
+            or self.expected_interviews_bp
+            != derived_expected_interviews
             or not 0 <= self.implementation_cost_points <= 10_000
             or not 0 <= self.operational_friction_points <= 10_000
         ):
             raise ValueError("measurement aggregate is invalid")
+        if (
+            len({row.source_snapshot_sha256 for row in self.observations})
+            != len(self.observations)
+            or len({row.prediction_id for row in self.observations})
+            != len(self.observations)
+        ):
+            raise ValueError(
+                "measurement cannot duplicate sources or predictions"
+            )
         expected_score = (
             self.worthwhile_vacancies * 10_000
             + self.expected_interviews_bp
@@ -861,6 +970,7 @@ def compile_adapter_measurement(
         "cohort_id": cohort_id,
         "measurement_window_start": window_start,
         "measurement_window_end": window_end,
+        "observations": tuple(row.document() for row in observations),
         "observation_ids": observation_ids,
         "job_keys": job_keys,
         "sample_count": len(observations),
@@ -874,7 +984,22 @@ def compile_adapter_measurement(
         "certifies_slice": False,
     }
     return AdapterMeasurement(
-        **body,
+        contract_sha256=contract.contract_sha256,
+        candidate_id=candidate.candidate_id,
+        adapter_id=candidate.adapter_id,
+        adapter_version=candidate.adapter_version,
+        cohort_id=cohort_id,
+        measurement_window_start=window_start,
+        measurement_window_end=window_end,
+        observations=observations,
+        observation_ids=observation_ids,
+        job_keys=job_keys,
+        sample_count=len(observations),
+        worthwhile_vacancies=worthwhile_count,
+        expected_interviews_bp=expected_interviews,
+        implementation_cost_points=implementation_cost_points,
+        operational_friction_points=operational_friction_points,
+        value_score=value_score,
         measurement_id=_content_hash(body),
     )
 
