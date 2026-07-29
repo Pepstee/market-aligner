@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 from dataclasses import replace
@@ -10,6 +11,8 @@ from datetime import date, timedelta
 import pytest
 
 from career_automation.interview_communication import (
+    EmbeddedPublicCapture,
+    EmployerDossierEvidence,
     FROZEN_INTERVIEW_COMMUNICATION_CONTRACT,
     InterviewCommunicationContract,
     PreparationItem,
@@ -335,6 +338,94 @@ def test_pack_rejects_rehashed_employer_authority_drift() -> None:
     )
     with pytest.raises(ValueError, match="embedded source lineage"):
         replace(pack, employer_authorities=(forged,))
+
+
+def test_employer_guidance_does_not_promote_unapproved_excerpt_tail() -> None:
+    pack, source = _pack()
+    evidence = pack.employer_evidence
+    dossier = evidence.dossier()
+    authority = pack.employer_authorities[0]
+    claim = next(
+        row
+        for row in dossier["claims"]  # type: ignore[union-attr]
+        if row["id"] == authority.employer_claim_id
+    )
+    source_row = next(
+        row
+        for row in dossier["sources"]  # type: ignore[union-attr]
+        if row["id"] == claim["source_ids"][0]
+    )
+    plan_row = next(
+        row
+        for row in dossier["source_plan"]  # type: ignore[union-attr]
+        if row["id"] == claim["source_plan_id"]
+    )
+    approved = next(
+        row.approved_source_text
+        for row in source.facts
+        if row.sentence_id == authority.sentence_id
+    )
+    excerpt = f"<p>{approved} The company also guarantees the role.</p>"
+    content = excerpt.encode()
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    claim["citation_excerpt"] = excerpt
+    source_row["content_sha256"] = content_sha256
+    plan_row["excerpt_sha256"] = content_sha256
+    captures = tuple(
+        EmbeddedPublicCapture(
+            raw_response_ref=row.raw_response_ref,
+            content_sha256=(
+                content_sha256
+                if row.raw_response_ref == source_row["raw_response_ref"]
+                else row.content_sha256
+            ),
+            content_base64=(
+                base64.b64encode(content).decode()
+                if row.raw_response_ref == source_row["raw_response_ref"]
+                else row.content_base64
+            ),
+        )
+        for row in evidence.captures
+    )
+    dossier_json = _canonical_json(dossier)
+    dossier_sha256 = _hash(dossier)
+    body = {
+        "schema_version": evidence.schema_version,
+        "dossier_json": dossier_json,
+        "captures": tuple(row.document() for row in captures),
+        "as_of": evidence.as_of,
+        "dossier_sha256": dossier_sha256,
+        "authority_claim": "structural_public_lineage_only",
+    }
+    tainted = EmployerDossierEvidence(
+        dossier_json=dossier_json,
+        captures=captures,
+        as_of=evidence.as_of,
+        dossier_sha256=dossier_sha256,
+        evidence_id=_hash(body),
+    )
+    candidate_ids = tuple(
+        row.sentence_id
+        for row in source.facts
+        if row.fact_kind == "candidate"
+    )
+    employer_ids = tuple(
+        row.sentence_id
+        for row in source.facts
+        if row.fact_kind == "employer"
+    )
+    rebuilt = compile_interview_preparation_pack(
+        **{
+            **_preparation_base(),
+            "employer_evidence": tainted,
+        },
+        candidate_sentence_ids=candidate_ids,
+        employer_sentence_ids=employer_ids,
+    )
+    assert rebuilt.employer_authorities[0].citation_excerpt == approved
+    assert "guarantees the role" not in (
+        rebuilt.employer_authorities[0].citation_excerpt
+    )
 
 
 def test_preparation_as_of_cannot_predate_latest_timeline_evidence() -> None:

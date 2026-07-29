@@ -1108,8 +1108,10 @@ def _employer_authority(
         source_ids=tuple(source_ids),
         source_urls=source_urls,
         source_content_sha256s=source_content_sha256s,
-        citation_excerpt=excerpt,
-        citation_excerpt_sha256=hashlib.sha256(excerpt.encode()).hexdigest(),
+        citation_excerpt=fact.approved_source_text,
+        citation_excerpt_sha256=hashlib.sha256(
+            fact.approved_source_text.encode()
+        ).hexdigest(),
         dossier_evidence_id=evidence.evidence_id,
         dossier_sha256=evidence.dossier_sha256,
         observed_at=observed.isoformat(),
