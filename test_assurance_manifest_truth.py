@@ -1772,6 +1772,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "evidence_class",
         "maximum_claim",
         "cohort_status",
+        "open_runtime_evidence",
         "accepted_paths",
         "design_authority",
         "sonnet_review",
@@ -1827,8 +1828,253 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "loopback_fixture_elapsed_interval_same_boot_local_only"
     )
     assert phase_c["cohort_status"] == (
-        "not_opened_not_closed_not_collected"
+        "open_not_closed_not_collected"
     )
+    open_runtime = phase_c["open_runtime_evidence"]
+    assert set(open_runtime) == {
+        "cohort_id",
+        "open_receipt_sha256",
+        "observation_id",
+        "observation_sha256",
+        "ledger_instance_id",
+        "genesis_receipt_sha256",
+        "chain_head_receipt_sha256",
+        "ledger_receipt_count",
+        "fixture_measures_report_id",
+        "first_witness",
+        "ledger_sha256_at_open",
+        "artifact_sha256_at_open",
+        "browser_work",
+        "public_network_requests",
+        "network_isolation_witness_limit",
+        "cohort_close_attempted_at_record",
+        "incomplete_attempt",
+        "immutable_evidence",
+    }
+    assert open_runtime["cohort_id"] == (
+        "6f899b49467ab28e5c19af6b5aba9dd2"
+        "1274d374d1d05dbbd457fcf130987693"
+    )
+    assert open_runtime["open_receipt_sha256"] == (
+        "22f26d138e758a83f78a808f8ecfef9d"
+        "f20caa963d0eefb7b79f7e80c3ca9e1d"
+    )
+    assert open_runtime["observation_id"] == (
+        "jaa10-phase-c-open-9246458"
+    )
+    assert open_runtime["observation_sha256"] == (
+        "480357d4fbaaaa7bf47353cb703997751"
+        "a65c167d3470bb1b11de9a26f443ae4"
+    )
+    assert open_runtime["ledger_instance_id"] == (
+        "ff1f71f999651ccdd819e42ef1e5afae"
+        "be19aceac19b9dc91eee43fa0368bf4d"
+    )
+    assert open_runtime["genesis_receipt_sha256"] == (
+        "b88249ea97ebdf0f3a23b9ca60ff5232"
+        "fb73fa1fd8f711412ff6b726940fba31"
+    )
+    assert open_runtime["chain_head_receipt_sha256"] == (
+        "66d3c6872938c74926d648d8c53f54ef"
+        "22071bff2ba059fd5b5aa32a213379fe"
+    )
+    assert open_runtime["ledger_receipt_count"] == 3
+    assert open_runtime["fixture_measures_report_id"] == (
+        "9796e3839fdbe8bbaba63e2c3b6014c9"
+        "0e31937a818aea8ab5482ee2f3c902eb"
+    )
+    assert open_runtime["first_witness"] == {
+        "boot_id_sha256": (
+            "9d6ad2cc5bc6547443e97a1d5667e73f"
+            "ef732b1b4af080077366798b93903c77"
+        ),
+        "clock_boottime_ns": 642_873_679_497_750,
+        "monotonic_ns": 642_873_679_498_909,
+        "process_token": (
+            "4d76f06f21737909b9c6dba0226f2df"
+            "c4bd1c9a08f24b19535ee47504cb0ff81"
+        ),
+        "recorded_wall_clock": "2026-07-30T12:08:49.810648+00:00",
+        "recorded_wall_clock_status": "informational",
+    }
+    assert open_runtime["ledger_sha256_at_open"] == (
+        "0a08dfcb418e389d57be38fdb764b8c37"
+        "e68ef8ee081599545b6622ec2a10388"
+    )
+    assert open_runtime["artifact_sha256_at_open"] == {
+        "metadata.json": {
+            "sha256": (
+                "708eec015ca5898055157204a48529259"
+                "3d793400a3d2747f790e5d0e1b917de"
+            ),
+            "status": "as_of_open",
+        },
+        "observation.json": {
+            "sha256": (
+                "c484ad6dae19942984120800a95a241c6"
+                "f75f2f85a80f89a86bfe6aebcc80df6"
+            ),
+            "status": "as_of_open",
+        },
+        "ledger-identity.json": {
+            "sha256": (
+                "5e4c740f2eb9293c908b3bd00b38ee68"
+                "b2d6b4499c6e2464ac971a2cfbbc6cf8"
+            ),
+            "status": "as_of_open",
+        },
+        "ledger-receipt.json": {
+            "sha256": (
+                "472d93af860a76c7e272fdeab482dd416"
+                "e4c9b75fd546ead3fb4c5c5bf51507b"
+            ),
+            "status": "as_of_open",
+        },
+        "fixture-measures-report.json": {
+            "sha256": (
+                "c4dacea7eb7b6c56dda3154b9865a16f"
+                "47286c827609c45446838b6de8f3d95f"
+            ),
+            "status": "as_of_open",
+        },
+        "open-receipt.json": {
+            "sha256": (
+                "89eddda0b97061e45208bc1e5efdf0bd"
+                "1b7f991539f73735b6f95777e7343ab4"
+            ),
+            "status": "as_of_open",
+        },
+        "shadow-observations.sqlite3": {
+            "sha256": (
+                "0a08dfcb418e389d57be38fdb764b8c37"
+                "e68ef8ee081599545b6622ec2a10388"
+            ),
+            "status": "as_of_open",
+        },
+    }
+    assert open_runtime["browser_work"] == {
+        "file_count": 84,
+        "total_bytes": 4_948_470,
+        "inventory_sha256": (
+            "150f80bf8190a6521cb2e494daa76cf7"
+            "85de7bff1c3b161ff7289c53d1ec357a"
+        ),
+        "inventory_domain": (
+            "jaa10-phase-c-browser-work-inventory-v1"
+        ),
+        "inventory_algorithm": (
+            "root is the active runtime root's `browser-work` directory; "
+            "files are every recursive regular file sorted by relative "
+            "POSIX path; initialize SHA-256 with bytes "
+            '`b"jaa10-phase-c-browser-work-inventory-v1\\0"`; for each '
+            "file update with: 8-byte big-endian relative-path byte "
+            "length; relative POSIX path bytes; 4-byte big-endian "
+            "`(st_mode & 0o777)`; 8-byte big-endian content length; raw "
+            "32-byte SHA-256 digest of the content."
+        ),
+    }
+    assert open_runtime["public_network_requests"] == 0
+    assert open_runtime["network_isolation_witness_limit"] == (
+        "cooperative_inprocess_loopback_controls_and_artifact_"
+        "corroboration_no_os_level_traffic_audit"
+    )
+    assert open_runtime["cohort_close_attempted_at_record"] is False
+    assert open_runtime["incomplete_attempt"] == {
+        "relative_path": (
+            "jaa10-phase-c-open-cohort-9246458-attempt1-incomplete"
+        ),
+        "ledger_sha256": (
+            "9adeef327e42af2a1fa61847638ff8afe"
+            "99c05fe32bfb13bd332cc1b8b4ac819"
+        ),
+        "disposition": "preserved_disclosed_not_active",
+    }
+    assert open_runtime["immutable_evidence"] == {
+        "open_receipt": {
+            "mode": "0444",
+            "artifact": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "JAA10_PHASE_C_OPEN_COHORT_RECEIPT.md"
+                ),
+                "sha256": (
+                    "b3d969a5d27658d45a58c62c9349bdeb"
+                    "01c2860434a8c4fcd874f855fcea0f51"
+                ),
+            },
+        },
+        "durable_reconstruction_log": {
+            "mode": "0444",
+            "artifact": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa10-phase-c-open-cohort-durable-reconstruction.log"
+                ),
+                "sha256": (
+                    "48fae5f0eff4d15fe1508c4424d75a966"
+                    "45d1f2c785ba5dd785233be59f201fe"
+                ),
+            },
+        },
+        "sonnet_review": {
+            "session_id": "da3d680c-d3c2-4047-af9e-2d52228a4700",
+            "disposition": "ACCEPT_WITH_NONBLOCKING_FINDINGS",
+            "mode": "0444",
+            "prompt": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "sonnet-jaa10-phase-c-open-cohort-review-prompt.txt"
+                ),
+                "sha256": (
+                    "3db5177dba27a93c8e914ff475f2f5829"
+                    "61b6e5265722fc7ffca237d753130c0"
+                ),
+            },
+            "artifact": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "sonnet-jaa10-phase-c-open-cohort-review-raw.json"
+                ),
+                "sha256": (
+                    "6713b84aa1e026815af5df9a5374e032"
+                    "1ba1f497b6e35aa902af9f4b92189260"
+                ),
+            },
+        },
+        "fable_runtime_ruling": {
+            "session_id": "09321b59-aec5-4a44-bcd5-5eccdc18bd5e",
+            "disposition": "ACCEPT_OPEN_COHORT_EXACT_RUNTIME_EVIDENCE",
+            "mode": "0444",
+            "prompt": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "fable-jaa10-phase-c-open-cohort-runtime-gate-"
+                    "prompt.txt"
+                ),
+                "sha256": (
+                    "302fe31268e9a994e34b55b129c462b6"
+                    "9d2ab302223549909aeb687f61fc2a31"
+                ),
+            },
+            "artifact": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "fable-jaa10-phase-c-open-cohort-runtime-gate-"
+                    "raw.json"
+                ),
+                "sha256": (
+                    "e182f5517ee1f5b4d4845e020b593e5e"
+                    "1c02666e33dec8cebf218a2d74ebabb5"
+                ),
+            },
+        },
+    }
     assert _git(
         "rev-parse", f"{phase_c_revision}^{{tree}}"
     ).decode().strip() == phase_c["implemented_source_tree"]
@@ -2003,6 +2249,30 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         ): "02ea7c00e47f8950eb15de6f00a7e87d92d86f846ac7f06af5ba04a91103441a",
         (
             "jaa-single-codex-20260729/"
+            "JAA10_PHASE_C_OPEN_COHORT_RECEIPT.md"
+        ): "b3d969a5d27658d45a58c62c9349bdeb01c2860434a8c4fcd874f855fcea0f51",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-open-cohort-durable-reconstruction.log"
+        ): "48fae5f0eff4d15fe1508c4424d75a96645d1f2c785ba5dd785233be59f201fe",
+        (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa10-phase-c-open-cohort-review-prompt.txt"
+        ): "3db5177dba27a93c8e914ff475f2f582961b6e5265722fc7ffca237d753130c0",
+        (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa10-phase-c-open-cohort-review-raw.json"
+        ): "6713b84aa1e026815af5df9a5374e0321ba1f497b6e35aa902af9f4b92189260",
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-phase-c-open-cohort-runtime-gate-prompt.txt"
+        ): "302fe31268e9a994e34b55b129c462b69d2ab302223549909aeb687f61fc2a31",
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-phase-c-open-cohort-runtime-gate-raw.json"
+        ): "e182f5517ee1f5b4d4845e020b593e5e1c02666e33dec8cebf218a2d74ebabb5",
+        (
+            "jaa-single-codex-20260729/"
             "jaa10-phase-c-elapsed-cohort-new-suites-postcommit.log"
         ): "29680a96da0fb4e585730694fbf09e8386a72b7ebebe44b0f1c0fa802f639aa2",
         (
@@ -2099,8 +2369,12 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     )
     assert phase_c["strongest_claim"] == (
         "Bounded same-boot elapsed-cohort fixture rehearsal machinery is "
-        "independently accepted; no cohort has been opened, closed or "
-        "collected."
+        "independently accepted; one bounded-local loopback-fixture cohort "
+        "is OPEN under the accepted open_elapsed_cohort entry point at "
+        "source 9246458d12f5907eaa87df49f33f259c2b9043a0 and has not "
+        "been closed or collected; no elapsed threshold, calendar-time, "
+        "signed-time, live external-vacancy, metric, production or slice "
+        "claim is made."
     )
     assert phase_c["contamination_policy"] == (
         "cohort_outputs_are_locked_evidence_never_tuning_input_for_"
