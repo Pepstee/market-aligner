@@ -140,6 +140,11 @@ def test_superseded_synthetic_baseline_cannot_replace_real_vacancy_authority() -
             FROZEN_SHADOW_CONTRACT,
             job_key="jaa06-synthetic:strategy-job",
         )
+    with pytest.raises(ValueError, match="authority differs"):
+        replace(
+            FROZEN_SHADOW_CONTRACT,
+            official_response_sha256="0" * 64,
+        )
 
 
 def test_interruption_and_mutation_rows_fail_if_they_claim_unsafe_success() -> None:
