@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,11 +12,14 @@ import pytest
 from career_automation.browser_workflows import fixture_submit_event_sha256
 from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
+    HARD_QUALITY_TARGETS,
     MUTATION_TEST_NODES,
+    FrozenShadowContract,
     InterruptionObservation,
     MutationObservation,
     WithheldShadowEvidence,
     compile_withheld_shadow_evidence,
+    normalized_submit_event_sha256,
 )
 from test_jaa10_independent_acceptance import _observation
 
@@ -126,6 +130,55 @@ def test_caller_defined_shadow_contract_cannot_replace_frozen_authority() -> Non
         replace(
             FROZEN_SHADOW_CONTRACT,
             application_id="caller-defined-fixture",
+        )
+
+
+def test_self_consistent_alternative_contract_fails_canonical_barriers() -> None:
+    alternative_hashes = {
+        label: hashlib.sha256(f"alternative-{label}".encode()).hexdigest()
+        for label in (
+            "workflow",
+            "receipt",
+            "receipt-payload",
+            "field-map",
+            "screenshot",
+        )
+    }
+    alternative = FrozenShadowContract(
+        workflow_sha256=alternative_hashes["workflow"],
+        application_id=FROZEN_SHADOW_CONTRACT.application_id,
+        job_key=FROZEN_SHADOW_CONTRACT.job_key,
+        receipt_id=alternative_hashes["receipt"],
+        receipt_payload_sha256=alternative_hashes["receipt-payload"],
+        field_map_sha256=alternative_hashes["field-map"],
+        screenshot_sha256=alternative_hashes["screenshot"],
+        submit_event_sha256=normalized_submit_event_sha256(
+            workflow_sha256=alternative_hashes["workflow"],
+            receipt_id=alternative_hashes["receipt"],
+            receipt_payload_sha256=alternative_hashes["receipt-payload"],
+            field_map_sha256=alternative_hashes["field-map"],
+            screenshot_sha256=alternative_hashes["screenshot"],
+        ),
+    )
+    assert alternative.contract_sha256 != (
+        FROZEN_SHADOW_CONTRACT.contract_sha256
+    )
+    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    observations = (
+        _observation("shadow-001", observed_at),
+        _observation("shadow-002", observed_at + timedelta(days=1)),
+    )
+
+    with pytest.raises(ValueError, match="canonical frozen contract"):
+        compile_withheld_shadow_evidence(alternative, observations)
+    with pytest.raises(ValueError, match="canonical frozen contract"):
+        WithheldShadowEvidence(
+            contract=alternative,
+            observations=observations,
+            hard_quality_targets=HARD_QUALITY_TARGETS,
+            evidence_id=hashlib.sha256(
+                b"self-consistent-alternative-evidence"
+            ).hexdigest(),
         )
 
 
