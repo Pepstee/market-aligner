@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ import pytest
 from career_automation.linux_network_namespace_witness import (
     CAPABILITY_FIELDS,
     COMMAND_ENVIRONMENT,
+    COOPERATIVE_BROWSER_CONTROLS_DOMAIN,
+    CooperativeBrowserExpectation,
     FD_INVENTORY_DOMAIN,
     PINNED_TOOLS,
     RECEIPT_SCHEMA_VERSION,
@@ -24,6 +27,7 @@ from career_automation.linux_network_namespace_witness import (
     NetworkNamespaceWitnessReceipt,
     _canonical_json,
     _domain_hash,
+    _source_identity,
     run_isolated_network_witness,
 )
 
@@ -303,3 +307,84 @@ def test_v1_witness_and_receipt_remain_reconstructable(
         receipt_document
     )
     assert v1_receipt.schema_version == RECEIPT_SCHEMA_VERSION_V1
+
+
+def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
+    execution_root = tmp_path / "execution"
+    execution_root.mkdir(mode=0o700)
+    worker_output = execution_root / "worker-output"
+    worker_output.mkdir(mode=0o700)
+    integration_tmp = execution_root / "integration-tmp"
+    integration_tmp.mkdir(mode=0o700)
+    request_path = execution_root / "integration-request.json"
+    request_payload = b"{}"
+    request_path.write_bytes(request_payload)
+    request_path.chmod(0o444)
+    request_sha256 = hashlib.sha256(request_payload).hexdigest()
+    nonce_sha256 = hashlib.sha256(b"integration-nonce").hexdigest()
+    policy_sha256 = hashlib.sha256(b"cooperative-policy").hexdigest()
+    source = _source_identity(ROOT)
+    artifact_inventory_sha256 = hashlib.sha256(
+        b"worker-artifacts"
+    ).hexdigest()
+    result = {
+        "schema_version": (
+            "jaa10.network-witnessed-fixture-worker-result.v1"
+        ),
+        "request_sha256": request_sha256,
+        "integration_nonce_sha256": nonce_sha256,
+        "source": source.document(),
+        "cooperative_policy_sha256": policy_sha256,
+        "environment": {},
+        "environment_sha256": hashlib.sha256(b"environment").hexdigest(),
+        "shared_memory": {},
+        "chromium_effective_argv": [],
+        "chromium_effective_argv_sha256": hashlib.sha256(b"argv").hexdigest(),
+        "runtime_identities": {},
+        "fixture_receipt": {},
+        "submission_proof": {},
+        "observation": {},
+        "artifact_inventory": {},
+        "worker_artifact_inventory_sha256": artifact_inventory_sha256,
+        "evidence_kind": "synthetic_shadow",
+        "execution_claim": "structural_lineage_only",
+        "external_actions": 0,
+        "real_applications_submitted": 0,
+    }
+    result_payload = _canonical_json(result)
+    result_path = worker_output / "worker-result.json"
+    code = (
+        "import os;"
+        f"p={str(result_path)!r};"
+        f"b={result_payload!r};"
+        "f=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);"
+        "os.write(f,b);os.fsync(f);os.close(f);os.chmod(p,0o444)"
+    )
+    expectation = CooperativeBrowserExpectation(
+        execution_root,
+        request_path,
+        request_sha256,
+        result_path,
+        nonce_sha256,
+        policy_sha256,
+        source,
+    )
+    witness, receipt = run_isolated_network_witness(
+        (sys.executable, "-c", code),
+        repository_root=ROOT,
+        evidence_directory=execution_root / "network-evidence",
+        cooperative_browser_expectation=expectation,
+    )
+    controls = witness.document()["cooperative_browser_controls"]
+    assert controls["worker_result_sha256"] == hashlib.sha256(
+        result_payload
+    ).hexdigest()
+    assert controls["worker_artifact_inventory_sha256"] == (
+        artifact_inventory_sha256
+    )
+    assert receipt.worker_result_sha256 == controls["worker_result_sha256"]
+    assert receipt.cooperative_browser_controls_sha256 == _domain_hash(
+        COOPERATIVE_BROWSER_CONTROLS_DOMAIN,
+        _canonical_json(controls),
+    )
+    assert os.environ.get("TMPDIR") != str(integration_tmp)

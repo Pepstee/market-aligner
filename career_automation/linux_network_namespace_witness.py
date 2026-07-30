@@ -183,6 +183,13 @@ class CooperativeBrowserExpectation:
         ):
             if not re.fullmatch(r"[0-9a-f]{64}", value):
                 raise NetworkWitnessError(f"{name} is invalid")
+        for value, name in (
+            (self.execution_root, "execution root"),
+            (self.request_path, "request path"),
+            (self.result_path, "result path"),
+        ):
+            if not isinstance(value, Path) or not value.is_absolute():
+                raise NetworkWitnessError(f"{name} must be an absolute Path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1085,6 +1092,163 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
     return normalized
 
 
+def _cooperative_preflight(
+    expectation: CooperativeBrowserExpectation,
+    source: SourceIdentity,
+    evidence_root: Path,
+) -> dict[str, tuple[int, int, int]]:
+    if expectation.expected_source != source:
+        raise NetworkWitnessError("cooperative source identity differs")
+    root = expectation.execution_root.resolve(strict=True)
+    request = expectation.request_path.resolve(strict=True)
+    output_root = expectation.result_path.parent.resolve(strict=True)
+    temp_root = (root / "integration-tmp").resolve(strict=True)
+    if (
+        root != expectation.execution_root
+        or request != expectation.request_path
+        or output_root != expectation.result_path.parent
+        or evidence_root.parent.resolve(strict=True) != root
+        or evidence_root.name != "network-evidence"
+        or request != root / "integration-request.json"
+        or output_root != root / "worker-output"
+        or temp_root != root / "integration-tmp"
+        or expectation.result_path != output_root / "worker-result.json"
+    ):
+        raise NetworkWitnessError("cooperative path layout is invalid")
+    if evidence_root.exists() or expectation.result_path.exists():
+        raise NetworkWitnessError(
+            "cooperative output paths must not already exist"
+        )
+    if (
+        not request.is_file()
+        or request.is_symlink()
+        or stat.S_IMODE(request.stat().st_mode) != 0o444
+        or _sha256_file(request) != expectation.request_sha256
+    ):
+        raise NetworkWitnessError("cooperative request identity differs")
+    identities: dict[str, tuple[int, int, int]] = {}
+    for name, path in (
+        ("execution_root", root),
+        ("worker_output", output_root),
+        ("integration_tmp", temp_root),
+    ):
+        status = path.stat()
+        if (
+            not path.is_dir()
+            or path.is_symlink()
+            or stat.S_IMODE(status.st_mode) != 0o700
+        ):
+            raise NetworkWitnessError(
+                "cooperative directory identity is invalid"
+            )
+        if name != "execution_root" and any(path.iterdir()):
+            raise NetworkWitnessError(
+                "cooperative directory must start empty"
+            )
+        identities[name] = (status.st_dev, status.st_ino, status.st_mode)
+    return identities
+
+
+def _cooperative_result(
+    expectation: CooperativeBrowserExpectation,
+    identities: Mapping[str, tuple[int, int, int]],
+) -> tuple[dict[str, Any], str]:
+    output_root = expectation.result_path.parent
+    current = output_root.stat()
+    if (
+        current.st_dev,
+        current.st_ino,
+        current.st_mode,
+    ) != identities["worker_output"]:
+        raise NetworkWitnessError("cooperative output directory changed")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(expectation.result_path, flags)
+    except OSError as error:
+        raise NetworkWitnessError("cooperative result is missing") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o444
+            or before.st_size < 2
+            or before.st_size > 4_000_000
+        ):
+            raise NetworkWitnessError("cooperative result file is invalid")
+        payload = os.read(descriptor, before.st_size + 1)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        len(payload) != before.st_size
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+    ):
+        raise NetworkWitnessError("cooperative result changed while read")
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NetworkWitnessError("cooperative result JSON is invalid") from error
+    result = dict(_mapping(value, "cooperative result"))
+    if _canonical_json(result) != payload:
+        raise NetworkWitnessError("cooperative result is not canonical")
+    expected_keys = {
+        "schema_version",
+        "request_sha256",
+        "integration_nonce_sha256",
+        "source",
+        "cooperative_policy_sha256",
+        "environment",
+        "environment_sha256",
+        "shared_memory",
+        "chromium_effective_argv",
+        "chromium_effective_argv_sha256",
+        "runtime_identities",
+        "fixture_receipt",
+        "submission_proof",
+        "observation",
+        "artifact_inventory",
+        "worker_artifact_inventory_sha256",
+        "evidence_kind",
+        "execution_claim",
+        "external_actions",
+        "real_applications_submitted",
+    }
+    if set(result) != expected_keys:
+        raise NetworkWitnessError("cooperative result field set differs")
+    source = _mapping(result.get("source"), "cooperative result source")
+    if (
+        result.get("schema_version") != expectation.result_schema_version
+        or result.get("request_sha256") != expectation.request_sha256
+        or result.get("integration_nonce_sha256")
+        != expectation.integration_nonce_sha256
+        or result.get("cooperative_policy_sha256")
+        != expectation.cooperative_policy_sha256
+        or dict(source) != expectation.expected_source.document()
+        or result.get("evidence_kind") != "synthetic_shadow"
+        or result.get("execution_claim") != "structural_lineage_only"
+        or result.get("external_actions") != 0
+        or result.get("real_applications_submitted") != 0
+    ):
+        raise NetworkWitnessError("cooperative result authority differs")
+    artifact_hash = str(result.get("worker_artifact_inventory_sha256"))
+    if not re.fullmatch(r"[0-9a-f]{64}", artifact_hash):
+        raise NetworkWitnessError("cooperative artifact inventory is invalid")
+    return result, hashlib.sha256(payload).hexdigest()
+
+
 def _descriptor_policy(
     control_fd: int,
     evidence_fd: int,
@@ -1387,6 +1551,9 @@ def run_isolated_network_witness(
     repository_root: str | Path,
     evidence_directory: str | Path,
     timeout_seconds: float = 30.0,
+    cooperative_browser_expectation: (
+        CooperativeBrowserExpectation | None
+    ) = None,
 ) -> tuple[
     LinuxNetworkNamespaceWitness,
     NetworkNamespaceWitnessReceipt,
@@ -1400,6 +1567,21 @@ def run_isolated_network_witness(
     source = _source_identity(repository)
     tools = _tool_inventory()
     evidence_root = Path(evidence_directory)
+    cooperative_identities = (
+        _cooperative_preflight(
+            cooperative_browser_expectation,
+            source,
+            evidence_root,
+        )
+        if cooperative_browser_expectation is not None
+        else None
+    )
+    command_environment = dict(COMMAND_ENVIRONMENT)
+    if cooperative_browser_expectation is not None:
+        command_environment["TMPDIR"] = str(
+            cooperative_browser_expectation.execution_root
+            / "integration-tmp"
+        )
     try:
         evidence_root.mkdir(mode=0o700)
     except OSError as error:
@@ -1429,6 +1611,7 @@ def run_isolated_network_witness(
         "repository_root": str(repository),
         "command_stdout": str(command_stdout),
         "command_stderr": str(command_stderr),
+        "command_environment": command_environment,
     }
     _write_exclusive(config_path, _canonical_json(config), 0o600)
 
@@ -1593,6 +1776,17 @@ def run_isolated_network_witness(
         }
         if result != expected_result:
             raise NetworkWitnessError("command result binding differs")
+        cooperative_result: dict[str, Any] | None = None
+        worker_result_sha256: str | None = None
+        if cooperative_browser_expectation is not None:
+            if cooperative_identities is None:
+                raise NetworkWitnessError(
+                    "cooperative preflight identity is missing"
+                )
+            cooperative_result, worker_result_sha256 = _cooperative_result(
+                cooperative_browser_expectation,
+                cooperative_identities,
+            )
         execution_result_sha256 = _domain_hash(
             EXECUTION_RESULT_DOMAIN,
             _canonical_json(expected_result),
@@ -1617,6 +1811,44 @@ def run_isolated_network_witness(
             FD_INVENTORY_DOMAIN,
             _canonical_json({"fds": fd_post}),
         )
+        if cooperative_result is None:
+            cooperative_controls = {
+                "schema_version": "jaa10.cooperative-browser-controls.v2",
+                "integration_status": "not_integrated_standalone_harness",
+                "existing_loopback_controls_required_for_future_integration": True,
+                "external_actions": 0,
+                "real_applications_submitted": 0,
+            }
+        else:
+            cooperative_controls = {
+                "schema_version": "jaa10.cooperative-browser-controls.v2",
+                "integration_status": (
+                    "network_witnessed_local_fixture_single_execution"
+                ),
+                "binding_mode": (
+                    "direct_result_path_independently_read_post_command"
+                ),
+                "request_sha256": (
+                    cooperative_browser_expectation.request_sha256
+                ),
+                "integration_nonce_sha256": (
+                    cooperative_browser_expectation.integration_nonce_sha256
+                ),
+                "worker_result_schema_version": (
+                    cooperative_browser_expectation.result_schema_version
+                ),
+                "worker_result_sha256": worker_result_sha256,
+                "worker_artifact_inventory_sha256": cooperative_result[
+                    "worker_artifact_inventory_sha256"
+                ],
+                "cooperative_policy_sha256": (
+                    cooperative_browser_expectation.cooperative_policy_sha256
+                ),
+                "fixture_origin_class": "exact_loopback_http_origin_only",
+                "existing_loopback_controls_required": True,
+                "external_actions": 0,
+                "real_applications_submitted": 0,
+            }
         witness_document = {
             "schema_version": SCHEMA_VERSION,
             "source": source.document(),
@@ -1647,13 +1879,7 @@ def run_isolated_network_witness(
             "descendant_namespace_inventory": list(
                 finished.get("descendant_namespace_inventory", [])
             ),
-            "cooperative_browser_controls": {
-                "schema_version": "jaa10.cooperative-browser-controls.v2",
-                "integration_status": "not_integrated_standalone_harness",
-                "existing_loopback_controls_required_for_future_integration": True,
-                "external_actions": 0,
-                "real_applications_submitted": 0,
-            },
+            "cooperative_browser_controls": cooperative_controls,
             "claim": {
                 "external_ip_network_capability": (
                     "absent_under_linux_network_namespace"
@@ -1702,6 +1928,25 @@ def run_isolated_network_witness(
             fd_inventory_post_sha256=fd_post_sha256,
             designated_pipe_inodes=(control_inode, evidence_inode),
             evidence_inventory_sha256=inventory_sha256,
+            cooperative_browser_controls_sha256=(
+                _domain_hash(
+                    COOPERATIVE_BROWSER_CONTROLS_DOMAIN,
+                    _canonical_json(cooperative_controls),
+                )
+                if cooperative_result is not None
+                else None
+            ),
+            worker_result_sha256=worker_result_sha256,
+            request_sha256=(
+                cooperative_browser_expectation.request_sha256
+                if cooperative_browser_expectation is not None
+                else None
+            ),
+            integration_nonce_sha256=(
+                cooperative_browser_expectation.integration_nonce_sha256
+                if cooperative_browser_expectation is not None
+                else None
+            ),
         )
         witness_path = evidence_root / "network-witness.json"
         receipt_path = evidence_root / "network-witness-receipt.json"
@@ -1816,6 +2061,18 @@ def _worker(config_path: Path, control_fd: int, evidence_fd: int) -> int:
         )
         _worker_control(control_fd, "EXECUTE", nonce)
         command = [str(value) for value in config["command"]]
+        command_environment = {
+            str(key): str(value)
+            for key, value in _mapping(
+                config["command_environment"],
+                "command environment",
+            ).items()
+        }
+        allowed_environment = dict(COMMAND_ENVIRONMENT)
+        if "TMPDIR" in command_environment:
+            allowed_environment["TMPDIR"] = command_environment["TMPDIR"]
+        if command_environment != allowed_environment:
+            raise NetworkWitnessError("command environment is invalid")
         stdout_path = Path(str(config["command_stdout"]))
         stderr_path = Path(str(config["command_stderr"]))
         descendant_inventory: list[dict[str, Any]] = []
@@ -1832,7 +2089,7 @@ def _worker(config_path: Path, control_fd: int, evidence_fd: int) -> int:
                 stderr=stderr,
                 close_fds=True,
                 cwd=str(config["repository_root"]),
-                env=COMMAND_ENVIRONMENT,
+                env=command_environment,
             )
             try:
                 descendant_inventory.append(
