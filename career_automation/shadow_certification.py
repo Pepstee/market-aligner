@@ -22,9 +22,20 @@ from .browser_workflows import (
     SubmissionProof,
     fixture_submit_event_sha256,
 )
+from .jaa04_corpus_authority import (
+    CORPUS_IDENTITY,
+    DOSSIER_SHA256,
+    GRAPHCORE_JOB_KEY,
+    RAW_RESPONSE_SHA256,
+)
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
-BASELINE_REVISION = "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
+BASELINE_REVISION = "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
+BASELINE_TREE = "3d4df58429daa7e97310552c8556945720627915"
+BASELINE_SOURCE_CONTENT_REVISION = (
+    "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
+    "a4906e8d74241b7a1ec04d2e481db95a"
+)
 MINIMUM_SHADOW_SEPARATION = timedelta(hours=24)
 REQUIRED_INTERRUPTION_POINTS = (
     "post_prepare_pre_consume",
@@ -225,15 +236,39 @@ class FrozenShadowContract:
     screenshot_sha256: str
     submit_event_sha256: str
     baseline_revision: str = BASELINE_REVISION
-    schema_version: str = "jaa10.frozen-shadow-contract.v1"
+    baseline_tree: str = BASELINE_TREE
+    baseline_source_content_revision: str = BASELINE_SOURCE_CONTENT_REVISION
+    corpus_inventory_sha256: str = CORPUS_IDENTITY
+    official_response_sha256: str = RAW_RESPONSE_SHA256
+    dossier_sha256: str = DOSSIER_SHA256
+    schema_version: str = "jaa10.frozen-shadow-contract.v2"
 
     def __post_init__(self) -> None:
-        if self.baseline_revision != BASELINE_REVISION:
-            raise ValueError("shadow baseline must bind the accepted JAA-09 commit")
-        if not re.fullmatch(r"[0-9a-f]{40}", self.baseline_revision):
-            raise ValueError("shadow baseline revision is invalid")
-        if not self.application_id or not self.job_key:
-            raise ValueError("shadow fixture identity is incomplete")
+        if (
+            self.baseline_revision != BASELINE_REVISION
+            or self.baseline_tree != BASELINE_TREE
+            or self.baseline_source_content_revision
+            != BASELINE_SOURCE_CONTENT_REVISION
+        ):
+            raise ValueError(
+                "shadow baseline must bind the standing JAA-09 source triple"
+            )
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", self.baseline_revision)
+            or not re.fullmatch(r"[0-9a-f]{40}", self.baseline_tree)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                self.baseline_source_content_revision,
+            )
+        ):
+            raise ValueError("shadow baseline source identity is invalid")
+        if (
+            self.application_id != "graphcore-build-engineer"
+            or self.job_key != GRAPHCORE_JOB_KEY
+        ):
+            raise ValueError(
+                "shadow fixture must bind the standing JAA-09 real vacancy"
+            )
         for value, label in (
             (self.workflow_sha256, "workflow hash"),
             (self.receipt_id, "receipt identity"),
@@ -241,9 +276,20 @@ class FrozenShadowContract:
             (self.field_map_sha256, "field-map hash"),
             (self.screenshot_sha256, "screenshot hash"),
             (self.submit_event_sha256, "submit-event hash"),
+            (self.corpus_inventory_sha256, "corpus inventory hash"),
+            (self.official_response_sha256, "official response hash"),
+            (self.dossier_sha256, "dossier hash"),
         ):
             _digest(value, label)
-        if self.schema_version != "jaa10.frozen-shadow-contract.v1":
+        if (
+            self.corpus_inventory_sha256 != CORPUS_IDENTITY
+            or self.official_response_sha256 != RAW_RESPONSE_SHA256
+            or self.dossier_sha256 != DOSSIER_SHA256
+        ):
+            raise ValueError(
+                "shadow vacancy authority differs from standing JAA-09"
+            )
+        if self.schema_version != "jaa10.frozen-shadow-contract.v2":
             raise ValueError("shadow contract schema is unsupported")
         expected_submit_event = normalized_submit_event_sha256(
             workflow_sha256=self.workflow_sha256,
@@ -261,6 +307,13 @@ class FrozenShadowContract:
         return {
             "schema_version": self.schema_version,
             "baseline_revision": self.baseline_revision,
+            "baseline_tree": self.baseline_tree,
+            "baseline_source_content_revision": (
+                self.baseline_source_content_revision
+            ),
+            "corpus_inventory_sha256": self.corpus_inventory_sha256,
+            "official_response_sha256": self.official_response_sha256,
+            "dossier_sha256": self.dossier_sha256,
             "workflow_sha256": self.workflow_sha256,
             "application_id": self.application_id,
             "job_key": self.job_key,
@@ -287,24 +340,24 @@ class FrozenShadowContract:
 
 FROZEN_SHADOW_CONTRACT = FrozenShadowContract(
     workflow_sha256=(
-        "ec9329ec86534bc2a1fa37c0f12034806cdedbdd0ba472d34fc74b2ae69961da"
+        "0577bae68e8d8372e2cb42caa42394439dac286a92e63ef95bb84e40245ed100"
     ),
-    application_id="jaa10-frozen-platform-engineer",
-    job_key="jaa06-synthetic:strategy-job",
+    application_id="graphcore-build-engineer",
+    job_key=GRAPHCORE_JOB_KEY,
     receipt_id=(
-        "69a871ba9d9727c77a8eb06de29e186f64a3c75f036364a7fa0dda4064c9945a"
+        "96d907b1f9b181c291da12bf7910279bcc307182b5b4ce3c4de6ed717ba2514d"
     ),
     receipt_payload_sha256=(
-        "f914ca653f03eec5c2b28a3a32355f86571ae066a73f80a11cc6db72b40219d8"
+        "184df396f3aac7f641adca129353d8eef8b29072bd805c0e447964c65e636b9f"
     ),
     field_map_sha256=(
-        "049d0e52a572d3341e353d1b48ef4b7ed3bc5d4b59f296efc6e345bd53b1fbd3"
+        "952eb9e97ca170dd45b333c4589130a29726d46e977fd4dfffe6df06c3c1141e"
     ),
     screenshot_sha256=(
-        "91a316e9f44cb894792896ad063e975badff08e6c5fd762de47a8798a5b3feb4"
+        "4aeea8f2b0dd2fd4e02b35a5b0eab2427da9658e57fba092b6bc9bedc6b2715c"
     ),
     submit_event_sha256=(
-        "ab9985ca0792079093161d234036109d4769838b5335454425e93fe4a20eb7c9"
+        "592a8c32edd909ff7a1fd114c34d356a39184543ad18cb511374b54a67e2af85"
     ),
 )
 

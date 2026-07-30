@@ -25,6 +25,13 @@ from career_automation.browser_workflows import (
     SubmissionProof,
     fixture_submit_event_sha256,
 )
+from career_automation.jaa04_corpus_authority import (
+    CORPUS_IDENTITY,
+    DOSSIER_SHA256,
+    GRAPHCORE_JOB_KEY,
+    RAW_RESPONSE_SHA256,
+    verify_graphcore_corpus,
+)
 from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
     HARD_QUALITY_TARGETS,
@@ -39,12 +46,16 @@ from career_automation.shadow_certification import (
     normalized_submit_event_sha256,
     normalized_workflow_sha256,
 )
-from test_jaa08_independent_acceptance import _issued_release_inputs
 from test_jaa09_independent_acceptance import (
     FORM_TOKEN,
     NONCE,
     ROOT,
     _released_browser_inputs,
+)
+from test_jaa09_real_vacancy_acceptance import (
+    CERTIFIED_CORPUS,
+    TRACKED_SEED,
+    _real_issued_release_inputs,
 )
 
 
@@ -132,15 +143,22 @@ def _observation(
 
 
 def _frozen_fixture_inputs(tmp_path: Path):
-    release_inputs = _issued_release_inputs(tmp_path)
-    source = release_inputs[4]
+    authority = verify_graphcore_corpus(CERTIFIED_CORPUS, TRACKED_SEED)
+    release_inputs = _real_issued_release_inputs(tmp_path, authority)
     vacancy = FixtureVacancy(
         FROZEN_SHADOW_CONTRACT.application_id,
-        source.job_key,
-        source.role_title,
-        source.company_name,
-        source.answers[0].question,
+        authority.job_key,
+        authority.title,
+        authority.company,
+        authority.requirement_anchors[0].text,
     )
+    assert authority.corpus_identity == (
+        FROZEN_SHADOW_CONTRACT.corpus_inventory_sha256
+    )
+    assert authority.raw_response_sha256 == (
+        FROZEN_SHADOW_CONTRACT.official_response_sha256
+    )
+    assert authority.dossier_sha256 == FROZEN_SHADOW_CONTRACT.dossier_sha256
     return release_inputs, vacancy
 
 
@@ -602,16 +620,26 @@ def _execute_interruption(
         return result
 
 
-def test_frozen_shadow_contract_binds_exact_accepted_jaa09_golden_set() -> None:
+def test_frozen_shadow_contract_binds_standing_jaa09_real_vacancy_set() -> None:
     golden = FROZEN_SHADOW_CONTRACT
     assert golden.baseline_revision == (
-        "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
+        "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
+    )
+    assert golden.baseline_tree == (
+        "3d4df58429daa7e97310552c8556945720627915"
+    )
+    assert golden.baseline_source_content_revision == (
+        "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
+        "a4906e8d74241b7a1ec04d2e481db95a"
     )
     assert golden.workflow_sha256 == (
-        "ec9329ec86534bc2a1fa37c0f12034806cdedbdd0ba472d34fc74b2ae69961da"
+        "0577bae68e8d8372e2cb42caa42394439dac286a92e63ef95bb84e40245ed100"
     )
-    assert golden.application_id == "jaa10-frozen-platform-engineer"
-    assert golden.job_key == "jaa06-synthetic:strategy-job"
+    assert golden.application_id == "graphcore-build-engineer"
+    assert golden.job_key == GRAPHCORE_JOB_KEY
+    assert golden.corpus_inventory_sha256 == CORPUS_IDENTITY
+    assert golden.official_response_sha256 == RAW_RESPONSE_SHA256
+    assert golden.dossier_sha256 == DOSSIER_SHA256
     assert golden.contract_sha256
 
 

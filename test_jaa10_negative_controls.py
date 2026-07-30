@@ -122,21 +122,23 @@ def test_missing_or_duplicate_time_separation_cannot_compile() -> None:
 
 
 def test_caller_defined_shadow_contract_cannot_replace_frozen_authority() -> None:
-    observed_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    replacement = replace(
-        FROZEN_SHADOW_CONTRACT,
-        application_id="caller-defined-fixture",
-    )
-    with pytest.raises(ValueError, match="canonical frozen contract"):
-        compile_withheld_shadow_evidence(
-            replacement,
-            (
-                _observation("shadow-001", observed_at),
-                _observation(
-                    "shadow-002",
-                    observed_at + timedelta(days=1),
-                ),
-            ),
+    with pytest.raises(ValueError, match="standing JAA-09 real vacancy"):
+        replace(
+            FROZEN_SHADOW_CONTRACT,
+            application_id="caller-defined-fixture",
+        )
+
+
+def test_superseded_synthetic_baseline_cannot_replace_real_vacancy_authority() -> None:
+    with pytest.raises(ValueError, match="standing JAA-09 source triple"):
+        replace(
+            FROZEN_SHADOW_CONTRACT,
+            baseline_revision="8107f09beb3c5651850ad40a0ff8842ac2de1e47",
+        )
+    with pytest.raises(ValueError, match="standing JAA-09 real vacancy"):
+        replace(
+            FROZEN_SHADOW_CONTRACT,
+            job_key="jaa06-synthetic:strategy-job",
         )
 
 
