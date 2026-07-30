@@ -43,6 +43,24 @@ FD_INVENTORY_DOMAIN = b"jaa10-linux-network-fd-inventory-v1\0"
 COOPERATIVE_BROWSER_CONTROLS_DOMAIN = (
     b"jaa10-cooperative-browser-controls-v2\0"
 )
+COOPERATIVE_REQUEST_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-request-v1\0"
+)
+COOPERATIVE_NONCE_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-nonce-v1\0"
+)
+COOPERATIVE_POLICY_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-policy-v1\0"
+)
+COOPERATIVE_ENVIRONMENT_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-environment-v1\0"
+)
+COOPERATIVE_EFFECTIVE_ARGV_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-effective-argv-v1\0"
+)
+COOPERATIVE_WORKER_INVENTORY_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-worker-inventory-v1\0"
+)
 
 UNSHARE = Path("/usr/bin/unshare")
 IP = Path("/usr/sbin/ip")
@@ -1119,13 +1137,43 @@ def _cooperative_preflight(
         raise NetworkWitnessError(
             "cooperative output paths must not already exist"
         )
+    request_payload = request.read_bytes()
     if (
         not request.is_file()
         or request.is_symlink()
         or stat.S_IMODE(request.stat().st_mode) != 0o444
-        or _sha256_file(request) != expectation.request_sha256
+        or _domain_hash(COOPERATIVE_REQUEST_DOMAIN, request_payload)
+        != expectation.request_sha256
     ):
         raise NetworkWitnessError("cooperative request identity differs")
+    try:
+        request_document = json.loads(request_payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NetworkWitnessError("cooperative request JSON is invalid") from error
+    request_mapping = _mapping(
+        request_document,
+        "cooperative request",
+    )
+    if _canonical_json(request_mapping) != request_payload:
+        raise NetworkWitnessError("cooperative request is not canonical")
+    try:
+        integration_nonce = bytes.fromhex(
+            str(request_mapping.get("integration_nonce"))
+        )
+    except ValueError as error:
+        raise NetworkWitnessError("cooperative request nonce is invalid") from error
+    if (
+        len(integration_nonce) != 32
+        or request_mapping.get("integration_nonce_sha256")
+        != expectation.integration_nonce_sha256
+        or _domain_hash(COOPERATIVE_NONCE_DOMAIN, integration_nonce)
+        != expectation.integration_nonce_sha256
+        or request_mapping.get("cooperative_policy_sha256")
+        != expectation.cooperative_policy_sha256
+        or request_mapping.get("source")
+        != expectation.expected_source.document()
+    ):
+        raise NetworkWitnessError("cooperative request authority differs")
     identities: dict[str, tuple[int, int, int]] = {}
     for name, path in (
         ("execution_root", root),
@@ -1243,6 +1291,162 @@ def _cooperative_result(
         or result.get("real_applications_submitted") != 0
     ):
         raise NetworkWitnessError("cooperative result authority differs")
+    request_payload = expectation.request_path.read_bytes()
+    try:
+        request_value = json.loads(request_payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NetworkWitnessError("cooperative request JSON is invalid") from error
+    request = dict(_mapping(request_value, "cooperative request"))
+    if (
+        _canonical_json(request) != request_payload
+        or _domain_hash(COOPERATIVE_REQUEST_DOMAIN, request_payload)
+        != expectation.request_sha256
+    ):
+        raise NetworkWitnessError("cooperative request binding differs")
+    policy = _mapping(
+        request.get("cooperative_policy"),
+        "cooperative policy",
+    )
+    environment = _mapping(
+        request.get("environment"),
+        "cooperative environment",
+    )
+    expected_environment = {
+        **COMMAND_ENVIRONMENT,
+        "TMPDIR": str(expectation.execution_root / "integration-tmp"),
+    }
+    if (
+        _domain_hash(COOPERATIVE_POLICY_DOMAIN, _canonical_json(policy))
+        != expectation.cooperative_policy_sha256
+        or dict(environment) != expected_environment
+        or request.get("environment_sha256")
+        != _domain_hash(
+            COOPERATIVE_ENVIRONMENT_DOMAIN,
+            _canonical_json(environment),
+        )
+        or result.get("environment") != dict(environment)
+        or result.get("environment_sha256")
+        != request.get("environment_sha256")
+    ):
+        raise NetworkWitnessError("cooperative environment or policy differs")
+    argv = result.get("chromium_effective_argv")
+    if not isinstance(argv, list) or not all(
+        isinstance(argument, str) and argument for argument in argv
+    ):
+        raise NetworkWitnessError("cooperative Chromium argv is invalid")
+    if result.get("chromium_effective_argv_sha256") != _domain_hash(
+        COOPERATIVE_EFFECTIVE_ARGV_DOMAIN,
+        _canonical_json({"argv": argv}),
+    ):
+        raise NetworkWitnessError("cooperative Chromium argv hash differs")
+    fixture = _mapping(
+        result.get("fixture_receipt"),
+        "cooperative fixture receipt",
+    )
+    proof = _mapping(
+        result.get("submission_proof"),
+        "cooperative submission proof",
+    )
+    observation = _mapping(
+        result.get("observation"),
+        "cooperative observation",
+    )
+    fixture_keys = {
+        "schema_version",
+        "application_id",
+        "job_key",
+        "payload_sha256",
+        "certifies_slice",
+        "receipt_id",
+    }
+    proof_keys = {
+        "release_manifest_sha256",
+        "token_sha256",
+        "receipt_id",
+        "receipt_payload_sha256",
+        "screenshot_sha256",
+        "field_map_sha256",
+        "submit_event_sha256",
+    }
+    if (
+        set(fixture) != fixture_keys
+        or set(proof) != proof_keys
+        or fixture.get("schema_version") != "jaa09.fixture-receipt.v1"
+        or fixture.get("certifies_slice") is not False
+        or fixture.get("receipt_id")
+        != hashlib.sha256(
+            _canonical_json(
+                {
+                    key: fixture[key]
+                    for key in (
+                        "schema_version",
+                        "application_id",
+                        "job_key",
+                        "payload_sha256",
+                        "certifies_slice",
+                    )
+                }
+            )
+        ).hexdigest()
+    ):
+        raise NetworkWitnessError("cooperative fixture receipt differs")
+    for key in (
+        "release_manifest_sha256",
+        "receipt_id",
+        "receipt_payload_sha256",
+        "screenshot_sha256",
+        "field_map_sha256",
+        "submit_event_sha256",
+    ):
+        if observation.get(key) != proof.get(key):
+            raise NetworkWitnessError("cooperative submission lineage differs")
+    if (
+        observation.get("fixture_receipt") != dict(fixture)
+        or observation.get("evidence_kind") != "synthetic_shadow"
+        or observation.get("execution_claim") != "structural_lineage_only"
+    ):
+        raise NetworkWitnessError("cooperative observation differs")
+    inventory = result.get("artifact_inventory")
+    if not isinstance(inventory, list):
+        raise NetworkWitnessError("cooperative artifact inventory is invalid")
+    observed_inventory: list[dict[str, Any]] = []
+    total_size = 0
+    for candidate in sorted(
+        output_root.rglob("*"),
+        key=lambda item: item.as_posix(),
+    ):
+        if candidate == expectation.result_path:
+            continue
+        if candidate.is_symlink():
+            raise NetworkWitnessError("cooperative artifact is a symlink")
+        if candidate.is_dir():
+            continue
+        if not candidate.is_file():
+            raise NetworkWitnessError(
+                "cooperative artifact is not a regular file"
+            )
+        status = candidate.stat()
+        total_size += status.st_size
+        if total_size > 64_000_000:
+            raise NetworkWitnessError("cooperative artifacts are oversized")
+        observed_inventory.append(
+            {
+                "relative_path": candidate.relative_to(output_root).as_posix(),
+                "mode": f"{stat.S_IMODE(status.st_mode):04o}",
+                "size": status.st_size,
+                "sha256": _sha256_file(candidate),
+            }
+        )
+    observed_inventory_sha256 = _domain_hash(
+        COOPERATIVE_WORKER_INVENTORY_DOMAIN,
+        _canonical_json({"files": observed_inventory}),
+    )
+    if (
+        inventory != observed_inventory
+        or result.get("worker_artifact_inventory_sha256")
+        != observed_inventory_sha256
+    ):
+        raise NetworkWitnessError("cooperative artifact inventory differs")
     artifact_hash = str(result.get("worker_artifact_inventory_sha256"))
     if not re.fullmatch(r"[0-9a-f]{64}", artifact_hash):
         raise NetworkWitnessError("cooperative artifact inventory is invalid")

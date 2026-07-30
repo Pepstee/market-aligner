@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,14 @@ from career_automation.linux_network_namespace_witness import (
     _source_identity,
     run_isolated_network_witness,
 )
+from career_automation.network_witnessed_fixture import (
+    EFFECTIVE_ARGV_DOMAIN,
+    REQUEST_DOMAIN,
+    RESULT_SCHEMA_VERSION,
+    WORKER_INVENTORY_DOMAIN,
+    _request_document,
+)
+from test_jaa10_independent_acceptance import _observation
 
 ROOT = Path(__file__).resolve().parent
 
@@ -317,34 +326,65 @@ def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
     integration_tmp = execution_root / "integration-tmp"
     integration_tmp.mkdir(mode=0o700)
     request_path = execution_root / "integration-request.json"
-    request_payload = b"{}"
+    chromium = next(
+        Path("/home/gutua/.cache/ms-playwright").glob(
+            "chromium-*/chrome-linux64/chrome"
+        )
+    ).resolve(strict=True)
+    source = _source_identity(ROOT)
+    nonce = b"i" * 32
+    request = _request_document(
+        source=source,
+        execution_root=execution_root,
+        python_executable=Path(sys.executable).resolve(strict=True),
+        chromium_executable=chromium,
+        integration_nonce=nonce,
+    )
+    request_payload = _canonical_json(request)
     request_path.write_bytes(request_payload)
     request_path.chmod(0o444)
-    request_sha256 = hashlib.sha256(request_payload).hexdigest()
-    nonce_sha256 = hashlib.sha256(b"integration-nonce").hexdigest()
-    policy_sha256 = hashlib.sha256(b"cooperative-policy").hexdigest()
-    source = _source_identity(ROOT)
-    artifact_inventory_sha256 = hashlib.sha256(
-        b"worker-artifacts"
-    ).hexdigest()
+    request_sha256 = _domain_hash(REQUEST_DOMAIN, request_payload)
+    nonce_sha256 = str(request["integration_nonce_sha256"])
+    policy_sha256 = str(request["cooperative_policy_sha256"])
+    artifact = b"synthetic direct-binding control"
+    artifact_inventory = [
+        {
+            "relative_path": "binding-control.txt",
+            "mode": "0444",
+            "size": len(artifact),
+            "sha256": hashlib.sha256(artifact).hexdigest(),
+        }
+    ]
+    artifact_inventory_sha256 = _domain_hash(
+        WORKER_INVENTORY_DOMAIN,
+        _canonical_json({"files": artifact_inventory}),
+    )
+    observation = _observation(
+        "direct-binding",
+        datetime(2030, 1, 2, tzinfo=timezone.utc),
+    ).document()
+    proof = observation["submission_proof"]
+    fixture = observation["fixture_receipt"]
+    argv = [str(chromium), "--disable-background-networking"]
     result = {
-        "schema_version": (
-            "jaa10.network-witnessed-fixture-worker-result.v1"
-        ),
+        "schema_version": RESULT_SCHEMA_VERSION,
         "request_sha256": request_sha256,
         "integration_nonce_sha256": nonce_sha256,
         "source": source.document(),
         "cooperative_policy_sha256": policy_sha256,
-        "environment": {},
-        "environment_sha256": hashlib.sha256(b"environment").hexdigest(),
+        "environment": request["environment"],
+        "environment_sha256": request["environment_sha256"],
         "shared_memory": {},
-        "chromium_effective_argv": [],
-        "chromium_effective_argv_sha256": hashlib.sha256(b"argv").hexdigest(),
-        "runtime_identities": {},
-        "fixture_receipt": {},
-        "submission_proof": {},
-        "observation": {},
-        "artifact_inventory": {},
+        "chromium_effective_argv": argv,
+        "chromium_effective_argv_sha256": _domain_hash(
+            EFFECTIVE_ARGV_DOMAIN,
+            _canonical_json({"argv": argv}),
+        ),
+        "runtime_identities": request["runtime_identities"],
+        "fixture_receipt": fixture,
+        "submission_proof": proof,
+        "observation": observation,
+        "artifact_inventory": artifact_inventory,
         "worker_artifact_inventory_sha256": artifact_inventory_sha256,
         "evidence_kind": "synthetic_shadow",
         "execution_claim": "structural_lineage_only",
@@ -355,6 +395,10 @@ def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
     result_path = worker_output / "worker-result.json"
     code = (
         "import os;"
+        f"a={str(worker_output / 'binding-control.txt')!r};"
+        f"d={artifact!r};"
+        "g=os.open(a,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);"
+        "os.write(g,d);os.fsync(g);os.close(g);os.chmod(a,0o444);"
         f"p={str(result_path)!r};"
         f"b={result_payload!r};"
         "f=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);"

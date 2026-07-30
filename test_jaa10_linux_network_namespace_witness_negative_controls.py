@@ -14,9 +14,11 @@ import pytest
 
 import career_automation.linux_network_namespace_witness as witness_module
 from career_automation.linux_network_namespace_witness import (
+    CooperativeBrowserExpectation,
     LinuxNetworkNamespaceWitness,
     NetworkNamespaceWitnessReceipt,
     NetworkWitnessError,
+    _source_identity,
     _parse_ipv6_routes,
     _validate_fd_inventory,
     run_isolated_network_witness,
@@ -415,3 +417,34 @@ def test_receipt_mutation_fails_closed(accepted) -> None:
 
     with pytest.raises(NetworkWitnessError, match="receipt hash"):
         NetworkNamespaceWitnessReceipt.from_document(document)
+
+
+def test_integrated_request_rejects_legacy_raw_hash_binding(
+    tmp_path: Path,
+) -> None:
+    execution_root = tmp_path / "execution"
+    execution_root.mkdir(mode=0o700)
+    output_root = execution_root / "worker-output"
+    output_root.mkdir(mode=0o700)
+    (execution_root / "integration-tmp").mkdir(mode=0o700)
+    request = execution_root / "integration-request.json"
+    request.write_bytes(b"{}")
+    request.chmod(0o444)
+    result = output_root / "worker-result.json"
+    expectation = CooperativeBrowserExpectation(
+        execution_root,
+        request,
+        hashlib.sha256(b"{}").hexdigest(),
+        result,
+        hashlib.sha256(b"nonce").hexdigest(),
+        hashlib.sha256(b"policy").hexdigest(),
+        _source_identity(ROOT),
+    )
+
+    with pytest.raises(NetworkWitnessError, match="request identity"):
+        run_isolated_network_witness(
+            (sys.executable, "-c", "pass"),
+            repository_root=ROOT,
+            evidence_directory=execution_root / "network-evidence",
+            cooperative_browser_expectation=expectation,
+        )
