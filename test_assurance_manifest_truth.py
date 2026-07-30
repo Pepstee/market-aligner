@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
@@ -77,6 +78,18 @@ def _declared_slice_paths(component: dict[str, object]) -> list[str]:
             ).decode().splitlines()
         )
     return sorted(expanded)
+
+
+def _evidence_pointers(value: object) -> Iterator[dict[str, str]]:
+    if isinstance(value, dict):
+        if set(value) == {"path_base", "relative_path", "sha256"}:
+            yield value
+            return
+        for nested in value.values():
+            yield from _evidence_pointers(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _evidence_pointers(nested)
 
 
 def test_unimplemented_slices_are_not_declared_complete() -> None:
@@ -692,11 +705,21 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa10 = components["JAA-10"]
     assert (
         jaa10["increment"]
-        == "implementation_complete_bounded_local_accepted"
+        == (
+            "implementation_complete_bounded_local_accepted_"
+            "real_frozen_vacancy_input"
+        )
     )
     assert jaa10["objective_satisfied"] is False
     assert jaa10["evidence"] == []
-    assert "production certification is withheld" in jaa10["claim"]
+    assert (
+        "verified real-frozen-vacancy input rebased onto the standing "
+        "JAA-09 certified source"
+    ) in jaa10["claim"]
+    assert (
+        "production certification is withheld with reason "
+        "live_time_separated_shadow_and_metrics_not_evaluated"
+    ) in jaa10["claim"]
     assert "all five submit interruption windows" in jaa10["claim"]
     assert (
         "exact fourteen-control executable mutation cohort passes"
@@ -708,25 +731,56 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "OBJECTIVE_UNSATISFIED"
         ),
         "independent_fable_certification": (
-            "bounded_local_implementation_independently_accepted_"
-            "objective_unsatisfied_2026-07-30"
+            "real_frozen_vacancy_bounded_local_implementation_"
+            "independently_accepted_objective_unsatisfied_2026-07-30"
         ),
         "implemented_source_git_revision": (
-            "82ff3e0931c5c342e4d43b40773950a78e0b32bd"
+            "6544fff00f2e825873e91b460c19669114c1bf56"
         ),
         "implemented_source_tree": (
-            "a122a3e820ed21b2c915caabb3a273080abc0e37"
+            "e2dfdc5a6c7f4019c862663333404932be2a4760"
         ),
         "implemented_source_content_revision": (
-            "sha256:e69be3197496efc04bbf178035ee7ec02"
-            "e26b66fa0874924109a814cefdfcf66"
+            "sha256:be6296205c136f02d5a3d13b123a5f7"
+            "01abc830538375777289e4a610f5052ae"
         ),
         "frozen_shadow_baseline": {
             "baseline_revision": (
-                "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
+                "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
             ),
-            "job_key": "jaa06-synthetic:strategy-job",
-            "standing_jaa09_real_vacancy_rebased": False,
+            "baseline_tree": (
+                "3d4df58429daa7e97310552c8556945720627915"
+            ),
+            "baseline_source_content_revision": (
+                "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
+                "a4906e8d74241b7a1ec04d2e481db95a"
+            ),
+            "application_id": "graphcore-build-engineer",
+            "job_key": "greenhouse:graphcore:8420314002",
+            "corpus_inventory_sha256": (
+                "f93733a741ffe9b0441fe4bf549d3bb34"
+                "e167d28d90283f70003843805201258"
+            ),
+            "official_response_sha256": (
+                "49097938daa0a352cbbf6e26de54c355d"
+                "cc0090060e1fd2fde2288a32d26a061"
+            ),
+            "dossier_sha256": (
+                "bf8692e5977cf20f18b2fe7ba3a19f29"
+                "678a21c4b428dd91cf937ac580b8da4a"
+            ),
+            "frozen_shadow_contract_sha256": (
+                "a3af7433808ec9adb787d76b3d29ce0b"
+                "e0cd263f53cee34cbdf5cee426f9c01b"
+            ),
+            "contract_schema_version": "jaa10.frozen-shadow-contract.v2",
+            "withheld_evidence_schema_version": (
+                "jaa10.withheld-shadow-evidence.v4"
+            ),
+            "withheld_reason": (
+                "live_time_separated_shadow_and_metrics_not_evaluated"
+            ),
+            "standing_jaa09_real_vacancy_rebased": True,
         },
         "production_certification": "withheld",
         "deputy_authority": {
@@ -740,107 +794,188 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "f11b82831baf04fd9e663cabc462ef3"
             ),
         },
-        "provisional_acceptance_receipt": {
+        "sonnet_bounded_review": {
             "path_base": "operator_control_root",
             "relative_path": (
                 "jaa-single-codex-20260729/"
-                "SOL_JAA10_PROVISIONAL_IMPLEMENTATION_ACCEPTANCE.md"
+                "sonnet-jaa10-real-vacancy-rebase-review-raw.json"
             ),
             "sha256": (
-                "1508876b4a8ccffa2fde26c16a0c821c5"
-                "0c6ef978d436ae987e4f855a40f23d5"
-            ),
-        },
-        "sonnet_post_repair_review": {
-            "path_base": "operator_control_root",
-            "relative_path": (
-                "jaa-single-codex-20260729/"
-                "sonnet-jaa10-sol-deputy-post-repair-review-raw.json"
-            ),
-            "sha256": (
-                "3d5e484d17b60dd8d43f8074e282b27c"
-                "b4570e855d2fd99f74457a626db68a6f"
-            ),
-        },
-        "focused_log": {
-            "path_base": "operator_control_root",
-            "relative_path": (
-                "jaa-single-codex-20260729/"
-                "jaa10-post-review-focused.log"
-            ),
-            "sha256": (
-                "be3607d83f81b4e789380faa09b522325"
-                "efb938c6bfab6dab70cb4c8ee48041e"
-            ),
-        },
-        "mutation_log": {
-            "path_base": "operator_control_root",
-            "relative_path": (
-                "jaa-single-codex-20260729/"
-                "jaa10-mutation-cohort.log"
-            ),
-            "sha256": (
-                "c964f2e41db90c718ffb4d189dd10f3a"
-                "0ec82af05bd0bd3bd12fb85afcaf1b40"
-            ),
-        },
-        "jaa09_restart_cross_slice_log": {
-            "path_base": "operator_control_root",
-            "relative_path": (
-                "jaa-single-codex-20260729/"
-                "jaa10-jaa09-restart-cross-slice.log"
-            ),
-            "sha256": (
-                "ffee8a9701562fced0cff6b402682cb53"
-                "87cb3f43ec696732232c80ab1f04711"
-            ),
-        },
-        "ruff_log": {
-            "path_base": "operator_control_root",
-            "relative_path": (
-                "jaa-single-codex-20260729/jaa10-post-review-ruff.log"
-            ),
-            "sha256": (
-                "82b3e6a6c090a57601d22943bd23fca9"
-                "218d1031dbe5a7b754092f9a156b4f18"
-            ),
-        },
-        "final_integrity_receipt": {
-            "path_base": "operator_control_root",
-            "relative_path": (
-                "jaa-single-codex-20260729/"
-                "SOL_JAA10_INTEGRITY_REPAIR_ACCEPTANCE.md"
-            ),
-            "sha256": (
-                "88c848f7f4b2c9af5c69f4d8e9fe3229"
-                "5089570f4816a79abfff82f272f7f98e"
+                "d6a97f60a1ec7eb9f37cff856d4457ce"
+                "11dde983f7999b1892327387b8e6dd49"
             ),
         },
         "bounded_local_gate_ruling": {
             "path_base": "operator_control_root",
             "relative_path": (
                 "jaa-single-codex-20260729/"
-                "fable-jaa10-exact-gate-raw.json"
+                "fable-jaa10-real-vacancy-rebase-gate-raw.json"
             ),
             "sha256": (
-                "46340ed2ab29bf0b379f2a78980339b9d"
-                "7350ee4b17013133967743cd3687dd6"
+                "f536faf6b0f28bd717611aefbd178eece"
+                "0efbfa301137caea9026353611917fe"
             ),
         },
+        "superseded_bounded_local_acceptances": [
+            {
+                "status": (
+                    "INDEPENDENT_FABLE_BOUNDED_LOCAL_ACCEPTED_"
+                    "OBJECTIVE_UNSATISFIED"
+                ),
+                "independent_fable_certification": (
+                    "bounded_local_implementation_independently_accepted_"
+                    "objective_unsatisfied_2026-07-30"
+                ),
+                "implemented_source_git_revision": (
+                    "82ff3e0931c5c342e4d43b40773950a78e0b32bd"
+                ),
+                "implemented_source_tree": (
+                    "a122a3e820ed21b2c915caabb3a273080abc0e37"
+                ),
+                "implemented_source_content_revision": (
+                    "sha256:e69be3197496efc04bbf178035ee7ec02"
+                    "e26b66fa0874924109a814cefdfcf66"
+                ),
+                "frozen_shadow_baseline": {
+                    "baseline_revision": (
+                        "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
+                    ),
+                    "job_key": "jaa06-synthetic:strategy-job",
+                    "standing_jaa09_real_vacancy_rebased": False,
+                },
+                "production_certification": "withheld",
+                "provisional_acceptance_receipt": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "SOL_JAA10_PROVISIONAL_IMPLEMENTATION_ACCEPTANCE.md"
+                    ),
+                    "sha256": (
+                        "1508876b4a8ccffa2fde26c16a0c821c5"
+                        "0c6ef978d436ae987e4f855a40f23d5"
+                    ),
+                },
+                "sonnet_post_repair_review": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "sonnet-jaa10-sol-deputy-post-repair-review-raw.json"
+                    ),
+                    "sha256": (
+                        "3d5e484d17b60dd8d43f8074e282b27c"
+                        "b4570e855d2fd99f74457a626db68a6f"
+                    ),
+                },
+                "focused_log": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "jaa10-post-review-focused.log"
+                    ),
+                    "sha256": (
+                        "be3607d83f81b4e789380faa09b522325"
+                        "efb938c6bfab6dab70cb4c8ee48041e"
+                    ),
+                },
+                "mutation_log": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "jaa10-mutation-cohort.log"
+                    ),
+                    "sha256": (
+                        "c964f2e41db90c718ffb4d189dd10f3a"
+                        "0ec82af05bd0bd3bd12fb85afcaf1b40"
+                    ),
+                },
+                "jaa09_restart_cross_slice_log": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "jaa10-jaa09-restart-cross-slice.log"
+                    ),
+                    "sha256": (
+                        "ffee8a9701562fced0cff6b402682cb53"
+                        "87cb3f43ec696732232c80ab1f04711"
+                    ),
+                },
+                "ruff_log": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "jaa10-post-review-ruff.log"
+                    ),
+                    "sha256": (
+                        "82b3e6a6c090a57601d22943bd23fca9"
+                        "218d1031dbe5a7b754092f9a156b4f18"
+                    ),
+                },
+                "final_integrity_receipt": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "SOL_JAA10_INTEGRITY_REPAIR_ACCEPTANCE.md"
+                    ),
+                    "sha256": (
+                        "88c848f7f4b2c9af5c69f4d8e9fe3229"
+                        "5089570f4816a79abfff82f272f7f98e"
+                    ),
+                },
+                "bounded_local_gate_ruling": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "fable-jaa10-exact-gate-raw.json"
+                    ),
+                    "sha256": (
+                        "46340ed2ab29bf0b379f2a78980339b9d"
+                        "7350ee4b17013133967743cd3687dd6"
+                    ),
+                },
+                "truth_transition_receipt": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "JAA10_BOUNDED_LOCAL_TRUTH_TRANSITION.md"
+                    ),
+                    "sha256": (
+                        "82efc72f7ef97bec7b15e3d63dc8ff8a"
+                        "661a550296d32e80fb266281a5ccae5b"
+                    ),
+                },
+            }
+        ],
     }
     assert "certification" not in jaa10
     for key in (
         "deputy_authority",
-        "provisional_acceptance_receipt",
-        "sonnet_post_repair_review",
-        "focused_log",
-        "mutation_log",
-        "jaa09_restart_cross_slice_log",
-        "ruff_log",
-        "final_integrity_receipt",
+        "sonnet_bounded_review",
         "bounded_local_gate_ruling",
     ):
         pointer = jaa10["bounded_local_acceptance"][key]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
+    history = jaa10["bounded_local_acceptance"][
+        "superseded_bounded_local_acceptances"
+    ]
+    assert len(history) == 1
+    old_acceptance = history[0]
+    old_revision = old_acceptance["implemented_source_git_revision"]
+    assert _git(
+        "rev-parse", f"{old_revision}^{{tree}}"
+    ).decode().strip() == old_acceptance["implemented_source_tree"]
+    assert subprocess.run(
+        ("git", "merge-base", "--is-ancestor", old_revision, "HEAD"),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    for pointer in _evidence_pointers(old_acceptance):
         evidence_path = (
             evidence_bases[pointer["path_base"]]
             / pointer["relative_path"]
@@ -2062,10 +2197,10 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
     }
     expected_identities = {
         "JAA-10": (
-            "82ff3e0931c5c342e4d43b40773950a78e0b32bd",
-            "a122a3e820ed21b2c915caabb3a273080abc0e37",
-            "sha256:e69be3197496efc04bbf178035ee7ec0"
-            "2e26b66fa0874924109a814cefdfcf66",
+            "6544fff00f2e825873e91b460c19669114c1bf56",
+            "e2dfdc5a6c7f4019c862663333404932be2a4760",
+            "sha256:be6296205c136f02d5a3d13b123a5f7"
+            "01abc830538375777289e4a610f5052ae",
         ),
         "JAA-11": (
             "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
@@ -2128,8 +2263,8 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
             "truth_finalization_pending"
             if slice_id == "JAA-11"
             else (
-                "bounded_local_implementation_independently_accepted_"
-                "objective_unsatisfied_2026-07-30"
+                "real_frozen_vacancy_bounded_local_implementation_"
+                "independently_accepted_objective_unsatisfied_2026-07-30"
                 if slice_id == "JAA-10"
                 else ratification_marker
             )
@@ -2158,23 +2293,14 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                 "rev-parse", f"{revision}:{relative}"
             ) == _git("rev-parse", f"HEAD:{relative}")
 
-        for value in block.values():
-            if not (
-                isinstance(value, dict)
-                and set(value) == {
-                    "path_base",
-                    "relative_path",
-                    "sha256",
-                }
-            ):
-                continue
+        for pointer in _evidence_pointers(block):
             evidence_path = (
-                evidence_bases[value["path_base"]]
-                / value["relative_path"]
+                evidence_bases[pointer["path_base"]]
+                / pointer["relative_path"]
             )
             assert evidence_path.is_file()
             assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
-                value["sha256"]
+                pointer["sha256"]
             )
 
 
