@@ -706,8 +706,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert (
         jaa10["increment"]
         == (
-            "implementation_complete_bounded_local_accepted_"
-            "real_frozen_vacancy_input"
+            "canonical_contract_negative_control_added_"
+            "bounded_local_accepted"
         )
     )
     assert jaa10["objective_satisfied"] is False
@@ -720,6 +720,11 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "production certification is withheld with reason "
         "live_time_separated_shadow_and_metrics_not_evaluated"
     ) in jaa10["claim"]
+    assert (
+        "self-consistent alternative frozen-shadow-contract negative control "
+        "proves both the compile-path and verify-path canonical-contract "
+        "barriers reject non-canonical contracts"
+    ) in jaa10["claim"]
     assert "all five submit interruption windows" in jaa10["claim"]
     assert (
         "exact fourteen-control executable mutation cohort passes"
@@ -731,18 +736,19 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "OBJECTIVE_UNSATISFIED"
         ),
         "independent_fable_certification": (
-            "real_frozen_vacancy_bounded_local_implementation_"
-            "independently_accepted_objective_unsatisfied_2026-07-30"
+            "real_frozen_vacancy_bounded_local_implementation_with_"
+            "canonical_contract_control_independently_accepted_"
+            "objective_unsatisfied_2026-07-30"
         ),
         "implemented_source_git_revision": (
-            "6544fff00f2e825873e91b460c19669114c1bf56"
+            "a975d7b35cd6dd20d00cc689018b91c71bf5af63"
         ),
         "implemented_source_tree": (
-            "e2dfdc5a6c7f4019c862663333404932be2a4760"
+            "fc9cc3f33e9b326a38059d1f0191997813e791d0"
         ),
         "implemented_source_content_revision": (
-            "sha256:be6296205c136f02d5a3d13b123a5f7"
-            "01abc830538375777289e4a610f5052ae"
+            "sha256:dcf7f436025e2c273affc352ecc8f43f"
+            "841e54fe1f13310f072d170ec416bd3c"
         ),
         "frozen_shadow_baseline": {
             "baseline_revision": (
@@ -814,6 +820,72 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "sha256": (
                 "f536faf6b0f28bd717611aefbd178eece"
                 "0efbfa301137caea9026353611917fe"
+            ),
+        },
+        "canonical_contract_control_targeted_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa10-canonical-contract-control-targeted.log"
+            ),
+            "sha256": (
+                "fa8e3e1f0a4b084326a7027307e5cc3a"
+                "94f799f9733ea598c3b878fa3c70f37c"
+            ),
+        },
+        "canonical_contract_control_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa10-canonical-contract-control-focused.log"
+            ),
+            "sha256": (
+                "e4c66c8362cecdbac35c568b3c623ab3"
+                "f1476473ffd93edd62294556bed76237"
+            ),
+        },
+        "canonical_contract_control_ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa10-canonical-contract-control-ruff.log"
+            ),
+            "sha256": (
+                "82b3e6a6c090a57601d22943bd23fca9"
+                "218d1031dbe5a7b754092f9a156b4f18"
+            ),
+        },
+        "canonical_contract_control_stale_truth_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa10-canonical-contract-control-stale-truth.log"
+            ),
+            "sha256": (
+                "d66fe2171e062ab7e2f4b866d8b31fe1"
+                "41561c5f25e0883a7641f46cf7df0027"
+            ),
+        },
+        "sonnet_canonical_contract_control_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa10-canonical-contract-control-review-raw.json"
+            ),
+            "sha256": (
+                "6316cbc7e6ac7a07bbcb2f242ebe1d01"
+                "70683e6b2e7b927c7831d1a8b0d75aa4"
+            ),
+        },
+        "canonical_contract_control_gate_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-canonical-contract-control-gate-raw.json"
+            ),
+            "sha256": (
+                "6c54f0cb2959ff43bd9056b456aca2a1"
+                "0cce30cd23fca0f96d9cb442503a53c6"
             ),
         },
         "superseded_bounded_local_acceptances": [
@@ -943,6 +1015,112 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                         "661a550296d32e80fb266281a5ccae5b"
                     ),
                 },
+            },
+            {
+                "status": (
+                    "INDEPENDENT_FABLE_BOUNDED_LOCAL_ACCEPTED_"
+                    "OBJECTIVE_UNSATISFIED"
+                ),
+                "independent_fable_certification": (
+                    "real_frozen_vacancy_bounded_local_implementation_"
+                    "independently_accepted_objective_unsatisfied_2026-07-30"
+                ),
+                "implemented_source_git_revision": (
+                    "6544fff00f2e825873e91b460c19669114c1bf56"
+                ),
+                "implemented_source_tree": (
+                    "e2dfdc5a6c7f4019c862663333404932be2a4760"
+                ),
+                "implemented_source_content_revision": (
+                    "sha256:be6296205c136f02d5a3d13b123a5f7"
+                    "01abc830538375777289e4a610f5052ae"
+                ),
+                "frozen_shadow_baseline": {
+                    "baseline_revision": (
+                        "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
+                    ),
+                    "baseline_tree": (
+                        "3d4df58429daa7e97310552c8556945720627915"
+                    ),
+                    "baseline_source_content_revision": (
+                        "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
+                        "a4906e8d74241b7a1ec04d2e481db95a"
+                    ),
+                    "application_id": "graphcore-build-engineer",
+                    "job_key": "greenhouse:graphcore:8420314002",
+                    "corpus_inventory_sha256": (
+                        "f93733a741ffe9b0441fe4bf549d3bb34"
+                        "e167d28d90283f70003843805201258"
+                    ),
+                    "official_response_sha256": (
+                        "49097938daa0a352cbbf6e26de54c355d"
+                        "cc0090060e1fd2fde2288a32d26a061"
+                    ),
+                    "dossier_sha256": (
+                        "bf8692e5977cf20f18b2fe7ba3a19f29"
+                        "678a21c4b428dd91cf937ac580b8da4a"
+                    ),
+                    "frozen_shadow_contract_sha256": (
+                        "a3af7433808ec9adb787d76b3d29ce0b"
+                        "e0cd263f53cee34cbdf5cee426f9c01b"
+                    ),
+                    "contract_schema_version": (
+                        "jaa10.frozen-shadow-contract.v2"
+                    ),
+                    "withheld_evidence_schema_version": (
+                        "jaa10.withheld-shadow-evidence.v4"
+                    ),
+                    "withheld_reason": (
+                        "live_time_separated_shadow_and_metrics_not_evaluated"
+                    ),
+                    "standing_jaa09_real_vacancy_rebased": True,
+                },
+                "production_certification": "withheld",
+                "deputy_authority": {
+                    "path_base": "software_factory_root",
+                    "relative_path": (
+                        "giga-user/reports/"
+                        "JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md"
+                    ),
+                    "sha256": (
+                        "8199c4848468669dd908eff8f4b92226d"
+                        "f11b82831baf04fd9e663cabc462ef3"
+                    ),
+                },
+                "sonnet_bounded_review": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "sonnet-jaa10-real-vacancy-rebase-review-raw.json"
+                    ),
+                    "sha256": (
+                        "d6a97f60a1ec7eb9f37cff856d4457ce"
+                        "11dde983f7999b1892327387b8e6dd49"
+                    ),
+                },
+                "bounded_local_gate_ruling": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "fable-jaa10-real-vacancy-rebase-gate-raw.json"
+                    ),
+                    "sha256": (
+                        "f536faf6b0f28bd717611aefbd178eece"
+                        "0efbfa301137caea9026353611917fe"
+                    ),
+                },
+                "truth_transition_receipt": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "FABLE_JAA10_REAL_VACANCY_"
+                        "BOUNDED_LOCAL_TRUTH_TRANSITION.md"
+                    ),
+                    "sha256": (
+                        "eda5a61c5ca6049a8f97034f057275856"
+                        "bfb64402b14fac6085294790b1e6734"
+                    ),
+                },
             }
         ],
     }
@@ -951,6 +1129,12 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "deputy_authority",
         "sonnet_bounded_review",
         "bounded_local_gate_ruling",
+        "canonical_contract_control_targeted_log",
+        "canonical_contract_control_focused_log",
+        "canonical_contract_control_ruff_log",
+        "canonical_contract_control_stale_truth_log",
+        "sonnet_canonical_contract_control_review",
+        "canonical_contract_control_gate_ruling",
     ):
         pointer = jaa10["bounded_local_acceptance"][key]
         evidence_path = (
@@ -964,26 +1148,59 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     history = jaa10["bounded_local_acceptance"][
         "superseded_bounded_local_acceptances"
     ]
-    assert len(history) == 1
-    old_acceptance = history[0]
-    old_revision = old_acceptance["implemented_source_git_revision"]
-    assert _git(
-        "rev-parse", f"{old_revision}^{{tree}}"
-    ).decode().strip() == old_acceptance["implemented_source_tree"]
-    assert subprocess.run(
-        ("git", "merge-base", "--is-ancestor", old_revision, "HEAD"),
-        cwd=ROOT,
-        check=False,
-    ).returncode == 0
-    for pointer in _evidence_pointers(old_acceptance):
-        evidence_path = (
-            evidence_bases[pointer["path_base"]]
-            / pointer["relative_path"]
+    expected_history = (
+        (
+            "82ff3e0931c5c342e4d43b40773950a78e0b32bd",
+            "a122a3e820ed21b2c915caabb3a273080abc0e37",
+            "sha256:e69be3197496efc04bbf178035ee7ec0"
+            "2e26b66fa0874924109a814cefdfcf66",
+            "bounded_local_implementation_independently_accepted_"
+            "objective_unsatisfied_2026-07-30",
+        ),
+        (
+            "6544fff00f2e825873e91b460c19669114c1bf56",
+            "e2dfdc5a6c7f4019c862663333404932be2a4760",
+            "sha256:be6296205c136f02d5a3d13b123a5f7"
+            "01abc830538375777289e4a610f5052ae",
+            "real_frozen_vacancy_bounded_local_implementation_"
+            "independently_accepted_objective_unsatisfied_2026-07-30",
+        ),
+    )
+    assert len(history) == len(expected_history)
+    for old_acceptance, expected in zip(
+        history, expected_history, strict=True
+    ):
+        old_revision, old_tree, old_content_revision, old_marker = expected
+        assert old_acceptance["implemented_source_git_revision"] == (
+            old_revision
         )
-        assert evidence_path.is_file()
-        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
-            pointer["sha256"]
+        assert old_acceptance["implemented_source_tree"] == old_tree
+        assert old_acceptance["implemented_source_content_revision"] == (
+            old_content_revision
         )
+        assert old_acceptance["independent_fable_certification"] == (
+            old_marker
+        )
+        assert _git(
+            "rev-parse", f"{old_revision}^{{tree}}"
+        ).decode().strip() == old_tree
+        assert _source_content_revision_at(old_revision) == (
+            old_content_revision
+        )
+        assert subprocess.run(
+            ("git", "merge-base", "--is-ancestor", old_revision, "HEAD"),
+            cwd=ROOT,
+            check=False,
+        ).returncode == 0
+        for pointer in _evidence_pointers(old_acceptance):
+            evidence_path = (
+                evidence_bases[pointer["path_base"]]
+                / pointer["relative_path"]
+            )
+            assert evidence_path.is_file()
+            assert hashlib.sha256(
+                evidence_path.read_bytes()
+            ).hexdigest() == pointer["sha256"]
     mutation_tests = [
         test for test in jaa10["tests"]
         if test["id"] == "JAA-10-mutation-cohort"
@@ -2197,10 +2414,10 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
     }
     expected_identities = {
         "JAA-10": (
-            "6544fff00f2e825873e91b460c19669114c1bf56",
-            "e2dfdc5a6c7f4019c862663333404932be2a4760",
-            "sha256:be6296205c136f02d5a3d13b123a5f7"
-            "01abc830538375777289e4a610f5052ae",
+            "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+            "fc9cc3f33e9b326a38059d1f0191997813e791d0",
+            "sha256:dcf7f436025e2c273affc352ecc8f43f"
+            "841e54fe1f13310f072d170ec416bd3c",
         ),
         "JAA-11": (
             "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
@@ -2263,8 +2480,9 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
             "truth_finalization_pending"
             if slice_id == "JAA-11"
             else (
-                "real_frozen_vacancy_bounded_local_implementation_"
-                "independently_accepted_objective_unsatisfied_2026-07-30"
+                "real_frozen_vacancy_bounded_local_implementation_with_"
+                "canonical_contract_control_independently_accepted_"
+                "objective_unsatisfied_2026-07-30"
                 if slice_id == "JAA-10"
                 else ratification_marker
             )
