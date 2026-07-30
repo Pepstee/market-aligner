@@ -550,12 +550,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa09 = components["JAA-09"]
     assert (
         jaa09["increment"]
-        == (
-            "real_vacancy_fixture_browser_evidence_receipted_"
-            "pending_fable_final_certification"
-        )
+        == "local_fixture_boundary_certified_with_real_frozen_vacancy_input"
     )
-    assert jaa09["objective_satisfied"] is False
     assert jaa09["evidence"] == [
         {
             "path_base": "operator_control_root",
@@ -571,132 +567,81 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         }
     ]
     assert "one genuine JAA-08 token" in jaa09["claim"]
-    assert (
-        jaa09["provisional_acceptance"]
-        == {
-            "status": (
-                "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION"
+    assert "provisional_acceptance" not in jaa09
+    assert "objective_satisfied" not in jaa09
+    assert jaa09["certification"] == {
+        "status": "certified_local_fixture_boundary_implementation",
+        "certified_source_git_revision": (
+            "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
+        ),
+        "certified_source_tree": (
+            "3d4df58429daa7e97310552c8556945720627915"
+        ),
+        "certified_source_content_revision": (
+            "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
+            "a4906e8d74241b7a1ec04d2e481db95a"
+        ),
+        "evidence_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa09-real-vacancy-local-receipt-sha256-"
+                "d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c"
+                ".json"
             ),
-            "independent_fable_certification": (
-                "bounded_local_implementation_ratified_"
-                "objective_unsatisfied_2026-07-30"
+            "sha256": (
+                "d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c"
             ),
-            "implemented_source_git_revision": (
-                "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
+        },
+        "phase_a_acceptance_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa09-real-vacancy-phase-a-acceptance-raw.json"
             ),
-            "implemented_source_tree": (
-                "3d4df58429daa7e97310552c8556945720627915"
+            "sha256": (
+                "bb6524d17937a540d76688539ea6b7095"
+                "ea8bcf57870bb23647d6817ed56e657"
             ),
-            "implemented_source_content_revision": (
-                "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
-                "a4906e8d74241b7a1ec04d2e481db95a"
+        },
+        "sonnet_phase_b_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa09-real-vacancy-phase-b-review-raw.json"
             ),
-            "deputy_authority": {
-                "path_base": "software_factory_root",
-                "relative_path": (
-                    "giga-user/reports/"
-                    "JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md"
-                ),
-                "sha256": (
-                    "8199c4848468669dd908eff8f4b92226d"
-                    "f11b82831baf04fd9e663cabc462ef3"
-                ),
-            },
-            "provisional_acceptance_receipt": {
-                "path_base": "operator_control_root",
-                "relative_path": (
-                    "jaa-single-codex-20260729/"
-                    "SOL_JAA09_PROVISIONAL_IMPLEMENTATION_ACCEPTANCE.md"
-                ),
-                "sha256": (
-                    "a24b616d23e781c8a7cea29f03e3418ca"
-                    "ae2c77ca7092bc3ad5c1bd079e1c728"
-                ),
-            },
-            "sonnet_post_repair_review": {
-                "path_base": "operator_control_root",
-                "relative_path": (
-                    "jaa-single-codex-20260729/"
-                    "sonnet-jaa09-sol-deputy-post-repair-review-raw.json"
-                ),
-                "sha256": (
-                    "e77be399d983cfb795b758e0d07b37848"
-                    "bc72754d069cc8a0f223bdc8a1613ea"
-                ),
-            },
-            "positive_log": {
-                "path_base": "operator_control_root",
-                "relative_path": (
-                    "jaa-single-codex-20260729/"
-                    "jaa09-sol-deputy-post-review-positive.log"
-                ),
-                "sha256": (
-                    "77c0c7d21cb7c859206f08759e24213de"
-                    "d843104e55f3b57fb019672a6ecdc40"
-                ),
-            },
-            "negative_restart_log": {
-                "path_base": "operator_control_root",
-                "relative_path": (
-                    "jaa-single-codex-20260729/"
-                    "jaa09-sol-deputy-post-review-negative.log"
-                ),
-                "sha256": (
-                    "8f51e13f65eae64d0267cac2efaf8980f"
-                    "a226c33f74c56da740ed1bfbbb58fa7"
-                ),
-            },
-            "jaa08_cross_slice_log": {
-                "path_base": "operator_control_root",
-                "relative_path": (
-                    "jaa-single-codex-20260729/"
-                    "jaa09-sol-deputy-post-review-jaa08-cross-slice.log"
-                ),
-                "sha256": (
-                    "bc3231ddc0a9050c98b96810c589d4670"
-                    "979466779d28a2a54f972380a22070e"
-                ),
-            },
-            "ruff_log": {
-                "path_base": "operator_control_root",
-                "relative_path": (
-                    "jaa-single-codex-20260729/"
-                    "jaa09-sol-deputy-post-review-ruff.log"
-                ),
-                "sha256": (
-                    "82b3e6a6c090a57601d22943bd23fca9"
-                    "218d1031dbe5a7b754092f9a156b4f18"
-                ),
-            },
-            "final_integrity_receipt": {
-                "path_base": "operator_control_root",
-                "relative_path": (
-                    "jaa-single-codex-20260729/"
-                    "SOL_JAA09_INTEGRITY_REPAIR_ACCEPTANCE.md"
-                ),
-                "sha256": (
-                    "2c0d139c350ca1783862f353f5a15c0f4"
-                    "1d05bbf61e7cfcf7cb711a487ed04bd"
-                ),
-            },
-        }
-    )
-    assert "certification" not in jaa09
+            "sha256": (
+                "df682079a815dbddf49d25a869cf82df1"
+                "a07d2f553b3a56692a5bbafecef6120"
+            ),
+        },
+        "final_certification_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa09-real-vacancy-phase-b-final-ruling-raw.json"
+            ),
+            "sha256": (
+                "9804b6adfbb6319229f3a5ae8858da2a7"
+                "c86147bd1d8b8dcd4061fc01f790df5"
+            ),
+        },
+    }
     evidence_bases = {
         "operator_control_root": ROOT.parents[1] / ".control",
         "software_factory_root": ROOT.parents[1],
     }
+    assert (
+        jaa09["certification"]["evidence_receipt"]
+        == jaa09["evidence"][0]
+    )
     for key in (
-        "deputy_authority",
-        "provisional_acceptance_receipt",
-        "sonnet_post_repair_review",
-        "positive_log",
-        "negative_restart_log",
-        "jaa08_cross_slice_log",
-        "ruff_log",
-        "final_integrity_receipt",
+        "evidence_receipt",
+        "phase_a_acceptance_ruling",
+        "sonnet_phase_b_review",
+        "final_certification_ruling",
     ):
-        pointer = jaa09["provisional_acceptance"][key]
+        pointer = jaa09["certification"][key]
         evidence_path = (
             evidence_bases[pointer["path_base"]]
             / pointer["relative_path"]
@@ -705,15 +650,28 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
             pointer["sha256"]
         )
-    real_vacancy_receipt = jaa09["evidence"][0]
-    real_vacancy_receipt_path = (
-        evidence_bases[real_vacancy_receipt["path_base"]]
-        / real_vacancy_receipt["relative_path"]
-    )
-    assert real_vacancy_receipt_path.is_file()
-    assert hashlib.sha256(
-        real_vacancy_receipt_path.read_bytes()
-    ).hexdigest() == real_vacancy_receipt["sha256"]
+    certified_revision = jaa09["certification"][
+        "certified_source_git_revision"
+    ]
+    certified_tree = jaa09["certification"]["certified_source_tree"]
+    certified_content = jaa09["certification"][
+        "certified_source_content_revision"
+    ]
+    assert _git(
+        "rev-parse",
+        f"{certified_revision}^{{tree}}",
+    ).decode().strip() == certified_tree
+    assert subprocess.run(
+        ("git", "merge-base", "--is-ancestor", certified_revision, "HEAD"),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    assert _source_content_revision_at(certified_revision) == certified_content
+    for relative in _declared_slice_paths(jaa09):
+        assert _git(
+            "rev-parse",
+            f"{certified_revision}:{relative}",
+        ) == _git("rev-parse", f"HEAD:{relative}")
     tests_by_id = {test["id"]: test for test in jaa09["tests"]}
     assert tests_by_id["JAA-09-real-vacancy-browser"]["files"] == [
         "test_jaa09_real_vacancy_acceptance.py"
@@ -2072,7 +2030,6 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
 def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -> None:
     components = _manifest()["components"]
     blocks = {
-        "JAA-09": "provisional_acceptance",
         "JAA-10": "provisional_acceptance",
         "JAA-11": "provisional_fixture_contract",
         "JAA-12": "provisional_local_export_contract",
@@ -2082,12 +2039,6 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
         "JAA-16": "provisional_local_contract",
     }
     expected_identities = {
-        "JAA-09": (
-            "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
-            "3d4df58429daa7e97310552c8556945720627915",
-            "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
-            "a4906e8d74241b7a1ec04d2e481db95a",
-        ),
         "JAA-10": (
             "82ff3e0931c5c342e4d43b40773950a78e0b32bd",
             "a122a3e820ed21b2c915caabb3a273080abc0e37",
@@ -2146,7 +2097,7 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
         revision, tree, content_revision = expected_identities[slice_id]
         marker_key = (
             "independent_fable_certification"
-            if slice_id in {"JAA-09", "JAA-10"}
+            if slice_id == "JAA-10"
             else "independent_fable_ratification"
         )
         assert component["objective_satisfied"] is False

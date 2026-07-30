@@ -518,54 +518,32 @@
     },
     "JAA-09": {
       "claim": "A cooperative local browser walking skeleton consumes one genuine JAA-08 token, binds exact approved materialisations and canonical consumption time, checkpoints one fixture receipt, and recovers each pre-click or post-click interruption without a repeated submit.",
-      "increment": "real_vacancy_fixture_browser_evidence_receipted_pending_fable_final_certification",
+      "increment": "local_fixture_boundary_certified_with_real_frozen_vacancy_input",
       "depends_on": ["JAA-08"],
-      "objective_satisfied": false,
-      "provisional_acceptance": {
-        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_certification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
-        "implemented_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
-        "implemented_source_tree": "3d4df58429daa7e97310552c8556945720627915",
-        "implemented_source_content_revision": "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4da4906e8d74241b7a1ec04d2e481db95a",
-        "deputy_authority": {
-          "path_base": "software_factory_root",
-          "relative_path": "giga-user/reports/JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md",
-          "sha256": "8199c4848468669dd908eff8f4b92226df11b82831baf04fd9e663cabc462ef3"
-        },
-        "provisional_acceptance_receipt": {
+      "certification": {
+        "status": "certified_local_fixture_boundary_implementation",
+        "certified_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
+        "certified_source_tree": "3d4df58429daa7e97310552c8556945720627915",
+        "certified_source_content_revision": "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4da4906e8d74241b7a1ec04d2e481db95a",
+        "evidence_receipt": {
           "path_base": "operator_control_root",
-          "relative_path": "jaa-single-codex-20260729/SOL_JAA09_PROVISIONAL_IMPLEMENTATION_ACCEPTANCE.md",
-          "sha256": "a24b616d23e781c8a7cea29f03e3418caae2c77ca7092bc3ad5c1bd079e1c728"
+          "relative_path": "jaa-single-codex-20260729/jaa09-real-vacancy-local-receipt-sha256-d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c.json",
+          "sha256": "d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c"
         },
-        "sonnet_post_repair_review": {
+        "phase_a_acceptance_ruling": {
           "path_base": "operator_control_root",
-          "relative_path": "jaa-single-codex-20260729/sonnet-jaa09-sol-deputy-post-repair-review-raw.json",
-          "sha256": "e77be399d983cfb795b758e0d07b37848bc72754d069cc8a0f223bdc8a1613ea"
+          "relative_path": "jaa-single-codex-20260729/fable-jaa09-real-vacancy-phase-a-acceptance-raw.json",
+          "sha256": "bb6524d17937a540d76688539ea6b7095ea8bcf57870bb23647d6817ed56e657"
         },
-        "positive_log": {
+        "sonnet_phase_b_review": {
           "path_base": "operator_control_root",
-          "relative_path": "jaa-single-codex-20260729/jaa09-sol-deputy-post-review-positive.log",
-          "sha256": "77c0c7d21cb7c859206f08759e24213ded843104e55f3b57fb019672a6ecdc40"
+          "relative_path": "jaa-single-codex-20260729/sonnet-jaa09-real-vacancy-phase-b-review-raw.json",
+          "sha256": "df682079a815dbddf49d25a869cf82df1a07d2f553b3a56692a5bbafecef6120"
         },
-        "negative_restart_log": {
+        "final_certification_ruling": {
           "path_base": "operator_control_root",
-          "relative_path": "jaa-single-codex-20260729/jaa09-sol-deputy-post-review-negative.log",
-          "sha256": "8f51e13f65eae64d0267cac2efaf8980fa226c33f74c56da740ed1bfbbb58fa7"
-        },
-        "jaa08_cross_slice_log": {
-          "path_base": "operator_control_root",
-          "relative_path": "jaa-single-codex-20260729/jaa09-sol-deputy-post-review-jaa08-cross-slice.log",
-          "sha256": "bc3231ddc0a9050c98b96810c589d4670979466779d28a2a54f972380a22070e"
-        },
-        "ruff_log": {
-          "path_base": "operator_control_root",
-          "relative_path": "jaa-single-codex-20260729/jaa09-sol-deputy-post-review-ruff.log",
-          "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
-        },
-        "final_integrity_receipt": {
-          "path_base": "operator_control_root",
-          "relative_path": "jaa-single-codex-20260729/SOL_JAA09_INTEGRITY_REPAIR_ACCEPTANCE.md",
-          "sha256": "2c0d139c350ca1783862f353f5a15c0f41d05bbf61e7cfcf7cb711a487ed04bd"
+          "relative_path": "jaa-single-codex-20260729/fable-jaa09-real-vacancy-phase-b-final-ruling-raw.json",
+          "sha256": "9804b6adfbb6319229f3a5ae8858da2a7c86147bd1d8b8dcd4061fc01f790df5"
         }
       },
       "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py", "career_automation/browser_workflows.py"],
