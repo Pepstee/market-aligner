@@ -12,8 +12,11 @@ from pathlib import Path
 
 import pytest
 
+import career_automation.linux_network_namespace_witness as witness_module
 from career_automation.linux_network_namespace_witness import (
+    AF_UNIX_PATH_CAPACITY,
     CAPABILITY_FIELDS,
+    CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES,
     COMMAND_ENVIRONMENT,
     COOPERATIVE_BROWSER_CONTROLS_DOMAIN,
     CooperativeBrowserExpectation,
@@ -21,14 +24,16 @@ from career_automation.linux_network_namespace_witness import (
     PINNED_TOOLS,
     RECEIPT_SCHEMA_VERSION,
     RECEIPT_SCHEMA_VERSION_V1,
+    RUNTIME_TMP_ROOT_MAX_BYTES,
     SCHEMA_VERSION,
     SCHEMA_VERSION_V1,
+    SourceIdentity,
     WITNESS_DOMAIN_V1,
     LinuxNetworkNamespaceWitness,
     NetworkNamespaceWitnessReceipt,
     _canonical_json,
     _domain_hash,
-    _source_identity,
+    derive_runtime_tmp_binding,
     run_isolated_network_witness,
 )
 from career_automation.network_witnessed_fixture import (
@@ -41,6 +46,14 @@ from career_automation.network_witnessed_fixture import (
 from test_jaa10_independent_acceptance import _observation
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _synthetic_source() -> SourceIdentity:
+    return SourceIdentity(
+        "a" * 40,
+        "b" * 40,
+        "sha256:" + ("c" * 64),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -318,20 +331,35 @@ def test_v1_witness_and_receipt_remain_reconstructable(
     assert v1_receipt.schema_version == RECEIPT_SCHEMA_VERSION_V1
 
 
-def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stray_sidecar", (False, True))
+def test_v2_direct_cooperative_result_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    stray_sidecar: bool,
+) -> None:
+    test_anchor = tmp_path_factory.getbasetemp()
+    monkeypatch.setattr(
+        witness_module,
+        "RUNTIME_TMP_HOME_ANCHOR",
+        test_anchor,
+    )
     execution_root = tmp_path / "execution"
     execution_root.mkdir(mode=0o700)
     worker_output = execution_root / "worker-output"
     worker_output.mkdir(mode=0o700)
-    integration_tmp = execution_root / "integration-tmp"
-    integration_tmp.mkdir(mode=0o700)
     request_path = execution_root / "integration-request.json"
     chromium = next(
         Path("/home/gutua/.cache/ms-playwright").glob(
             "chromium-*/chrome-linux64/chrome"
         )
     ).resolve(strict=True)
-    source = _source_identity(ROOT)
+    source = _synthetic_source()
+    monkeypatch.setattr(witness_module, "_source_identity", lambda _root: source)
+    runtime_tmp_root, derivation, socket_budget = (
+        derive_runtime_tmp_binding(source, execution_root)
+    )
+    runtime_tmp_root.mkdir(mode=0o700)
     nonce = b"i" * 32
     request = _request_document(
         source=source,
@@ -374,6 +402,18 @@ def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
         "cooperative_policy_sha256": policy_sha256,
         "environment": request["environment"],
         "environment_sha256": request["environment_sha256"],
+        "runtime_tmp_root": request["runtime_tmp_root"],
+        "runtime_tmp_root_derivation": request[
+            "runtime_tmp_root_derivation"
+        ],
+        "socket_budget": request["socket_budget"],
+        "worker_database_finalization": {
+            "journal_mode": "wal",
+            "checkpoint_mode": "truncate",
+            "busy": 0,
+            "log_frames": 0,
+            "checkpointed_frames": 0,
+        },
         "shared_memory": {},
         "chromium_effective_argv": argv,
         "chromium_effective_argv_sha256": _domain_hash(
@@ -402,7 +442,14 @@ def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
         f"p={str(result_path)!r};"
         f"b={result_payload!r};"
         "f=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);"
-        "os.write(f,b);os.fsync(f);os.close(f);os.chmod(p,0o444)"
+        "os.write(f,b);os.fsync(f);os.close(f);os.chmod(p,0o444);"
+        + (
+            f"s={str(worker_output / 'workflow.sqlite3-wal')!r};"
+            "h=os.open(s,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);"
+            "os.write(h,b'stray');os.fsync(h);os.close(h);os.chmod(s,0o444)"
+            if stray_sidecar
+            else ""
+        )
     )
     expectation = CooperativeBrowserExpectation(
         execution_root,
@@ -412,7 +459,22 @@ def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
         nonce_sha256,
         policy_sha256,
         source,
+        runtime_tmp_root,
+        derivation,
+        socket_budget,
     )
+    if stray_sidecar:
+        with pytest.raises(
+            witness_module.NetworkWitnessError,
+            match="cooperative artifact inventory differs",
+        ):
+            run_isolated_network_witness(
+                (sys.executable, "-c", code),
+                repository_root=ROOT,
+                evidence_directory=execution_root / "network-evidence",
+                cooperative_browser_expectation=expectation,
+            )
+        return
     witness, receipt = run_isolated_network_witness(
         (sys.executable, "-c", code),
         repository_root=ROOT,
@@ -431,4 +493,53 @@ def test_v2_direct_cooperative_result_binding(tmp_path: Path) -> None:
         COOPERATIVE_BROWSER_CONTROLS_DOMAIN,
         _canonical_json(controls),
     )
-    assert os.environ.get("TMPDIR") != str(integration_tmp)
+    assert not (execution_root / "integration-tmp").exists()
+    assert os.environ.get("TMPDIR") != str(runtime_tmp_root)
+    assert runtime_tmp_root.parent == test_anchor
+    assert str(runtime_tmp_root).startswith(str(test_anchor))
+    assert not str(runtime_tmp_root).startswith("/home/gutua/")
+    assert socket_budget["observed_root_bytes"] <= RUNTIME_TMP_ROOT_MAX_BYTES
+    assert (
+        socket_budget["observed_total_bytes"]
+        <= AF_UNIX_PATH_CAPACITY
+    )
+    assert (
+        socket_budget["observed_root_bytes"]
+        + CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES
+        == socket_budget["observed_total_bytes"]
+    )
+
+
+def test_runtime_tmp_derivation_is_exact_and_attempt_specific(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        witness_module,
+        "RUNTIME_TMP_HOME_ANCHOR",
+        Path("/home/gutua"),
+    )
+    source = _synthetic_source()
+    first, first_derivation, first_budget = derive_runtime_tmp_binding(
+        source,
+        Path("/tmp/jaa10-attempt-01"),
+    )
+    repeated, repeated_derivation, repeated_budget = (
+        derive_runtime_tmp_binding(
+            source,
+            Path("/tmp/jaa10-attempt-01"),
+        )
+    )
+    second, second_derivation, _ = derive_runtime_tmp_binding(
+        source,
+        Path("/tmp/jaa10-attempt-02"),
+    )
+
+    assert first == repeated
+    assert first_derivation == repeated_derivation
+    assert first_budget == repeated_budget
+    assert first != second
+    assert first_derivation["token"] != second_derivation["token"]
+    assert len(os.fsencode(first)) == 37
+    assert first_budget["observed_root_bytes"] == 37
+    assert first_budget["observed_total_bytes"] == 82
+    assert RUNTIME_TMP_ROOT_MAX_BYTES == 62

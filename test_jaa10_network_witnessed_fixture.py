@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import secrets
 import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
+import career_automation.linux_network_namespace_witness as witness_module
+import career_automation.network_witnessed_fixture as fixture_module
 from career_automation.linux_network_namespace_witness import (
+    AF_UNIX_PATH_CAPACITY,
+    CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES,
+    RUNTIME_TMP_ROOT_MAX_BYTES,
     SCHEMA_VERSION,
     NetworkNamespaceWitnessReceipt,
 )
@@ -54,28 +59,109 @@ def accepted_integration(tmp_path_factory: pytest.TempPathFactory):
         for path in ROOT.rglob("*")
         if path.name == "__pycache__" or path.suffix == ".pyc"
     }
-    tmp_path_factory.mktemp("network-witnessed-browser")
-    execution_root = Path(
-        f"/tmp/jaa10-nw-{os.getpid()}-{secrets.token_hex(4)}"
+    anchor_token = hashlib.sha256(
+        os.fsencode(tmp_path_factory.getbasetemp())
+    ).hexdigest()[:5]
+    test_anchor = Path("/tmp") / f"j{anchor_token}"
+    assert len(os.fsencode(test_anchor)) <= 11
+    assert not test_anchor.exists()
+    assert not test_anchor.is_symlink()
+    test_anchor.mkdir(mode=0o700)
+    assert stat.S_IMODE(test_anchor.stat().st_mode) == 0o700
+    production_before = tuple(
+        (
+            path.name,
+            path.lstat().st_dev,
+            path.lstat().st_ino,
+            path.lstat().st_mode,
+            path.lstat().st_size,
+        )
+        for path in sorted(Path("/home/gutua").glob(".jaa10rt-*"))
     )
-    receipt, witness, network_receipt = run_network_witnessed_fixture(
-        repository_root=ROOT,
-        execution_root=execution_root,
-        python_executable=ROOT / ".venv/bin/python",
-        chromium_executable=_chromium(),
-        timeout_seconds=240,
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(
+        witness_module,
+        "RUNTIME_TMP_HOME_ANCHOR",
+        test_anchor,
     )
-    after_bytecode = {
-        path.relative_to(ROOT).as_posix()
-        for path in ROOT.rglob("*")
-        if path.name == "__pycache__" or path.suffix == ".pyc"
-    }
-    assert after_bytecode == before_bytecode
-    assert not any(
-        path.name == "__pycache__" or path.suffix == ".pyc"
-        for path in execution_root.rglob("*")
+    real_witness_call = witness_module.run_isolated_network_witness
+    delegated_argv: list[tuple[tuple[str, ...], tuple[str, ...], str]] = []
+
+    def test_witness_delegate(
+        command,
+        **keywords,
+    ):
+        incoming = tuple(str(value) for value in command)
+        assert len(incoming) == 6
+        assert incoming[1:4] == (
+            "-m",
+            "career_automation.network_witnessed_fixture",
+            "--worker",
+        )
+        bootstrap = (
+            "from pathlib import Path;"
+            "import runpy;"
+            "import career_automation.linux_network_namespace_witness as w;"
+            f"w.RUNTIME_TMP_HOME_ANCHOR=Path({str(test_anchor)!r});"
+            "runpy.run_module("
+            "'career_automation.network_witnessed_fixture',"
+            "run_name='__main__')"
+        )
+        assert str(test_anchor) in bootstrap
+        assert "/home/gutua" not in bootstrap
+        assert "environ" not in bootstrap
+        assert "getenv" not in bootstrap
+        wrapped = (
+            incoming[0],
+            "-c",
+            bootstrap,
+            *incoming[3:],
+        )
+        assert wrapped[3:] == incoming[3:]
+        delegated_argv.append((incoming, wrapped, bootstrap))
+        return real_witness_call(wrapped, **keywords)
+
+    patcher.setattr(
+        fixture_module,
+        "run_isolated_network_witness",
+        test_witness_delegate,
     )
-    return execution_root, receipt, witness, network_receipt
+    execution_root = (
+        tmp_path_factory.mktemp("network-witnessed-browser") / "execution"
+    )
+    try:
+        receipt, witness, network_receipt = run_network_witnessed_fixture(
+            repository_root=ROOT,
+            execution_root=execution_root,
+            python_executable=ROOT / ".venv/bin/python",
+            chromium_executable=_chromium(),
+            timeout_seconds=240,
+        )
+        after_bytecode = {
+            path.relative_to(ROOT).as_posix()
+            for path in ROOT.rglob("*")
+            if path.name == "__pycache__" or path.suffix == ".pyc"
+        }
+        assert after_bytecode == before_bytecode
+        assert not any(
+            path.name == "__pycache__" or path.suffix == ".pyc"
+            for path in execution_root.rglob("*")
+        )
+        assert len(delegated_argv) == 1
+        yield execution_root, receipt, witness, network_receipt
+    finally:
+        production_after = tuple(
+            (
+                path.name,
+                path.lstat().st_dev,
+                path.lstat().st_ino,
+                path.lstat().st_mode,
+                path.lstat().st_size,
+            )
+            for path in sorted(Path("/home/gutua").glob(".jaa10rt-*"))
+        )
+        assert production_after == production_before
+        patcher.undo()
 
 
 def test_complete_fixture_flow_is_mutually_bound_and_noncertifying(
@@ -102,6 +188,34 @@ def test_complete_fixture_flow_is_mutually_bound_and_noncertifying(
     assert document["cooperative_policy_sha256"] == (
         controls["cooperative_policy_sha256"]
     )
+    assert document["runtime_tmp_root"] == controls["runtime_tmp_root"]
+    assert document["runtime_tmp_root_derivation"] == (
+        controls["runtime_tmp_root_derivation"]
+    )
+    assert document["socket_budget"] == controls["socket_budget"]
+    runtime_tmp_root = Path(document["runtime_tmp_root"])
+    assert runtime_tmp_root.is_dir()
+    assert not runtime_tmp_root.is_symlink()
+    assert stat.S_IMODE(runtime_tmp_root.stat().st_mode) == 0o700
+    assert runtime_tmp_root.parent != Path("/home/gutua")
+    assert runtime_tmp_root.parent.name.startswith("j")
+    assert len(os.fsencode(runtime_tmp_root.parent)) <= 11
+    assert __import__("re").fullmatch(
+        r"\.jaa10rt-[0-9a-f]{16}",
+        runtime_tmp_root.name,
+    )
+    assert document["socket_budget"]["observed_root_bytes"] == len(
+        os.fsencode(runtime_tmp_root)
+    )
+    assert document["socket_budget"]["observed_total_bytes"] == (
+        len(os.fsencode(runtime_tmp_root))
+        + CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES
+    )
+    assert (
+        document["socket_budget"]["observed_total_bytes"]
+        <= AF_UNIX_PATH_CAPACITY
+    )
+    assert RUNTIME_TMP_ROOT_MAX_BYTES == 62
     assert document["network_witness_sha256"] == witness.witness_sha256
     assert document["network_receipt_sha256"] == (
         network_receipt.receipt_sha256
@@ -162,6 +276,25 @@ def test_worker_browser_and_kernel_artifact_inventory_is_complete(
     assert result["observation"]["fixture_receipt"] == (
         result["fixture_receipt"]
     )
+    finalization = result["worker_database_finalization"]
+    assert finalization["journal_mode"] == "wal"
+    assert finalization["checkpoint_mode"] == "truncate"
+    assert finalization["busy"] == 0
+    assert finalization["log_frames"] == (
+        finalization["checkpointed_frames"]
+    )
+    assert not (execution_root / "worker-output/workflow.sqlite3-wal").exists()
+    assert not (execution_root / "worker-output/workflow.sqlite3-shm").exists()
+    inventory_by_path = {
+        row["relative_path"]: row
+        for row in result["artifact_inventory"]
+    }
+    assert "workflow.sqlite3-wal" not in inventory_by_path
+    assert "workflow.sqlite3-shm" not in inventory_by_path
+    database = execution_root / "worker-output/workflow.sqlite3"
+    assert inventory_by_path["workflow.sqlite3"]["sha256"] == (
+        hashlib.sha256(database.read_bytes()).hexdigest()
+    )
     launch = json.loads(
         (
             execution_root
@@ -204,5 +337,6 @@ def test_old_cohort_surfaces_do_not_accept_composite_type(
         assert "NetworkWitnessedFixtureObservationReceipt" not in source
         assert receipt.document()["schema_version"] not in source
     assert os.environ.get("TMPDIR") != str(
-        accepted_integration[0] / "integration-tmp"
+        Path(receipt.document()["runtime_tmp_root"])
     )
+    assert not (accepted_integration[0] / "integration-tmp").exists()

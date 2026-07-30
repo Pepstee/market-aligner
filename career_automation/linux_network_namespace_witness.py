@@ -42,10 +42,16 @@ DESCRIPTOR_POLICY_DOMAIN = b"jaa10-linux-network-descriptor-policy-v1\0"
 INVENTORY_DOMAIN = b"jaa10-linux-network-evidence-inventory-v1\0"
 FD_INVENTORY_DOMAIN = b"jaa10-linux-network-fd-inventory-v1\0"
 COOPERATIVE_BROWSER_CONTROLS_DOMAIN = (
+    b"jaa10-cooperative-browser-controls-v3\0"
+)
+COOPERATIVE_BROWSER_CONTROLS_DOMAIN_V2 = (
     b"jaa10-cooperative-browser-controls-v2\0"
 )
-COOPERATIVE_REQUEST_DOMAIN = (
+COOPERATIVE_REQUEST_DOMAIN_V1 = (
     b"jaa10-network-witnessed-fixture-request-v1\0"
+)
+COOPERATIVE_REQUEST_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-request-v2\0"
 )
 COOPERATIVE_NONCE_DOMAIN = (
     b"jaa10-network-witnessed-fixture-nonce-v1\0"
@@ -53,14 +59,40 @@ COOPERATIVE_NONCE_DOMAIN = (
 COOPERATIVE_POLICY_DOMAIN = (
     b"jaa10-network-witnessed-fixture-policy-v1\0"
 )
-COOPERATIVE_ENVIRONMENT_DOMAIN = (
+COOPERATIVE_ENVIRONMENT_DOMAIN_V1 = (
     b"jaa10-network-witnessed-fixture-environment-v1\0"
+)
+COOPERATIVE_ENVIRONMENT_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-environment-v2\0"
 )
 COOPERATIVE_EFFECTIVE_ARGV_DOMAIN = (
     b"jaa10-network-witnessed-fixture-effective-argv-v1\0"
 )
 COOPERATIVE_WORKER_INVENTORY_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-worker-inventory-v2\0"
+)
+COOPERATIVE_WORKER_INVENTORY_DOMAIN_V1 = (
     b"jaa10-network-witnessed-fixture-worker-inventory-v1\0"
+)
+COOPERATIVE_REQUEST_SCHEMA_VERSION = (
+    "jaa10.network-witnessed-fixture-request.v2"
+)
+RUNTIME_TMP_HOME_ANCHOR = Path("/home/gutua")
+AF_UNIX_PATH_CAPACITY = 107
+# Pinned Chromium's `/org.chromium.Chromium.XXXXXX/SingletonSocket` suffix.
+# Any Chromium identity change requires a fresh boundary probe.
+CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES = 45
+RUNTIME_TMP_ROOT_MAX_BYTES = (
+    AF_UNIX_PATH_CAPACITY - CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES
+)
+RUNTIME_TMP_PATH_DOMAIN = (
+    b"jaa10-network-witnessed-runtime-tmp-path-v1\0"
+)
+RUNTIME_TMP_DERIVATION_SCHEMA_VERSION = (
+    "jaa10.network-witnessed-runtime-tmp-derivation.v1"
+)
+RUNTIME_TMP_SOCKET_BUDGET_SCHEMA_VERSION = (
+    "jaa10.network-witnessed-runtime-tmp-socket-budget.v1"
 )
 
 UNSHARE = Path("/usr/bin/unshare")
@@ -168,9 +200,70 @@ class SourceIdentity:
         }
 
 
+def derive_runtime_tmp_binding(
+    source: SourceIdentity,
+    execution_root: Path,
+) -> tuple[Path, dict[str, object], dict[str, object]]:
+    """Derive one short runtime-temp root without caller-selected path input."""
+
+    if not isinstance(execution_root, Path) or not execution_root.is_absolute():
+        raise NetworkWitnessError("runtime execution root must be absolute")
+    normalized_root = Path(os.path.abspath(os.fspath(execution_root)))
+    if normalized_root != execution_root or "\0" in os.fspath(execution_root):
+        raise NetworkWitnessError("runtime execution root must be lexical")
+    anchor = RUNTIME_TMP_HOME_ANCHOR
+    if (
+        not isinstance(anchor, Path)
+        or not anchor.is_absolute()
+        or Path(os.path.abspath(os.fspath(anchor))) != anchor
+        or "\0" in os.fspath(anchor)
+    ):
+        raise NetworkWitnessError("runtime-temp anchor is invalid")
+    input_document = {
+        "schema_version": "jaa10.network-witnessed-runtime-tmp-input.v1",
+        "source": source.document(),
+        "execution_root": str(execution_root),
+    }
+    input_bytes = _canonical_json(input_document)
+    derived_sha256 = _domain_hash(RUNTIME_TMP_PATH_DOMAIN, input_bytes)
+    token = derived_sha256[:16]
+    root = anchor / f".jaa10rt-{token}"
+    try:
+        encoded = os.fsencode(root)
+    except UnicodeEncodeError as error:
+        raise NetworkWitnessError(
+            "runtime-temp path cannot be encoded"
+        ) from error
+    root_bytes = len(encoded)
+    total_bytes = root_bytes + CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES
+    if (
+        b"\0" in encoded
+        or root.parent != anchor
+        or not re.fullmatch(r"\.jaa10rt-[0-9a-f]{16}", root.name)
+        or root_bytes > RUNTIME_TMP_ROOT_MAX_BYTES
+        or total_bytes > AF_UNIX_PATH_CAPACITY
+    ):
+        raise NetworkWitnessError("runtime-temp socket budget is invalid")
+    derivation = {
+        "schema_version": RUNTIME_TMP_DERIVATION_SCHEMA_VERSION,
+        "domain": RUNTIME_TMP_PATH_DOMAIN.decode("ascii"),
+        "canonical_input_sha256": hashlib.sha256(input_bytes).hexdigest(),
+        "token": token,
+    }
+    socket_budget = {
+        "schema_version": RUNTIME_TMP_SOCKET_BUDGET_SCHEMA_VERSION,
+        "af_unix_path_capacity_bytes": AF_UNIX_PATH_CAPACITY,
+        "chromium_suffix_bytes": CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES,
+        "maximum_root_bytes": RUNTIME_TMP_ROOT_MAX_BYTES,
+        "observed_root_bytes": root_bytes,
+        "observed_total_bytes": total_bytes,
+    }
+    return root, derivation, socket_budget
+
+
 @dataclass(frozen=True, slots=True)
 class CooperativeBrowserExpectation:
-    """Exact application result that an integrated v2 witness must bind."""
+    """Exact application result that an integrated v3 witness must bind."""
 
     execution_root: Path
     request_path: Path
@@ -179,18 +272,21 @@ class CooperativeBrowserExpectation:
     integration_nonce_sha256: str
     cooperative_policy_sha256: str
     expected_source: SourceIdentity
-    schema_version: str = "jaa10.cooperative-browser-expectation.v1"
+    runtime_tmp_root: Path
+    runtime_tmp_root_derivation: Mapping[str, Any]
+    socket_budget: Mapping[str, Any]
+    schema_version: str = "jaa10.cooperative-browser-expectation.v2"
     result_schema_version: str = (
-        "jaa10.network-witnessed-fixture-worker-result.v1"
+        "jaa10.network-witnessed-fixture-worker-result.v2"
     )
 
     def __post_init__(self) -> None:
-        if self.schema_version != "jaa10.cooperative-browser-expectation.v1":
+        if self.schema_version != "jaa10.cooperative-browser-expectation.v2":
             raise NetworkWitnessError(
                 "cooperative expectation schema is invalid"
             )
         if self.result_schema_version != (
-            "jaa10.network-witnessed-fixture-worker-result.v1"
+            "jaa10.network-witnessed-fixture-worker-result.v2"
         ):
             raise NetworkWitnessError(
                 "cooperative result schema is invalid"
@@ -206,9 +302,24 @@ class CooperativeBrowserExpectation:
             (self.execution_root, "execution root"),
             (self.request_path, "request path"),
             (self.result_path, "result path"),
+            (self.runtime_tmp_root, "runtime-temp root"),
         ):
             if not isinstance(value, Path) or not value.is_absolute():
                 raise NetworkWitnessError(f"{name} must be an absolute Path")
+        expected_root, expected_derivation, expected_budget = (
+            derive_runtime_tmp_binding(
+                self.expected_source,
+                self.execution_root,
+            )
+        )
+        if (
+            self.runtime_tmp_root != expected_root
+            or dict(self.runtime_tmp_root_derivation) != expected_derivation
+            or dict(self.socket_budget) != expected_budget
+        ):
+            raise NetworkWitnessError(
+                "cooperative runtime-temp binding differs"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1121,7 +1232,18 @@ def _cooperative_preflight(
     root = expectation.execution_root.resolve(strict=True)
     request = expectation.request_path.resolve(strict=True)
     output_root = expectation.result_path.parent.resolve(strict=True)
-    temp_root = (root / "integration-tmp").resolve(strict=True)
+    expected_temp_root, expected_derivation, expected_budget = (
+        derive_runtime_tmp_binding(source, root)
+    )
+    temp_root = expectation.runtime_tmp_root
+    anchor = RUNTIME_TMP_HOME_ANCHOR
+    try:
+        anchor_status = anchor.lstat()
+        temp_status = temp_root.lstat()
+    except OSError as error:
+        raise NetworkWitnessError(
+            "cooperative runtime-temp root is missing"
+        ) from error
     if (
         root != expectation.execution_root
         or request != expectation.request_path
@@ -1130,8 +1252,21 @@ def _cooperative_preflight(
         or evidence_root.name != "network-evidence"
         or request != root / "integration-request.json"
         or output_root != root / "worker-output"
-        or temp_root != root / "integration-tmp"
+        or temp_root != expected_temp_root
+        or dict(expectation.runtime_tmp_root_derivation)
+        != expected_derivation
+        or dict(expectation.socket_budget) != expected_budget
         or expectation.result_path != output_root / "worker-result.json"
+        or not anchor.is_absolute()
+        or stat.S_ISLNK(anchor_status.st_mode)
+        or not stat.S_ISDIR(anchor_status.st_mode)
+        or anchor.resolve(strict=True) != anchor
+        or temp_root.parent != anchor
+        or stat.S_ISLNK(temp_status.st_mode)
+        or not stat.S_ISDIR(temp_status.st_mode)
+        or stat.S_IMODE(temp_status.st_mode) != 0o700
+        or (root / "integration-tmp").exists()
+        or (root / "integration-tmp").is_symlink()
     ):
         raise NetworkWitnessError("cooperative path layout is invalid")
     if evidence_root.exists() or expectation.result_path.exists():
@@ -1163,8 +1298,18 @@ def _cooperative_preflight(
         )
     except ValueError as error:
         raise NetworkWitnessError("cooperative request nonce is invalid") from error
+    request_environment = _mapping(
+        request_mapping.get("environment"),
+        "cooperative request environment",
+    )
+    request_paths = _mapping(
+        request_mapping.get("paths"),
+        "cooperative request paths",
+    )
     if (
-        len(integration_nonce) != 32
+        request_mapping.get("schema_version")
+        != COOPERATIVE_REQUEST_SCHEMA_VERSION
+        or len(integration_nonce) != 32
         or request_mapping.get("integration_nonce_sha256")
         != expectation.integration_nonce_sha256
         or _domain_hash(COOPERATIVE_NONCE_DOMAIN, integration_nonce)
@@ -1173,18 +1318,31 @@ def _cooperative_preflight(
         != expectation.cooperative_policy_sha256
         or request_mapping.get("source")
         != expectation.expected_source.document()
+        or request_mapping.get("runtime_tmp_root") != str(temp_root)
+        or request_mapping.get("runtime_tmp_root_derivation")
+        != expected_derivation
+        or request_mapping.get("socket_budget") != expected_budget
+        or dict(request_environment)
+        != {**COMMAND_ENVIRONMENT, "TMPDIR": str(temp_root)}
+        or request_paths.get("execution_root") != str(root)
+        or request_paths.get("worker_output") != str(output_root)
+        or request_paths.get("integration_tmp") != str(temp_root)
+        or request_paths.get("network_evidence")
+        != str(root / "network-evidence")
+        or request_paths.get("worker_result")
+        != str(output_root / "worker-result.json")
     ):
         raise NetworkWitnessError("cooperative request authority differs")
     identities: dict[str, tuple[int, int, int]] = {}
     for name, path in (
         ("execution_root", root),
         ("worker_output", output_root),
-        ("integration_tmp", temp_root),
+        ("runtime_tmp_root", temp_root),
     ):
-        status = path.stat()
+        status = path.lstat()
         if (
-            not path.is_dir()
-            or path.is_symlink()
+            not stat.S_ISDIR(status.st_mode)
+            or stat.S_ISLNK(status.st_mode)
             or stat.S_IMODE(status.st_mode) != 0o700
         ):
             raise NetworkWitnessError(
@@ -1261,6 +1419,10 @@ def _cooperative_result(
         "cooperative_policy_sha256",
         "environment",
         "environment_sha256",
+        "runtime_tmp_root",
+        "runtime_tmp_root_derivation",
+        "socket_budget",
+        "worker_database_finalization",
         "shared_memory",
         "chromium_effective_argv",
         "chromium_effective_argv_sha256",
@@ -1314,7 +1476,7 @@ def _cooperative_result(
     )
     expected_environment = {
         **COMMAND_ENVIRONMENT,
-        "TMPDIR": str(expectation.execution_root / "integration-tmp"),
+        "TMPDIR": str(expectation.runtime_tmp_root),
     }
     if (
         _domain_hash(COOPERATIVE_POLICY_DOMAIN, _canonical_json(policy))
@@ -1328,8 +1490,39 @@ def _cooperative_result(
         or result.get("environment") != dict(environment)
         or result.get("environment_sha256")
         != request.get("environment_sha256")
+        or request.get("runtime_tmp_root")
+        != str(expectation.runtime_tmp_root)
+        or request.get("runtime_tmp_root_derivation")
+        != dict(expectation.runtime_tmp_root_derivation)
+        or request.get("socket_budget") != dict(expectation.socket_budget)
+        or result.get("runtime_tmp_root")
+        != request.get("runtime_tmp_root")
+        or result.get("runtime_tmp_root_derivation")
+        != request.get("runtime_tmp_root_derivation")
+        or result.get("socket_budget") != request.get("socket_budget")
     ):
         raise NetworkWitnessError("cooperative environment or policy differs")
+    finalization = result.get("worker_database_finalization")
+    if (
+        not isinstance(finalization, dict)
+        or set(finalization)
+        != {
+            "journal_mode",
+            "checkpoint_mode",
+            "busy",
+            "log_frames",
+            "checkpointed_frames",
+        }
+        or finalization.get("journal_mode") != "wal"
+        or finalization.get("checkpoint_mode") != "truncate"
+        or finalization.get("busy") != 0
+        or not isinstance(finalization.get("log_frames"), int)
+        or finalization.get("log_frames")
+        != finalization.get("checkpointed_frames")
+    ):
+        raise NetworkWitnessError(
+            "cooperative database finalization differs"
+        )
     argv = result.get("chromium_effective_argv")
     if not isinstance(argv, list) or not all(
         isinstance(argument, str) and argument for argument in argv
@@ -1536,6 +1729,9 @@ def _validate_cooperative_browser_controls(
         "worker_result_sha256",
         "worker_artifact_inventory_sha256",
         "cooperative_policy_sha256",
+        "runtime_tmp_root",
+        "runtime_tmp_root_derivation",
+        "socket_budget",
         "fixture_origin_class",
         "existing_loopback_controls_required",
         "external_actions",
@@ -1546,7 +1742,7 @@ def _validate_cooperative_browser_controls(
             "integrated cooperative browser field set differs"
         )
     literals = {
-        "schema_version": "jaa10.cooperative-browser-controls.v2",
+        "schema_version": "jaa10.cooperative-browser-controls.v3",
         "integration_status": (
             "network_witnessed_local_fixture_single_execution"
         ),
@@ -1554,7 +1750,7 @@ def _validate_cooperative_browser_controls(
             "direct_result_path_independently_read_post_command"
         ),
         "worker_result_schema_version": (
-            "jaa10.network-witnessed-fixture-worker-result.v1"
+            "jaa10.network-witnessed-fixture-worker-result.v2"
         ),
         "fixture_origin_class": "exact_loopback_http_origin_only",
         "existing_loopback_controls_required": True,
@@ -1576,6 +1772,14 @@ def _validate_cooperative_browser_controls(
             raise NetworkWitnessError(
                 "integrated cooperative browser hash is invalid"
             )
+    if (
+        not isinstance(controls.get("runtime_tmp_root"), str)
+        or not isinstance(controls.get("runtime_tmp_root_derivation"), dict)
+        or not isinstance(controls.get("socket_budget"), dict)
+    ):
+        raise NetworkWitnessError(
+            "integrated runtime-temp binding is invalid"
+        )
     return True
 
 
@@ -1784,8 +1988,7 @@ def run_isolated_network_witness(
     command_environment = dict(COMMAND_ENVIRONMENT)
     if cooperative_browser_expectation is not None:
         command_environment["TMPDIR"] = str(
-            cooperative_browser_expectation.execution_root
-            / "integration-tmp"
+            cooperative_browser_expectation.runtime_tmp_root
         )
     try:
         evidence_root.mkdir(mode=0o700)
@@ -2026,7 +2229,7 @@ def run_isolated_network_witness(
             }
         else:
             cooperative_controls = {
-                "schema_version": "jaa10.cooperative-browser-controls.v2",
+                "schema_version": "jaa10.cooperative-browser-controls.v3",
                 "integration_status": (
                     "network_witnessed_local_fixture_single_execution"
                 ),
@@ -2048,6 +2251,15 @@ def run_isolated_network_witness(
                 ],
                 "cooperative_policy_sha256": (
                     cooperative_browser_expectation.cooperative_policy_sha256
+                ),
+                "runtime_tmp_root": str(
+                    cooperative_browser_expectation.runtime_tmp_root
+                ),
+                "runtime_tmp_root_derivation": dict(
+                    cooperative_browser_expectation.runtime_tmp_root_derivation
+                ),
+                "socket_budget": dict(
+                    cooperative_browser_expectation.socket_budget
                 ),
                 "fixture_origin_class": "exact_loopback_http_origin_only",
                 "existing_loopback_controls_required": True,

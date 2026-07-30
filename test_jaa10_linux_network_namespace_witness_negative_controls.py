@@ -18,13 +18,21 @@ from career_automation.linux_network_namespace_witness import (
     LinuxNetworkNamespaceWitness,
     NetworkNamespaceWitnessReceipt,
     NetworkWitnessError,
-    _source_identity,
+    SourceIdentity,
     _parse_ipv6_routes,
     _validate_fd_inventory,
     run_isolated_network_witness,
 )
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _synthetic_source() -> SourceIdentity:
+    return SourceIdentity(
+        "a" * 40,
+        "b" * 40,
+        "sha256:" + ("c" * 64),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -420,17 +428,32 @@ def test_receipt_mutation_fails_closed(accepted) -> None:
 
 
 def test_integrated_request_rejects_legacy_raw_hash_binding(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
+    monkeypatch.setattr(
+        witness_module,
+        "RUNTIME_TMP_HOME_ANCHOR",
+        tmp_path_factory.getbasetemp(),
+    )
     execution_root = tmp_path / "execution"
     execution_root.mkdir(mode=0o700)
     output_root = execution_root / "worker-output"
     output_root.mkdir(mode=0o700)
-    (execution_root / "integration-tmp").mkdir(mode=0o700)
     request = execution_root / "integration-request.json"
     request.write_bytes(b"{}")
     request.chmod(0o444)
     result = output_root / "worker-result.json"
+    source = _synthetic_source()
+    monkeypatch.setattr(witness_module, "_source_identity", lambda _root: source)
+    runtime_tmp_root, derivation, socket_budget = (
+        witness_module.derive_runtime_tmp_binding(
+            source,
+            execution_root,
+        )
+    )
+    runtime_tmp_root.mkdir(mode=0o700)
     expectation = CooperativeBrowserExpectation(
         execution_root,
         request,
@@ -438,7 +461,10 @@ def test_integrated_request_rejects_legacy_raw_hash_binding(
         result,
         hashlib.sha256(b"nonce").hexdigest(),
         hashlib.sha256(b"policy").hexdigest(),
-        _source_identity(ROOT),
+        source,
+        runtime_tmp_root,
+        derivation,
+        socket_budget,
     )
 
     with pytest.raises(NetworkWitnessError, match="request identity"):
@@ -447,4 +473,83 @@ def test_integrated_request_rejects_legacy_raw_hash_binding(
             repository_root=ROOT,
             evidence_directory=execution_root / "network-evidence",
             cooperative_browser_expectation=expectation,
+        )
+
+
+def test_runtime_tmp_budget_accepts_107_and_rejects_108(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _synthetic_source()
+    execution_root = Path("/tmp/jaa10-budget-attempt")
+    monkeypatch.setattr(
+        witness_module,
+        "RUNTIME_TMP_HOME_ANCHOR",
+        Path("/" + ("a" * 35)),
+    )
+    root, _derivation, budget = witness_module.derive_runtime_tmp_binding(
+        source,
+        execution_root,
+    )
+    assert len(os.fsencode(root)) == 62
+    assert budget["observed_total_bytes"] == 107
+
+    monkeypatch.setattr(
+        witness_module,
+        "RUNTIME_TMP_HOME_ANCHOR",
+        Path("/" + ("a" * 36)),
+    )
+    with pytest.raises(NetworkWitnessError, match="socket budget"):
+        witness_module.derive_runtime_tmp_binding(
+            source,
+            execution_root,
+        )
+
+
+def test_expectation_rejects_tampered_runtime_tmp_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        witness_module,
+        "RUNTIME_TMP_HOME_ANCHOR",
+        Path("/tmp"),
+    )
+    source = _synthetic_source()
+    execution_root = Path("/tmp/jaa10-expectation-attempt")
+    runtime_tmp_root, derivation, socket_budget = (
+        witness_module.derive_runtime_tmp_binding(
+            source,
+            execution_root,
+        )
+    )
+    request = execution_root / "integration-request.json"
+    result = execution_root / "worker-output/worker-result.json"
+
+    tampered = dict(derivation)
+    tampered["token"] = "0" * 16
+    with pytest.raises(NetworkWitnessError, match="binding differs"):
+        CooperativeBrowserExpectation(
+            execution_root,
+            request,
+            "a" * 64,
+            result,
+            "b" * 64,
+            "c" * 64,
+            source,
+            runtime_tmp_root,
+            tampered,
+            socket_budget,
+        )
+    with pytest.raises(NetworkWitnessError, match="schema"):
+        CooperativeBrowserExpectation(
+            execution_root,
+            request,
+            "a" * 64,
+            result,
+            "b" * 64,
+            "c" * 64,
+            source,
+            runtime_tmp_root,
+            derivation,
+            socket_budget,
+            schema_version="jaa10.cooperative-browser-expectation.v1",
         )

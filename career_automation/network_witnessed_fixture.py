@@ -14,6 +14,7 @@ import importlib.metadata
 import json
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -77,11 +78,19 @@ from .jaa04_corpus_authority import (
     verify_graphcore_corpus,
 )
 from .linux_network_namespace_witness import (
+    AF_UNIX_PATH_CAPACITY,
+    CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES,
     COMMAND_ENVIRONMENT,
     CooperativeBrowserExpectation,
     LinuxNetworkNamespaceWitness,
     NetworkNamespaceWitnessReceipt,
+    NetworkWitnessError,
+    RUNTIME_TMP_DERIVATION_SCHEMA_VERSION,
+    RUNTIME_TMP_PATH_DOMAIN,
+    RUNTIME_TMP_ROOT_MAX_BYTES,
+    RUNTIME_TMP_SOCKET_BUDGET_SCHEMA_VERSION,
     SourceIdentity,
+    derive_runtime_tmp_binding,
     run_isolated_network_witness,
 )
 from .release_gate import (
@@ -103,23 +112,42 @@ from .shadow_certification import (
 )
 
 
-REQUEST_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-request.v1"
-RESULT_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-worker-result.v1"
-COMPOSITE_SCHEMA_VERSION = (
+REQUEST_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-request.v1"
+RESULT_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-worker-result.v1"
+COMPOSITE_SCHEMA_VERSION_V1 = (
     "jaa10.network-witnessed-fixture-observation-receipt.v1"
 )
+REQUEST_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-request.v2"
+RESULT_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-worker-result.v2"
+COMPOSITE_SCHEMA_VERSION = (
+    "jaa10.network-witnessed-fixture-observation-receipt.v2"
+)
 POLICY_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-policy.v1"
-REQUEST_DOMAIN = b"jaa10-network-witnessed-fixture-request-v1\0"
+REQUEST_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-request-v1\0"
+REQUEST_DOMAIN = b"jaa10-network-witnessed-fixture-request-v2\0"
 NONCE_DOMAIN = b"jaa10-network-witnessed-fixture-nonce-v1\0"
 POLICY_DOMAIN = b"jaa10-network-witnessed-fixture-policy-v1\0"
-ENVIRONMENT_DOMAIN = b"jaa10-network-witnessed-fixture-environment-v1\0"
+ENVIRONMENT_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-environment-v1\0"
+ENVIRONMENT_DOMAIN = b"jaa10-network-witnessed-fixture-environment-v2\0"
 EFFECTIVE_ARGV_DOMAIN = b"jaa10-network-witnessed-fixture-effective-argv-v1\0"
-WORKER_INVENTORY_DOMAIN = b"jaa10-network-witnessed-fixture-worker-inventory-v1\0"
-COMPOSITE_INVENTORY_DOMAIN = (
+WORKER_INVENTORY_DOMAIN_V1 = (
+    b"jaa10-network-witnessed-fixture-worker-inventory-v1\0"
+)
+WORKER_INVENTORY_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-worker-inventory-v2\0"
+)
+COMPOSITE_INVENTORY_DOMAIN_V1 = (
     b"jaa10-network-witnessed-fixture-composite-inventory-v1\0"
 )
-COMPOSITE_DOMAIN = b"jaa10-network-witnessed-fixture-composite-v1\0"
-RECONSTRUCTION_DOMAIN = b"jaa10-network-witnessed-fixture-reconstruction-v1\0"
+COMPOSITE_INVENTORY_DOMAIN = (
+    b"jaa10-network-witnessed-fixture-composite-inventory-v2\0"
+)
+COMPOSITE_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-composite-v1\0"
+COMPOSITE_DOMAIN = b"jaa10-network-witnessed-fixture-composite-v2\0"
+RECONSTRUCTION_DOMAIN_V1 = (
+    b"jaa10-network-witnessed-fixture-reconstruction-v1\0"
+)
+RECONSTRUCTION_DOMAIN = b"jaa10-network-witnessed-fixture-reconstruction-v2\0"
 MAX_REQUEST_BYTES = 2_000_000
 MAX_WORKER_RESULT_BYTES = 4_000_000
 MAX_ARTIFACT_BYTES = 64_000_000
@@ -371,9 +399,13 @@ def _request_document(
     integration_nonce: bytes,
 ) -> dict[str, object]:
     policy = _cooperative_policy()
+    runtime_tmp_root, derivation, socket_budget = derive_runtime_tmp_binding(
+        source,
+        execution_root,
+    )
     environment = {
         **COMMAND_ENVIRONMENT,
-        "TMPDIR": str(execution_root / "integration-tmp"),
+        "TMPDIR": str(runtime_tmp_root),
     }
     return {
         "schema_version": REQUEST_SCHEMA_VERSION,
@@ -390,6 +422,9 @@ def _request_document(
             ENVIRONMENT_DOMAIN,
             _canonical_json(environment),
         ),
+        "runtime_tmp_root": str(runtime_tmp_root),
+        "runtime_tmp_root_derivation": derivation,
+        "socket_budget": socket_budget,
         "runtime_identities": _playwright_runtime_identity(
             python_executable,
             chromium_executable,
@@ -410,7 +445,7 @@ def _request_document(
         "paths": {
             "execution_root": str(execution_root),
             "worker_output": str(execution_root / "worker-output"),
-            "integration_tmp": str(execution_root / "integration-tmp"),
+            "integration_tmp": str(runtime_tmp_root),
             "network_evidence": str(execution_root / "network-evidence"),
             "worker_result": str(
                 execution_root / "worker-output/worker-result.json"
@@ -442,6 +477,9 @@ def _validate_request(
         "cooperative_policy_sha256",
         "environment",
         "environment_sha256",
+        "runtime_tmp_root",
+        "runtime_tmp_root_derivation",
+        "socket_budget",
         "runtime_identities",
         "frozen_contract",
         "paths",
@@ -492,10 +530,58 @@ def _validate_request(
     if not isinstance(paths, dict):
         raise NetworkWitnessedFixtureError("request paths are invalid")
     root = request_path.parent.resolve(strict=True)
+    try:
+        runtime_tmp_root, derivation, socket_budget = (
+            derive_runtime_tmp_binding(source, root)
+        )
+    except NetworkWitnessError as error:
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp derivation differs"
+        ) from error
+    expected_environment = {
+        **COMMAND_ENVIRONMENT,
+        "TMPDIR": str(runtime_tmp_root),
+    }
+    try:
+        anchor_status = runtime_tmp_root.parent.lstat()
+        runtime_status = runtime_tmp_root.lstat()
+    except OSError as error:
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp root is missing"
+        ) from error
+    if (
+        dict(environment) != expected_environment
+        or document.get("runtime_tmp_root") != str(runtime_tmp_root)
+        or document.get("runtime_tmp_root_derivation") != derivation
+        or document.get("socket_budget") != socket_budget
+        or derivation.get("schema_version")
+        != RUNTIME_TMP_DERIVATION_SCHEMA_VERSION
+        or derivation.get("domain") != RUNTIME_TMP_PATH_DOMAIN.decode("ascii")
+        or socket_budget.get("schema_version")
+        != RUNTIME_TMP_SOCKET_BUDGET_SCHEMA_VERSION
+        or socket_budget.get("af_unix_path_capacity_bytes")
+        != AF_UNIX_PATH_CAPACITY
+        or socket_budget.get("chromium_suffix_bytes")
+        != CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES
+        or socket_budget.get("maximum_root_bytes")
+        != RUNTIME_TMP_ROOT_MAX_BYTES
+        or stat.S_ISLNK(anchor_status.st_mode)
+        or not stat.S_ISDIR(anchor_status.st_mode)
+        or runtime_tmp_root.parent.resolve(strict=True)
+        != runtime_tmp_root.parent
+        or stat.S_ISLNK(runtime_status.st_mode)
+        or not stat.S_ISDIR(runtime_status.st_mode)
+        or stat.S_IMODE(runtime_status.st_mode) != 0o700
+        or (root / "integration-tmp").exists()
+        or (root / "integration-tmp").is_symlink()
+    ):
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp binding differs"
+        )
     expected_paths = {
         "execution_root": str(root),
         "worker_output": str(root / "worker-output"),
-        "integration_tmp": str(root / "integration-tmp"),
+        "integration_tmp": str(runtime_tmp_root),
         "network_evidence": str(root / "network-evidence"),
         "worker_result": str(root / "worker-output/worker-result.json"),
     }
@@ -1179,7 +1265,15 @@ def _document_inventory(
     rows: list[dict[str, object]] = []
     total = 0
     for path in sorted(root.rglob("*"), key=lambda value: value.as_posix()):
-        if path.resolve(strict=False) in excluded:
+        relative = path.relative_to(root)
+        if (
+            path.resolve(strict=False) in excluded
+            or relative
+            in {
+                Path("workflow.sqlite3-wal"),
+                Path("workflow.sqlite3-shm"),
+            }
+        ):
             continue
         if path.is_symlink():
             raise NetworkWitnessedFixtureError("artifact inventory found a symlink")
@@ -1203,6 +1297,51 @@ def _document_inventory(
         )
     document = {"files": rows}
     return rows, _domain_hash(domain, _canonical_json(document))
+
+
+def _finalize_worker_database(path: Path) -> dict[str, object]:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(path, timeout=30)
+        journal_row = connection.execute("PRAGMA journal_mode").fetchone()
+        checkpoint_row = connection.execute(
+            "PRAGMA wal_checkpoint(TRUNCATE)"
+        ).fetchone()
+        if (
+            journal_row is None
+            or len(journal_row) != 1
+            or checkpoint_row is None
+            or len(checkpoint_row) != 3
+        ):
+            raise NetworkWitnessedFixtureError(
+                "worker database finalization result is invalid"
+            )
+        journal_mode = str(journal_row[0]).lower()
+        busy, log_frames, checkpointed_frames = (
+            int(value) for value in checkpoint_row
+        )
+        if (
+            journal_mode != "wal"
+            or busy != 0
+            or log_frames != checkpointed_frames
+        ):
+            raise NetworkWitnessedFixtureError(
+                "worker database finalization did not quiesce"
+            )
+        return {
+            "journal_mode": journal_mode,
+            "checkpoint_mode": "truncate",
+            "busy": busy,
+            "log_frames": log_frames,
+            "checkpointed_frames": checkpointed_frames,
+        }
+    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+        raise NetworkWitnessedFixtureError(
+            "worker database finalization failed"
+        ) from error
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _freeze_worker_files(output_root: Path) -> None:
@@ -1462,6 +1601,9 @@ def _execute_worker(
     }
     for name, document in artifacts.items():
         _write_exclusive(output_root / name, _canonical_json(document))
+    worker_database_finalization = _finalize_worker_database(
+        output_root / "workflow.sqlite3"
+    )
     _freeze_worker_files(output_root)
     result_path = output_root / "worker-result.json"
     inventory, inventory_sha256 = _document_inventory(
@@ -1477,6 +1619,12 @@ def _execute_worker(
         "cooperative_policy_sha256": request["cooperative_policy_sha256"],
         "environment": request["environment"],
         "environment_sha256": request["environment_sha256"],
+        "runtime_tmp_root": request["runtime_tmp_root"],
+        "runtime_tmp_root_derivation": request[
+            "runtime_tmp_root_derivation"
+        ],
+        "socket_budget": request["socket_budget"],
+        "worker_database_finalization": worker_database_finalization,
         "shared_memory": _shared_memory_evidence(),
         "chromium_effective_argv": argv,
         "chromium_effective_argv_sha256": _domain_hash(
@@ -1513,6 +1661,10 @@ def validate_worker_result(
         "cooperative_policy_sha256",
         "environment",
         "environment_sha256",
+        "runtime_tmp_root",
+        "runtime_tmp_root_derivation",
+        "socket_budget",
+        "worker_database_finalization",
         "shared_memory",
         "chromium_effective_argv",
         "chromium_effective_argv_sha256",
@@ -1541,12 +1693,41 @@ def validate_worker_result(
         or result.get("environment") != request.get("environment")
         or result.get("environment_sha256")
         != request.get("environment_sha256")
+        or result.get("runtime_tmp_root")
+        != request.get("runtime_tmp_root")
+        or result.get("runtime_tmp_root_derivation")
+        != request.get("runtime_tmp_root_derivation")
+        or result.get("socket_budget") != request.get("socket_budget")
+        or not isinstance(
+            result.get("worker_database_finalization"),
+            dict,
+        )
         or result.get("evidence_kind") != "synthetic_shadow"
         or result.get("execution_claim") != "structural_lineage_only"
         or result.get("external_actions") != 0
         or result.get("real_applications_submitted") != 0
     ):
         raise NetworkWitnessedFixtureError("worker result authority differs")
+    finalization = result["worker_database_finalization"]
+    if (
+        set(finalization)
+        != {
+            "journal_mode",
+            "checkpoint_mode",
+            "busy",
+            "log_frames",
+            "checkpointed_frames",
+        }
+        or finalization.get("journal_mode") != "wal"
+        or finalization.get("checkpoint_mode") != "truncate"
+        or finalization.get("busy") != 0
+        or not isinstance(finalization.get("log_frames"), int)
+        or finalization.get("log_frames")
+        != finalization.get("checkpointed_frames")
+    ):
+        raise NetworkWitnessedFixtureError(
+            "worker database finalization differs"
+        )
     argv = result.get("chromium_effective_argv")
     if not isinstance(argv, list) or result.get(
         "chromium_effective_argv_sha256"
@@ -1615,6 +1796,9 @@ class NetworkWitnessedFixtureObservationReceipt:
             "request_sha256",
             "integration_nonce_sha256",
             "cooperative_policy_sha256",
+            "runtime_tmp_root",
+            "runtime_tmp_root_derivation",
+            "socket_budget",
             "worker_result_sha256",
             "worker_artifact_inventory_sha256",
             "network_witness_sha256",
@@ -1638,6 +1822,12 @@ class NetworkWitnessedFixtureObservationReceipt:
             document.get("schema_version") != COMPOSITE_SCHEMA_VERSION
             or document.get("integration_status")
             != "network_witnessed_local_fixture_single_execution"
+            or not isinstance(document.get("runtime_tmp_root"), str)
+            or not isinstance(
+                document.get("runtime_tmp_root_derivation"),
+                dict,
+            )
+            or not isinstance(document.get("socket_budget"), dict)
             or document.get("strongest_claim") != STRONGEST_CLAIM
             or tuple(document.get("limitations", ())) != LIMITATIONS
             or document.get("evidence_kind") != "synthetic_shadow"
@@ -1704,14 +1894,74 @@ def run_network_witnessed_fixture(
     if not python.is_file():
         raise NetworkWitnessedFixtureError("Python executable is missing")
     chromium = Path(chromium_executable).resolve(strict=True)
+    source = _source_identity(repository)
+    try:
+        runtime_tmp_root, runtime_tmp_derivation, socket_budget = (
+            derive_runtime_tmp_binding(source, root)
+        )
+    except NetworkWitnessError as error:
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp derivation differs"
+        ) from error
+    anchor = runtime_tmp_root.parent
+    try:
+        anchor_before = anchor.lstat()
+    except OSError as error:
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp anchor is missing"
+        ) from error
+    if (
+        stat.S_ISLNK(anchor_before.st_mode)
+        or not stat.S_ISDIR(anchor_before.st_mode)
+        or anchor.resolve(strict=True) != anchor
+        or runtime_tmp_root.parent != anchor
+        or runtime_tmp_root.exists()
+        or runtime_tmp_root.is_symlink()
+    ):
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp preflight differs"
+        )
     root.mkdir(mode=0o700)
-    if root.resolve(strict=True) != root:
+    root_status = root.lstat()
+    if (
+        root.resolve(strict=True) != root
+        or stat.S_ISLNK(root_status.st_mode)
+        or not stat.S_ISDIR(root_status.st_mode)
+        or stat.S_IMODE(root_status.st_mode) != 0o700
+    ):
         raise NetworkWitnessedFixtureError("execution root identity differs")
     worker_output = root / "worker-output"
-    integration_tmp = root / "integration-tmp"
     worker_output.mkdir(mode=0o700)
-    integration_tmp.mkdir(mode=0o700)
-    source = _source_identity(repository)
+    try:
+        runtime_tmp_root.mkdir(mode=0o700)
+    except OSError as error:
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp root must be newly creatable"
+        ) from error
+    runtime_status = runtime_tmp_root.lstat()
+    anchor_after = anchor.lstat()
+    anchor_before_identity = (
+        anchor_before.st_dev,
+        anchor_before.st_ino,
+        anchor_before.st_mode,
+    )
+    anchor_after_identity = (
+        anchor_after.st_dev,
+        anchor_after.st_ino,
+        anchor_after.st_mode,
+    )
+    if (
+        anchor_before_identity != anchor_after_identity
+        or stat.S_ISLNK(runtime_status.st_mode)
+        or not stat.S_ISDIR(runtime_status.st_mode)
+        or stat.S_IMODE(runtime_status.st_mode) != 0o700
+        or runtime_tmp_root.parent != anchor
+        or (root / "integration-tmp").exists()
+        or (root / "integration-tmp").is_symlink()
+    ):
+        raise NetworkWitnessedFixtureError(
+            "runtime-temp root identity differs"
+        )
     request_document = _request_document(
         source=source,
         execution_root=root,
@@ -1736,6 +1986,9 @@ def run_network_witnessed_fixture(
             request_document["cooperative_policy_sha256"]
         ),
         expected_source=source,
+        runtime_tmp_root=runtime_tmp_root,
+        runtime_tmp_root_derivation=runtime_tmp_derivation,
+        socket_budget=socket_budget,
     )
     witness, network_receipt = run_isolated_network_witness(
         (
@@ -1770,13 +2023,16 @@ def run_network_witnessed_fixture(
     ):
         raise NetworkWitnessedFixtureError("network receipt binding differs")
     reconstruction = {
-        "schema_version": "jaa10.network-witnessed-reconstruction.v1",
+        "schema_version": "jaa10.network-witnessed-reconstruction.v2",
         "request_reconstructed": True,
         "worker_result_reconstructed": True,
         "worker_inventory_reconstructed": True,
         "network_witness_reconstructed": True,
         "network_receipt_reconstructed": True,
         "source": source.document(),
+        "runtime_tmp_root": str(runtime_tmp_root),
+        "runtime_tmp_root_derivation": runtime_tmp_derivation,
+        "socket_budget": socket_budget,
         "request_sha256": request_sha256,
         "worker_result_sha256": worker_result_sha256,
         "network_witness_sha256": witness.witness_sha256,
@@ -1818,6 +2074,9 @@ def run_network_witnessed_fixture(
             "cooperative_policy_sha256": (
                 request_document["cooperative_policy_sha256"]
             ),
+            "runtime_tmp_root": str(runtime_tmp_root),
+            "runtime_tmp_root_derivation": runtime_tmp_derivation,
+            "socket_budget": socket_budget,
             "worker_result_sha256": worker_result_sha256,
             "worker_artifact_inventory_sha256": (
                 result["worker_artifact_inventory_sha256"]
