@@ -1848,6 +1848,11 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "public_network_requests",
         "network_isolation_witness_limit",
         "cohort_close_attempted_at_record",
+        "current_source_eligible",
+        "permanently_non_closeable_for_current_source",
+        "ineligibility_reason",
+        "ineligible_since_head",
+        "ineligibility_authority",
         "incomplete_attempt",
         "immutable_evidence",
     }
@@ -1879,6 +1884,27 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "22071bff2ba059fd5b5aa32a213379fe"
     )
     assert open_runtime["ledger_receipt_count"] == 3
+    assert open_runtime["current_source_eligible"] is False
+    assert (
+        open_runtime["permanently_non_closeable_for_current_source"] is True
+    )
+    assert open_runtime["ineligibility_reason"] == (
+        "product_execution_files_changed_since_open"
+    )
+    assert open_runtime["ineligible_since_head"] == (
+        "3d239d40ac7a74f6f390e231d967ed85dca4e4d7"
+    )
+    assert open_runtime["ineligibility_authority"] == {
+        "path_base": "operator_control_root",
+        "relative_path": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-live-shadow-hard-metrics-design-v2-gate-raw.json"
+        ),
+        "sha256": (
+            "342edb0306f8622293d6778da7b87139"
+            "3f1b7a66dfd3698ff31c2940eb380f62"
+        ),
+    }
     assert open_runtime["fixture_measures_report_id"] == (
         "9796e3839fdbe8bbaba63e2c3b6014c9"
         "0e31937a818aea8ab5482ee2f3c902eb"
@@ -2271,6 +2297,10 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "jaa-single-codex-20260729/"
             "fable-jaa10-phase-c-open-cohort-runtime-gate-raw.json"
         ): "e182f5517ee1f5b4d4845e020b593e5e1c02666e33dec8cebf218a2d74ebabb5",
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-live-shadow-hard-metrics-design-v2-gate-raw.json"
+        ): "342edb0306f8622293d6778da7b871393f1b7a66dfd3698ff31c2940eb380f62",
         (
             "jaa-single-codex-20260729/"
             "jaa10-phase-c-elapsed-cohort-new-suites-postcommit.log"

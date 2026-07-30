@@ -1047,6 +1047,15 @@
             "public_network_requests": 0,
             "network_isolation_witness_limit": "cooperative_inprocess_loopback_controls_and_artifact_corroboration_no_os_level_traffic_audit",
             "cohort_close_attempted_at_record": false,
+            "current_source_eligible": false,
+            "permanently_non_closeable_for_current_source": true,
+            "ineligibility_reason": "product_execution_files_changed_since_open",
+            "ineligible_since_head": "3d239d40ac7a74f6f390e231d967ed85dca4e4d7",
+            "ineligibility_authority": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa10-live-shadow-hard-metrics-design-v2-gate-raw.json",
+              "sha256": "342edb0306f8622293d6778da7b871393f1b7a66dfd3698ff31c2940eb380f62"
+            },
             "incomplete_attempt": {
               "relative_path": "jaa10-phase-c-open-cohort-9246458-attempt1-incomplete",
               "ledger_sha256": "9adeef327e42af2a1fa61847638ff8afe99c05fe32bfb13bd332cc1b8b4ac819",
