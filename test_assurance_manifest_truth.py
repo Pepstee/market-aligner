@@ -736,6 +736,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         key: value
         for key, value in jaa10_bounded.items()
         if key not in {
+            "dependency_independent_hard_metrics_package",
             "phase_b_fixture_measures",
             "phase_c_elapsed_cohort",
         }
@@ -1388,6 +1389,156 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             }
         ],
     }
+    hard_metrics = jaa10_bounded[
+        "dependency_independent_hard_metrics_package"
+    ]
+    assert hard_metrics == {
+        "status": "ACCEPT_BOUNDED_PACKAGE_EXACT_SOURCE",
+        "scope": "dependency_independent_frozen_fixture_metrics_only",
+        "implemented_source_git_revision": (
+            "a8d187157dc5950136921aec1c7dfc71eefa2cd7"
+        ),
+        "implemented_source_parent": (
+            "3514c8803faf939b6c0bb7fb5b975f3e0e765828"
+        ),
+        "implemented_source_tree": (
+            "c053277f45127a8a546139516de3c0c61c5b16dd"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:4a84af764757149c899b604e3c931a59"
+            "85077c87720f980062e588fbfb4758fe"
+        ),
+        "truth_transition_3514c880_ratified": True,
+        "package_file_sha256": {
+            "career_automation/hard_metrics_evaluation.py": (
+                "9fd5728fbaa2ed4bf77cd276c095899bf"
+                "2825df05781ee43ba696ef936fb8a3a"
+            ),
+            "career_automation/certification_candidate_compiler.py": (
+                "99ff070060b816a4ae227f91ea09fd8f4"
+                "c4d1442c167d9b14494ccf6c9619671"
+            ),
+            "test_jaa10_hard_metrics_evaluation.py": (
+                "5cd052da903f71adb2b7c20638b5ed165"
+                "a19454ccabf9397cfcb2362083395a2"
+            ),
+            "test_jaa10_hard_metrics_evaluation_negative_controls.py": (
+                "07d5920a1fcebefed561e329ea40cbadd"
+                "85e5035dc7b7fa9c342564e1874d7c1"
+            ),
+            "test_jaa10_certification_candidate_compiler.py": (
+                "34385a1aceaa500d744b144c05462d103"
+                "c2ea06dd619b9117cf4d966ee7ee9ff"
+            ),
+            (
+                "test_jaa10_certification_candidate_compiler_"
+                "negative_controls.py"
+            ): (
+                "411dccffa338c34237e5fe438fde4b236"
+                "3d3bee762850e329afa85bca4890f0f"
+            ),
+        },
+        "derived_metric_statuses": {
+            "ats_parse_success_bp": "PASS",
+            "confirmed_without_receipt": "UNEVALUABLE",
+            "deterministic_replay_mismatch": "UNEVALUABLE",
+            "duplicate_submissions": "UNEVALUABLE",
+            "ineligible_submissions": "UNEVALUABLE",
+            "released_employer_claims_without_citations": "UNEVALUABLE",
+            "unsupported_released_claims": "UNEVALUABLE",
+        },
+        "ats_parse_success_basis_points": 10_000,
+        "ats_parse_evidence_class": "fixture_frozen",
+        "candidate_status": "CERTIFICATION_WITHHELD",
+        "candidate_withheld_reasons": [
+            "live_evidence_absent",
+            "signed_time_absent",
+            "metrics_incomplete",
+        ],
+        "sonnet_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa10-hard-metrics-package-review-raw.json"
+            ),
+            "sha256": (
+                "d91b7242d69688b744d6cd8a232d98ca"
+                "968158ea8d52cb547174c6286e1dd58c"
+            ),
+            "session_id": "3452a591-c0ac-4ff5-aed6-ee60c9bc8915",
+            "disposition": (
+                "IMPLEMENTATION_REVIEW_DECISION: ACCEPT_WITH_FINDINGS"
+            ),
+        },
+        "implementation_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "JAA10_HARD_METRICS_PACKAGE_IMPLEMENTATION_RECEIPT.md"
+            ),
+            "sha256": (
+                "7e401ab88dad8a24c6d001688bd8b5816"
+                "4eb0e73d5bd9a29b08a20778b176f56"
+            ),
+        },
+        "acceptance_authority": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-hard-metrics-package-"
+                "exact-source-gate-raw.json"
+            ),
+            "sha256": (
+                "0971d3a7f42d0931db5f03afbbe3188e"
+                "fae4eef2277aceeb02a5c9ba1ee57b44"
+            ),
+        },
+        "independent_fable_certification": False,
+        "objective_satisfied": False,
+        "certifies_slice": False,
+        "live_metrics_evaluated": False,
+        "production_certification": "withheld",
+        "live_time_separated_execution": "not_collected",
+        "external_action_capability": False,
+        "real_applications_submitted": 0,
+    }
+    for relative, expected_sha256 in hard_metrics[
+        "package_file_sha256"
+    ].items():
+        assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == (
+            expected_sha256
+        )
+    assert _git(
+        "rev-parse",
+        f"{hard_metrics['implemented_source_git_revision']}^",
+    ).decode().strip() == hard_metrics["implemented_source_parent"]
+    assert _git(
+        "rev-parse",
+        f"{hard_metrics['implemented_source_git_revision']}^{{tree}}",
+    ).decode().strip() == hard_metrics["implemented_source_tree"]
+    assert _source_content_revision_at(
+        hard_metrics["implemented_source_git_revision"]
+    ) == hard_metrics["implemented_source_content_revision"]
+    hard_metrics_gate_hash_index = {
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-hard-metrics-package-exact-source-gate-raw.json"
+        ): "0971d3a7f42d0931db5f03afbbe3188efae4eef2277aceeb02a5c9ba1ee57b44"
+    }
+    assert hard_metrics_gate_hash_index == {
+        hard_metrics["acceptance_authority"]["relative_path"]: (
+            hard_metrics["acceptance_authority"]["sha256"]
+        )
+    }
+    for relative_path, expected_sha256 in (
+        hard_metrics_gate_hash_index.items()
+    ):
+        evidence_path = ROOT.parents[1] / ".control" / relative_path
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            expected_sha256
+        )
+        assert evidence_path.stat().st_mode & 0o777 == 0o444
     phase_b = jaa10_bounded["phase_b_fixture_measures"]
     assert set(phase_b) == {
         "status",
