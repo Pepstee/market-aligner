@@ -8,19 +8,26 @@ from pathlib import Path
 
 import pytest
 
+from career_automation.durable_circuit_store import (
+    CircuitStateError,
+    assess_fixture_adapter_attempt,
+)
 from career_automation.official_ats_adapter import (
     BLOCKING_SIGNALS,
     FROZEN_FIXTURE_ADAPTER_CONTRACT,
-    armed_fixture_circuit,
-    assess_fixture_adapter_attempt,
 )
 from career_automation.release_gate import OfficialRouteBinding
-from test_jaa11_independent_acceptance import _content_hash, _observation
+from test_jaa11_independent_acceptance import (
+    _content_hash,
+    _observation,
+    _store,
+)
 
 
 @pytest.mark.parametrize("signal", BLOCKING_SIGNALS)
 def test_unknown_or_prohibited_interaction_parks_without_evidence(
     signal: str,
+    tmp_path: Path,
 ) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     observation = replace(
@@ -29,22 +36,26 @@ def test_unknown_or_prohibited_interaction_parks_without_evidence(
         submit_dispatch_count=0,
         receipt=None,
     )
-    circuit, result, evidence = assess_fixture_adapter_attempt(
+    store = _store(tmp_path / f"{signal}.sqlite3")
+    initial = store.require_armed()
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        store,
         observation,
     )
-    assert circuit.state == "armed"
-    assert circuit.assessed_attempts == 1
+    assert store.require_armed() == initial
     assert result.outcome == "parked"
     assert result.reason_codes == (signal,)
     assert result.evidence_id is None
     assert result.receipt_id is None
     assert result.halts_canaries is False
     assert evidence is None
+    assert trip_receipt is None
 
 
-def test_blocker_cannot_relabel_a_completed_submit_as_parked() -> None:
+def test_blocker_cannot_relabel_a_completed_submit_as_parked(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     observation = replace(
         _observation(),
@@ -56,7 +67,7 @@ def test_blocker_cannot_relabel_a_completed_submit_as_parked() -> None:
     ):
         assess_fixture_adapter_attempt(
             contract,
-            armed_fixture_circuit(contract),
+            _store(tmp_path / "circuit.sqlite3"),
             observation,
         )
 
@@ -81,63 +92,80 @@ def test_blocker_cannot_relabel_a_completed_submit_as_parked() -> None:
 def test_hard_invariant_breach_trips_and_latches_circuit(
     changed: dict[str, object],
     reason: str,
+    tmp_path: Path,
 ) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     observation = replace(_observation(), **changed)
-    circuit, result, evidence = assess_fixture_adapter_attempt(
+    store = _store(tmp_path / f"{reason}.sqlite3")
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        store,
         observation,
     )
-    assert circuit.state == "tripped"
-    assert circuit.breach_code == reason
+    persisted = store.verify()
+    assert persisted.state == "tripped"
+    assert persisted.breach_code == reason
+    assert trip_receipt is not None
+    assert persisted.head_receipt_sha256 == trip_receipt.receipt_sha256
     assert result.outcome == "circuit_open"
     assert result.reason_codes == (reason,)
     assert result.halts_canaries is True
     assert result.evidence_id is None
     assert result.receipt_id is None
     assert evidence is None
-    with pytest.raises(RuntimeError, match="circuit breaker is open"):
+    with pytest.raises(CircuitStateError, match="tripped"):
         assess_fixture_adapter_attempt(
             contract,
-            circuit,
+            store,
             _observation(),
         )
 
 
-def test_hard_breach_cannot_be_masked_by_a_parking_signal() -> None:
+def test_hard_breach_cannot_be_masked_by_a_parking_signal(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     observation = replace(
         _observation(),
         submit_dispatch_count=2,
         blocking_signals=("captcha",),
     )
-    circuit, result, evidence = assess_fixture_adapter_attempt(
+    store = _store(tmp_path / "circuit.sqlite3")
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        store,
         observation,
     )
-    assert circuit.state == "tripped"
-    assert circuit.breach_code == "second_submit_attempt"
+    assert store.verify().state == "tripped"
+    assert store.verify().breach_code == "second_submit_attempt"
+    assert trip_receipt is not None
     assert result.outcome == "circuit_open"
     assert result.reason_codes == ("second_submit_attempt",)
     assert evidence is None
 
 
-def test_fabricated_or_mismatched_receipt_trips_without_evidence() -> None:
+def test_fabricated_or_mismatched_receipt_trips_without_evidence(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     fabricated = replace(_observation().receipt, receipt_id="0" * 64)
     observation = replace(_observation(), receipt=fabricated)
-    circuit, result, evidence = assess_fixture_adapter_attempt(
+    fabricated_store = _store(tmp_path / "fabricated.sqlite3")
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        fabricated_store,
         observation,
     )
-    assert circuit.breach_code == "fabricated_receipt"
+    assert fabricated_store.verify().breach_code == "fabricated_receipt"
+    assert trip_receipt is not None
     assert result.receipt_id is None
     assert evidence is None
-    with pytest.raises(RuntimeError, match="circuit breaker is open"):
-        assess_fixture_adapter_attempt(contract, circuit, _observation())
+    with pytest.raises(CircuitStateError, match="tripped"):
+        assess_fixture_adapter_attempt(
+            contract,
+            fabricated_store,
+            _observation(),
+        )
 
     mismatched = replace(
         _observation().receipt,
@@ -151,34 +179,44 @@ def test_fabricated_or_mismatched_receipt_trips_without_evidence() -> None:
         ),
     )
     observation = replace(_observation(), receipt=mismatched)
-    circuit, result, evidence = assess_fixture_adapter_attempt(
+    mismatched_store = _store(tmp_path / "mismatched.sqlite3")
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        mismatched_store,
         observation,
     )
-    assert circuit.breach_code == "mismatched_receipt"
+    assert mismatched_store.verify().breach_code == "mismatched_receipt"
+    assert trip_receipt is not None
     assert result.receipt_id is None
     assert evidence is None
-    with pytest.raises(RuntimeError, match="circuit breaker is open"):
-        assess_fixture_adapter_attempt(contract, circuit, _observation())
+    with pytest.raises(CircuitStateError, match="tripped"):
+        assess_fixture_adapter_attempt(
+            contract,
+            mismatched_store,
+            _observation(),
+        )
 
 
-def test_malformed_receipt_runtime_type_trips_as_fabricated() -> None:
+def test_malformed_receipt_runtime_type_trips_as_fabricated(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     malformed = replace(_observation().receipt, receipt_id=object())
     observation = replace(_observation(), receipt=malformed)
-    circuit, result, evidence = assess_fixture_adapter_attempt(
+    store = _store(tmp_path / "circuit.sqlite3")
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        store,
         observation,
     )
-    assert circuit.state == "tripped"
-    assert circuit.breach_code == "fabricated_receipt"
+    assert store.verify().state == "tripped"
+    assert store.verify().breach_code == "fabricated_receipt"
+    assert trip_receipt is not None
     assert result.reason_codes == ("fabricated_receipt",)
     assert result.receipt_id is None
     assert evidence is None
-    with pytest.raises(RuntimeError, match="circuit breaker is open"):
-        assess_fixture_adapter_attempt(contract, circuit, _observation())
+    with pytest.raises(CircuitStateError, match="tripped"):
+        assess_fixture_adapter_attempt(contract, store, _observation())
 
 
 @pytest.mark.parametrize(
@@ -191,6 +229,7 @@ def test_malformed_receipt_runtime_type_trips_as_fabricated() -> None:
 )
 def test_changed_submission_proof_trips_without_receipt_claim(
     changed: dict[str, str],
+    tmp_path: Path,
 ) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     changed_proof = replace(
@@ -201,16 +240,18 @@ def test_changed_submission_proof_trips_without_receipt_claim(
         _observation(),
         submission_proof=changed_proof,
     )
-    circuit, result, evidence = assess_fixture_adapter_attempt(
+    store = _store(tmp_path / f"{next(iter(changed))}.sqlite3")
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        store,
         observation,
     )
-    assert circuit.breach_code == "changed_submission_proof"
+    assert store.verify().breach_code == "changed_submission_proof"
+    assert trip_receipt is not None
     assert result.receipt_id is None
     assert evidence is None
-    with pytest.raises(RuntimeError, match="circuit breaker is open"):
-        assess_fixture_adapter_attempt(contract, circuit, _observation())
+    with pytest.raises(CircuitStateError, match="tripped"):
+        assess_fixture_adapter_attempt(contract, store, _observation())
 
 
 def test_fixture_contract_rejects_external_or_actionable_route() -> None:
@@ -237,7 +278,9 @@ def test_fixture_contract_rejects_external_or_actionable_route() -> None:
         )
 
 
-def test_noncanonical_contract_cannot_assess_or_arm() -> None:
+def test_noncanonical_contract_cannot_assess_or_arm(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     replacement = replace(
         contract,
@@ -246,15 +289,13 @@ def test_noncanonical_contract_cannot_assess_or_arm() -> None:
             route_id="caller-defined-route",
         ),
     )
-    with pytest.raises(ValueError, match="canonical contract"):
-        armed_fixture_circuit(replacement)
     with pytest.raises(
         ValueError,
         match="canonical adapter contract",
     ):
         assess_fixture_adapter_attempt(
             replacement,
-            armed_fixture_circuit(contract),
+            _store(tmp_path / "circuit.sqlite3"),
             _observation(),
         )
 
@@ -274,13 +315,16 @@ def test_adapter_identifiers_must_be_canonical_without_padding() -> None:
         )
 
 
-def test_fixture_evidence_cannot_be_relabelled_as_production() -> None:
+def test_fixture_evidence_cannot_be_relabelled_as_production(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
-    _circuit, result, evidence = assess_fixture_adapter_attempt(
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        armed_fixture_circuit(contract),
+        _store(tmp_path / "circuit.sqlite3"),
         _observation(),
     )
+    assert trip_receipt is None
     assert evidence is not None
     with pytest.raises(ValueError, match="cannot activate or certify"):
         replace(evidence, real_canary_activation="authorized")
@@ -312,6 +356,7 @@ def test_product_module_has_no_browser_network_or_submission_capability() -> Non
         "urlopen",
         "consume_release_token",
         "evaluate_and_issue",
+        "durable_circuit_store",
         "locator.click",
         "page.goto",
         "certifies_slice: bool = True",

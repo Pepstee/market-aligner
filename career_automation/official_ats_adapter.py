@@ -452,51 +452,6 @@ class AdapterFixtureObservation:
 
 
 @dataclass(frozen=True)
-class AdapterCircuitBreaker:
-    adapter_contract_sha256: str
-    state: str = "armed"
-    assessed_attempts: int = 0
-    breach_code: str | None = None
-    schema_version: str = "jaa11.adapter-circuit-breaker-state.v1"
-
-    def __post_init__(self) -> None:
-        _digest(self.adapter_contract_sha256, "circuit contract hash")
-        if self.state not in {"armed", "tripped"}:
-            raise ValueError("adapter circuit state is invalid")
-        if (
-            not isinstance(self.assessed_attempts, int)
-            or self.assessed_attempts < 0
-        ):
-            raise ValueError("adapter circuit attempt count is invalid")
-        if self.state == "armed" and self.breach_code is not None:
-            raise ValueError("armed adapter circuit cannot retain a breach")
-        if self.state == "tripped" and self.breach_code not in (
-            INVARIANT_BREACHES
-        ):
-            raise ValueError(
-                "tripped adapter circuit requires an invariant breach"
-            )
-        if (
-            self.schema_version
-            != "jaa11.adapter-circuit-breaker-state.v1"
-        ):
-            raise ValueError("adapter circuit schema is unsupported")
-
-    def document(self) -> dict[str, object]:
-        return {
-            "schema_version": self.schema_version,
-            "adapter_contract_sha256": self.adapter_contract_sha256,
-            "state": self.state,
-            "assessed_attempts": self.assessed_attempts,
-            "breach_code": self.breach_code,
-        }
-
-    @property
-    def state_sha256(self) -> str:
-        return _content_hash(self.document())
-
-
-@dataclass(frozen=True)
 class FixtureAdapterEvidence:
     adapter_contract_sha256: str
     observation_sha256: str
@@ -623,14 +578,6 @@ class AdapterAttemptResult:
             raise ValueError("fixture adapter result schema is unsupported")
 
 
-def armed_fixture_circuit(
-    contract: FixtureAdapterContract,
-) -> AdapterCircuitBreaker:
-    if contract != FROZEN_FIXTURE_ADAPTER_CONTRACT:
-        raise ValueError("fixture circuit requires the canonical contract")
-    return AdapterCircuitBreaker(contract.contract_sha256)
-
-
 def _hard_breach(
     contract: FixtureAdapterContract,
     observation: AdapterFixtureObservation,
@@ -682,28 +629,59 @@ def _hard_breach(
     return None
 
 
-def assess_fixture_adapter_attempt(
+@dataclass(frozen=True)
+class FixtureObservationEvaluation:
+    """Pure fixture classification that carries no circuit authority."""
+
+    outcome: str
+    reason_codes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
+        if self.outcome not in {
+            "breach",
+            "parked",
+            "pass_candidate",
+        }:
+            raise ValueError("fixture observation evaluation is invalid")
+        if len(self.reason_codes) != len(set(self.reason_codes)):
+            raise ValueError(
+                "fixture observation evaluation reasons must be unique"
+            )
+        if self.outcome == "breach":
+            if (
+                len(self.reason_codes) != 1
+                or self.reason_codes[0] not in INVARIANT_BREACHES
+            ):
+                raise ValueError(
+                    "fixture breach evaluation has invalid reasons"
+                )
+        elif self.outcome == "parked":
+            if (
+                not self.reason_codes
+                or any(
+                    reason not in BLOCKING_SIGNALS
+                    for reason in self.reason_codes
+                )
+            ):
+                raise ValueError(
+                    "fixture parked evaluation has invalid reasons"
+                )
+        elif self.reason_codes:
+            raise ValueError(
+                "fixture pass candidate cannot retain reasons"
+            )
+
+
+def evaluate_fixture_observation(
     contract: FixtureAdapterContract,
-    circuit: AdapterCircuitBreaker,
     observation: AdapterFixtureObservation,
-) -> tuple[
-    AdapterCircuitBreaker,
-    AdapterAttemptResult,
-    FixtureAdapterEvidence | None,
-]:
-    """Assess pure fixture evidence without executing or authorizing an action."""
+) -> FixtureObservationEvaluation:
+    """Classify a fixture observation without gating or granting authority."""
     if contract != FROZEN_FIXTURE_ADAPTER_CONTRACT:
         raise ValueError(
             "fixture assessment requires the canonical adapter contract"
         )
-    if not isinstance(circuit, AdapterCircuitBreaker):
-        raise TypeError(
-            "fixture assessment requires an AdapterCircuitBreaker"
-        )
-    if circuit.adapter_contract_sha256 != contract.contract_sha256:
-        raise ValueError("fixture circuit binds a different contract")
-    if circuit.state != "armed":
-        raise RuntimeError("fixture adapter circuit breaker is open")
     if not isinstance(observation, AdapterFixtureObservation):
         raise TypeError(
             "fixture assessment requires an AdapterFixtureObservation"
@@ -711,7 +689,6 @@ def assess_fixture_adapter_attempt(
     if observation.adapter_contract_sha256 != contract.contract_sha256:
         raise ValueError("fixture observation binds a different contract")
 
-    attempt_count = circuit.assessed_attempts + 1
     breach = _hard_breach(contract, observation)
     if (
         observation.blocking_signals
@@ -719,39 +696,36 @@ def assess_fixture_adapter_attempt(
         and observation.receipt is None
         and breach == "missing_submit_dispatch"
     ):
-        next_circuit = AdapterCircuitBreaker(
-            contract.contract_sha256,
-            assessed_attempts=attempt_count,
-        )
-        result = AdapterAttemptResult(
+        return FixtureObservationEvaluation(
             outcome="parked",
             reason_codes=observation.blocking_signals,
-            evidence_id=None,
-            receipt_id=None,
-            halts_canaries=False,
         )
-        return next_circuit, result, None
     if breach is not None:
-        next_circuit = AdapterCircuitBreaker(
-            contract.contract_sha256,
-            state="tripped",
-            assessed_attempts=attempt_count,
-            breach_code=breach,
-        )
-        result = AdapterAttemptResult(
-            outcome="circuit_open",
+        return FixtureObservationEvaluation(
+            outcome="breach",
             reason_codes=(breach,),
-            evidence_id=None,
-            receipt_id=None,
-            halts_canaries=True,
         )
-        return next_circuit, result, None
 
     if observation.blocking_signals:
         raise ValueError(
             "blocking signals cannot follow a completed submit dispatch"
         )
+    return FixtureObservationEvaluation(
+        outcome="pass_candidate",
+        reason_codes=(),
+    )
 
+
+def compile_fixture_evidence(
+    contract: FixtureAdapterContract,
+    observation: AdapterFixtureObservation,
+) -> FixtureAdapterEvidence:
+    """Compile inert evidence only for a pure passing fixture observation."""
+    evaluation = evaluate_fixture_observation(contract, observation)
+    if evaluation.outcome != "pass_candidate":
+        raise ValueError(
+            "fixture evidence requires a passing observation"
+        )
     proof = observation.submission_proof
     body = {
         "schema_version": "jaa11.fixture-adapter-evidence.v1",
@@ -777,15 +751,4 @@ def assess_fixture_adapter_attempt(
         submit_event_sha256=proof.submit_event_sha256,
         evidence_id=_content_hash(body),
     )
-    next_circuit = AdapterCircuitBreaker(
-        contract.contract_sha256,
-        assessed_attempts=attempt_count,
-    )
-    result = AdapterAttemptResult(
-        outcome="fixture_pass",
-        reason_codes=(),
-        evidence_id=evidence.evidence_id,
-        receipt_id=evidence.receipt_id,
-        halts_canaries=False,
-    )
-    return next_circuit, result, evidence
+    return evidence

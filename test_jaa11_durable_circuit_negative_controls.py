@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from career_automation.durable_circuit_store import (
+    POLICY_VERSION,
     RESET_AUTHORITY_ANCHOR,
     CircuitIntegrityError,
     CircuitStateError,
@@ -340,3 +342,47 @@ def test_reset_proposal_requires_current_tripped_version(
             rationale_sha256=digest("rationale"),
         )
     assert store.verify() == before
+
+
+def test_v1_policy_database_is_refused_without_migration(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "circuit.sqlite3"
+    store = new_store(path)
+    assert POLICY_VERSION == "jaa11.durable-trip-only-policy.v2"
+    v1_policy = {
+        "schema_version": "jaa11.durable-circuit-store.v1",
+        "policy_version": "jaa11.durable-trip-only-policy.v1",
+        "states": ["armed", "tripped"],
+        "terminal_state": "tripped",
+        "reset_mutation": "withheld",
+        "reset_authority_anchor": RESET_AUTHORITY_ANCHOR,
+        "external_action_capability": False,
+        "fixture_scope_only": True,
+        "whole_file_replacement_limit": (
+            "detectable_only_with_pinned_instance_and_genesis"
+        ),
+    }
+    policy_json = json.dumps(
+        v1_policy,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    execute(
+        path,
+        """
+        UPDATE circuit_metadata
+        SET policy_json = ?, policy_sha256 = ?
+        WHERE singleton = 1
+        """,
+        (
+            policy_json,
+            hashlib.sha256(policy_json.encode("utf-8")).hexdigest(),
+        ),
+    )
+    with pytest.raises(
+        CircuitIntegrityError,
+        match="policy differs",
+    ):
+        store.verify()

@@ -18,8 +18,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from career_automation.official_ats_adapter import (
+    AdapterAttemptResult,
+    AdapterFixtureObservation,
     FROZEN_FIXTURE_ADAPTER_CONTRACT,
     INVARIANT_BREACHES,
+    FixtureAdapterContract,
+    FixtureAdapterEvidence,
+    compile_fixture_evidence,
+    evaluate_fixture_observation,
 )
 
 
@@ -27,7 +33,7 @@ HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 STORE_SCHEMA_VERSION = "jaa11.durable-circuit-store.v1"
 RECEIPT_SCHEMA_VERSION = "jaa11.durable-circuit-receipt.v1"
-POLICY_VERSION = "jaa11.durable-trip-only-policy.v1"
+POLICY_VERSION = "jaa11.durable-trip-only-policy.v2"
 RESET_AUTHORITY_ANCHOR = "unavailable_local_only_fail_closed"
 GENESIS_LINK = "genesis"
 SQLITE_TIMEOUT_SECONDS = 10.0
@@ -178,6 +184,9 @@ def circuit_policy_document() -> dict[str, object]:
         "fixture_scope_only": True,
         "whole_file_replacement_limit": (
             "detectable_only_with_pinned_instance_and_genesis"
+        ),
+        "filesystem_privileged_writer_limit": (
+            "surgical_partial_rewrite_undetectable_no_local_mitigation"
         ),
     }
 
@@ -853,3 +862,80 @@ class DurableCircuitStore:
             raise CircuitIntegrityError(
                 "durable circuit state differs from receipt chain"
             )
+
+
+def assess_fixture_adapter_attempt(
+    contract: FixtureAdapterContract,
+    store: DurableCircuitStore,
+    observation: AdapterFixtureObservation,
+) -> tuple[
+    AdapterAttemptResult,
+    FixtureAdapterEvidence | None,
+    DurableCircuitReceipt | None,
+]:
+    """Assess inert fixture evidence through the pinned durable circuit."""
+    if contract != FROZEN_FIXTURE_ADAPTER_CONTRACT:
+        raise ValueError(
+            "fixture assessment requires the canonical adapter contract"
+        )
+    if type(store) is not DurableCircuitStore:
+        raise TypeError(
+            "fixture assessment requires an exact DurableCircuitStore"
+        )
+    if not isinstance(observation, AdapterFixtureObservation):
+        raise TypeError(
+            "fixture assessment requires an AdapterFixtureObservation"
+        )
+    if observation.adapter_contract_sha256 != contract.contract_sha256:
+        raise ValueError("fixture observation binds a different contract")
+    if (
+        store.identity.adapter_contract_sha256
+        != contract.contract_sha256
+    ):
+        raise ValueError("durable circuit binds a different contract")
+
+    initial = store.require_armed()
+    evaluation = evaluate_fixture_observation(contract, observation)
+    if evaluation.outcome == "breach":
+        breach = evaluation.reason_codes[0]
+        trip_receipt = store.trip(
+            expected_version=initial.version,
+            breach_code=breach,
+        )
+        result = AdapterAttemptResult(
+            outcome="circuit_open",
+            reason_codes=(breach,),
+            evidence_id=None,
+            receipt_id=None,
+            halts_canaries=True,
+        )
+        return result, None, trip_receipt
+
+    confirmed = store.verify()
+    if confirmed != initial or confirmed.state != "armed":
+        raise CircuitStateError(
+            "durable circuit changed during fixture assessment"
+        )
+    if evaluation.outcome == "parked":
+        result = AdapterAttemptResult(
+            outcome="parked",
+            reason_codes=evaluation.reason_codes,
+            evidence_id=None,
+            receipt_id=None,
+            halts_canaries=False,
+        )
+        return result, None, None
+    if evaluation.outcome != "pass_candidate":
+        raise CircuitIntegrityError(
+            "fixture evaluation produced an unsupported outcome"
+        )
+
+    evidence = compile_fixture_evidence(contract, observation)
+    result = AdapterAttemptResult(
+        outcome="fixture_pass",
+        reason_codes=(),
+        evidence_id=evidence.evidence_id,
+        receipt_id=evidence.receipt_id,
+        halts_canaries=False,
+    )
+    return result, evidence, None

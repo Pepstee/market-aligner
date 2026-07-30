@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 from career_automation.ats_fixture import FixtureReceipt
 from career_automation.browser_workflows import SubmissionProof
+from career_automation.durable_circuit_store import (
+    DurableCircuitStore,
+    assess_fixture_adapter_attempt,
+)
 from career_automation.official_ats_adapter import (
     CIRCUIT_BREAKER_POLICY_SHA256,
     FIXTURE_CIRCUIT_BREAKER_POLICY,
@@ -21,8 +26,6 @@ from career_automation.official_ats_adapter import (
     ROUTE_POLICY_SHA256,
     SELECTOR_SET_SHA256,
     AdapterFixtureObservation,
-    armed_fixture_circuit,
-    assess_fixture_adapter_attempt,
 )
 from career_automation.shadow_certification import FROZEN_SHADOW_CONTRACT
 
@@ -77,6 +80,16 @@ def _observation() -> AdapterFixtureObservation:
     )
 
 
+def _store(path: Path) -> DurableCircuitStore:
+    return DurableCircuitStore.initialize(
+        path,
+        adapter_contract_sha256=(
+            FROZEN_FIXTURE_ADAPTER_CONTRACT.contract_sha256
+        ),
+        circuit_instance_id="jaa11-integrated-fixture-circuit",
+    )
+
+
 def test_frozen_fixture_contract_binds_exact_upstream_and_policy() -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     assert contract.upstream_shadow_contract_sha256 == (
@@ -115,16 +128,19 @@ def test_fixture_policy_hashes_are_recomputable_from_serialized_inputs() -> None
     assert ROUTE_POLICY_SHA256 == _content_hash(dict(FIXTURE_ROUTE_POLICY))
 
 
-def test_exact_fixture_submission_proof_compiles_only_with_withheld_status() -> None:
+def test_exact_fixture_submission_proof_compiles_only_with_withheld_status(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
-    circuit = armed_fixture_circuit(contract)
-    next_circuit, result, evidence = assess_fixture_adapter_attempt(
+    store = _store(tmp_path / "circuit.sqlite3")
+    initial = store.require_armed()
+    result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        circuit,
+        store,
         _observation(),
     )
-    assert next_circuit.state == "armed"
-    assert next_circuit.assessed_attempts == 1
+    assert store.require_armed() == initial
+    assert trip_receipt is None
     assert result.outcome == "fixture_pass"
     assert result.reason_codes == ()
     assert result.halts_canaries is False
@@ -140,16 +156,21 @@ def test_exact_fixture_submission_proof_compiles_only_with_withheld_status() -> 
     assert "real_canary_receipt" not in evidence.document()
 
 
-def test_fixture_observation_and_circuit_state_are_content_addressed() -> None:
+def test_fixture_observation_and_circuit_state_are_content_addressed(
+    tmp_path: Path,
+) -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
     observation = _observation()
-    first = armed_fixture_circuit(contract)
-    second, _result, evidence = assess_fixture_adapter_attempt(
+    store = _store(tmp_path / "circuit.sqlite3")
+    first = store.require_armed()
+    _result, evidence, trip_receipt = assess_fixture_adapter_attempt(
         contract,
-        first,
+        store,
         observation,
     )
     assert observation.observation_sha256
-    assert first.state_sha256 != second.state_sha256
+    assert store.require_armed() == first
+    assert trip_receipt is None
+    assert store.identity.genesis_receipt_sha256
     assert evidence is not None
     assert evidence.observation_sha256 == observation.observation_sha256

@@ -73,6 +73,7 @@ def test_real_sqlite_genesis_is_armed_pinned_and_verifiable(
         identity=store.identity,
     )
     assert reopened.require_armed() == store.require_armed()
+    assert POLICY_VERSION == "jaa11.durable-trip-only-policy.v2"
     assert circuit_policy_document() == {
         "schema_version": "jaa11.durable-circuit-store.v1",
         "policy_version": POLICY_VERSION,
@@ -84,6 +85,9 @@ def test_real_sqlite_genesis_is_armed_pinned_and_verifiable(
         "fixture_scope_only": True,
         "whole_file_replacement_limit": (
             "detectable_only_with_pinned_instance_and_genesis"
+        ),
+        "filesystem_privileged_writer_limit": (
+            "surgical_partial_rewrite_undetectable_no_local_mitigation"
         ),
     }
 
@@ -120,6 +124,10 @@ def test_trip_and_reset_proposal_form_one_verified_terminal_chain(
     assert proposal.document["prior_version"] == 1
     assert proposal.document["next_version"] == 1
     assert proposal.document["reset_mutation_performed"] is False
+    assert all(
+        receipt.document["policy_version"] == POLICY_VERSION
+        for receipt in store.receipts()
+    )
     assert [receipt.document["event_type"] for receipt in store.receipts()] == [
         "initialize",
         "trip",
