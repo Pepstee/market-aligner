@@ -705,10 +705,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa10 = components["JAA-10"]
     assert (
         jaa10["increment"]
-        == (
-            "canonical_contract_negative_control_added_"
-            "bounded_local_accepted"
-        )
+        == "durable_fixture_observation_ledger_phase_a_local_only_live_withheld"
     )
     assert jaa10["objective_satisfied"] is False
     assert jaa10["evidence"] == []
@@ -730,6 +727,10 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "exact fourteen-control executable mutation cohort passes"
         in jaa10["claim"]
     )
+    assert (
+        "bounded-local, fixture-scope-only, append-only, hash-chained "
+        "SQLite observation ledger"
+    ) in jaa10["claim"]
     assert jaa10["bounded_local_acceptance"] == {
         "status": (
             "INDEPENDENT_FABLE_BOUNDED_LOCAL_ACCEPTED_"
@@ -887,6 +888,261 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "6c54f0cb2959ff43bd9056b456aca2a1"
                 "0cce30cd23fca0f96d9cb442503a53c6"
             ),
+        },
+        "observation_ledger_phase_a": {
+            "status": "ACCEPT_PHASE_A_EXACT_SOURCE",
+            "scope": "bounded_local_fixture_only",
+            "objective_satisfied": False,
+            "implemented_source_git_revision": (
+                "68f0f245b58a3ad0180f4d49ecb086d29ee0e99f"
+            ),
+            "implemented_source_tree": (
+                "cb847d93b73ff9170543e8cf06e454c2da77d69f"
+            ),
+            "implemented_source_parent": (
+                "91b67c83944edc4bb41cd5a0e8750c829c8d6b8b"
+            ),
+            "implemented_source_content_revision": (
+                "sha256:940f01525d9487cf0a0bfd07bc959499"
+                "9de8d0b0bd3d761d51df92b7e4cb140a"
+            ),
+            "prior_truth_transition": {
+                "source_git_revision": (
+                    "91b67c83944edc4bb41cd5a0e8750c829c8d6b8b"
+                ),
+                "source_tree": (
+                    "d231654bfc3d86f93279feb36a42169339d45f7d"
+                ),
+                "source_content_revision": (
+                    "sha256:34a1d329e82a542cccb06b08d7f89da"
+                    "74ee8e03bc0dd5f1a0178a9df2ad72084"
+                ),
+                "receipt": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "FABLE_JAA10_CANONICAL_CONTRACT_CONTROL_"
+                        "TRUTH_TRANSITION.md"
+                    ),
+                    "sha256": (
+                        "475d56af52028e32a3d6af6043605dba"
+                        "805f49e7c15ab62e177b22883776ffb6"
+                    ),
+                },
+            },
+            "accepted_paths": [
+                {
+                    "path": (
+                        "career_automation/shadow_observation_ledger.py"
+                    ),
+                    "sha256": (
+                        "45b4b5f3258344ed96c0e37318b43033"
+                        "fc40d1bc58b96309a40e229ba4ca2038"
+                    ),
+                },
+                {
+                    "path": "test_jaa10_shadow_observation_ledger.py",
+                    "sha256": (
+                        "e90f4aa5ff17897c3f2bf8af2502cb78"
+                        "ed683fc1262443ba09e38a5c5d5fa05d"
+                    ),
+                },
+                {
+                    "path": (
+                        "test_jaa10_shadow_observation_ledger_"
+                        "negative_controls.py"
+                    ),
+                    "sha256": (
+                        "f194dea736861090d01bc62fa857de83e"
+                        "43a9f2d42c07853e1cf325f07887099"
+                    ),
+                },
+            ],
+            "scope_claim": (
+                "A bounded-local, fixture-scope-only, append-only, "
+                "hash-chained SQLite observation ledger records "
+                "host-generated UTC wall-clock times, captured inside the "
+                "write transaction, across genuinely separate store sessions "
+                "with internally generated identities; its integrity "
+                "verification holds only under a non-privileged-filesystem-"
+                "writer assumption and an unauthenticated local host clock; "
+                "it evaluates no metrics, certifies nothing, compares no span "
+                "to any separation threshold, and possesses no external-"
+                "action capability. Live time-separated shadow evidence "
+                "remains not collected."
+            ),
+            "metrics_evaluated": False,
+            "live_time_separated_execution": "not_collected",
+            "production_certification": "withheld",
+            "withheld_reason": (
+                "live_time_separated_shadow_and_metrics_not_evaluated"
+            ),
+            "external_action_capability": False,
+            "submission_authority": "withheld",
+            "release_token_authority": "withheld",
+            "credential_authority": "withheld",
+            "sonnet_review": {
+                "session_id": (
+                    "ff366d0d-0e89-4caf-b0b2-ee0aa282c53a"
+                ),
+                "verdict": "ACCEPT_WITH_NONBLOCKING_FINDINGS",
+                "prompt_sha256": (
+                    "7adc00baa8a1d581a660aeebcfee6b23d"
+                    "bbe98d5d1f39d7fe2f54df79d305d0c"
+                ),
+                "mode": "0444",
+                "artifact": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "sonnet-jaa10-observation-ledger-phase-a-"
+                        "review-resume-raw.json"
+                    ),
+                    "sha256": (
+                        "b9ae1aab74bc02947de92d1cb677d6f7"
+                        "fe63bc2ec0d28054a808090db04b3da4"
+                    ),
+                },
+                "nonblocking_findings": [
+                    (
+                        "No distinct record_observation clock-rollback "
+                        "test."
+                    ),
+                    (
+                        "No distinct positive observation-hash equality "
+                        "assertion."
+                    ),
+                    (
+                        "Strict same-process monotonic advance may fail "
+                        "closed on a degraded coarse clock."
+                    ),
+                    (
+                        "The initialize error path harmlessly closes SQLite "
+                        "twice."
+                    ),
+                ],
+            },
+            "fable_exact_source_ruling": {
+                "session_id": (
+                    "7bb75a34-38de-46c3-b3c6-f1f2182454eb"
+                ),
+                "verdict": "ACCEPT_PHASE_A_EXACT_SOURCE",
+                "prompt_sha256": (
+                    "6e5e761a8bf21a37fb72664440ed045e"
+                    "913ce7874934b82c1537bf17e3c68128"
+                ),
+                "mode": "0444",
+                "artifact": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "fable-jaa10-observation-ledger-phase-a-"
+                        "exact-source-raw.json"
+                    ),
+                    "sha256": (
+                        "70f1031b1468be55044cad4325338f8c3"
+                        "2a7b7b82f9d3190fab4bc92cc0d4bf3"
+                    ),
+                },
+            },
+            "deterministic_logs": {
+                "new_suites": {
+                    "result": "19 passed",
+                    "mode": "0444",
+                    "artifact": {
+                        "path_base": "operator_control_root",
+                        "relative_path": (
+                            "jaa-single-codex-20260729/"
+                            "jaa10-observation-ledger-phase-a-"
+                            "new-suites-postcommit.log"
+                        ),
+                        "sha256": (
+                            "0b49b0a9ea5d59d580a098ef32ec6978"
+                            "1d1e5a98e3eea5457540f02aa5c80fe3"
+                        ),
+                    },
+                },
+                "standing_jaa10_focused": {
+                    "result": "16 passed",
+                    "mode": "0444",
+                    "artifact": {
+                        "path_base": "operator_control_root",
+                        "relative_path": (
+                            "jaa-single-codex-20260729/"
+                            "jaa10-observation-ledger-phase-a-"
+                            "focused-postcommit.log"
+                        ),
+                        "sha256": (
+                            "db4b3425cd1671fb18dc99eec81e8e2a"
+                            "d1ea99bcedbbd7b742513b220fa04b72"
+                        ),
+                    },
+                },
+                "manifest_truth": {
+                    "result": "4 passed",
+                    "mode": "0444",
+                    "artifact": {
+                        "path_base": "operator_control_root",
+                        "relative_path": (
+                            "jaa-single-codex-20260729/"
+                            "jaa10-observation-ledger-phase-a-"
+                            "manifest-postcommit.log"
+                        ),
+                        "sha256": (
+                            "b9ba65cbca942b33073b5421795944767"
+                            "4da9148ca564716ea664a3c10f673d6"
+                        ),
+                    },
+                },
+                "mutation_cohort": {
+                    "result": "14 passed",
+                    "mode": "0444",
+                    "artifact": {
+                        "path_base": "operator_control_root",
+                        "relative_path": (
+                            "jaa-single-codex-20260729/"
+                            "jaa10-observation-ledger-phase-a-"
+                            "mutation-postcommit.log"
+                        ),
+                        "sha256": (
+                            "48f520a25e6912ce23782af64fa083471"
+                            "c4a275fe3e6e2b4c261463f5056eee0"
+                        ),
+                    },
+                },
+                "standing_jaa09_real_vacancy": {
+                    "result": "32 passed",
+                    "mode": "0444",
+                    "artifact": {
+                        "path_base": "operator_control_root",
+                        "relative_path": (
+                            "jaa-single-codex-20260729/"
+                            "jaa10-observation-ledger-phase-a-"
+                            "jaa09-postcommit.log"
+                        ),
+                        "sha256": (
+                            "7142c243dcbc3df4f408536ea643f4e51"
+                            "4d3793d09266674c5ac8670f02e7b4e"
+                        ),
+                    },
+                },
+                "ruff": {
+                    "result": "All checks passed!",
+                    "mode": "0444",
+                    "artifact": {
+                        "path_base": "operator_control_root",
+                        "relative_path": (
+                            "jaa-single-codex-20260729/"
+                            "jaa10-observation-ledger-phase-a-"
+                            "ruff-postcommit.log"
+                        ),
+                        "sha256": (
+                            "82b3e6a6c090a57601d22943bd23fca9"
+                            "218d1031dbe5a7b754092f9a156b4f18"
+                        ),
+                    },
+                },
+            },
         },
         "superseded_bounded_local_acceptances": [
             {
@@ -1145,6 +1401,79 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
             pointer["sha256"]
         )
+    phase_a = jaa10["bounded_local_acceptance"][
+        "observation_ledger_phase_a"
+    ]
+    assert phase_a["objective_satisfied"] is False
+    assert phase_a["metrics_evaluated"] is False
+    assert phase_a["live_time_separated_execution"] == "not_collected"
+    assert phase_a["production_certification"] == "withheld"
+    assert phase_a["withheld_reason"] == (
+        "live_time_separated_shadow_and_metrics_not_evaluated"
+    )
+    assert phase_a["external_action_capability"] is False
+    for key in (
+        "submission_authority",
+        "release_token_authority",
+        "credential_authority",
+    ):
+        assert phase_a[key] == "withheld"
+    phase_revision = phase_a["implemented_source_git_revision"]
+    assert phase_revision == "68f0f245b58a3ad0180f4d49ecb086d29ee0e99f"
+    assert _git(
+        "rev-parse", f"{phase_revision}^{{tree}}"
+    ).decode().strip() == phase_a["implemented_source_tree"]
+    assert _git(
+        "rev-parse", f"{phase_revision}^"
+    ).decode().strip() == phase_a["implemented_source_parent"]
+    assert _source_content_revision_at(phase_revision) == (
+        phase_a["implemented_source_content_revision"]
+    )
+    assert subprocess.run(
+        ("git", "merge-base", "--is-ancestor", phase_revision, "HEAD"),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    for accepted_path in phase_a["accepted_paths"]:
+        relative = accepted_path["path"]
+        payload = _git("show", f"{phase_revision}:{relative}")
+        assert hashlib.sha256(payload).hexdigest() == (
+            accepted_path["sha256"]
+        )
+        assert _git(
+            "rev-parse", f"{phase_revision}:{relative}"
+        ) == _git("rev-parse", f"HEAD:{relative}")
+    prior_truth = phase_a["prior_truth_transition"]
+    assert prior_truth["source_git_revision"] == (
+        phase_a["implemented_source_parent"]
+    )
+    assert _git(
+        "rev-parse", f"{prior_truth['source_git_revision']}^{{tree}}"
+    ).decode().strip() == prior_truth["source_tree"]
+    assert _source_content_revision_at(
+        prior_truth["source_git_revision"]
+    ) == prior_truth["source_content_revision"]
+    for pointer in _evidence_pointers(phase_a):
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
+    for record in (
+        phase_a["sonnet_review"],
+        phase_a["fable_exact_source_ruling"],
+        *phase_a["deterministic_logs"].values(),
+    ):
+        assert record["mode"] == "0444"
+        pointer = record["artifact"]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.stat().st_mode & 0o777 == 0o444
     history = jaa10["bounded_local_acceptance"][
         "superseded_bounded_local_acceptances"
     ]
@@ -1215,6 +1544,26 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "test_jaa09_negative_controls.py",
         "test_jaa10_negative_controls.py",
     ]
+    tests_by_id = {test["id"]: test for test in jaa10["tests"]}
+    assert tests_by_id["JAA-10-observation-ledger"]["argv"] == [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "test_jaa10_shadow_observation_ledger.py",
+    ]
+    assert tests_by_id[
+        "JAA-10-observation-ledger-negative-controls"
+    ]["argv"] == [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "test_jaa10_shadow_observation_ledger_negative_controls.py",
+    ]
+    assert tests_by_id[
+        "JAA-10-observation-ledger-negative-controls"
+    ]["negative_control"] is True
     for relative in jaa10["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-10 materialised path missing: {relative}"
@@ -2506,9 +2855,26 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
             assert len(
                 [path for path in declared_paths if path.startswith("scraper/")]
             ) == 67
+        jaa10_phase_paths = (
+            {
+                item["path"]
+                for item in block["observation_ledger_phase_a"][
+                    "accepted_paths"
+                ]
+            }
+            if slice_id == "JAA-10"
+            else set()
+        )
         for relative in declared_paths:
+            path_revision = (
+                block["observation_ledger_phase_a"][
+                    "implemented_source_git_revision"
+                ]
+                if relative in jaa10_phase_paths
+                else revision
+            )
             assert _git(
-                "rev-parse", f"{revision}:{relative}"
+                "rev-parse", f"{path_revision}:{relative}"
             ) == _git("rev-parse", f"HEAD:{relative}")
 
         for pointer in _evidence_pointers(block):
