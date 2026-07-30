@@ -224,6 +224,11 @@ def test_shadow_evidence_has_no_certifying_or_action_capability() -> None:
     )
     with pytest.raises(ValueError, match="cannot certify production"):
         replace(evidence, certifies_slice=True)
+    with pytest.raises(ValueError, match="cannot certify production"):
+        replace(
+            evidence,
+            withheld_reason="upstream_jaa04_authentic_authority_blocked",
+        )
 
 
 def test_durable_submit_event_and_typed_proof_cannot_drift() -> None:

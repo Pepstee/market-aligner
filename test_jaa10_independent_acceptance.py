@@ -660,6 +660,9 @@ def test_time_separated_shadow_evidence_is_content_addressed_and_withheld() -> N
     assert evidence.hard_quality_targets == HARD_QUALITY_TARGETS
     assert evidence.metrics_evaluated is False
     assert evidence.production_certification == "withheld"
+    assert evidence.withheld_reason == (
+        "live_time_separated_shadow_and_metrics_not_evaluated"
+    )
     assert evidence.certifies_slice is False
     assert evidence.evidence_kind == "synthetic_shadow"
     assert evidence.contract == FROZEN_SHADOW_CONTRACT

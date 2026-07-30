@@ -143,6 +143,7 @@ HARD_QUALITY_TARGETS: Mapping[str, int] = MappingProxyType({
     "released_employer_claims_without_citations": 0,
     "unsupported_released_claims": 0,
 })
+WITHHELD_REASON = "live_time_separated_shadow_and_metrics_not_evaluated"
 
 
 def _canonical_json(value: object) -> str:
@@ -701,10 +702,10 @@ class WithheldShadowEvidence:
     evidence_id: str
     metrics_evaluated: bool = False
     production_certification: str = "withheld"
-    withheld_reason: str = "upstream_jaa04_authentic_authority_blocked"
+    withheld_reason: str = WITHHELD_REASON
     evidence_kind: str = "synthetic_shadow"
     certifies_slice: bool = False
-    schema_version: str = "jaa10.withheld-shadow-evidence.v3"
+    schema_version: str = "jaa10.withheld-shadow-evidence.v4"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -769,13 +770,12 @@ class WithheldShadowEvidence:
         if (
             self.metrics_evaluated is not False
             or self.production_certification != "withheld"
-            or self.withheld_reason
-            != "upstream_jaa04_authentic_authority_blocked"
+            or self.withheld_reason != WITHHELD_REASON
             or self.evidence_kind != "synthetic_shadow"
             or self.certifies_slice is not False
         ):
             raise ValueError("shadow evidence cannot certify production")
-        if self.schema_version != "jaa10.withheld-shadow-evidence.v3":
+        if self.schema_version != "jaa10.withheld-shadow-evidence.v4":
             raise ValueError("withheld shadow schema is unsupported")
         expected = _content_hash(self.document(include_identity=False))
         if self.evidence_id != expected:
@@ -795,7 +795,7 @@ def compile_withheld_shadow_evidence(
         )
     _validate_shadow_observations(contract, observations)
     body = {
-        "schema_version": "jaa10.withheld-shadow-evidence.v3",
+        "schema_version": "jaa10.withheld-shadow-evidence.v4",
         "contract": contract.document(),
         "contract_sha256": contract.contract_sha256,
         "observations": [row.document() for row in observations],
@@ -808,7 +808,7 @@ def compile_withheld_shadow_evidence(
         "hard_quality_targets": dict(sorted(HARD_QUALITY_TARGETS.items())),
         "metrics_evaluated": False,
         "production_certification": "withheld",
-        "withheld_reason": "upstream_jaa04_authentic_authority_blocked",
+        "withheld_reason": WITHHELD_REASON,
         "evidence_kind": "synthetic_shadow",
         "certifies_slice": False,
     }
