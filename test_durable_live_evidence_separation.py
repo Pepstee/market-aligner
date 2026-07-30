@@ -7,6 +7,7 @@ validity. JAA-00 is the only owner of a new live observation.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -24,6 +25,14 @@ from baseline_adoption import core
 ROOT = Path(__file__).resolve().parent
 DOMAIN = b"jaa-source-content-revision-v2\0"
 EXCLUDED = (b"runtime_evidence/",)
+SOURCE_CONTENT_REVISION_CONTRACT = {
+    "algorithm": "sha256",
+    "domain": "jaa-source-content-revision-v2",
+    "entry_encoding": "uint64be-length-prefixed-path-mode-content",
+    "exclusions": ["runtime_evidence/"],
+    "ordering": "repository-relative-path-byte-order",
+    "scope": "current-tracked-source-tree",
+}
 
 
 def _sha256(path: Path) -> str:
@@ -38,15 +47,19 @@ def _receipt() -> tuple[Path, dict[str, Any]]:
     return paths[0], json.loads(payload)
 
 
-def _git(*arguments: str) -> bytes:
+def _git_at(root: Path, *arguments: str) -> bytes:
     import subprocess
 
     completed = subprocess.run(
-        ("git", *arguments), cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ("git", *arguments), cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
     return completed.stdout
+
+
+def _git(*arguments: str) -> bytes:
+    return _git_at(ROOT, *arguments)
 
 
 def _independent_revision() -> str:
@@ -74,6 +87,60 @@ def _independent_revision() -> str:
             digest.update(len(field).to_bytes(8, "big"))
             digest.update(field)
     return f"sha256:{digest.hexdigest()}"
+
+
+def _independent_revision_at(revision: str, root: Path = ROOT) -> str:
+    """Recompute the published framing at one exact ancestral commit."""
+    assert (
+        len(revision) == 40
+        and revision == revision.lower()
+        and all(character in "0123456789abcdef" for character in revision)
+    ), "historical source revision must be one exact lowercase SHA-1"
+    resolved = _git_at(
+        root, "rev-parse", "--verify", f"{revision}^{{commit}}"
+    ).strip()
+    assert resolved == revision.encode("ascii"), (
+        "historical source revision must resolve to the exact recorded commit"
+    )
+    _git_at(root, "merge-base", "--is-ancestor", revision, "HEAD")
+
+    entries: list[tuple[bytes, bytes, bytes]] = []
+    for record in _git_at(
+        root, "ls-tree", "-r", "-z", "--full-tree", revision
+    ).split(b"\0"):
+        if not record:
+            continue
+        metadata, tab, relative = record.partition(b"\t")
+        mode, object_type, object_id = metadata.split()
+        assert tab and object_type == b"blob"
+        assert mode in {b"100644", b"100755", b"120000"}
+        if not relative.startswith(EXCLUDED):
+            entries.append(
+                (
+                    relative,
+                    mode,
+                    _git_at(root, "cat-file", "blob", object_id.decode("ascii")),
+                )
+            )
+
+    digest = hashlib.sha256(DOMAIN)
+    for relative, mode, payload in sorted(entries):
+        for field in (relative, mode, payload):
+            digest.update(len(field).to_bytes(8, "big"))
+            digest.update(field)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _assert_historical_receipt_binding(
+    document: dict[str, Any], root: Path = ROOT
+) -> str:
+    assert (
+        document["source_content_revision_contract"]
+        == SOURCE_CONTENT_REVISION_CONTRACT
+    )
+    recomputed = _independent_revision_at(document["source_git_revision"], root)
+    assert document["source_content_revision"] == recomputed
+    return recomputed
 
 
 def _make_live_database(path: Path) -> sqlite3.Connection:
@@ -125,7 +192,8 @@ def test_checked_in_jaa01_is_frozen_and_ignores_a_later_live_source_change(
 
         assert changed_live_hashes != original_live_hashes
         assert evidence.read_bytes() == original_bytes
-        assert document["source_content_revision"] == _independent_revision()
+        historical_revision = _assert_historical_receipt_binding(document)
+        assert historical_revision != _independent_revision()
         assert document["hashes"]["baseline_sha256_before"] == document["hashes"][
             "baseline_sha256_after"
         ]
@@ -138,6 +206,68 @@ def test_checked_in_jaa01_is_frozen_and_ignores_a_later_live_source_change(
         assert str(simulated_live) not in rendered
     finally:
         writer.close()
+
+
+@pytest.mark.parametrize("revision", ["not-a-revision", "0" * 64])
+def test_historical_revision_helper_rejects_malformed_or_missing_commit(
+    revision: str,
+) -> None:
+    with pytest.raises(AssertionError):
+        _independent_revision_at(revision)
+
+
+def test_historical_revision_helper_rejects_non_commit_object() -> None:
+    tree = _git("rev-parse", "HEAD^{tree}").decode("ascii").strip()
+    with pytest.raises(AssertionError):
+        _independent_revision_at(tree)
+
+
+def test_historical_revision_binding_rejects_divergence_and_tampering(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "history"
+    repository.mkdir()
+    _git_at(repository, "init", "--quiet")
+    _git_at(repository, "config", "user.name", "JAA test")
+    _git_at(repository, "config", "user.email", "jaa-test@example.test")
+    (repository / "alpha.txt").write_bytes(b"alpha\n")
+    _git_at(repository, "add", "alpha.txt")
+    _git_at(repository, "commit", "--quiet", "-m", "first")
+    first = _git_at(repository, "rev-parse", "HEAD").decode("ascii").strip()
+
+    expected = hashlib.sha256(DOMAIN)
+    for field in (b"alpha.txt", b"100644", b"alpha\n"):
+        expected.update(len(field).to_bytes(8, "big"))
+        expected.update(field)
+    expected_revision = f"sha256:{expected.hexdigest()}"
+
+    _git_at(repository, "checkout", "--quiet", "-b", "divergent")
+    (repository / "divergent.txt").write_bytes(b"divergent\n")
+    _git_at(repository, "add", "divergent.txt")
+    _git_at(repository, "commit", "--quiet", "-m", "divergent")
+    divergent = _git_at(
+        repository, "rev-parse", "HEAD"
+    ).decode("ascii").strip()
+
+    _git_at(repository, "checkout", "--quiet", "--detach", first)
+    (repository / "current.txt").write_bytes(b"current\n")
+    _git_at(repository, "add", "current.txt")
+    _git_at(repository, "commit", "--quiet", "-m", "current")
+
+    assert _independent_revision_at(first, repository) == expected_revision
+    with pytest.raises(AssertionError):
+        _independent_revision_at(divergent, repository)
+
+    _, document = _receipt()
+    tampered_content = copy.deepcopy(document)
+    tampered_content["source_content_revision"] = "sha256:" + ("0" * 64)
+    with pytest.raises(AssertionError):
+        _assert_historical_receipt_binding(tampered_content)
+
+    tampered_commit = copy.deepcopy(document)
+    tampered_commit["source_git_revision"] = divergent
+    with pytest.raises(AssertionError):
+        _assert_historical_receipt_binding(tampered_commit, repository)
 
 
 def test_recertification_records_two_live_originals_with_utc_and_read_only_semantics(
