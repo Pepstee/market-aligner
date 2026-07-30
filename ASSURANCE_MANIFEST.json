@@ -518,15 +518,15 @@
     },
     "JAA-09": {
       "claim": "A cooperative local browser walking skeleton consumes one genuine JAA-08 token, binds exact approved materialisations and canonical consumption time, checkpoints one fixture receipt, and recovers each pre-click or post-click interruption without a repeated submit.",
-      "increment": "implementation_complete_pending_fable_ratification",
+      "increment": "real_vacancy_fixture_browser_evidence_receipted_pending_fable_final_certification",
       "depends_on": ["JAA-08"],
       "objective_satisfied": false,
       "provisional_acceptance": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_certification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
-        "implemented_source_git_revision": "8107f09beb3c5651850ad40a0ff8842ac2de1e47",
-        "implemented_source_tree": "a43fcf66051b3d1a1907f89a3652309325b5e629",
-        "implemented_source_content_revision": "sha256:76391f45f20cb5695ee644faeefc8318086f723049adbe557bc7270ba0c247a8",
+        "implemented_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
+        "implemented_source_tree": "3d4df58429daa7e97310552c8556945720627915",
+        "implemented_source_content_revision": "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4da4906e8d74241b7a1ec04d2e481db95a",
         "deputy_authority": {
           "path_base": "software_factory_root",
           "relative_path": "giga-user/reports/JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md",
@@ -574,9 +574,17 @@
       "environment": [],
       "tests": [
         {"id": "JAA-09-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa09_independent_acceptance.py"], "files": ["test_jaa09_independent_acceptance.py"]},
-        {"id": "JAA-09-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa09_negative_controls.py"], "files": ["test_jaa09_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-09-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa09_negative_controls.py"], "files": ["test_jaa09_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-09-real-vacancy-browser", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa09_real_vacancy_acceptance.py"], "files": ["test_jaa09_real_vacancy_acceptance.py"]},
+        {"id": "JAA-09-real-vacancy-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa09_real_vacancy_negative_controls.py"], "files": ["test_jaa09_real_vacancy_negative_controls.py"], "negative_control": true}
       ],
-      "evidence": []
+      "evidence": [
+        {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/jaa09-real-vacancy-local-receipt-sha256-d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c.json",
+          "sha256": "d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c"
+        }
+      ]
     },
     "JAA-10": {
       "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract, all five submit interruption windows recover or fail closed, and the exact fourteen-control executable mutation cohort passes; production certification is withheld.",

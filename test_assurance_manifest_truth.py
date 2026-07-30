@@ -550,10 +550,26 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa09 = components["JAA-09"]
     assert (
         jaa09["increment"]
-        == "implementation_complete_pending_fable_ratification"
+        == (
+            "real_vacancy_fixture_browser_evidence_receipted_"
+            "pending_fable_final_certification"
+        )
     )
     assert jaa09["objective_satisfied"] is False
-    assert jaa09["evidence"] == []
+    assert jaa09["evidence"] == [
+        {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa09-real-vacancy-local-receipt-sha256-"
+                "d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c"
+                ".json"
+            ),
+            "sha256": (
+                "d19e884285c31d08d5cee8276cf197f7903c3a07bd0760f19aef5286fb01140c"
+            ),
+        }
+    ]
     assert "one genuine JAA-08 token" in jaa09["claim"]
     assert (
         jaa09["provisional_acceptance"]
@@ -566,14 +582,14 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "objective_unsatisfied_2026-07-30"
             ),
             "implemented_source_git_revision": (
-                "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
+                "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
             ),
             "implemented_source_tree": (
-                "a43fcf66051b3d1a1907f89a3652309325b5e629"
+                "3d4df58429daa7e97310552c8556945720627915"
             ),
             "implemented_source_content_revision": (
-                "sha256:76391f45f20cb5695ee644faeefc83180"
-                "86f723049adbe557bc7270ba0c247a8"
+                "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
+                "a4906e8d74241b7a1ec04d2e481db95a"
             ),
             "deputy_authority": {
                 "path_base": "software_factory_root",
@@ -689,6 +705,22 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
             pointer["sha256"]
         )
+    real_vacancy_receipt = jaa09["evidence"][0]
+    real_vacancy_receipt_path = (
+        evidence_bases[real_vacancy_receipt["path_base"]]
+        / real_vacancy_receipt["relative_path"]
+    )
+    assert real_vacancy_receipt_path.is_file()
+    assert hashlib.sha256(
+        real_vacancy_receipt_path.read_bytes()
+    ).hexdigest() == real_vacancy_receipt["sha256"]
+    tests_by_id = {test["id"]: test for test in jaa09["tests"]}
+    assert tests_by_id["JAA-09-real-vacancy-browser"]["files"] == [
+        "test_jaa09_real_vacancy_acceptance.py"
+    ]
+    assert tests_by_id[
+        "JAA-09-real-vacancy-negative-controls"
+    ]["files"] == ["test_jaa09_real_vacancy_negative_controls.py"]
     for relative in jaa09["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-09 materialised path missing: {relative}"
@@ -2051,10 +2083,10 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
     }
     expected_identities = {
         "JAA-09": (
-            "8107f09beb3c5651850ad40a0ff8842ac2de1e47",
-            "a43fcf66051b3d1a1907f89a3652309325b5e629",
-            "sha256:76391f45f20cb5695ee644faeefc8318"
-            "086f723049adbe557bc7270ba0c247a8",
+            "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
+            "3d4df58429daa7e97310552c8556945720627915",
+            "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
+            "a4906e8d74241b7a1ec04d2e481db95a",
         ),
         "JAA-10": (
             "82ff3e0931c5c342e4d43b40773950a78e0b32bd",
