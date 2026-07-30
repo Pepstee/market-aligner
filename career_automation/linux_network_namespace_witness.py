@@ -17,6 +17,7 @@ import select
 import stat
 import subprocess
 import sys
+import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -2239,6 +2240,28 @@ def _close_unexpected_descriptors(allowed: set[int]) -> None:
                 pass
 
 
+def _reap_exited_adopted_descendants(timeout_seconds: float = 1.0) -> None:
+    """Reap exited grandchildren adopted by the PID-namespace init worker."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        reaped = False
+        while True:
+            try:
+                pid, _status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if pid == 0:
+                break
+            reaped = True
+        if not _descendants(os.getpid()):
+            return
+        if time.monotonic() >= deadline:
+            return
+        if not reaped:
+            time.sleep(0.01)
+
+
 def _worker(config_path: Path, control_fd: int, evidence_fd: int) -> int:
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2309,6 +2332,7 @@ def _worker(config_path: Path, control_fd: int, evidence_fd: int) -> int:
             except NetworkWitnessError:
                 pass
             returncode = process.wait()
+        _reap_exited_adopted_descendants()
         if _descendants(os.getpid()):
             raise NetworkWitnessError("command left a surviving descendant")
         post_state = _inner_state()
