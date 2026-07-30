@@ -735,7 +735,10 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert {
         key: value
         for key, value in jaa10_bounded.items()
-        if key != "phase_b_fixture_measures"
+        if key not in {
+            "phase_b_fixture_measures",
+            "phase_c_elapsed_cohort",
+        }
     } == {
         "status": (
             "INDEPENDENT_FABLE_BOUNDED_LOCAL_ACCEPTED_"
@@ -1756,6 +1759,413 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "credential_authority",
     ):
         assert phase_b[authority] == "withheld"
+    phase_c = jaa10_bounded["phase_c_elapsed_cohort"]
+    assert set(phase_c) == {
+        "status",
+        "scope",
+        "implemented_source_git_revision",
+        "implemented_source_tree",
+        "implemented_source_parent",
+        "implemented_source_branch",
+        "implemented_source_content_revision",
+        "cohort_schema_version",
+        "evidence_class",
+        "maximum_claim",
+        "cohort_status",
+        "accepted_paths",
+        "design_authority",
+        "sonnet_review",
+        "fable_exact_source_ruling",
+        "deterministic_logs",
+        "strongest_claim",
+        "contamination_policy",
+        "calendar_time_authentication",
+        "external_time_attestation",
+        "filesystem_privileged_writer_limit",
+        "kernel_time_witness_limit",
+        "objective_satisfied",
+        "metrics_evaluated",
+        "hard_quality_targets",
+        "live_time_separated_execution",
+        "production_certification",
+        "withheld_reason",
+        "certifies_slice",
+        "external_action_capability",
+        "real_applications_submitted",
+        "assessment",
+        "submission_authority",
+        "release_token_authority",
+        "credential_authority",
+        "browser_network_authority",
+    }
+    phase_c_revision = "f0254ac0a696c20368f59d3eab04c09d16655550"
+    assert phase_c["status"] == (
+        "ACCEPT_PHASE_C_BOUNDED_LOCAL_EXACT_SOURCE"
+    )
+    assert phase_c["scope"] == "bounded_local_fixture_only"
+    assert phase_c["implemented_source_git_revision"] == phase_c_revision
+    assert phase_c["implemented_source_tree"] == (
+        "3d1721b292f137817a038a32596ec72089b0b519"
+    )
+    assert phase_c["implemented_source_parent"] == (
+        "52e853b920ce0af235117afa1b004243757e331f"
+    )
+    assert phase_c["implemented_source_branch"] == (
+        "codex/jaa-native-completion-20260725"
+    )
+    assert phase_c["implemented_source_content_revision"] == (
+        "sha256:9fba6283d836621569c42157e605b6bf"
+        "ed18280ded845e1e3a9daed89a875cfc"
+    )
+    assert phase_c["cohort_schema_version"] == (
+        "jaa10.shadow-elapsed-cohort.v1"
+    )
+    assert phase_c["evidence_class"] == (
+        "loopback_fixture_browser_elapsed"
+    )
+    assert phase_c["maximum_claim"] == (
+        "loopback_fixture_elapsed_interval_same_boot_local_only"
+    )
+    assert phase_c["cohort_status"] == (
+        "not_opened_not_closed_not_collected"
+    )
+    assert _git(
+        "rev-parse", f"{phase_c_revision}^{{tree}}"
+    ).decode().strip() == phase_c["implemented_source_tree"]
+    assert _git(
+        "rev-parse", f"{phase_c_revision}^"
+    ).decode().strip() == phase_c["implemented_source_parent"]
+    assert _source_content_revision_at(phase_c_revision) == (
+        phase_c["implemented_source_content_revision"]
+    )
+    assert subprocess.run(
+        ("git", "merge-base", "--is-ancestor", phase_c_revision, "HEAD"),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    assert phase_c["accepted_paths"] == [
+        {
+            "path": "career_automation/shadow_elapsed_cohort.py",
+            "sha256": (
+                "d658cb48c71780f273c47ee7d5db2854a"
+                "f242a7d41664fa12f7a60d1eed97e49"
+            ),
+        },
+        {
+            "path": "test_jaa10_shadow_elapsed_cohort.py",
+            "sha256": (
+                "24e3044bece7ebe8cda26faa3abc089c8e"
+                "3b8907f4d591ae650da3cf6e5ddda7"
+            ),
+        },
+        {
+            "path": (
+                "test_jaa10_shadow_elapsed_cohort_negative_controls.py"
+            ),
+            "sha256": (
+                "88aa80d3118f50d51e8d0150b573d33e"
+                "25881dd8207f9c3d24a1a801eed84c14"
+            ),
+        },
+    ]
+    for accepted_path in phase_c["accepted_paths"]:
+        relative = accepted_path["path"]
+        candidate_payload = _git("show", f"{phase_c_revision}:{relative}")
+        assert hashlib.sha256(candidate_payload).hexdigest() == (
+            accepted_path["sha256"]
+        )
+        assert _git(
+            "rev-parse", f"{phase_c_revision}:{relative}"
+        ) == _git("rev-parse", f"HEAD:{relative}")
+        assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == (
+            accepted_path["sha256"]
+        )
+    assert phase_c["design_authority"] == {
+        "session_id": "3c34bcf8-b801-4eb0-ae7c-c3460e060ff0",
+        "disposition": (
+            "DEPENDENCY_BLOCKED_WITH_AUTHORIZED_PREPARATION"
+        ),
+        "mode": "0444",
+        "artifact": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-phase-c-live-shadow-design-gate-raw.json"
+            ),
+            "sha256": (
+                "733a756a121ce5756e21b86ff06b3e6d7"
+                "3fa4f463e52071092ff30f1d5b3a77f"
+            ),
+        },
+    }
+    assert phase_c["sonnet_review"] == {
+        "session_id": "6ef1b1e2-376e-473a-8565-2afec2c9df19",
+        "final_event_uuid": "f14d55a9-9195-4b54-a846-d98e4f574576",
+        "verdict": "ACCEPT_WITH_NONBLOCKING_FINDINGS",
+        "mode": "0444",
+        "prompt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa10-phase-c-elapsed-cohort-review-prompt.txt"
+            ),
+            "sha256": (
+                "393d2848a1afbde49aae4fcd6eef10b1b"
+                "e9260719dd8f6ffe7b43f3b3e61b90c"
+            ),
+        },
+        "artifact": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa10-phase-c-elapsed-cohort-review-raw.jsonl"
+            ),
+            "sha256": (
+                "dee086ab1aee4f9a412747738500c39712"
+                "f4de8818893bb7f70f2e0da686838e"
+            ),
+        },
+        "nonblocking_findings": [
+            {
+                "finding": (
+                    "Module-private validation helpers can inject witness "
+                    "values and produce structurally identical bounded "
+                    "receipts."
+                ),
+                "adjudication": (
+                    "nonblocking_design_authorized_validation_layer_"
+                    "public_entry_points_capture_kernel_witnesses"
+                ),
+            },
+            {
+                "finding": (
+                    "Active-process double-close prevention does not "
+                    "persist across process restart."
+                ),
+                "adjudication": (
+                    "nonblocking_redundant_bounded_receipt_cannot_elevate_"
+                    "withheld_claims"
+                ),
+            },
+        ],
+    }
+    assert phase_c["fable_exact_source_ruling"] == {
+        "session_id": "4855a5ea-4076-470a-a21a-54fc45827442",
+        "disposition": (
+            "ACCEPT_PHASE_C_BOUNDED_LOCAL_EXACT_SOURCE"
+        ),
+        "mode": "0444",
+        "prompt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-phase-c-elapsed-cohort-"
+                "exact-source-prompt.txt"
+            ),
+            "sha256": (
+                "269bab941961f071cd8022e4b3591803d"
+                "6d72f23f246e2adcad2f92178b2ce7f"
+            ),
+        },
+        "artifact": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-phase-c-elapsed-cohort-"
+                "exact-source-raw.json"
+            ),
+            "sha256": (
+                "02ea7c00e47f8950eb15de6f00a7e87d9"
+                "2d86f846ac7f06af5ba04a91103441a"
+            ),
+        },
+    }
+    expected_phase_c_evidence = {
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-phase-c-live-shadow-design-gate-raw.json"
+        ): "733a756a121ce5756e21b86ff06b3e6d73fa4f463e52071092ff30f1d5b3a77f",
+        (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa10-phase-c-elapsed-cohort-review-prompt.txt"
+        ): "393d2848a1afbde49aae4fcd6eef10b1be9260719dd8f6ffe7b43f3b3e61b90c",
+        (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa10-phase-c-elapsed-cohort-review-raw.jsonl"
+        ): "dee086ab1aee4f9a412747738500c39712f4de8818893bb7f70f2e0da686838e",
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-phase-c-elapsed-cohort-exact-source-prompt.txt"
+        ): "269bab941961f071cd8022e4b3591803d6d72f23f246e2adcad2f92178b2ce7f",
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-phase-c-elapsed-cohort-exact-source-raw.json"
+        ): "02ea7c00e47f8950eb15de6f00a7e87d92d86f846ac7f06af5ba04a91103441a",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-new-suites-postcommit.log"
+        ): "29680a96da0fb4e585730694fbf09e8386a72b7ebebe44b0f1c0fa802f639aa2",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-phase-b-postcommit.log"
+        ): "639990e9e0b84b7a3053feb3ff212cbd4bc3ae955ca8d87939ee016d0e0a70b4",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-phase-a-postcommit.log"
+        ): "82307027379c2be9addf6c8bb7403e8d4de6be9c975b5ba1f9c35d82dcd39b55",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-manifest-postcommit.log"
+        ): "9d5adbac0eaa86d9927f93032cbb9d4d0343464ad8360b04cd68949a72c00c50",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-focused-postcommit.log"
+        ): "e2c3bdd23df73a465035ab586b78271640dda35335a16a18f7860b7786c2f15c",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-mutation-postcommit.log"
+        ): "ede8c4a839ce2b65d0c2de85e95fd9135afccce8a53c2bb04e5c3c196decd157",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-jaa09-postcommit.log"
+        ): "5746f0b675ec217096628ca533a9468bd10e1b55dcd89793841269a3c78b22c6",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-ruff-postcommit.log"
+        ): "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-allowlist-postcommit.log"
+        ): "684833d0e4a025d46fa1b91c7fe90ed53e8b98cecdb3b18c04f566e254d4026b",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-compileall-postcommit.log"
+        ): "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-diff-check-postcommit.log"
+        ): "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-c-elapsed-cohort-status-postcommit.log"
+        ): "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    }
+    phase_c_evidence = {
+        pointer["relative_path"]: pointer["sha256"]
+        for pointer in _evidence_pointers(phase_c)
+    }
+    assert phase_c_evidence == expected_phase_c_evidence
+    for relative_path, expected_sha256 in expected_phase_c_evidence.items():
+        evidence_path = evidence_bases["operator_control_root"] / relative_path
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            expected_sha256
+        )
+        assert evidence_path.stat().st_mode & 0o777 == 0o444
+    assert set(phase_c["deterministic_logs"]) == {
+        "new_suites",
+        "phase_b",
+        "phase_a",
+        "manifest_truth",
+        "standing_jaa10_focused",
+        "mutation_cohort",
+        "standing_jaa09_real_vacancy",
+        "ruff",
+        "allowlist",
+        "compileall",
+        "diff_check",
+        "clean_status",
+    }
+    assert {
+        key: record["result"]
+        for key, record in phase_c["deterministic_logs"].items()
+    } == {
+        "new_suites": "25 passed",
+        "phase_b": "41 passed",
+        "phase_a": "19 passed",
+        "manifest_truth": "4 passed",
+        "standing_jaa10_focused": "16 passed",
+        "mutation_cohort": "14 passed",
+        "standing_jaa09_real_vacancy": "32 passed",
+        "ruff": "All checks passed!",
+        "allowlist": "exact three add-only paths",
+        "compileall": "empty_success",
+        "diff_check": "empty_success",
+        "clean_status": "empty_success",
+    }
+    assert all(
+        record["mode"] == "0444"
+        for record in phase_c["deterministic_logs"].values()
+    )
+    assert phase_c["strongest_claim"] == (
+        "Bounded same-boot elapsed-cohort fixture rehearsal machinery is "
+        "independently accepted; no cohort has been opened, closed or "
+        "collected."
+    )
+    assert phase_c["contamination_policy"] == (
+        "cohort_outputs_are_locked_evidence_never_tuning_input_for_"
+        "same_source_version"
+    )
+    assert phase_c["calendar_time_authentication"] == (
+        "absent_same_boot_scope_only"
+    )
+    assert phase_c["external_time_attestation"] == "absent"
+    assert phase_c["filesystem_privileged_writer_limit"] == (
+        "surgical_partial_rewrite_undetectable_no_local_mitigation"
+    )
+    assert phase_c["kernel_time_witness_limit"] == (
+        "same_boot_clock_boottime_honest_kernel_not_calendar_authenticated"
+    )
+    assert phase_c["objective_satisfied"] is False
+    assert phase_c["metrics_evaluated"] is False
+    assert phase_c["hard_quality_targets"] == {
+        "ats_parse_success_bp": {
+            "target": 10_000,
+            "status": "not_evaluable_from_elapsed_fixture_cohort",
+        },
+        "confirmed_without_receipt": {
+            "target": 0,
+            "status": "not_evaluable_from_elapsed_fixture_cohort",
+        },
+        "deterministic_replay_mismatch": {
+            "target": 0,
+            "status": "not_evaluable_from_elapsed_fixture_cohort",
+        },
+        "duplicate_submissions": {
+            "target": 0,
+            "status": "not_evaluable_from_elapsed_fixture_cohort",
+        },
+        "ineligible_submissions": {
+            "target": 0,
+            "status": "not_evaluable_from_elapsed_fixture_cohort",
+        },
+        "released_employer_claims_without_citations": {
+            "target": 0,
+            "status": "not_evaluable_from_elapsed_fixture_cohort",
+        },
+        "unsupported_released_claims": {
+            "target": 0,
+            "status": "not_evaluable_from_elapsed_fixture_cohort",
+        },
+    }
+    assert phase_c["live_time_separated_execution"] == "not_collected"
+    assert phase_c["production_certification"] == "withheld"
+    assert phase_c["withheld_reason"] == (
+        "live_time_separated_shadow_and_metrics_not_evaluated"
+    )
+    assert phase_c["certifies_slice"] is False
+    assert phase_c["external_action_capability"] is False
+    assert phase_c["real_applications_submitted"] == 0
+    assert phase_c["assessment"] == (
+        "bounded_local_elapsed_cohort_fixture_rehearsal_accepted"
+    )
+    for authority in (
+        "submission_authority",
+        "release_token_authority",
+        "credential_authority",
+        "browser_network_authority",
+    ):
+        assert phase_c[authority] == "withheld"
     assert "certification" not in jaa10
     for key in (
         "deputy_authority",
