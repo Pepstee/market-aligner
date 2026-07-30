@@ -731,7 +731,12 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "bounded-local, fixture-scope-only, append-only, hash-chained "
         "SQLite observation ledger"
     ) in jaa10["claim"]
-    assert jaa10["bounded_local_acceptance"] == {
+    jaa10_bounded = jaa10["bounded_local_acceptance"]
+    assert {
+        key: value
+        for key, value in jaa10_bounded.items()
+        if key != "phase_b_fixture_measures"
+    } == {
         "status": (
             "INDEPENDENT_FABLE_BOUNDED_LOCAL_ACCEPTED_"
             "OBJECTIVE_UNSATISFIED"
@@ -1380,6 +1385,377 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             }
         ],
     }
+    phase_b = jaa10_bounded["phase_b_fixture_measures"]
+    assert set(phase_b) == {
+        "status",
+        "scope",
+        "implemented_source_git_revision",
+        "implemented_source_tree",
+        "implemented_source_parent",
+        "implemented_source_branch",
+        "implemented_source_content_revision",
+        "report_schema_version",
+        "report_identity_domain",
+        "accepted_paths",
+        "design_authority",
+        "sonnet_review",
+        "fable_exact_source_ruling",
+        "phase_a_ancestry",
+        "deterministic_logs",
+        "strongest_claim",
+        "objective_satisfied",
+        "metrics_evaluated",
+        "hard_quality_targets",
+        "live_time_separated_execution",
+        "production_certification",
+        "withheld_reason",
+        "certifies_slice",
+        "external_action_capability",
+        "assessment",
+        "submission_authority",
+        "release_token_authority",
+        "credential_authority",
+    }
+    phase_b_revision = "2d94075c3abe4feddd50a6a7546e7af2c8cfa18a"
+    assert phase_b["status"] == "ACCEPT_PHASE_B_EXACT_SOURCE"
+    assert phase_b["scope"] == "bounded_local_fixture_only"
+    assert phase_b["implemented_source_git_revision"] == phase_b_revision
+    assert phase_b["implemented_source_tree"] == (
+        "8a582e126ba3299a722c21a8bf20a1af462e2e5e"
+    )
+    assert phase_b["implemented_source_parent"] == (
+        "3ee8584458705ac0d8f859d9e832ad9ad8aa97c7"
+    )
+    assert phase_b["implemented_source_branch"] == (
+        "codex/jaa-native-completion-20260725"
+    )
+    assert phase_b["implemented_source_content_revision"] == (
+        "sha256:1d8374bcb68ea66008e5acaa9287917d"
+        "4e85203f4ebfff5c722b9d2de21e3c1c"
+    )
+    assert phase_b["report_schema_version"] == (
+        "jaa10.shadow-fixture-measures-report.v1"
+    )
+    assert phase_b["report_identity_domain"] == (
+        "jaa10-shadow-fixture-measures-report-v1\0"
+    )
+    assert _git(
+        "rev-parse", f"{phase_b_revision}^{{tree}}"
+    ).decode().strip() == phase_b["implemented_source_tree"]
+    assert _git(
+        "rev-parse", f"{phase_b_revision}^"
+    ).decode().strip() == phase_b["implemented_source_parent"]
+    assert _source_content_revision_at(phase_b_revision) == (
+        phase_b["implemented_source_content_revision"]
+    )
+    assert subprocess.run(
+        ("git", "merge-base", "--is-ancestor", phase_b_revision, "HEAD"),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    assert phase_b["accepted_paths"] == [
+        {
+            "path": "career_automation/shadow_fixture_measures.py",
+            "sha256": (
+                "6fcc7c329fbff895e4b0b9830ce4aed14"
+                "f601ec2be683cb601a1693aad620297"
+            ),
+        },
+        {
+            "path": "test_jaa10_shadow_fixture_measures.py",
+            "sha256": (
+                "a4f05f29ec801ff84caf77f82560b1832"
+                "18c4f65568b016f2d910b4d3f030abe"
+            ),
+        },
+        {
+            "path": (
+                "test_jaa10_shadow_fixture_measures_negative_controls.py"
+            ),
+            "sha256": (
+                "fbbc561f48944a6ca7eea636ef1138b47"
+                "0bb21d6fa620c42904f7c520993c779"
+            ),
+        },
+    ]
+    for accepted_path in phase_b["accepted_paths"]:
+        relative = accepted_path["path"]
+        candidate_payload = _git("show", f"{phase_b_revision}:{relative}")
+        assert hashlib.sha256(candidate_payload).hexdigest() == (
+            accepted_path["sha256"]
+        )
+        assert _git(
+            "rev-parse", f"{phase_b_revision}:{relative}"
+        ) == _git("rev-parse", f"HEAD:{relative}")
+        assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == (
+            accepted_path["sha256"]
+        )
+    assert phase_b["design_authority"] == {
+        "session_id": "49045bd7-73d2-46db-92b8-65dd745bd7d5",
+        "disposition": "AUTHORIZE_REVISED_PHASE_B_DESIGN",
+        "mode": "0444",
+        "artifact": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-phase-b-metrics-design-gate-raw.json"
+            ),
+            "sha256": (
+                "c6364e1193ec97b412f5c75b64edc688"
+                "4cc1b1bbd1e5ebf31bdbb7e7939bcc34"
+            ),
+        },
+    }
+    assert phase_b["sonnet_review"] == {
+        "session_id": "16220c7b-4ced-40ce-a06c-4bab0a575b1d",
+        "verdict": "ACCEPT_WITH_NONBLOCKING_FINDINGS",
+        "prompt_sha256": (
+            "006bda9b15c12b7f873ed4dbca22cb8a"
+            "72a9701d95e75fcaf9c05659b29f37e9"
+        ),
+        "mode": "0444",
+        "artifact": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa10-phase-b-fixture-measures-review-raw.json"
+            ),
+            "sha256": (
+                "4b477b618a634927fe0c26296464113237"
+                "cb00d257b26b54e38f28af674d9c79"
+            ),
+        },
+        "nonblocking_findings": [
+            (
+                "Receipt tuple reordering is structurally rejected by exact "
+                "sequence checks but lacks a dedicated test."
+            ),
+            (
+                "Offline verification does not embed the genesis receipt; "
+                "current verification binds ledger identity."
+            ),
+            (
+                "Action keys seed from the first typed observation while "
+                "every typed observation enforces the complete action set."
+            ),
+        ],
+        "resolved_source_revision_note": (
+            "The documented tracked_source_revision."
+            "source_content_revision command reproduces the accepted "
+            "source-content revision exactly."
+        ),
+    }
+    assert phase_b["fable_exact_source_ruling"] == {
+        "session_id": "994b3ffc-efa1-4481-86a3-f31da794443c",
+        "disposition": "ACCEPT_PHASE_B_EXACT_SOURCE",
+        "prompt_sha256": (
+            "1d931cbda75d243568e5a7ae58e7c53b"
+            "be05c90b4f5c96cf7b77c54881281c62"
+        ),
+        "mode": "0444",
+        "artifact": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-phase-b-fixture-measures-"
+                "exact-source-raw.json"
+            ),
+            "sha256": (
+                "2ee181f5cd6fd5c8ac2465816b5c41259"
+                "e86b9cb3653bd1466a09e0d381954d3"
+            ),
+        },
+    }
+    assert phase_b["phase_a_ancestry"] == {
+        "accepted_implementation_revision": (
+            "68f0f245b58a3ad0180f4d49ecb086d29ee0e99f"
+        ),
+        "round_116_truth_transition_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA10_OBSERVATION_LEDGER_PHASE_A_"
+                "TRUTH_TRANSITION.md"
+            ),
+            "sha256": (
+                "226d6cf7724bc869e089a51c1abd86726"
+                "b3d9b170379b4f620bcc04f68289799"
+            ),
+        },
+    }
+    assert subprocess.run(
+        (
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            phase_b["phase_a_ancestry"][
+                "accepted_implementation_revision"
+            ],
+            phase_b_revision,
+        ),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    expected_phase_b_evidence = {
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-phase-b-metrics-design-gate-raw.json"
+        ): "c6364e1193ec97b412f5c75b64edc6884cc1b1bbd1e5ebf31bdbb7e7939bcc34",
+        (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa10-phase-b-fixture-measures-review-raw.json"
+        ): "4b477b618a634927fe0c26296464113237cb00d257b26b54e38f28af674d9c79",
+        (
+            "jaa-single-codex-20260729/"
+            "fable-jaa10-phase-b-fixture-measures-exact-source-raw.json"
+        ): "2ee181f5cd6fd5c8ac2465816b5c41259e86b9cb3653bd1466a09e0d381954d3",
+        (
+            "jaa-single-codex-20260729/"
+            "FABLE_JAA10_OBSERVATION_LEDGER_PHASE_A_TRUTH_TRANSITION.md"
+        ): "226d6cf7724bc869e089a51c1abd86726b3d9b170379b4f620bcc04f68289799",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-new-suites-postcommit.log"
+        ): "9342c4cebc47721fbda71cec810ec6aecb97e4a8c9a575040a1ddff0369563b6",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-ledger-postcommit.log"
+        ): "e2ebf47a50a184103eefd68156713da769df5ca7f875a79cb44f209944154658",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-manifest-postcommit.log"
+        ): "4b0e8fe4a5cee60d17a9a5bbc3675786a42a24bac07ad58b0f2be92bb4e73875",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-focused-postcommit.log"
+        ): "2fa3b4ec16d02b794d23f40cdf74cf3a4cd35a342a49e5d8a3410c0fdd33d0f8",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-mutation-postcommit.log"
+        ): "8116eb849876d9b4f1b3babf137d2a47ee89ef6a04ef30149a3dfc536b9a6c4f",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-jaa09-postcommit.log"
+        ): "a15b54024a8da850dd701a09fd8a8155fc440ec685a324e50811a8f49784d212",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-ruff-postcommit.log"
+        ): "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-allowlist-postcommit.log"
+        ): "df11aa6e5a6b63c6e23cb614bf0f4adfd4081d1e8195606226db15ddc1fcb0d2",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-compileall-postcommit.log"
+        ): "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-diff-check-postcommit.log"
+        ): "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        (
+            "jaa-single-codex-20260729/"
+            "jaa10-phase-b-fixture-measures-status-postcommit.log"
+        ): "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    }
+    phase_b_evidence = {
+        pointer["relative_path"]: pointer["sha256"]
+        for pointer in _evidence_pointers(phase_b)
+    }
+    assert phase_b_evidence == expected_phase_b_evidence
+    for relative_path, expected_sha256 in expected_phase_b_evidence.items():
+        evidence_path = evidence_bases["operator_control_root"] / relative_path
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            expected_sha256
+        )
+    assert set(phase_b["deterministic_logs"]) == {
+        "new_suites",
+        "standing_ledger",
+        "manifest_truth",
+        "standing_jaa10_focused",
+        "mutation_cohort",
+        "standing_jaa09_real_vacancy",
+        "ruff",
+        "allowlist",
+        "compileall",
+        "diff_check",
+        "clean_status",
+    }
+    assert {
+        key: record["result"]
+        for key, record in phase_b["deterministic_logs"].items()
+    } == {
+        "new_suites": "41 passed",
+        "standing_ledger": "19 passed",
+        "manifest_truth": "4 passed",
+        "standing_jaa10_focused": "16 passed",
+        "mutation_cohort": "14 passed",
+        "standing_jaa09_real_vacancy": "32 passed",
+        "ruff": "All checks passed!",
+        "allowlist": "exact three add-only paths",
+        "compileall": "empty_success",
+        "diff_check": "empty_success",
+        "clean_status": "empty_success",
+    }
+    assert all(
+        record["mode"] == "0444"
+        for record in phase_b["deterministic_logs"].values()
+    )
+    assert phase_b["strongest_claim"] == (
+        "descriptive fixture measures, recomputed from hash-bound typed "
+        "observations bound one-for-one to a verified append-only fixture "
+        "ledger snapshot, under an unauthenticated local clock and a "
+        "non-privileged-filesystem-writer assumption."
+    )
+    assert phase_b["objective_satisfied"] is False
+    assert phase_b["metrics_evaluated"] is False
+    assert phase_b["hard_quality_targets"] == {
+        "ats_parse_success_bp": {
+            "target": 10_000,
+            "status": "not_evaluable_from_fixture_ledger",
+        },
+        "confirmed_without_receipt": {
+            "target": 0,
+            "status": "not_evaluable_from_fixture_ledger",
+        },
+        "deterministic_replay_mismatch": {
+            "target": 0,
+            "status": "not_evaluable_from_fixture_ledger",
+        },
+        "duplicate_submissions": {
+            "target": 0,
+            "status": "not_evaluable_from_fixture_ledger",
+        },
+        "ineligible_submissions": {
+            "target": 0,
+            "status": "not_evaluable_from_fixture_ledger",
+        },
+        "released_employer_claims_without_citations": {
+            "target": 0,
+            "status": "not_evaluable_from_fixture_ledger",
+        },
+        "unsupported_released_claims": {
+            "target": 0,
+            "status": "not_evaluable_from_fixture_ledger",
+        },
+    }
+    assert phase_b["live_time_separated_execution"] == "not_collected"
+    assert phase_b["production_certification"] == "withheld"
+    assert phase_b["withheld_reason"] == (
+        "live_time_separated_shadow_and_metrics_not_evaluated"
+    )
+    assert phase_b["certifies_slice"] is False
+    assert phase_b["external_action_capability"] is False
+    assert phase_b["assessment"] == (
+        "withheld_pending_fable_live_execution_gate"
+    )
+    for authority in (
+        "submission_authority",
+        "release_token_authority",
+        "credential_authority",
+    ):
+        assert phase_b[authority] == "withheld"
     assert "certification" not in jaa10
     for key in (
         "deputy_authority",
