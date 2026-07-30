@@ -12,11 +12,18 @@ import pytest
 
 from career_automation.linux_network_namespace_witness import (
     CAPABILITY_FIELDS,
+    COMMAND_ENVIRONMENT,
+    FD_INVENTORY_DOMAIN,
     PINNED_TOOLS,
     RECEIPT_SCHEMA_VERSION,
+    RECEIPT_SCHEMA_VERSION_V1,
     SCHEMA_VERSION,
+    SCHEMA_VERSION_V1,
+    WITNESS_DOMAIN_V1,
     LinuxNetworkNamespaceWitness,
     NetworkNamespaceWitnessReceipt,
+    _canonical_json,
+    _domain_hash,
     run_isolated_network_witness,
 )
 
@@ -58,6 +65,17 @@ def test_exact_source_tool_and_schema_binding(accepted_witness) -> None:
     for path, expected in PINNED_TOOLS.items():
         assert document["tools"][path]["sha256"] == expected["sha256"]
         assert document["tools"][path]["version"] == expected["version"]
+    assert COMMAND_ENVIRONMENT["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert (
+        document["cooperative_browser_controls"]
+        == {
+            "schema_version": "jaa10.cooperative-browser-controls.v2",
+            "integration_status": "not_integrated_standalone_harness",
+            "existing_loopback_controls_required_for_future_integration": True,
+            "external_actions": 0,
+            "real_applications_submitted": 0,
+        }
+    )
 
 
 def test_kernel_namespace_capability_claim_is_exact(
@@ -156,6 +174,14 @@ def test_descriptor_inventory_is_exact_and_socket_free(
         receipt.designated_pipe_inodes
     )
     assert policy["fd_passing_capability"] is False
+    assert receipt.fd_inventory_pre_sha256 == _domain_hash(
+        FD_INVENTORY_DOMAIN,
+        _canonical_json({"fds": pre}),
+    )
+    assert receipt.fd_inventory_post_sha256 == _domain_hash(
+        FD_INVENTORY_DOMAIN,
+        _canonical_json({"fds": post}),
+    )
 
 
 def test_execution_result_and_descendants_are_bound(
@@ -243,3 +269,37 @@ def test_current_cohort_and_browser_integration_are_not_in_surface() -> None:
     assert "close_elapsed_cohort" not in public
     assert "LocalBrowserExecutor" not in public
     assert "sync_playwright" not in public
+    assert "NetworkWitnessedFixtureObservationReceipt" not in public
+
+
+def test_v1_witness_and_receipt_remain_reconstructable(
+    accepted_witness,
+) -> None:
+    _, witness, receipt = accepted_witness
+    document = witness.document()
+    document["schema_version"] = SCHEMA_VERSION_V1
+    document["cooperative_browser_controls"] = {
+        "integration_status": "not_integrated_standalone_harness",
+        "playwright_launch_flags": "not_applicable",
+        "existing_loopback_controls_required_for_future_integration": True,
+    }
+    v1_witness = LinuxNetworkNamespaceWitness.from_document(document)
+    assert v1_witness.witness_sha256 == _domain_hash(
+        WITNESS_DOMAIN_V1,
+        v1_witness.canonical_document,
+    )
+
+    receipt_document = receipt.core_document()
+    receipt_document["schema_version"] = RECEIPT_SCHEMA_VERSION_V1
+    from career_automation.linux_network_namespace_witness import (
+        RECEIPT_DOMAIN_V1,
+    )
+
+    receipt_document["receipt_sha256"] = _domain_hash(
+        RECEIPT_DOMAIN_V1,
+        _canonical_json(receipt_document),
+    )
+    v1_receipt = NetworkNamespaceWitnessReceipt.from_document(
+        receipt_document
+    )
+    assert v1_receipt.schema_version == RECEIPT_SCHEMA_VERSION_V1

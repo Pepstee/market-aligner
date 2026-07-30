@@ -48,7 +48,7 @@ def _mutated_document(accepted, mutation):
         lambda document: document.__setitem__("unexpected", True),
         lambda document: document.__setitem__(
             "schema_version",
-            "jaa10.linux-network-namespace-witness.v2",
+            "jaa10.linux-network-namespace-witness.v3",
         ),
         lambda document: document.__setitem__("external_actions", 1),
         lambda document: document.__setitem__(
@@ -103,6 +103,10 @@ def _mutated_document(accepted, mutation):
         lambda document: document["post_state"].__setitem__(
             "network_namespace",
             "net:[999999999]",
+        ),
+        lambda document: document["post_state"].__setitem__(
+            "process_start_ticks",
+            int(document["pre_state"]["process_start_ticks"]) + 1,
         ),
         lambda document: document["fd_inventory_post"][0].__setitem__(
             "target",
@@ -159,6 +163,7 @@ def _mutated_document(accepted, mutation):
         "non-loopback-ipv4",
         "missing-ipv6-loopback",
         "namespace-change",
+        "process-start-change",
         "fd-inventory-change",
         "descriptor-closure-off",
         "socket-table-binding",
@@ -221,13 +226,33 @@ def test_raw_ipv6_parser_rejects_unsafe_rows(payload: bytes) -> None:
         _parse_ipv6_routes(payload)
 
 
+@pytest.mark.parametrize(
+    "family",
+    (
+        socket.AF_INET,
+        socket.AF_INET6,
+        socket.AF_UNIX,
+    ),
+    ids=("connected-af-inet", "unbound-af-inet6", "unix-scm-rights"),
+)
 def test_outer_fd_inventory_rejects_an_inherited_socket(
     accepted,
+    family: socket.AddressFamily,
 ) -> None:
     document = accepted[1].document()
     policy = document["descriptor_policy"]
     rows = copy.deepcopy(document["fd_inventory_pre"])
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as inherited:
+    opened: list[socket.socket] = []
+    try:
+        if family == socket.AF_UNIX:
+            inherited, peer = socket.socketpair()
+            opened.extend((inherited, peer))
+        else:
+            inherited = socket.socket(family, socket.SOCK_STREAM)
+            opened.append(inherited)
+        if family == socket.AF_INET:
+            inherited.bind(("127.0.0.1", 0))
+            inherited.listen(1)
         rows.append(
             {
                 "fd": 99,
@@ -247,6 +272,9 @@ def test_outer_fd_inventory_rejects_an_inherited_socket(
                 stdout_path=Path(policy["stdout"]),
                 stderr_path=Path(policy["stderr"]),
             )
+    finally:
+        for descriptor in opened:
+            descriptor.close()
 
 
 def test_live_worker_inventory_has_no_hidden_socket(accepted) -> None:

@@ -24,15 +24,25 @@ from typing import Any, Mapping, Sequence
 
 from tracked_source_revision import source_content_revision
 
-SCHEMA_VERSION = "jaa10.linux-network-namespace-witness.v1"
-RECEIPT_SCHEMA_VERSION = (
+SCHEMA_VERSION_V1 = "jaa10.linux-network-namespace-witness.v1"
+RECEIPT_SCHEMA_VERSION_V1 = (
     "jaa10.linux-network-namespace-witness-receipt.v1"
 )
-WITNESS_DOMAIN = b"jaa10-linux-network-namespace-witness-v1\0"
-RECEIPT_DOMAIN = b"jaa10-linux-network-namespace-receipt-v1\0"
+SCHEMA_VERSION = "jaa10.linux-network-namespace-witness.v2"
+RECEIPT_SCHEMA_VERSION = (
+    "jaa10.linux-network-namespace-witness-receipt.v2"
+)
+WITNESS_DOMAIN_V1 = b"jaa10-linux-network-namespace-witness-v1\0"
+RECEIPT_DOMAIN_V1 = b"jaa10-linux-network-namespace-receipt-v1\0"
+WITNESS_DOMAIN = b"jaa10-linux-network-namespace-witness-v2\0"
+RECEIPT_DOMAIN = b"jaa10-linux-network-namespace-receipt-v2\0"
 EXECUTION_RESULT_DOMAIN = b"jaa10-linux-network-execution-result-v1\0"
 DESCRIPTOR_POLICY_DOMAIN = b"jaa10-linux-network-descriptor-policy-v1\0"
 INVENTORY_DOMAIN = b"jaa10-linux-network-evidence-inventory-v1\0"
+FD_INVENTORY_DOMAIN = b"jaa10-linux-network-fd-inventory-v1\0"
+COOPERATIVE_BROWSER_CONTROLS_DOMAIN = (
+    b"jaa10-cooperative-browser-controls-v2\0"
+)
 
 UNSHARE = Path("/usr/bin/unshare")
 IP = Path("/usr/sbin/ip")
@@ -91,6 +101,7 @@ COMMAND_ENVIRONMENT = {
     "LC_ALL": "C.UTF-8",
     "PATH": "/usr/bin:/bin",
     "PYTHONHASHSEED": "0",
+    "PYTHONDONTWRITEBYTECODE": "1",
 }
 
 
@@ -139,6 +150,42 @@ class SourceIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class CooperativeBrowserExpectation:
+    """Exact application result that an integrated v2 witness must bind."""
+
+    execution_root: Path
+    request_path: Path
+    request_sha256: str
+    result_path: Path
+    integration_nonce_sha256: str
+    cooperative_policy_sha256: str
+    expected_source: SourceIdentity
+    schema_version: str = "jaa10.cooperative-browser-expectation.v1"
+    result_schema_version: str = (
+        "jaa10.network-witnessed-fixture-worker-result.v1"
+    )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "jaa10.cooperative-browser-expectation.v1":
+            raise NetworkWitnessError(
+                "cooperative expectation schema is invalid"
+            )
+        if self.result_schema_version != (
+            "jaa10.network-witnessed-fixture-worker-result.v1"
+        ):
+            raise NetworkWitnessError(
+                "cooperative result schema is invalid"
+            )
+        for value, name in (
+            (self.request_sha256, "request hash"),
+            (self.integration_nonce_sha256, "integration nonce hash"),
+            (self.cooperative_policy_sha256, "cooperative policy hash"),
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise NetworkWitnessError(f"{name} is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class LinuxNetworkNamespaceWitness:
     """Immutable canonical witness bytes with exhaustive validation."""
 
@@ -159,7 +206,13 @@ class LinuxNetworkNamespaceWitness:
 
     @property
     def witness_sha256(self) -> str:
-        return _domain_hash(WITNESS_DOMAIN, self.canonical_document)
+        schema = self.document().get("schema_version")
+        domain = (
+            WITNESS_DOMAIN_V1
+            if schema == SCHEMA_VERSION_V1
+            else WITNESS_DOMAIN
+        )
+        return _domain_hash(domain, self.canonical_document)
 
     @classmethod
     def from_document(
@@ -184,9 +237,13 @@ class NetworkNamespaceWitnessReceipt:
     designated_pipe_inodes: tuple[int, int]
     evidence_inventory_sha256: str
     receipt_sha256: str
+    cooperative_browser_controls_sha256: str | None = None
+    worker_result_sha256: str | None = None
+    request_sha256: str | None = None
+    integration_nonce_sha256: str | None = None
 
     def core_document(self) -> dict[str, Any]:
-        return {
+        document = {
             "schema_version": self.schema_version,
             "witness_sha256": self.witness_sha256,
             "execution_result_sha256": self.execution_result_sha256,
@@ -198,6 +255,22 @@ class NetworkNamespaceWitnessReceipt:
             "designated_pipe_inodes": list(self.designated_pipe_inodes),
             "evidence_inventory_sha256": self.evidence_inventory_sha256,
         }
+        if self.schema_version == RECEIPT_SCHEMA_VERSION:
+            integrated = self.worker_result_sha256 is not None
+            if integrated:
+                document.update(
+                    {
+                        "cooperative_browser_controls_sha256": (
+                            self.cooperative_browser_controls_sha256
+                        ),
+                        "worker_result_sha256": self.worker_result_sha256,
+                        "request_sha256": self.request_sha256,
+                        "integration_nonce_sha256": (
+                            self.integration_nonce_sha256
+                        ),
+                    }
+                )
+        return document
 
     def document(self) -> dict[str, Any]:
         document = self.core_document()
@@ -205,10 +278,35 @@ class NetworkNamespaceWitnessReceipt:
         return document
 
     def __post_init__(self) -> None:
-        if self.schema_version != RECEIPT_SCHEMA_VERSION:
+        if self.schema_version not in {
+            RECEIPT_SCHEMA_VERSION_V1,
+            RECEIPT_SCHEMA_VERSION,
+        }:
             raise NetworkWitnessError("receipt schema version is invalid")
+        integrated_values = (
+            self.cooperative_browser_controls_sha256,
+            self.worker_result_sha256,
+            self.request_sha256,
+            self.integration_nonce_sha256,
+        )
+        if self.schema_version == RECEIPT_SCHEMA_VERSION_V1 and any(
+            value is not None for value in integrated_values
+        ):
+            raise NetworkWitnessError("v1 receipt contains v2 fields")
+        if self.schema_version == RECEIPT_SCHEMA_VERSION and (
+            any(value is None for value in integrated_values)
+            and any(value is not None for value in integrated_values)
+        ):
+            raise NetworkWitnessError(
+                "integrated receipt fields are incomplete"
+            )
+        domain = (
+            RECEIPT_DOMAIN_V1
+            if self.schema_version == RECEIPT_SCHEMA_VERSION_V1
+            else RECEIPT_DOMAIN
+        )
         expected = _domain_hash(
-            RECEIPT_DOMAIN,
+            domain,
             _canonical_json(self.core_document()),
         )
         if self.receipt_sha256 != expected:
@@ -227,6 +325,10 @@ class NetworkNamespaceWitnessReceipt:
         fd_inventory_post_sha256: str,
         designated_pipe_inodes: tuple[int, int],
         evidence_inventory_sha256: str,
+        cooperative_browser_controls_sha256: str | None = None,
+        worker_result_sha256: str | None = None,
+        request_sha256: str | None = None,
+        integration_nonce_sha256: str | None = None,
     ) -> NetworkNamespaceWitnessReceipt:
         provisional = cls.__new__(cls)
         object.__setattr__(
@@ -275,6 +377,16 @@ class NetworkNamespaceWitnessReceipt:
             "evidence_inventory_sha256",
             evidence_inventory_sha256,
         )
+        for name, value in (
+            (
+                "cooperative_browser_controls_sha256",
+                cooperative_browser_controls_sha256,
+            ),
+            ("worker_result_sha256", worker_result_sha256),
+            ("request_sha256", request_sha256),
+            ("integration_nonce_sha256", integration_nonce_sha256),
+        ):
+            object.__setattr__(provisional, name, value)
         receipt_sha256 = _domain_hash(
             RECEIPT_DOMAIN,
             _canonical_json(provisional.core_document()),
@@ -291,6 +403,10 @@ class NetworkNamespaceWitnessReceipt:
             designated_pipe_inodes,
             evidence_inventory_sha256,
             receipt_sha256,
+            cooperative_browser_controls_sha256,
+            worker_result_sha256,
+            request_sha256,
+            integration_nonce_sha256,
         )
 
     @classmethod
@@ -302,8 +418,34 @@ class NetworkNamespaceWitnessReceipt:
         pipes = document.get("designated_pipe_inodes")
         if not isinstance(pipes, list) or len(pipes) != 2:
             raise NetworkWitnessError("receipt pipe identities are invalid")
+        schema_version = str(document.get("schema_version"))
+        integrated_keys = {
+            "cooperative_browser_controls_sha256",
+            "worker_result_sha256",
+            "request_sha256",
+            "integration_nonce_sha256",
+        }
+        expected_keys = {
+            "schema_version",
+            "witness_sha256",
+            "execution_result_sha256",
+            "source",
+            "supervisor_nonce_sha256",
+            "descriptor_policy_sha256",
+            "fd_inventory_pre_sha256",
+            "fd_inventory_post_sha256",
+            "designated_pipe_inodes",
+            "evidence_inventory_sha256",
+            "receipt_sha256",
+        }
+        if schema_version == RECEIPT_SCHEMA_VERSION and integrated_keys & set(
+            document
+        ):
+            expected_keys |= integrated_keys
+        if set(document) != expected_keys:
+            raise NetworkWitnessError("receipt field set is invalid")
         return cls(
-            str(document.get("schema_version")),
+            schema_version,
             str(document.get("witness_sha256")),
             str(document.get("execution_result_sha256")),
             SourceIdentity(
@@ -318,6 +460,26 @@ class NetworkNamespaceWitnessReceipt:
             (int(pipes[0]), int(pipes[1])),
             str(document.get("evidence_inventory_sha256")),
             str(document.get("receipt_sha256")),
+            (
+                str(document.get("cooperative_browser_controls_sha256"))
+                if "cooperative_browser_controls_sha256" in document
+                else None
+            ),
+            (
+                str(document.get("worker_result_sha256"))
+                if "worker_result_sha256" in document
+                else None
+            ),
+            (
+                str(document.get("request_sha256"))
+                if "request_sha256" in document
+                else None
+            ),
+            (
+                str(document.get("integration_nonce_sha256"))
+                if "integration_nonce_sha256" in document
+                else None
+            ),
         )
 
 
@@ -651,6 +813,16 @@ def _capture_process_state(pid: int) -> dict[str, Any]:
         field: status.get(field, "")
         for field in CAPABILITY_FIELDS
     }
+    raw_proc_net = {
+        name: _read_proc_net(pid, name)
+        for name in (
+            "dev",
+            "route",
+            "fib_trie",
+            "if_inet6",
+            "ipv6_route",
+        )
+    }
     state = {
         "pid": pid,
         "process_start_ticks": _process_start_ticks(pid),
@@ -658,26 +830,20 @@ def _capture_process_state(pid: int) -> dict[str, Any]:
         "user_namespace": _namespace_identity(pid, "user"),
         "capabilities": capabilities,
         "no_new_privs": status.get("NoNewPrivs"),
-        "interfaces": _parse_interfaces(_read_proc_net(pid, "dev")),
-        "ipv4_routes": _parse_ipv4_routes(_read_proc_net(pid, "route")),
+        "interfaces": _parse_interfaces(raw_proc_net["dev"]),
+        "ipv4_routes": _parse_ipv4_routes(raw_proc_net["route"]),
         "ipv4_fib_addresses": _parse_fib_addresses(
-            _read_proc_net(pid, "fib_trie")
+            raw_proc_net["fib_trie"]
         ),
         "ipv6_addresses": _parse_if_inet6(
-            _read_proc_net(pid, "if_inet6")
+            raw_proc_net["if_inet6"]
         ),
         "ipv6_routes": _parse_ipv6_routes(
-            _read_proc_net(pid, "ipv6_route")
+            raw_proc_net["ipv6_route"]
         ),
         "raw_proc_net_sha256": {
-            name: hashlib.sha256(_read_proc_net(pid, name)).hexdigest()
-            for name in (
-                "dev",
-                "route",
-                "fib_trie",
-                "if_inet6",
-                "ipv6_route",
-            )
+            name: hashlib.sha256(payload).hexdigest()
+            for name, payload in raw_proc_net.items()
         },
         "raw_socket_table_sha256": _socket_table_hashes(pid),
     }
@@ -964,6 +1130,86 @@ def _evidence_inventory(
     return rows, _domain_hash(INVENTORY_DOMAIN, _canonical_json({"files": rows}))
 
 
+def _validate_cooperative_browser_controls(
+    document: Mapping[str, Any],
+    schema_version: str,
+) -> bool:
+    controls = _mapping(
+        document.get("cooperative_browser_controls"),
+        "cooperative browser controls",
+    )
+    if schema_version == SCHEMA_VERSION_V1:
+        if controls != {
+            "integration_status": "not_integrated_standalone_harness",
+            "playwright_launch_flags": "not_applicable",
+            "existing_loopback_controls_required_for_future_integration": True,
+        }:
+            raise NetworkWitnessError(
+                "v1 cooperative browser controls differ"
+            )
+        return False
+    standalone = {
+        "schema_version": "jaa10.cooperative-browser-controls.v2",
+        "integration_status": "not_integrated_standalone_harness",
+        "existing_loopback_controls_required_for_future_integration": True,
+        "external_actions": 0,
+        "real_applications_submitted": 0,
+    }
+    if controls == standalone:
+        return False
+    expected_keys = {
+        "schema_version",
+        "integration_status",
+        "binding_mode",
+        "request_sha256",
+        "integration_nonce_sha256",
+        "worker_result_schema_version",
+        "worker_result_sha256",
+        "worker_artifact_inventory_sha256",
+        "cooperative_policy_sha256",
+        "fixture_origin_class",
+        "existing_loopback_controls_required",
+        "external_actions",
+        "real_applications_submitted",
+    }
+    if set(controls) != expected_keys:
+        raise NetworkWitnessError(
+            "integrated cooperative browser field set differs"
+        )
+    literals = {
+        "schema_version": "jaa10.cooperative-browser-controls.v2",
+        "integration_status": (
+            "network_witnessed_local_fixture_single_execution"
+        ),
+        "binding_mode": (
+            "direct_result_path_independently_read_post_command"
+        ),
+        "worker_result_schema_version": (
+            "jaa10.network-witnessed-fixture-worker-result.v1"
+        ),
+        "fixture_origin_class": "exact_loopback_http_origin_only",
+        "existing_loopback_controls_required": True,
+        "external_actions": 0,
+        "real_applications_submitted": 0,
+    }
+    if any(controls.get(key) != value for key, value in literals.items()):
+        raise NetworkWitnessError(
+            "integrated cooperative browser control differs"
+        )
+    for key in (
+        "request_sha256",
+        "integration_nonce_sha256",
+        "worker_result_sha256",
+        "worker_artifact_inventory_sha256",
+        "cooperative_policy_sha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(controls.get(key))):
+            raise NetworkWitnessError(
+                "integrated cooperative browser hash is invalid"
+            )
+    return True
+
+
 def _validate_witness_document(document: Mapping[str, Any]) -> None:
     expected_keys = {
         "schema_version",
@@ -996,8 +1242,10 @@ def _validate_witness_document(document: Mapping[str, Any]) -> None:
     }
     if set(document) != expected_keys:
         raise NetworkWitnessError("witness field set is not exhaustive")
-    if document.get("schema_version") != SCHEMA_VERSION:
+    schema_version = str(document.get("schema_version"))
+    if schema_version not in {SCHEMA_VERSION_V1, SCHEMA_VERSION}:
         raise NetworkWitnessError("witness schema version is invalid")
+    _validate_cooperative_browser_controls(document, schema_version)
     if document.get("external_actions") != 0:
         raise NetworkWitnessError("witness cannot record an external action")
     if document.get("real_applications_submitted") != 0:
@@ -1033,7 +1281,11 @@ def _validate_witness_document(document: Mapping[str, Any]) -> None:
     post_state = _mapping(document.get("post_state"), "post state")
     _validate_process_state(pre_state)
     _validate_process_state(post_state)
-    for key in ("network_namespace", "user_namespace"):
+    for key in (
+        "network_namespace",
+        "user_namespace",
+        "process_start_ticks",
+    ):
         if pre_state.get(key) != post_state.get(key):
             raise NetworkWitnessError(f"worker {key} changed")
     fd_pre = document.get("fd_inventory_pre")
@@ -1357,10 +1609,14 @@ def run_isolated_network_witness(
             DESCRIPTOR_POLICY_DOMAIN,
             _canonical_json(descriptor_policy),
         )
-        fd_pre_sha256 = hashlib.sha256(_canonical_json({"fds": fd_pre})).hexdigest()
-        fd_post_sha256 = hashlib.sha256(
-            _canonical_json({"fds": fd_post})
-        ).hexdigest()
+        fd_pre_sha256 = _domain_hash(
+            FD_INVENTORY_DOMAIN,
+            _canonical_json({"fds": fd_pre}),
+        )
+        fd_post_sha256 = _domain_hash(
+            FD_INVENTORY_DOMAIN,
+            _canonical_json({"fds": fd_post}),
+        )
         witness_document = {
             "schema_version": SCHEMA_VERSION,
             "source": source.document(),
@@ -1392,9 +1648,11 @@ def run_isolated_network_witness(
                 finished.get("descendant_namespace_inventory", [])
             ),
             "cooperative_browser_controls": {
+                "schema_version": "jaa10.cooperative-browser-controls.v2",
                 "integration_status": "not_integrated_standalone_harness",
-                "playwright_launch_flags": "not_applicable",
                 "existing_loopback_controls_required_for_future_integration": True,
+                "external_actions": 0,
+                "real_applications_submitted": 0,
             },
             "claim": {
                 "external_ip_network_capability": (
