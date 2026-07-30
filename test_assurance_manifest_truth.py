@@ -864,7 +864,10 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa11 = components["JAA-11"]
     assert (
         jaa11["increment"]
-        == "fixture_contract_complete_live_canary_withheld"
+        == (
+            "durable_circuit_integrated_fixture_only_policy_v2_"
+            "live_canary_withheld"
+        )
     )
     assert jaa11["objective_satisfied"] is False
     assert jaa11["claim"] == executable_slices["JAA-11"]["objective"]
@@ -872,22 +875,25 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert jaa11["provisional_fixture_contract"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
-            "bounded_local_implementation_ratified_"
-            "objective_unsatisfied_2026-07-30"
+            "durable_circuit_integrated_fixture_only_policy_v2_"
+            "truth_finalization_pending"
         ),
         "implemented_source_git_revision": (
-            "eda87002a142b6f8ffaa5c6cf67b37bd0891a2eb"
+            "37347dcb6d5d57eb285bcae5b02c276bf5aef092"
         ),
         "implemented_source_tree": (
-            "922ca52451e64383227618a241086bc02e5e80ac"
+            "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c"
         ),
         "implemented_source_content_revision": (
-            "sha256:326697ebad572df92bba11d845914930c"
-            "61c870ae4e27512b7e6cb7a18009198"
+            "sha256:670bf5179703e9479c952d7ff3fc370c"
+            "f334876547fa85fd83269f15f0b34b75"
         ),
         "target_ats_selected": False,
         "live_canary_status": "not_collected",
-        "durable_circuit_latch": False,
+        "durable_circuit_latch": True,
+        "filesystem_privileged_writer_limit": (
+            "surgical_partial_rewrite_undetectable_no_local_mitigation"
+        ),
         "real_submission_authority": "withheld",
         "production_certification": "withheld",
         "dependency_satisfied": False,
@@ -989,6 +995,96 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "720ed5d5e9cf20dfb5c8574ebb95cea"
             ),
         },
+        "durable_circuit_design_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa11-durable-adapter-integration-design-raw.json"
+            ),
+            "sha256": (
+                "3560d3ae918e015704eafe052a48e622f"
+                "5942ee8f7582fd628d44c3a215319b0"
+            ),
+        },
+        "durable_integration_phase_a_sonnet_review": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa11-durable-integration-phase-a-review-raw.json"
+            ),
+            "sha256": (
+                "0bf805bdb25327c4d41e91ccd8da644f9"
+                "86444eea8b2d03e081a28473371875f"
+            ),
+        },
+        "durable_integration_phase_a_provisional_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA11_DURABLE_INTEGRATION_PHASE_A_"
+                "PROVISIONAL_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "506070f842763aadb4d512ed14e76256d"
+                "97d5d46e775c0338e9d45ac303e4ea4"
+            ),
+        },
+        "durable_integration_phase_a_fable_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa11-durable-integration-phase-a-"
+                "exact-source-raw.json"
+            ),
+            "sha256": (
+                "08bfc07f175db68c727a058eec5c512c"
+                "036e304ac850913f0e4dee35ab858f60"
+            ),
+        },
+        "durable_integration_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa11-durable-integration-phase-a-focused.log"
+            ),
+            "sha256": (
+                "e5a68078a7f8bb28e8d95d4499140ed5"
+                "39845a04843662507cf89b1d7baa5e6f"
+            ),
+        },
+        "durable_integration_stale_truth_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa11-durable-integration-phase-a-truth-stale.log"
+            ),
+            "sha256": (
+                "9f4fa8e9c4347efeaea57ed6341976ed1"
+                "e7473ef1d63aff64badc8ff61939c6f"
+            ),
+        },
+        "durable_integration_cross_slice_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa11-durable-integration-phase-a-cross-slice.log"
+            ),
+            "sha256": (
+                "c79b80df7c5d70d737ff980e7a96fb9a"
+                "d6c6b796d3f28ec7585edc3474994bba"
+            ),
+        },
+        "durable_integration_ruff_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "jaa11-durable-integration-phase-a-ruff.log"
+            ),
+            "sha256": (
+                "f08bdda4e29585b184a7de565669337094"
+                "d783aee0e7c6c64433c32ccf809250"
+            ),
+        },
     }
     assert "certification" not in jaa11
     for key in (
@@ -1001,6 +1097,14 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "final_integrity_receipt",
         "circuit_lineage_audit",
         "final_repair_focused_log",
+        "durable_circuit_design_ruling",
+        "durable_integration_phase_a_sonnet_review",
+        "durable_integration_phase_a_provisional_receipt",
+        "durable_integration_phase_a_fable_ruling",
+        "durable_integration_focused_log",
+        "durable_integration_stale_truth_log",
+        "durable_integration_cross_slice_log",
+        "durable_integration_ruff_log",
     ):
         pointer = jaa11["provisional_fixture_contract"][key]
         evidence_path = (
@@ -1020,6 +1124,17 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "external_action_gate": "explicit_operator_approval_required",
             "max_age_seconds": 86400,
         }
+    ]
+    assert jaa11["owns"] == [
+        "career_automation/official_ats_adapter.py",
+        "career_automation/durable_circuit_store.py",
+    ]
+    assert [test["id"] for test in jaa11["tests"]] == [
+        "JAA-11-contract",
+        "JAA-11-negative-controls",
+        "JAA-11-durable-circuit-contract",
+        "JAA-11-durable-circuit-negative-controls",
+        "JAA-11-durable-integration",
     ]
     for relative in jaa11["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -1046,14 +1161,14 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "objective_unsatisfied_2026-07-30"
         ),
         "implemented_source_git_revision": (
-            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0"
+            "37347dcb6d5d57eb285bcae5b02c276bf5aef092"
         ),
         "implemented_source_tree": (
-            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad"
+            "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c"
         ),
         "implemented_source_content_revision": (
-            "sha256:5bcee41a9e30b2e288ef92d958a70fd3"
-            "a28bda7fc29aea6fbeadebe98fb5520d"
+            "sha256:670bf5179703e9479c952d7ff3fc370c"
+            "f334876547fa85fd83269f15f0b34b75"
         ),
         "upstream_dependency_satisfied": False,
         "follow_up_reference_hashes": (
@@ -1548,14 +1663,14 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "objective_unsatisfied_2026-07-30"
         ),
         "implemented_source_git_revision": (
-            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0"
+            "37347dcb6d5d57eb285bcae5b02c276bf5aef092"
         ),
         "implemented_source_tree": (
-            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad"
+            "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c"
         ),
         "implemented_source_content_revision": (
-            "sha256:5bcee41a9e30b2e288ef92d958a70fd3"
-            "a28bda7fc29aea6fbeadebe98fb5520d"
+            "sha256:670bf5179703e9479c952d7ff3fc370c"
+            "f334876547fa85fd83269f15f0b34b75"
         ),
         "upstream_dependency_satisfied": False,
         "evidence_reference_authentication": "caller_asserted_digest_only",
@@ -1948,26 +2063,47 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
             "2e26b66fa0874924109a814cefdfcf66",
         ),
         "JAA-11": (
-            "eda87002a142b6f8ffaa5c6cf67b37bd0891a2eb",
-            "922ca52451e64383227618a241086bc02e5e80ac",
-            "sha256:326697ebad572df92bba11d845914930"
-            "c61c870ae4e27512b7e6cb7a18009198",
+            "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
+            "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c",
+            "sha256:670bf5179703e9479c952d7ff3fc370c"
+            "f334876547fa85fd83269f15f0b34b75",
         ),
-        **{
-            f"JAA-{number:02d}": (
-                "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
-                "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
-                "sha256:5bcee41a9e30b2e288ef92d958a70fd"
-                "3a28bda7fc29aea6fbeadebe98fb5520d",
-            )
-            for number in range(12, 17)
-        },
+        "JAA-12": (
+            "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
+            "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c",
+            "sha256:670bf5179703e9479c952d7ff3fc370c"
+            "f334876547fa85fd83269f15f0b34b75",
+        ),
+        "JAA-13": (
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd"
+            "3a28bda7fc29aea6fbeadebe98fb5520d",
+        ),
+        "JAA-14": (
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd"
+            "3a28bda7fc29aea6fbeadebe98fb5520d",
+        ),
+        "JAA-15": (
+            "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
+            "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c",
+            "sha256:670bf5179703e9479c952d7ff3fc370c"
+            "f334876547fa85fd83269f15f0b34b75",
+        ),
+        "JAA-16": (
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd"
+            "3a28bda7fc29aea6fbeadebe98fb5520d",
+        ),
     }
     evidence_bases = {
         "operator_control_root": ROOT.parents[1] / ".control",
         "software_factory_root": ROOT.parents[1],
     }
-    marker = (
+    ratification_marker = (
         "bounded_local_implementation_ratified_"
         "objective_unsatisfied_2026-07-30"
     )
@@ -1982,7 +2118,13 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
             else "independent_fable_ratification"
         )
         assert component["objective_satisfied"] is False
-        assert block[marker_key] == marker
+        expected_marker = (
+            "durable_circuit_integrated_fixture_only_policy_v2_"
+            "truth_finalization_pending"
+            if slice_id == "JAA-11"
+            else ratification_marker
+        )
+        assert block[marker_key] == expected_marker
         assert "certification" not in component
         assert block["implemented_source_git_revision"] == revision
         assert block["implemented_source_tree"] == tree
