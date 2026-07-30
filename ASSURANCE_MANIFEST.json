@@ -566,15 +566,20 @@
     },
     "JAA-10": {
       "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract, all five submit interruption windows recover or fail closed, and the exact fourteen-control executable mutation cohort passes; production certification is withheld.",
-      "increment": "implementation_complete_pending_fable_ratification",
+      "increment": "implementation_complete_bounded_local_accepted",
       "depends_on": ["JAA-09"],
       "objective_satisfied": false,
-      "provisional_acceptance": {
-        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_certification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+      "bounded_local_acceptance": {
+        "status": "INDEPENDENT_FABLE_BOUNDED_LOCAL_ACCEPTED_OBJECTIVE_UNSATISFIED",
+        "independent_fable_certification": "bounded_local_implementation_independently_accepted_objective_unsatisfied_2026-07-30",
         "implemented_source_git_revision": "82ff3e0931c5c342e4d43b40773950a78e0b32bd",
         "implemented_source_tree": "a122a3e820ed21b2c915caabb3a273080abc0e37",
         "implemented_source_content_revision": "sha256:e69be3197496efc04bbf178035ee7ec02e26b66fa0874924109a814cefdfcf66",
+        "frozen_shadow_baseline": {
+          "baseline_revision": "8107f09beb3c5651850ad40a0ff8842ac2de1e47",
+          "job_key": "jaa06-synthetic:strategy-job",
+          "standing_jaa09_real_vacancy_rebased": false
+        },
         "production_certification": "withheld",
         "deputy_authority": {
           "path_base": "software_factory_root",
@@ -615,6 +620,11 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/SOL_JAA10_INTEGRITY_REPAIR_ACCEPTANCE.md",
           "sha256": "88c848f7f4b2c9af5c69f4d8e9fe32295089570f4816a79abfff82f272f7f98e"
+        },
+        "bounded_local_gate_ruling": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/fable-jaa10-exact-gate-raw.json",
+          "sha256": "46340ed2ab29bf0b379f2a78980339b9d7350ee4b17013133967743cd3687dd6"
         }
       },
       "owns": ["career_automation/shadow_certification.py"],

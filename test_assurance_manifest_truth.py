@@ -692,7 +692,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa10 = components["JAA-10"]
     assert (
         jaa10["increment"]
-        == "implementation_complete_pending_fable_ratification"
+        == "implementation_complete_bounded_local_accepted"
     )
     assert jaa10["objective_satisfied"] is False
     assert jaa10["evidence"] == []
@@ -702,10 +702,13 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "exact fourteen-control executable mutation cohort passes"
         in jaa10["claim"]
     )
-    assert jaa10["provisional_acceptance"] == {
-        "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
+    assert jaa10["bounded_local_acceptance"] == {
+        "status": (
+            "INDEPENDENT_FABLE_BOUNDED_LOCAL_ACCEPTED_"
+            "OBJECTIVE_UNSATISFIED"
+        ),
         "independent_fable_certification": (
-            "bounded_local_implementation_ratified_"
+            "bounded_local_implementation_independently_accepted_"
             "objective_unsatisfied_2026-07-30"
         ),
         "implemented_source_git_revision": (
@@ -718,6 +721,13 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "sha256:e69be3197496efc04bbf178035ee7ec02"
             "e26b66fa0874924109a814cefdfcf66"
         ),
+        "frozen_shadow_baseline": {
+            "baseline_revision": (
+                "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
+            ),
+            "job_key": "jaa06-synthetic:strategy-job",
+            "standing_jaa09_real_vacancy_rebased": False,
+        },
         "production_certification": "withheld",
         "deputy_authority": {
             "path_base": "software_factory_root",
@@ -806,6 +816,17 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "5089570f4816a79abfff82f272f7f98e"
             ),
         },
+        "bounded_local_gate_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-exact-gate-raw.json"
+            ),
+            "sha256": (
+                "46340ed2ab29bf0b379f2a78980339b9d"
+                "7350ee4b17013133967743cd3687dd6"
+            ),
+        },
     }
     assert "certification" not in jaa10
     for key in (
@@ -817,8 +838,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "jaa09_restart_cross_slice_log",
         "ruff_log",
         "final_integrity_receipt",
+        "bounded_local_gate_ruling",
     ):
-        pointer = jaa10["provisional_acceptance"][key]
+        pointer = jaa10["bounded_local_acceptance"][key]
         evidence_path = (
             evidence_bases[pointer["path_base"]]
             / pointer["relative_path"]
@@ -2030,7 +2052,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
 def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -> None:
     components = _manifest()["components"]
     blocks = {
-        "JAA-10": "provisional_acceptance",
+        "JAA-10": "bounded_local_acceptance",
         "JAA-11": "provisional_fixture_contract",
         "JAA-12": "provisional_local_export_contract",
         "JAA-13": "provisional_local_contract",
@@ -2105,7 +2127,12 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
             "durable_circuit_integrated_fixture_only_policy_v2_"
             "truth_finalization_pending"
             if slice_id == "JAA-11"
-            else ratification_marker
+            else (
+                "bounded_local_implementation_independently_accepted_"
+                "objective_unsatisfied_2026-07-30"
+                if slice_id == "JAA-10"
+                else ratification_marker
+            )
         )
         assert block[marker_key] == expected_marker
         assert "certification" not in component
