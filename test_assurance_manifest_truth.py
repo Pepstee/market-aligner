@@ -10,7 +10,10 @@ from pathlib import Path
 import yaml
 
 from career_automation.shadow_certification import MUTATION_TEST_NODES
-from tracked_source_revision import source_git_revision
+from tracked_source_revision import (
+    SOURCE_CONTENT_REVISION_DOMAIN,
+    source_git_revision,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -20,6 +23,60 @@ SLICES = ROOT / "IMPLEMENTATION_SLICES.yaml"
 
 def _manifest() -> dict[str, object]:
     return json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+
+def _git(*arguments: str) -> bytes:
+    return subprocess.run(
+        ("git", *arguments),
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+
+
+def _source_content_revision_at(revision: str) -> str:
+    entries: list[tuple[bytes, bytes, bytes]] = []
+    for record in _git(
+        "ls-tree", "-r", "-z", "--full-tree", revision
+    ).split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, path = record.partition(b"\t")
+        mode, object_type, object_id = metadata.split()
+        assert separator and object_type == b"blob"
+        if path.startswith(b"runtime_evidence/"):
+            continue
+        entries.append((path, mode, _git("cat-file", "blob", object_id.decode())))
+    digest = hashlib.sha256(SOURCE_CONTENT_REVISION_DOMAIN)
+    for path, mode, payload in sorted(entries):
+        for field in (path, mode, payload):
+            digest.update(len(field).to_bytes(8, "big"))
+            digest.update(field)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _declared_slice_paths(component: dict[str, object]) -> list[str]:
+    declared = [
+        *component["owns"],
+        *component["inputs"],
+        *component["interfaces"],
+        *component["environment"],
+    ]
+    declared.extend(
+        relative
+        for test in component["tests"]
+        for relative in test["files"]
+    )
+    expanded: set[str] = set()
+    for relative in declared:
+        pathspec = relative[:-3] if relative.endswith("/**") else relative
+        expanded.update(
+            _git(
+                "ls-tree", "-r", "--name-only", "HEAD", "--", pathspec
+            ).decode().splitlines()
+        )
+    return sorted(expanded)
 
 
 def test_unimplemented_slices_are_not_declared_complete() -> None:
@@ -495,6 +552,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         jaa09["increment"]
         == "implementation_complete_pending_fable_ratification"
     )
+    assert jaa09["objective_satisfied"] is False
     assert jaa09["evidence"] == []
     assert "one genuine JAA-08 token" in jaa09["claim"]
     assert (
@@ -504,17 +562,18 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION"
             ),
             "independent_fable_certification": (
-                "absent_pending_ratification"
+                "bounded_local_implementation_ratified_"
+                "objective_unsatisfied_2026-07-30"
             ),
             "implemented_source_git_revision": (
-                "ccc1d14bb65c7f3654359d6b4e08939c524b3161"
+                "8107f09beb3c5651850ad40a0ff8842ac2de1e47"
             ),
             "implemented_source_tree": (
-                "f10b49a80f9a6b3d54647b706fa749d0f74b9a5a"
+                "a43fcf66051b3d1a1907f89a3652309325b5e629"
             ),
             "implemented_source_content_revision": (
-                "sha256:3dcc1e030941645115ec5956e56bf1825"
-                "de406c1b0d2a8b8c337d60cb7389621"
+                "sha256:76391f45f20cb5695ee644faeefc83180"
+                "86f723049adbe557bc7270ba0c247a8"
             ),
             "deputy_authority": {
                 "path_base": "software_factory_root",
@@ -593,6 +652,17 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                     "218d1031dbe5a7b754092f9a156b4f18"
                 ),
             },
+            "final_integrity_receipt": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "SOL_JAA09_INTEGRITY_REPAIR_ACCEPTANCE.md"
+                ),
+                "sha256": (
+                    "2c0d139c350ca1783862f353f5a15c0f4"
+                    "1d05bbf61e7cfcf7cb711a487ed04bd"
+                ),
+            },
         }
     )
     assert "certification" not in jaa09
@@ -608,6 +678,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "negative_restart_log",
         "jaa08_cross_slice_log",
         "ruff_log",
+        "final_integrity_receipt",
     ):
         pointer = jaa09["provisional_acceptance"][key]
         evidence_path = (
@@ -633,6 +704,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         jaa10["increment"]
         == "implementation_complete_pending_fable_ratification"
     )
+    assert jaa10["objective_satisfied"] is False
     assert jaa10["evidence"] == []
     assert "production certification is withheld" in jaa10["claim"]
     assert "all five submit interruption windows" in jaa10["claim"]
@@ -642,16 +714,19 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     )
     assert jaa10["provisional_acceptance"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_certification": "absent_pending_ratification",
+        "independent_fable_certification": (
+            "bounded_local_implementation_ratified_"
+            "objective_unsatisfied_2026-07-30"
+        ),
         "implemented_source_git_revision": (
-            "43c3d90193e6092b430fdc59cacd7244caaf720b"
+            "82ff3e0931c5c342e4d43b40773950a78e0b32bd"
         ),
         "implemented_source_tree": (
-            "283a1c1051d2ced9bbbecc7eb446dcd5dafe592a"
+            "a122a3e820ed21b2c915caabb3a273080abc0e37"
         ),
         "implemented_source_content_revision": (
-            "sha256:8962b3f02120e0b0b88b8584f0e00a7b"
-            "e56a101fd0148d323010cc124be73bef"
+            "sha256:e69be3197496efc04bbf178035ee7ec02"
+            "e26b66fa0874924109a814cefdfcf66"
         ),
         "production_certification": "withheld",
         "deputy_authority": {
@@ -730,6 +805,17 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "218d1031dbe5a7b754092f9a156b4f18"
             ),
         },
+        "final_integrity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA10_INTEGRITY_REPAIR_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "88c848f7f4b2c9af5c69f4d8e9fe3229"
+                "5089570f4816a79abfff82f272f7f98e"
+            ),
+        },
     }
     assert "certification" not in jaa10
     for key in (
@@ -740,6 +826,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "mutation_log",
         "jaa09_restart_cross_slice_log",
         "ruff_log",
+        "final_integrity_receipt",
     ):
         pointer = jaa10["provisional_acceptance"][key]
         evidence_path = (
@@ -779,23 +866,28 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         jaa11["increment"]
         == "fixture_contract_complete_live_canary_withheld"
     )
+    assert jaa11["objective_satisfied"] is False
     assert jaa11["claim"] == executable_slices["JAA-11"]["objective"]
     assert jaa11["depends_on"] == executable_slices["JAA-11"]["depends_on"]
     assert jaa11["provisional_fixture_contract"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
+        "independent_fable_ratification": (
+            "bounded_local_implementation_ratified_"
+            "objective_unsatisfied_2026-07-30"
+        ),
         "implemented_source_git_revision": (
-            "4ee1b6a0b9cbd54bf884a22c99783b69ee849f35"
+            "eda87002a142b6f8ffaa5c6cf67b37bd0891a2eb"
         ),
         "implemented_source_tree": (
-            "3bfa4ff3e1f52a02b68e1bdec9e99ca555855f0f"
+            "922ca52451e64383227618a241086bc02e5e80ac"
         ),
         "implemented_source_content_revision": (
-            "sha256:d569686f3771e45c10e014e1d26093943"
-            "0f62f337a25dc151732e006f51797ae"
+            "sha256:326697ebad572df92bba11d845914930c"
+            "61c870ae4e27512b7e6cb7a18009198"
         ),
         "target_ats_selected": False,
         "live_canary_status": "not_collected",
+        "durable_circuit_latch": False,
         "real_submission_authority": "withheld",
         "production_certification": "withheld",
         "dependency_satisfied": False,
@@ -864,6 +956,39 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "218d1031dbe5a7b754092f9a156b4f18"
             ),
         },
+        "final_integrity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA11_12_FINAL_INTEGRITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "a04f525da6467a76500b1d17eab67e219"
+                "a60803c06d10e2582040940e5f41892"
+            ),
+        },
+        "circuit_lineage_audit": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA11_CIRCUIT_LINEAGE_AUDIT.md"
+            ),
+            "sha256": (
+                "f678153ef80b4a98d50d036f00f21fe37"
+                "d2b63899edc64f6abefcb30cda8ab0e"
+            ),
+        },
+        "final_repair_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log"
+            ),
+            "sha256": (
+                "13c0ad75c29fc5d84b918a05a172bb865"
+                "720ed5d5e9cf20dfb5c8574ebb95cea"
+            ),
+        },
     }
     assert "certification" not in jaa11
     for key in (
@@ -873,6 +998,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "positive_log",
         "negative_log",
         "ruff_log",
+        "final_integrity_receipt",
+        "circuit_lineage_audit",
+        "final_repair_focused_log",
     ):
         pointer = jaa11["provisional_fixture_contract"][key]
         evidence_path = (
@@ -908,22 +1036,29 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         jaa12["increment"]
         == "local_export_contract_complete_dependency_and_connectors_withheld"
     )
+    assert jaa12["objective_satisfied"] is False
     assert jaa12["claim"] == executable_slices["JAA-12"]["objective"]
     assert jaa12["depends_on"] == executable_slices["JAA-12"]["depends_on"]
     assert jaa12["provisional_local_export_contract"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
+        "independent_fable_ratification": (
+            "bounded_local_implementation_ratified_"
+            "objective_unsatisfied_2026-07-30"
+        ),
         "implemented_source_git_revision": (
-            "21ee76bfe5e886e8bc1230a24010b1d841882509"
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0"
         ),
         "implemented_source_tree": (
-            "6a66f606efa38112701d76a4406bfbcd8180be40"
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad"
         ),
         "implemented_source_content_revision": (
-            "sha256:4efcdbc108aaea487bb6305dcd370213f7"
-            "7969085e33ec8e7f6d0cd505fb723d"
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd3"
+            "a28bda7fc29aea6fbeadebe98fb5520d"
         ),
         "upstream_dependency_satisfied": False,
+        "follow_up_reference_hashes": (
+            "caller_supplied_structural_references"
+        ),
         "mailbox_connector_status": "not_connected",
         "portal_connector_status": "not_connected",
         "message_send_authority": "withheld",
@@ -994,6 +1129,50 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "218d1031dbe5a7b754092f9a156b4f18"
             ),
         },
+        "final_integrity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA11_12_FINAL_INTEGRITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "a04f525da6467a76500b1d17eab67e219"
+                "a60803c06d10e2582040940e5f41892"
+            ),
+        },
+        "typed_follow_up_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_TYPED_FOLLOW_UP_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "e3d34200b31550d3b3efc1aa7bde9780"
+                "f166ed70a621413d4b3f14a983a72c09"
+            ),
+        },
+        "final_repair_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log"
+            ),
+            "sha256": (
+                "13c0ad75c29fc5d84b918a05a172bb865"
+                "720ed5d5e9cf20dfb5c8574ebb95cea"
+            ),
+        },
+        "authenticity_repair_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_16_AUTHENTICITY_REPAIR_FOCUSED.log"
+            ),
+            "sha256": (
+                "8a39a140511d29d525f99ac958f50ee1c"
+                "84e570b5e8f3439511e526b529495a5"
+            ),
+        },
     }
     assert "certification" not in jaa12
     for key in (
@@ -1003,6 +1182,10 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "positive_log",
         "negative_log",
         "ruff_log",
+        "final_integrity_receipt",
+        "typed_follow_up_receipt",
+        "final_repair_focused_log",
+        "authenticity_repair_focused_log",
     ):
         pointer = jaa12["provisional_local_export_contract"][key]
         evidence_path = (
@@ -1032,22 +1215,29 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "dependency_refresh_and_send_withheld"
         )
     )
+    assert jaa13["objective_satisfied"] is False
     assert jaa13["claim"] == executable_slices["JAA-13"]["objective"]
     assert jaa13["depends_on"] == executable_slices["JAA-13"]["depends_on"]
     assert jaa13["provisional_local_contract"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
+        "independent_fable_ratification": (
+            "bounded_local_implementation_ratified_"
+            "objective_unsatisfied_2026-07-30"
+        ),
         "implemented_source_git_revision": (
-            "59bd3f044485a62407e0ffc92c6d786a8e7f689e"
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0"
         ),
         "implemented_source_tree": (
-            "3a03bed3cf6fe71de5f789dcb42850bb96776489"
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad"
         ),
         "implemented_source_content_revision": (
-            "sha256:d2a17c9cefc8dbafea4b8074e035fcfca"
-            "bd2384f744d31c525b71345bf0dd0e4"
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd3"
+            "a28bda7fc29aea6fbeadebe98fb5520d"
         ),
         "upstream_dependency_satisfied": False,
+        "submission_context_authentication": (
+            "unauthenticated_structural_assertion"
+        ),
         "source_refresh_authority": "withheld",
         "private_person_inference": False,
         "candidate_fact_mutation_authority": False,
@@ -1120,6 +1310,28 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "218d1031dbe5a7b754092f9a156b4f18"
             ),
         },
+        "final_integrity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA13_FINAL_INTEGRITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "82036eb230c447517d1550808404df09ab"
+                "7b74f80d090dfe0f68eca8e8e2a958"
+            ),
+        },
+        "final_repair_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log"
+            ),
+            "sha256": (
+                "13c0ad75c29fc5d84b918a05a172bb865"
+                "720ed5d5e9cf20dfb5c8574ebb95cea"
+            ),
+        },
     }
     assert "certification" not in jaa13
     for key in (
@@ -1129,6 +1341,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "positive_log",
         "negative_log",
         "ruff_log",
+        "final_integrity_receipt",
+        "final_repair_focused_log",
     ):
         pointer = jaa13["provisional_local_contract"][key]
         evidence_path = (
@@ -1158,20 +1372,24 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "runtime_and_promotion_withheld"
         )
     )
+    assert jaa14["objective_satisfied"] is False
     assert jaa14["claim"] == executable_slices["JAA-14"]["objective"]
     assert jaa14["depends_on"] == executable_slices["JAA-14"]["depends_on"]
     assert jaa14["provisional_local_contract"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
+        "independent_fable_ratification": (
+            "bounded_local_implementation_ratified_"
+            "objective_unsatisfied_2026-07-30"
+        ),
         "implemented_source_git_revision": (
-            "f029e05fdd0e5818e0cb30ebe3386778a1889c7e"
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0"
         ),
         "implemented_source_tree": (
-            "a42d72c677bcb5712282b1eae3dabbae9b1eb82e"
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad"
         ),
         "implemented_source_content_revision": (
-            "sha256:d38bfa42b998353b4ab62c74dbf38859"
-            "afe182e410ae27c84290e8f8f2e0c135"
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd3"
+            "a28bda7fc29aea6fbeadebe98fb5520d"
         ),
         "upstream_dependency_satisfied": False,
         "runtime_learning_authority": "withheld",
@@ -1257,6 +1475,28 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "218d1031dbe5a7b754092f9a156b4f18"
             ),
         },
+        "final_integrity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA14_FINAL_INTEGRITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "3b4d2e1d0f30b299fb9f10e3bb6ba4b"
+                "5f80f8e0ad9ef78faf9806d00b8aefd75"
+            ),
+        },
+        "final_repair_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log"
+            ),
+            "sha256": (
+                "13c0ad75c29fc5d84b918a05a172bb865"
+                "720ed5d5e9cf20dfb5c8574ebb95cea"
+            ),
+        },
     }
     assert "certification" not in jaa14
     for key in (
@@ -1267,6 +1507,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "negative_log",
         "upstream_cross_slice_log",
         "ruff_log",
+        "final_integrity_receipt",
+        "final_repair_focused_log",
     ):
         pointer = jaa14["provisional_local_contract"][key]
         evidence_path = (
@@ -1296,22 +1538,27 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "dependency_runtime_and_activation_withheld"
         )
     )
+    assert jaa15["objective_satisfied"] is False
     assert jaa15["claim"] == executable_slices["JAA-15"]["objective"]
     assert jaa15["depends_on"] == executable_slices["JAA-15"]["depends_on"]
     assert jaa15["provisional_local_contract"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
+        "independent_fable_ratification": (
+            "bounded_local_implementation_ratified_"
+            "objective_unsatisfied_2026-07-30"
+        ),
         "implemented_source_git_revision": (
-            "a33334832c88038199df475fca281f0c51b5ae38"
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0"
         ),
         "implemented_source_tree": (
-            "988d6c3c6c40d5e2e802e8cd750938bf898c370e"
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad"
         ),
         "implemented_source_content_revision": (
-            "sha256:f788d5a6e5864956915dc12b07e2ff16"
-            "504a54c8c9d37b41537beaa0141450cd"
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd3"
+            "a28bda7fc29aea6fbeadebe98fb5520d"
         ),
         "upstream_dependency_satisfied": False,
+        "evidence_reference_authentication": "caller_asserted_digest_only",
         "real_runtime_evidence_verified": False,
         "adapter_created_or_activated": False,
         "adapter_activation_authority": "withheld",
@@ -1396,6 +1643,39 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "218d1031dbe5a7b754092f9a156b4f18"
             ),
         },
+        "final_integrity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA15_16_FINAL_INTEGRITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "cd1487b30b591298dcdb25bb1ee90d1b32"
+                "4fe8d98b71f5fd60d70912fd4a9a3b"
+            ),
+        },
+        "evidence_authenticity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA15_16_EVIDENCE_AUTHENTICITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "31a89b0cdd8c0f7da30ccf8ebad7d928"
+                "57e20ae5b601dcadbb9da2f31b31e864"
+            ),
+        },
+        "authenticity_repair_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_16_AUTHENTICITY_REPAIR_FOCUSED.log"
+            ),
+            "sha256": (
+                "8a39a140511d29d525f99ac958f50ee1c"
+                "84e570b5e8f3439511e526b529495a5"
+            ),
+        },
     }
     assert "certification" not in jaa15
     for key in (
@@ -1406,6 +1686,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "negative_log",
         "upstream_cross_slice_log",
         "ruff_log",
+        "final_integrity_receipt",
+        "evidence_authenticity_receipt",
+        "authenticity_repair_focused_log",
     ):
         pointer = jaa15["provisional_local_contract"][key]
         evidence_path = (
@@ -1435,22 +1718,29 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "dependency_runtime_distribution_and_certification_withheld"
         )
     )
+    assert jaa16["objective_satisfied"] is False
     assert jaa16["claim"] == executable_slices["JAA-16"]["objective"]
     assert jaa16["depends_on"] == executable_slices["JAA-16"]["depends_on"]
     assert jaa16["provisional_local_contract"] == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
+        "independent_fable_ratification": (
+            "bounded_local_implementation_ratified_"
+            "objective_unsatisfied_2026-07-30"
+        ),
         "implemented_source_git_revision": (
-            "df341a275cbc4ec960250b9c5f2b8c26cad189e5"
+            "9bde24e294e49c98f84a16ba1f683047f8f3d1c0"
         ),
         "implemented_source_tree": (
-            "e19da2ada822cf815620163c7062b18c2cc45b7d"
+            "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad"
         ),
         "implemented_source_content_revision": (
-            "sha256:7ce7b1fedd9322dca7f709eadee61869"
-            "d5416a8911fc7c251f9c431b8fd44d9a"
+            "sha256:5bcee41a9e30b2e288ef92d958a70fd3"
+            "a28bda7fc29aea6fbeadebe98fb5520d"
         ),
         "upstream_dependency_satisfied": False,
+        "prior_certification_and_release_evidence_authentication": (
+            "unauthenticated_caller_supplied"
+        ),
         "runtime_drill_evidence_verified": False,
         "distributable_artifact_verified": False,
         "release_certificate_status": "absent",
@@ -1551,6 +1841,39 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "218d1031dbe5a7b754092f9a156b4f18"
             ),
         },
+        "final_integrity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA15_16_FINAL_INTEGRITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "cd1487b30b591298dcdb25bb1ee90d1b32"
+                "4fe8d98b71f5fd60d70912fd4a9a3b"
+            ),
+        },
+        "evidence_authenticity_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA15_16_EVIDENCE_AUTHENTICITY_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "31a89b0cdd8c0f7da30ccf8ebad7d928"
+                "57e20ae5b601dcadbb9da2f31b31e864"
+            ),
+        },
+        "authenticity_repair_focused_log": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "SOL_JAA12_16_AUTHENTICITY_REPAIR_FOCUSED.log"
+            ),
+            "sha256": (
+                "8a39a140511d29d525f99ac958f50ee1c"
+                "84e570b5e8f3439511e526b529495a5"
+            ),
+        },
     }
     assert "certification" not in jaa16
     for key in (
@@ -1562,6 +1885,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "acceptance_declaration_log",
         "upstream_cross_slice_log",
         "ruff_log",
+        "final_integrity_receipt",
+        "evidence_authenticity_receipt",
+        "authenticity_repair_focused_log",
     ):
         pointer = jaa16["provisional_local_contract"][key]
         evidence_path = (
@@ -1573,6 +1899,18 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             pointer["sha256"]
         )
     assert jaa16["evidence"] == []
+    release_tests = [
+        test for test in jaa16["tests"]
+        if test["id"] == "JAA-16-release"
+    ]
+    assert len(release_tests) == 1
+    assert release_tests[0]["argv"] == [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        *release_tests[0]["files"],
+    ]
     for relative in jaa16["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-16 materialised path missing: {relative}"
@@ -1581,6 +1919,110 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         for relative in test["files"]:
             assert (ROOT / relative).is_file(), (
                 f"JAA-16 declared test missing: {relative}"
+            )
+
+
+def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -> None:
+    components = _manifest()["components"]
+    blocks = {
+        "JAA-09": "provisional_acceptance",
+        "JAA-10": "provisional_acceptance",
+        "JAA-11": "provisional_fixture_contract",
+        "JAA-12": "provisional_local_export_contract",
+        "JAA-13": "provisional_local_contract",
+        "JAA-14": "provisional_local_contract",
+        "JAA-15": "provisional_local_contract",
+        "JAA-16": "provisional_local_contract",
+    }
+    expected_identities = {
+        "JAA-09": (
+            "8107f09beb3c5651850ad40a0ff8842ac2de1e47",
+            "a43fcf66051b3d1a1907f89a3652309325b5e629",
+            "sha256:76391f45f20cb5695ee644faeefc8318"
+            "086f723049adbe557bc7270ba0c247a8",
+        ),
+        "JAA-10": (
+            "82ff3e0931c5c342e4d43b40773950a78e0b32bd",
+            "a122a3e820ed21b2c915caabb3a273080abc0e37",
+            "sha256:e69be3197496efc04bbf178035ee7ec0"
+            "2e26b66fa0874924109a814cefdfcf66",
+        ),
+        "JAA-11": (
+            "eda87002a142b6f8ffaa5c6cf67b37bd0891a2eb",
+            "922ca52451e64383227618a241086bc02e5e80ac",
+            "sha256:326697ebad572df92bba11d845914930"
+            "c61c870ae4e27512b7e6cb7a18009198",
+        ),
+        **{
+            f"JAA-{number:02d}": (
+                "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+                "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+                "sha256:5bcee41a9e30b2e288ef92d958a70fd"
+                "3a28bda7fc29aea6fbeadebe98fb5520d",
+            )
+            for number in range(12, 17)
+        },
+    }
+    evidence_bases = {
+        "operator_control_root": ROOT.parents[1] / ".control",
+        "software_factory_root": ROOT.parents[1],
+    }
+    marker = (
+        "bounded_local_implementation_ratified_"
+        "objective_unsatisfied_2026-07-30"
+    )
+
+    for slice_id, block_name in blocks.items():
+        component = components[slice_id]
+        block = component[block_name]
+        revision, tree, content_revision = expected_identities[slice_id]
+        marker_key = (
+            "independent_fable_certification"
+            if slice_id in {"JAA-09", "JAA-10"}
+            else "independent_fable_ratification"
+        )
+        assert component["objective_satisfied"] is False
+        assert block[marker_key] == marker
+        assert "certification" not in component
+        assert block["implemented_source_git_revision"] == revision
+        assert block["implemented_source_tree"] == tree
+        assert block["implemented_source_content_revision"] == content_revision
+        assert _git("rev-parse", f"{revision}^{{tree}}").decode().strip() == tree
+        assert subprocess.run(
+            ("git", "merge-base", "--is-ancestor", revision, "HEAD"),
+            cwd=ROOT,
+            check=False,
+        ).returncode == 0
+        assert _source_content_revision_at(revision) == content_revision
+
+        declared_paths = _declared_slice_paths(component)
+        if slice_id == "JAA-15":
+            assert len(declared_paths) == 73
+            assert len(
+                [path for path in declared_paths if path.startswith("scraper/")]
+            ) == 67
+        for relative in declared_paths:
+            assert _git(
+                "rev-parse", f"{revision}:{relative}"
+            ) == _git("rev-parse", f"HEAD:{relative}")
+
+        for value in block.values():
+            if not (
+                isinstance(value, dict)
+                and set(value) == {
+                    "path_base",
+                    "relative_path",
+                    "sha256",
+                }
+            ):
+                continue
+            evidence_path = (
+                evidence_bases[value["path_base"]]
+                / value["relative_path"]
+            )
+            assert evidence_path.is_file()
+            assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+                value["sha256"]
             )
 
 

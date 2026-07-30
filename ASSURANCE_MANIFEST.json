@@ -520,12 +520,13 @@
       "claim": "A cooperative local browser walking skeleton consumes one genuine JAA-08 token, binds exact approved materialisations and canonical consumption time, checkpoints one fixture receipt, and recovers each pre-click or post-click interruption without a repeated submit.",
       "increment": "implementation_complete_pending_fable_ratification",
       "depends_on": ["JAA-08"],
+      "objective_satisfied": false,
       "provisional_acceptance": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_certification": "absent_pending_ratification",
-        "implemented_source_git_revision": "ccc1d14bb65c7f3654359d6b4e08939c524b3161",
-        "implemented_source_tree": "f10b49a80f9a6b3d54647b706fa749d0f74b9a5a",
-        "implemented_source_content_revision": "sha256:3dcc1e030941645115ec5956e56bf1825de406c1b0d2a8b8c337d60cb7389621",
+        "independent_fable_certification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "8107f09beb3c5651850ad40a0ff8842ac2de1e47",
+        "implemented_source_tree": "a43fcf66051b3d1a1907f89a3652309325b5e629",
+        "implemented_source_content_revision": "sha256:76391f45f20cb5695ee644faeefc8318086f723049adbe557bc7270ba0c247a8",
         "deputy_authority": {
           "path_base": "software_factory_root",
           "relative_path": "giga-user/reports/JAA_SOL_DEPUTY_AUTHORITY_2026-07-29.md",
@@ -560,6 +561,11 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa09-sol-deputy-post-review-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA09_INTEGRITY_REPAIR_ACCEPTANCE.md",
+          "sha256": "2c0d139c350ca1783862f353f5a15c0f41d05bbf61e7cfcf7cb711a487ed04bd"
         }
       },
       "owns": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py", "career_automation/browser_workflows.py"],
@@ -576,12 +582,13 @@
       "claim": "Two executed frozen localhost replays match the normalized JAA-09 golden contract, all five submit interruption windows recover or fail closed, and the exact fourteen-control executable mutation cohort passes; production certification is withheld.",
       "increment": "implementation_complete_pending_fable_ratification",
       "depends_on": ["JAA-09"],
+      "objective_satisfied": false,
       "provisional_acceptance": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_certification": "absent_pending_ratification",
-        "implemented_source_git_revision": "43c3d90193e6092b430fdc59cacd7244caaf720b",
-        "implemented_source_tree": "283a1c1051d2ced9bbbecc7eb446dcd5dafe592a",
-        "implemented_source_content_revision": "sha256:8962b3f02120e0b0b88b8584f0e00a7be56a101fd0148d323010cc124be73bef",
+        "independent_fable_certification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "82ff3e0931c5c342e4d43b40773950a78e0b32bd",
+        "implemented_source_tree": "a122a3e820ed21b2c915caabb3a273080abc0e37",
+        "implemented_source_content_revision": "sha256:e69be3197496efc04bbf178035ee7ec02e26b66fa0874924109a814cefdfcf66",
         "production_certification": "withheld",
         "deputy_authority": {
           "path_base": "software_factory_root",
@@ -617,6 +624,11 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa10-post-review-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA10_INTEGRITY_REPAIR_ACCEPTANCE.md",
+          "sha256": "88c848f7f4b2c9af5c69f4d8e9fe32295089570f4816a79abfff82f272f7f98e"
         }
       },
       "owns": ["career_automation/shadow_certification.py"],
@@ -655,14 +667,16 @@
       "claim": "Submit through one selected official application route and prove receipt/status integrity on the actual machine.",
       "increment": "fixture_contract_complete_live_canary_withheld",
       "depends_on": ["JAA-10"],
+      "objective_satisfied": false,
       "provisional_fixture_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
-        "implemented_source_git_revision": "4ee1b6a0b9cbd54bf884a22c99783b69ee849f35",
-        "implemented_source_tree": "3bfa4ff3e1f52a02b68e1bdec9e99ca555855f0f",
-        "implemented_source_content_revision": "sha256:d569686f3771e45c10e014e1d260939430f62f337a25dc151732e006f51797ae",
+        "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "eda87002a142b6f8ffaa5c6cf67b37bd0891a2eb",
+        "implemented_source_tree": "922ca52451e64383227618a241086bc02e5e80ac",
+        "implemented_source_content_revision": "sha256:326697ebad572df92bba11d845914930c61c870ae4e27512b7e6cb7a18009198",
         "target_ats_selected": false,
         "live_canary_status": "not_collected",
+        "durable_circuit_latch": false,
         "real_submission_authority": "withheld",
         "production_certification": "withheld",
         "dependency_satisfied": false,
@@ -695,6 +709,21 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa11-post-review-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA11_12_FINAL_INTEGRITY_ACCEPTANCE.md",
+          "sha256": "a04f525da6467a76500b1d17eab67e219a60803c06d10e2582040940e5f41892"
+        },
+        "circuit_lineage_audit": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA11_CIRCUIT_LINEAGE_AUDIT.md",
+          "sha256": "f678153ef80b4a98d50d036f00f21fe37d2b63899edc64f6abefcb30cda8ab0e"
+        },
+        "final_repair_focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log",
+          "sha256": "13c0ad75c29fc5d84b918a05a172bb865720ed5d5e9cf20dfb5c8574ebb95cea"
         }
       },
       "owns": ["career_automation/official_ats_adapter.py"],
@@ -720,13 +749,15 @@
       "claim": "Track the application after submission without manual bookkeeping.",
       "increment": "local_export_contract_complete_dependency_and_connectors_withheld",
       "depends_on": ["JAA-11"],
+      "objective_satisfied": false,
       "provisional_local_export_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
-        "implemented_source_git_revision": "21ee76bfe5e886e8bc1230a24010b1d841882509",
-        "implemented_source_tree": "6a66f606efa38112701d76a4406bfbcd8180be40",
-        "implemented_source_content_revision": "sha256:4efcdbc108aaea487bb6305dcd370213f77969085e33ec8e7f6d0cd505fb723d",
+        "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "implemented_source_tree": "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+        "implemented_source_content_revision": "sha256:5bcee41a9e30b2e288ef92d958a70fd3a28bda7fc29aea6fbeadebe98fb5520d",
         "upstream_dependency_satisfied": false,
+        "follow_up_reference_hashes": "caller_supplied_structural_references",
         "mailbox_connector_status": "not_connected",
         "portal_connector_status": "not_connected",
         "message_send_authority": "withheld",
@@ -761,6 +792,26 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa12-post-review-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA11_12_FINAL_INTEGRITY_ACCEPTANCE.md",
+          "sha256": "a04f525da6467a76500b1d17eab67e219a60803c06d10e2582040940e5f41892"
+        },
+        "typed_follow_up_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_TYPED_FOLLOW_UP_ACCEPTANCE.md",
+          "sha256": "e3d34200b31550d3b3efc1aa7bde9780f166ed70a621413d4b3f14a983a72c09"
+        },
+        "final_repair_focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log",
+          "sha256": "13c0ad75c29fc5d84b918a05a172bb865720ed5d5e9cf20dfb5c8574ebb95cea"
+        },
+        "authenticity_repair_focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_16_AUTHENTICITY_REPAIR_FOCUSED.log",
+          "sha256": "8a39a140511d29d525f99ac958f50ee1c84e570b5e8f3439511e526b529495a5"
         }
       },
       "owns": ["career_automation/status_ingestion.py"],
@@ -777,13 +828,15 @@
       "claim": "Convert the same evidence and employer intelligence into interview preparation and post-interview continuity.",
       "increment": "local_preparation_debrief_and_draft_contract_complete_dependency_refresh_and_send_withheld",
       "depends_on": ["JAA-12"],
+      "objective_satisfied": false,
       "provisional_local_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
-        "implemented_source_git_revision": "59bd3f044485a62407e0ffc92c6d786a8e7f689e",
-        "implemented_source_tree": "3a03bed3cf6fe71de5f789dcb42850bb96776489",
-        "implemented_source_content_revision": "sha256:d2a17c9cefc8dbafea4b8074e035fcfcabd2384f744d31c525b71345bf0dd0e4",
+        "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "implemented_source_tree": "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+        "implemented_source_content_revision": "sha256:5bcee41a9e30b2e288ef92d958a70fd3a28bda7fc29aea6fbeadebe98fb5520d",
         "upstream_dependency_satisfied": false,
+        "submission_context_authentication": "unauthenticated_structural_assertion",
         "source_refresh_authority": "withheld",
         "private_person_inference": false,
         "candidate_fact_mutation_authority": false,
@@ -820,6 +873,16 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa13-post-review-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA13_FINAL_INTEGRITY_ACCEPTANCE.md",
+          "sha256": "82036eb230c447517d1550808404df09ab7b74f80d090dfe0f68eca8e8e2a958"
+        },
+        "final_repair_focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log",
+          "sha256": "13c0ad75c29fc5d84b918a05a172bb865720ed5d5e9cf20dfb5c8574ebb95cea"
         }
       },
       "owns": ["career_automation/interview_communication.py"],
@@ -836,12 +899,13 @@
       "claim": "Improve selection and application strategy automatically from observed funnel outcomes.",
       "increment": "local_outcome_feedback_contract_complete_dependency_runtime_and_promotion_withheld",
       "depends_on": ["JAA-13"],
+      "objective_satisfied": false,
       "provisional_local_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
-        "implemented_source_git_revision": "f029e05fdd0e5818e0cb30ebe3386778a1889c7e",
-        "implemented_source_tree": "a42d72c677bcb5712282b1eae3dabbae9b1eb82e",
-        "implemented_source_content_revision": "sha256:d38bfa42b998353b4ab62c74dbf38859afe182e410ae27c84290e8f8f2e0c135",
+        "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "implemented_source_tree": "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+        "implemented_source_content_revision": "sha256:5bcee41a9e30b2e288ef92d958a70fd3a28bda7fc29aea6fbeadebe98fb5520d",
         "upstream_dependency_satisfied": false,
         "runtime_learning_authority": "withheld",
         "policy_promotion_authority": "withheld",
@@ -884,6 +948,16 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa14-definitive-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA14_FINAL_INTEGRITY_ACCEPTANCE.md",
+          "sha256": "3b4d2e1d0f30b299fb9f10e3bb6ba4b5f80f8e0ad9ef78faf9806d00b8aefd75"
+        },
+        "final_repair_focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_13_FINAL_REPAIR_FOCUSED.log",
+          "sha256": "13c0ad75c29fc5d84b918a05a172bb865720ed5d5e9cf20dfb5c8574ebb95cea"
         }
       },
       "owns": ["career_automation/outcome_feedback.py"],
@@ -900,13 +974,15 @@
       "claim": "Add only the sources and ATS routes with measured incremental career value.",
       "increment": "local_expansion_ranking_and_gate_contract_complete_dependency_runtime_and_activation_withheld",
       "depends_on": ["JAA-14"],
+      "objective_satisfied": false,
       "provisional_local_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
-        "implemented_source_git_revision": "a33334832c88038199df475fca281f0c51b5ae38",
-        "implemented_source_tree": "988d6c3c6c40d5e2e802e8cd750938bf898c370e",
-        "implemented_source_content_revision": "sha256:f788d5a6e5864956915dc12b07e2ff16504a54c8c9d37b41537beaa0141450cd",
+        "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "implemented_source_tree": "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+        "implemented_source_content_revision": "sha256:5bcee41a9e30b2e288ef92d958a70fd3a28bda7fc29aea6fbeadebe98fb5520d",
         "upstream_dependency_satisfied": false,
+        "evidence_reference_authentication": "caller_asserted_digest_only",
         "real_runtime_evidence_verified": false,
         "adapter_created_or_activated": false,
         "adapter_activation_authority": "withheld",
@@ -949,6 +1025,21 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa15-repair-final-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA15_16_FINAL_INTEGRITY_ACCEPTANCE.md",
+          "sha256": "cd1487b30b591298dcdb25bb1ee90d1b324fe8d98b71f5fd60d70912fd4a9a3b"
+        },
+        "evidence_authenticity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA15_16_EVIDENCE_AUTHENTICITY_ACCEPTANCE.md",
+          "sha256": "31a89b0cdd8c0f7da30ccf8ebad7d92857e20ae5b601dcadbb9da2f31b31e864"
+        },
+        "authenticity_repair_focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_16_AUTHENTICITY_REPAIR_FOCUSED.log",
+          "sha256": "8a39a140511d29d525f99ac958f50ee1c84e570b5e8f3439511e526b529495a5"
         }
       },
       "owns": ["career_automation/source_expansion.py"],
@@ -965,13 +1056,15 @@
       "claim": "Operate continuously with bounded failures, model fallback, recovery and honest reporting.",
       "increment": "local_operations_and_release_gate_contract_complete_dependency_runtime_distribution_and_certification_withheld",
       "depends_on": ["JAA-15"],
+      "objective_satisfied": false,
       "provisional_local_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "absent_pending_ratification",
-        "implemented_source_git_revision": "df341a275cbc4ec960250b9c5f2b8c26cad189e5",
-        "implemented_source_tree": "e19da2ada822cf815620163c7062b18c2cc45b7d",
-        "implemented_source_content_revision": "sha256:7ce7b1fedd9322dca7f709eadee61869d5416a8911fc7c251f9c431b8fd44d9a",
+        "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
+        "implemented_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "implemented_source_tree": "b44f16daa4a5aa3857950d0bf0a577efe9b1bfad",
+        "implemented_source_content_revision": "sha256:5bcee41a9e30b2e288ef92d958a70fd3a28bda7fc29aea6fbeadebe98fb5520d",
         "upstream_dependency_satisfied": false,
+        "prior_certification_and_release_evidence_authentication": "unauthenticated_caller_supplied",
         "runtime_drill_evidence_verified": false,
         "distributable_artifact_verified": false,
         "release_certificate_status": "absent",
@@ -1023,6 +1116,21 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa16-repair-definitive-ruff.log",
           "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+        },
+        "final_integrity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA15_16_FINAL_INTEGRITY_ACCEPTANCE.md",
+          "sha256": "cd1487b30b591298dcdb25bb1ee90d1b324fe8d98b71f5fd60d70912fd4a9a3b"
+        },
+        "evidence_authenticity_receipt": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA15_16_EVIDENCE_AUTHENTICITY_ACCEPTANCE.md",
+          "sha256": "31a89b0cdd8c0f7da30ccf8ebad7d92857e20ae5b601dcadbb9da2f31b31e864"
+        },
+        "authenticity_repair_focused_log": {
+          "path_base": "operator_control_root",
+          "relative_path": "jaa-single-codex-20260729/SOL_JAA12_16_AUTHENTICITY_REPAIR_FOCUSED.log",
+          "sha256": "8a39a140511d29d525f99ac958f50ee1c84e570b5e8f3439511e526b529495a5"
         }
       },
       "owns": ["career_automation/operations.py", "career_automation/release_certification.py"],
@@ -1030,7 +1138,7 @@
       "interfaces": [],
       "environment": [],
       "tests": [
-        {"id": "JAA-16-release", "argv": ["{python}", "-m", "pytest", "-q"], "files": ["test_jaa16_release_certification.py", "test_acceptance_declaration_contract.py"], "timeout_seconds": 3600},
+        {"id": "JAA-16-release", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa16_release_certification.py", "test_acceptance_declaration_contract.py"], "files": ["test_jaa16_release_certification.py", "test_acceptance_declaration_contract.py"], "timeout_seconds": 3600},
         {"id": "JAA-16-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa16_negative_controls.py"], "files": ["test_jaa16_negative_controls.py"], "negative_control": true}
       ],
       "evidence": []
