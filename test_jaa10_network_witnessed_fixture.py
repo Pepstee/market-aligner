@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import stat
 import subprocess
 from pathlib import Path
@@ -53,9 +54,9 @@ def accepted_integration(tmp_path_factory: pytest.TempPathFactory):
         for path in ROOT.rglob("*")
         if path.name == "__pycache__" or path.suffix == ".pyc"
     }
-    execution_root = (
-        tmp_path_factory.mktemp("network-witnessed-browser")
-        / "accepted-execution"
+    tmp_path_factory.mktemp("network-witnessed-browser")
+    execution_root = Path(
+        f"/tmp/jaa10-nw-{os.getpid()}-{secrets.token_hex(4)}"
     )
     receipt, witness, network_receipt = run_network_witnessed_fixture(
         repository_root=ROOT,
