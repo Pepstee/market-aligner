@@ -14,13 +14,17 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Mapping
 
-from career_automation.shadow_certification import HARD_QUALITY_TARGETS
+from career_automation.shadow_certification import (
+    FROZEN_SHADOW_CONTRACT,
+    HARD_QUALITY_TARGETS,
+)
 
 
 METRICS_SCHEMA_VERSION = "jaa10.hard-metrics-evaluation.v1"
@@ -38,10 +42,102 @@ _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _FIXTURE_SCHEMA = "jaa07.locked-application-packs.v1"
 _REPORT_SCHEMA = "jaa07.locked-evaluation-report.v1"
 _REPORT_STATUS = "SOFTWARE_CONTRACT_PASS"
-_REPORT_SCOPE_ID = (
-    "801349f4a13a9516e928d30035cfcab00adb4f1bd2783cbaa0c8cd61a4554e59"
-)
+_REPORT_SCOPE_ID = "801349f4a13a9516e928d30035cfcab00adb4f1bd2783cbaa0c8cd61a4554e59"
 _EXPECTED_PACK_IDS = tuple(f"pack-{index:02d}" for index in range(1, 21))
+REPLAY_PAIR_SCHEMA_VERSION = "jaa10.frozen-replay-pair.v1"
+REPLAY_OBSERVATION_SCHEMA_VERSION = "jaa10.shadow-observation.v2"
+STABLE_PROJECTION_VERSION = "jaa10.replay-stable-projection.v1"
+REPLAY_PAIR_DOMAIN = b"jaa10-frozen-replay-pair-v1\0"
+STABLE_PROJECTION_DOMAIN = b"jaa10-replay-stable-projection-v1\0"
+_REPLAY_IDENTITY = {
+    "source_git_revision": "95caa7254973523734d9cf5a633160e89a8e277e",
+    "source_tree": "cd8866e519d3d0d55ebb482be371843920c05047",
+    "source_content_revision": "sha256:0fa45f68150decc7b99e2ae92759850bf690805de33f89cbfaa9f5f330ac4ab7",
+}
+_REPLAY_EEI_SHA256 = "5cd96b3cb1ca8baeb87559d89df11670114d795282188ae893a549daf7bab5f1"
+_REPLAY_PAIR_RECEIPT_SHA256 = (
+    "0c6830ebe0a6bd0018eee869a32ab1d9dabbfe2ed9b78663c376feb040970cba"
+)
+_REPLAY_OBSERVATION_SHA256 = (
+    "b6dd3fbd2580da722435323d717bf6806c433c7628fd6c5cf465d5df64ef4442",
+    "5bf21fbdd2cac84f35d0bbaaa50abbb7d0cf8df67cabc18bb23c416852ec8915",
+)
+_REPLAY_OBSERVATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "observation_id",
+        "observed_at",
+        "evidence_kind",
+        "execution_claim",
+        "run_id",
+        "step_id",
+        "workflow_sha256",
+        "durable_workflow_sha256",
+        "release_manifest_sha256",
+        "receipt_id",
+        "receipt_payload_sha256",
+        "field_map_sha256",
+        "screenshot_sha256",
+        "submit_event_sha256",
+        "normalized_submit_event_sha256",
+        "submission_proof",
+        "fixture_receipt",
+        "action_elapsed_ms",
+        "browser_launch_count",
+        "database_bytes",
+        "screenshot_bytes",
+        "interruptions",
+        "mutations",
+        "model_version",
+        "prompt_version",
+        "model_cost_microusd",
+    }
+)
+_REPLAY_STABLE_KEYS = (
+    "schema_version",
+    "evidence_kind",
+    "execution_claim",
+    "step_id",
+    "workflow_sha256",
+    "receipt_id",
+    "receipt_payload_sha256",
+    "field_map_sha256",
+    "screenshot_sha256",
+    "normalized_submit_event_sha256",
+    "browser_launch_count",
+    "interruptions",
+    "mutations",
+    "model_version",
+    "prompt_version",
+    "model_cost_microusd",
+    "fixture_receipt",
+)
+_REPLAY_PAIR_KEYS = frozenset(
+    {
+        "schema_version",
+        "contract_sha256",
+        "replay_execution_identity",
+        "execution_environment_sha256",
+        "observation_1",
+        "observation_2",
+        "observation_1_sha256",
+        "observation_2_sha256",
+        "stable_projection_version",
+        "stable_field_hash_1",
+        "stable_field_hash_2",
+        "mismatched_stable_fields",
+        "mismatch_count",
+        "time_authenticated",
+        "evidence_class",
+        "objective_satisfied",
+        "certifies_slice",
+        "live_time_separated_execution",
+        "production_certification",
+        "external_action_capability",
+        "real_applications_submitted",
+        "receipt_sha256",
+    }
+)
 
 
 class MetricStatus(str, Enum):
@@ -109,9 +205,8 @@ class ModelCallAccounting:
         ):
             if not isinstance(value, str) or not _HEX_64.fullmatch(value):
                 raise ValueError(f"model-call {label} hash is required")
-        if (
-            self.transport_request_sha256 is not None
-            and not _HEX_64.fullmatch(self.transport_request_sha256)
+        if self.transport_request_sha256 is not None and not _HEX_64.fullmatch(
+            self.transport_request_sha256
         ):
             raise ValueError("model-call transport hash is invalid")
         for value, label in (
@@ -119,15 +214,9 @@ class ModelCallAccounting:
             (self.tokens_output, "output token"),
             (self.tokens_cached_input, "cached-input token"),
         ):
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
-            ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"model-call {label} count is invalid")
-        if (self.cost_amount_decimal is None) != (
-            self.cost_currency is None
-        ):
+        if (self.cost_amount_decimal is None) != (self.cost_currency is None):
             raise ValueError("model-call cost must be wholly available")
         if self.cost_amount_decimal is not None:
             try:
@@ -148,19 +237,12 @@ class ModelCallAccounting:
         )
         if any(value is None for value in latencies):
             if not all(value is None for value in latencies):
-                raise ValueError(
-                    "model-call latency must be wholly available"
-                )
-        elif (
-            any(
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
-                for value in latencies
-            )
-            or not (
-                latencies[0] <= latencies[1] <= latencies[2]  # type: ignore[operator]
-            )
+                raise ValueError("model-call latency must be wholly available")
+        elif any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in latencies
+        ) or not (
+            latencies[0] <= latencies[1] <= latencies[2]  # type: ignore[operator]
         ):
             raise ValueError("model-call latency is invalid")
         if not isinstance(self.abstained, bool):
@@ -227,16 +309,23 @@ _FIXTURE_ENTRY = _RegistryEntry(
 _REPORT_ENTRY = _RegistryEntry(
     evidence_id="jaa07-locked-evaluation-report-v1",
     path_base="operator_control_root",
+    relative_path=("jaa-single-codex-20260729/jaa07-post-review-repair-evaluator.log"),
+    sha256="5cf1f1f5bcee57aaf8a517edb734cf9dadf1802e44f831defd105418c41ef1fe",
+)
+_REPLAY_PAIR_ENTRY = _RegistryEntry(
+    evidence_id="jaa10-frozen-replay-pair-primary-v1",
+    path_base="operator_control_root",
     relative_path=(
         "jaa-single-codex-20260729/"
-        "jaa07-post-review-repair-evaluator.log"
+        "JAA10_FROZEN_REPLAY_PAIR_PRIMARY_95caa725/replay-pair.json"
     ),
-    sha256="5cf1f1f5bcee57aaf8a517edb734cf9dadf1802e44f831defd105418c41ef1fe",
+    sha256="0b278e63b95fd3031d0f6b9181f7e5d783c08052a1a7abd591dbc1467662b786",
 )
 EVIDENCE_REGISTRY: Mapping[str, _RegistryEntry] = MappingProxyType(
     {
         _FIXTURE_ENTRY.evidence_id: _FIXTURE_ENTRY,
         _REPORT_ENTRY.evidence_id: _REPORT_ENTRY,
+        _REPLAY_PAIR_ENTRY.evidence_id: _REPLAY_PAIR_ENTRY,
     }
 )
 
@@ -252,9 +341,8 @@ _LIVE_DEPENDENT_METRICS = frozenset(
 _FIXTURE_EVALUABLE_METRICS = frozenset(
     {"ats_parse_success_bp", "deterministic_replay_mismatch"}
 )
-if (
-    _LIVE_DEPENDENT_METRICS | _FIXTURE_EVALUABLE_METRICS
-    != frozenset(HARD_QUALITY_TARGETS)
+if _LIVE_DEPENDENT_METRICS | _FIXTURE_EVALUABLE_METRICS != frozenset(
+    HARD_QUALITY_TARGETS
 ):
     raise RuntimeError("hard-metric policy does not cover the canonical targets")
 
@@ -280,8 +368,7 @@ def evidence_registry_document() -> dict[str, object]:
     return {
         "schema_version": METRICS_SCHEMA_VERSION,
         "entries": [
-            EVIDENCE_REGISTRY[key].document()
-            for key in sorted(EVIDENCE_REGISTRY)
+            EVIDENCE_REGISTRY[key].document() for key in sorted(EVIDENCE_REGISTRY)
         ],
     }
 
@@ -310,9 +397,7 @@ def _operator_control_root(repository_root: Path) -> Path:
     try:
         resolved = control.resolve(strict=True)
     except OSError as exc:
-        raise EvidenceRegistryError(
-            "operator control root is unavailable"
-        ) from exc
+        raise EvidenceRegistryError("operator control root is unavailable") from exc
     if not resolved.is_dir():
         raise EvidenceRegistryError("operator control root is not a directory")
     return resolved
@@ -343,9 +428,7 @@ def _read_regular_file_once(root: Path, relative_path: str) -> bytes:
         descriptors.append(file_fd)
         metadata = os.fstat(file_fd)
         if not stat.S_ISREG(metadata.st_mode):
-            raise EvidenceRegistryError(
-                "metric evidence must be a regular file"
-            )
+            raise EvidenceRegistryError("metric evidence must be a regular file")
         chunks: list[bytes] = []
         while True:
             chunk = os.read(file_fd, 1024 * 1024)
@@ -371,11 +454,7 @@ def _read_registry_entry(
     repository_root: Path,
     control_root: Path,
 ) -> bytes:
-    root = (
-        repository_root
-        if entry.path_base == "repository_root"
-        else control_root
-    )
+    root = repository_root if entry.path_base == "repository_root" else control_root
     payload = _read_regular_file_once(root, entry.relative_path)
     if hashlib.sha256(payload).hexdigest() != entry.sha256:
         raise EvidenceRegistryError(
@@ -392,6 +471,198 @@ def _json_object(payload: bytes, label: str) -> dict[str, object]:
     if not isinstance(document, dict):
         raise EvidenceRegistryError(f"{label} must be a JSON object")
     return document
+
+
+def _mismatched_paths(
+    first: object, second: object, prefix: str = ""
+) -> tuple[str, ...]:
+    if type(first) is not type(second):
+        return (prefix or "$",)
+    if isinstance(first, dict):
+        other = second  # type: ignore[assignment]
+        if set(first) != set(other):
+            return tuple(
+                sorted(
+                    f"{prefix}.{key}" if prefix else key
+                    for key in set(first) ^ set(other)
+                )
+            )
+        paths: list[str] = []
+        for key in sorted(first):
+            paths.extend(
+                _mismatched_paths(
+                    first[key], other[key], f"{prefix}.{key}" if prefix else key
+                )
+            )
+        return tuple(paths)
+    if isinstance(first, list):
+        other = second  # type: ignore[assignment]
+        if len(first) != len(other):
+            return (f"{prefix}.length",)
+        return tuple(
+            path
+            for index, value in enumerate(first)
+            for path in _mismatched_paths(value, other[index], f"{prefix}[{index}]")
+        )
+    return () if first == second else (prefix or "$",)
+
+
+def _validate_replay_observation(document: object) -> dict[str, object]:
+    if not isinstance(document, dict) or set(document) != _REPLAY_OBSERVATION_KEYS:
+        raise EvidenceRegistryError("replay observation inventory differs")
+    if (
+        document["schema_version"] != REPLAY_OBSERVATION_SCHEMA_VERSION
+        or document["evidence_kind"] != "synthetic_shadow"
+        or document["execution_claim"] != "structural_lineage_only"
+    ):
+        raise EvidenceRegistryError("replay observation literals differ")
+    try:
+        observed = datetime.fromisoformat(
+            str(document["observed_at"]).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise EvidenceRegistryError("replay observation time differs") from exc
+    if observed.tzinfo is None:
+        raise EvidenceRegistryError("replay observation time differs")
+    golden = {
+        "workflow_sha256": FROZEN_SHADOW_CONTRACT.workflow_sha256,
+        "receipt_id": FROZEN_SHADOW_CONTRACT.receipt_id,
+        "receipt_payload_sha256": FROZEN_SHADOW_CONTRACT.receipt_payload_sha256,
+        "field_map_sha256": FROZEN_SHADOW_CONTRACT.field_map_sha256,
+        "screenshot_sha256": FROZEN_SHADOW_CONTRACT.screenshot_sha256,
+        "normalized_submit_event_sha256": FROZEN_SHADOW_CONTRACT.submit_event_sha256,
+    }
+    if any(document[key] != value for key, value in golden.items()):
+        raise EvidenceRegistryError("replay observation golden field differs")
+    fixture = document["fixture_receipt"]
+    if (
+        not isinstance(fixture, dict)
+        or set(fixture)
+        != {
+            "schema_version",
+            "receipt_id",
+            "payload_sha256",
+            "application_id",
+            "job_key",
+            "certifies_slice",
+        }
+        or fixture
+        != {
+            "schema_version": "jaa09.fixture-receipt.v1",
+            "receipt_id": document["receipt_id"],
+            "payload_sha256": document["receipt_payload_sha256"],
+            "application_id": FROZEN_SHADOW_CONTRACT.application_id,
+            "job_key": FROZEN_SHADOW_CONTRACT.job_key,
+            "certifies_slice": False,
+        }
+    ):
+        raise EvidenceRegistryError("replay fixture receipt differs")
+    proof = document["submission_proof"]
+    proof_fields = {
+        "receipt_id": "receipt_id",
+        "receipt_payload_sha256": "receipt_payload_sha256",
+        "field_map_sha256": "field_map_sha256",
+        "screenshot_sha256": "screenshot_sha256",
+        "release_manifest_sha256": "release_manifest_sha256",
+        "submit_event_sha256": "submit_event_sha256",
+    }
+    if (
+        not isinstance(proof, dict)
+        or set(proof) != {*proof_fields, "token_sha256"}
+        or any(proof[key] != document[source] for key, source in proof_fields.items())
+        or not isinstance(proof["token_sha256"], str)
+        or not _HEX_64.fullmatch(proof["token_sha256"])
+    ):
+        raise EvidenceRegistryError("replay submission proof differs")
+    return document
+
+
+def _derive_replay_pair(document: Mapping[str, object]) -> int:
+    if set(document) != _REPLAY_PAIR_KEYS:
+        raise EvidenceRegistryError("replay pair inventory differs")
+    withheld = {
+        "schema_version": REPLAY_PAIR_SCHEMA_VERSION,
+        "contract_sha256": FROZEN_SHADOW_CONTRACT.contract_sha256,
+        "stable_projection_version": STABLE_PROJECTION_VERSION,
+        "replay_execution_identity": _REPLAY_IDENTITY,
+        "execution_environment_sha256": _REPLAY_EEI_SHA256,
+        "evidence_class": "fixture_frozen",
+        "objective_satisfied": False,
+        "certifies_slice": False,
+        "live_time_separated_execution": "not_collected",
+        "production_certification": "withheld",
+        "external_action_capability": False,
+    }
+    if any(
+        type(document[key]) is not type(value) or document[key] != value
+        for key, value in withheld.items()
+    ):
+        raise EvidenceRegistryError("replay pair authority literal differs")
+    if document["time_authenticated"] is not False:
+        raise EvidenceRegistryError("replay pair time authentication differs")
+    applications = document["real_applications_submitted"]
+    if (
+        not isinstance(applications, int)
+        or isinstance(applications, bool)
+        or applications != 0
+    ):
+        raise EvidenceRegistryError("replay pair application count differs")
+    observations = (
+        _validate_replay_observation(document["observation_1"]),
+        _validate_replay_observation(document["observation_2"]),
+    )
+    if (
+        observations[0]["observation_id"] == observations[1]["observation_id"]
+        or observations[0]["release_manifest_sha256"]
+        == observations[1]["release_manifest_sha256"]
+    ):
+        raise EvidenceRegistryError("replay observations are not distinct")
+    projections = tuple(
+        {key: observation[key] for key in _REPLAY_STABLE_KEYS}
+        for observation in observations
+    )
+    stable_hashes = tuple(
+        _domain_hash(
+            STABLE_PROJECTION_DOMAIN,
+            {
+                "stable_projection_version": STABLE_PROJECTION_VERSION,
+                "projection": projection,
+            },
+        )
+        for projection in projections
+    )
+    observation_hashes = tuple(
+        hashlib.sha256(_canonical_json(observation).encode("utf-8")).hexdigest()
+        for observation in observations
+    )
+    paths = tuple(sorted(set(_mismatched_paths(projections[0], projections[1]))))
+    count = 0 if stable_hashes[0] == stable_hashes[1] else 1
+    if (
+        tuple(document[f"observation_{index}_sha256"] for index in (1, 2))
+        != observation_hashes
+        or tuple(document[f"stable_field_hash_{index}"] for index in (1, 2))
+        != stable_hashes
+        or document["mismatched_stable_fields"] != list(paths)
+        or document["mismatch_count"] != count
+        or bool(paths) != bool(count)
+    ):
+        raise EvidenceRegistryError("replay pair derivation differs")
+    core = dict(document)
+    stored_receipt = core.pop("receipt_sha256")
+    if _domain_hash(REPLAY_PAIR_DOMAIN, core) != stored_receipt:
+        raise EvidenceRegistryError("replay pair receipt differs")
+    return count
+
+
+def _validate_replay_pair(document: Mapping[str, object]) -> int:
+    count = _derive_replay_pair(document)
+    if (
+        tuple(document[f"observation_{index}_sha256"] for index in (1, 2))
+        != _REPLAY_OBSERVATION_SHA256
+        or document["receipt_sha256"] != _REPLAY_PAIR_RECEIPT_SHA256
+    ):
+        raise EvidenceRegistryError("replay pair authority pin differs")
+    return count
 
 
 def _reject_informational_inputs(value: object) -> None:
@@ -485,40 +756,31 @@ def _validate_report_document(
             or case_id not in fixture_artifacts
             or artifact_hash != fixture_artifacts[case_id]
         ):
-            raise EvidenceRegistryError(
-                "locked evaluation row binding differs"
-            )
+            raise EvidenceRegistryError("locked evaluation row binding differs")
         parse_success = checks.get("parse_success")
         deterministic_replay = checks.get("deterministic_replay")
-        if (
-            not isinstance(parse_success, bool)
-            or not isinstance(deterministic_replay, bool)
+        if not isinstance(parse_success, bool) or not isinstance(
+            deterministic_replay, bool
         ):
-            raise EvidenceRegistryError(
-                "locked evaluation row result is untyped"
-            )
+            raise EvidenceRegistryError("locked evaluation row result is untyped")
         seen.append(case_id)
         parse_failures += not parse_success
         replay_mismatches += not deterministic_replay
     if tuple(seen) != _EXPECTED_PACK_IDS:
-        raise EvidenceRegistryError(
-            "locked evaluation denominator is incomplete"
-        )
+        raise EvidenceRegistryError("locked evaluation denominator is incomplete")
     expected_parse_bp = (
-        (len(_EXPECTED_PACK_IDS) - parse_failures) * 10_000
-        // len(_EXPECTED_PACK_IDS)
+        (len(_EXPECTED_PACK_IDS) - parse_failures) * 10_000 // len(_EXPECTED_PACK_IDS)
     )
     expected_replay_bp = (
-        (len(_EXPECTED_PACK_IDS) - replay_mismatches) * 10_000
+        (len(_EXPECTED_PACK_IDS) - replay_mismatches)
+        * 10_000
         // len(_EXPECTED_PACK_IDS)
     )
     if (
         metrics.get("parse_success") != expected_parse_bp
         or metrics.get("deterministic_replay") != expected_replay_bp
     ):
-        raise EvidenceRegistryError(
-            "locked evaluation summary and denominator differ"
-        )
+        raise EvidenceRegistryError("locked evaluation summary and denominator differ")
     return parse_failures, replay_mismatches
 
 
@@ -563,9 +825,7 @@ class MetricReceipt:
             "value": self.value,
             "unit": self.unit,
             "evidence_class": (
-                None
-                if self.evidence_class is None
-                else self.evidence_class.value
+                None if self.evidence_class is None else self.evidence_class.value
             ),
             "evidence_item_ids": list(self.evidence_item_ids),
             "evidence_scope_id": self.evidence_scope_id,
@@ -602,13 +862,10 @@ class MetricReceipt:
                 or self.evidence_item_ids
                 or self.evidence_scope_id is not None
             ):
-                raise MetricIntegrityError(
-                    "unevaluable metric receipt is gameable"
-                )
+                raise MetricIntegrityError("unevaluable metric receipt is gameable")
         elif self.metric_name == "ats_parse_success_bp":
             expected_value = (
-                (self.denominator - self.numerator) * 10_000
-                // self.denominator
+                (self.denominator - self.numerator) * 10_000 // self.denominator
             )
             expected_status = (
                 MetricStatus.PASS
@@ -627,9 +884,26 @@ class MetricReceipt:
                 or self.missing_evidence_count != 0
             ):
                 raise MetricIntegrityError("ATS-parse metric receipt differs")
+        elif self.metric_name == "deterministic_replay_mismatch":
+            expected_status = (
+                MetricStatus.PASS
+                if self.numerator == self.target
+                else MetricStatus.FAIL
+            )
+            if (
+                self.denominator != 1
+                or self.value != self.numerator
+                or self.status is not expected_status
+                or self.unit != "count"
+                or self.evidence_class is not EvidenceClass.FIXTURE_FROZEN
+                or self.evidence_item_ids != (_REPLAY_PAIR_ENTRY.evidence_id,)
+                or self.evidence_scope_id != _REPLAY_PAIR_RECEIPT_SHA256
+                or self.missing_evidence_count != 0
+            ):
+                raise MetricIntegrityError("replay metric receipt differs")
         else:
             raise MetricIntegrityError(
-                "only ATS parse is evaluable from the current registry"
+                "only registry-pinned fixture metrics are evaluable"
             )
         expected_hash = _domain_hash(
             METRIC_RECEIPT_DOMAIN,
@@ -682,6 +956,27 @@ def _build_metric_receipt(
     return receipt
 
 
+def _build_replay_metric_receipt(mismatch_count: int) -> MetricReceipt:
+    if mismatch_count not in {0, 1}:
+        raise MetricIntegrityError("replay mismatch count differs")
+    return _build_metric_receipt(
+        metric_name="deterministic_replay_mismatch",
+        status=(
+            MetricStatus.PASS
+            if mismatch_count == HARD_QUALITY_TARGETS["deterministic_replay_mismatch"]
+            else MetricStatus.FAIL
+        ),
+        numerator=mismatch_count,
+        denominator=1,
+        value=mismatch_count,
+        unit="count",
+        evidence_class=EvidenceClass.FIXTURE_FROZEN,
+        evidence_item_ids=(_REPLAY_PAIR_ENTRY.evidence_id,),
+        evidence_scope_id=_REPLAY_PAIR_RECEIPT_SHA256,
+        missing_evidence_count=0,
+    )
+
+
 @dataclass(frozen=True, init=False)
 class HardMetricsEvaluation:
     metrics: tuple[MetricReceipt, ...]
@@ -732,12 +1027,14 @@ class HardMetricsEvaluation:
 def _derive_from_documents(
     fixture_document: Mapping[str, object],
     report_document: Mapping[str, object],
+    replay_pair_document: Mapping[str, object],
 ) -> HardMetricsEvaluation:
     fixture_artifacts = _validate_fixture_document(fixture_document)
     parse_failures, _replay_mismatches = _validate_report_document(
         report_document,
         fixture_artifacts=fixture_artifacts,
     )
+    replay_mismatch_count = _validate_replay_pair(replay_pair_document)
     receipts: list[MetricReceipt] = []
     for metric_name in sorted(HARD_QUALITY_TARGETS):
         if metric_name == "ats_parse_success_bp":
@@ -763,6 +1060,8 @@ def _derive_from_documents(
                 evidence_scope_id=_REPORT_SCOPE_ID,
                 missing_evidence_count=0,
             )
+        elif metric_name == "deterministic_replay_mismatch":
+            receipt = _build_replay_metric_receipt(replay_mismatch_count)
         else:
             receipt = _build_metric_receipt(
                 metric_name=metric_name,
@@ -770,9 +1069,7 @@ def _derive_from_documents(
                 numerator=0,
                 denominator=0,
                 value=None,
-                unit=(
-                    "count"
-                ),
+                unit=("count"),
                 evidence_class=None,
                 evidence_item_ids=(),
                 evidence_scope_id=None,
@@ -818,9 +1115,20 @@ def evaluate_hard_metrics() -> HardMetricsEvaluation:
         repository_root=repository_root,
         control_root=control_root,
     )
+    replay_pair_payload = _read_registry_entry(
+        _REPLAY_PAIR_ENTRY,
+        repository_root=repository_root,
+        control_root=control_root,
+    )
+    replay_pair_document = _json_object(replay_pair_payload, "frozen replay pair")
+    if replay_pair_payload != (_canonical_json(replay_pair_document) + "\n").encode(
+        "utf-8"
+    ):
+        raise EvidenceRegistryError("frozen replay pair is not canonical JSON")
     return _derive_from_documents(
         _json_object(fixture_payload, "locked application-pack fixture"),
         _json_object(report_payload, "locked evaluation report"),
+        replay_pair_document,
     )
 
 
@@ -852,9 +1160,7 @@ def _publish_canonical_receipt(
         )
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
-            raise ReceiptPublicationError(
-                "receipt staging target is not regular"
-            )
+            raise ReceiptPublicationError("receipt staging target is not regular")
         view = memoryview(payload)
         while view:
             written = os.write(descriptor, view)
@@ -866,9 +1172,7 @@ def _publish_canonical_receipt(
         os.link(temporary, destination, follow_symlinks=False)
         os.unlink(temporary)
     except (FileExistsError, OSError) as exc:
-        raise ReceiptPublicationError(
-            "receipt publication must be exclusive"
-        ) from exc
+        raise ReceiptPublicationError("receipt publication must be exclusive") from exc
     finally:
         if descriptor is not None:
             try:

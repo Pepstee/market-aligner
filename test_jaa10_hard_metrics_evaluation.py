@@ -22,13 +22,13 @@ from career_automation.hard_metrics_evaluation import (
     publish_hard_metrics_evaluation,
 )
 from career_automation.shadow_certification import HARD_QUALITY_TARGETS
+from career_automation import frozen_replay_pair_recorder as recorder
+from career_automation import hard_metrics_evaluation as evaluator
 
 
 def _metrics_by_name():
     evaluation = evaluate_hard_metrics()
-    return evaluation, {
-        metric.metric_name: metric for metric in evaluation.metrics
-    }
+    return evaluation, {metric.metric_name: metric for metric in evaluation.metrics}
 
 
 def test_authority_registry_is_fixed_and_evaluator_accepts_no_input() -> None:
@@ -36,25 +36,22 @@ def test_authority_registry_is_fixed_and_evaluator_accepts_no_input() -> None:
     assert set(EVIDENCE_REGISTRY) == {
         "jaa07-locked-application-packs-v1",
         "jaa07-locked-evaluation-report-v1",
+        "jaa10-frozen-replay-pair-primary-v1",
     }
-    assert evidence_registry_document()["schema_version"] == (
-        METRICS_SCHEMA_VERSION
-    )
+    assert evidence_registry_document()["schema_version"] == (METRICS_SCHEMA_VERSION)
     assert len(evidence_registry_sha256()) == 64
     with pytest.raises(TypeError):
         EVIDENCE_REGISTRY["caller-path"] = object()  # type: ignore[index]
 
 
-def test_current_registry_derives_one_fixture_pass_and_six_unevaluable() -> None:
+def test_current_registry_derives_two_fixture_passes_and_five_unevaluable() -> None:
     evaluation, metrics = _metrics_by_name()
     evaluation.verify()
     assert set(metrics) == set(HARD_QUALITY_TARGETS)
     assert evaluation.model_call_accounting == DETERMINISTIC_ACCOUNTING
     assert evaluation.document()["objective_satisfied"] is False
     assert evaluation.document()["production_certification"] == "withheld"
-    assert evaluation.document()["live_time_separated_execution"] == (
-        "not_collected"
-    )
+    assert evaluation.document()["live_time_separated_execution"] == ("not_collected")
     assert evaluation.document()["external_action_capability"] is False
     assert evaluation.document()["real_applications_submitted"] == 0
 
@@ -71,10 +68,22 @@ def test_current_registry_derives_one_fixture_pass_and_six_unevaluable() -> None
     )
     assert parse.missing_evidence_count == 0
 
+    replay = metrics["deterministic_replay_mismatch"]
+    assert replay.status is MetricStatus.PASS
+    assert replay.target == replay.numerator == replay.value == 0
+    assert replay.denominator == 1
+    assert replay.unit == "count"
+    assert replay.evidence_class is EvidenceClass.FIXTURE_FROZEN
+    assert replay.evidence_item_ids == ("jaa10-frozen-replay-pair-primary-v1",)
+    assert replay.evidence_scope_id == (
+        "0c6830ebe0a6bd0018eee869a32ab1d9dabbfe2ed9b78663c376feb040970cba"
+    )
+    assert replay.missing_evidence_count == 0
+
     for name, metric in metrics.items():
         metric.verify()
         assert metric.document()["certifies_slice"] is False
-        if name == "ats_parse_success_bp":
+        if name in {"ats_parse_success_bp", "deterministic_replay_mismatch"}:
             continue
         assert metric.status is MetricStatus.UNEVALUABLE
         assert metric.denominator == 0
@@ -82,6 +91,15 @@ def test_current_registry_derives_one_fixture_pass_and_six_unevaluable() -> None
         assert metric.evidence_class is None
         assert metric.evidence_item_ids == ()
         assert metric.missing_evidence_count == 1
+
+
+def test_independent_replay_literals_match_recorder_contract() -> None:
+    assert evaluator.REPLAY_PAIR_SCHEMA_VERSION == recorder.REPLAY_PAIR_SCHEMA_VERSION
+    assert evaluator.STABLE_PROJECTION_VERSION == recorder.STABLE_PROJECTION_VERSION
+    assert evaluator.REPLAY_PAIR_DOMAIN == recorder.REPLAY_PAIR_DOMAIN
+    assert evaluator.STABLE_PROJECTION_DOMAIN == recorder.STABLE_PROJECTION_DOMAIN
+    assert evaluator._REPLAY_OBSERVATION_KEYS == recorder._OBSERVATION_KEYS
+    assert evaluator._REPLAY_STABLE_KEYS == recorder._STABLE_KEYS
 
 
 def test_model_accounting_distinguishes_logical_transport_and_unavailable() -> None:
