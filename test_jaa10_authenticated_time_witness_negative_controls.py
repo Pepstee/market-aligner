@@ -151,6 +151,25 @@ def test_wrong_absent_or_unsupported_issuer_never_authenticates() -> None:
     _failed(verify_external_time_attestation(token, RECEIPT, rsa_pem, pin))
 
 
+@pytest.mark.parametrize("invalid_attestation", [None, "string", 42])
+def test_non_bytes_attestation_with_valid_anchor_fails_closed(
+    invalid_attestation: object,
+) -> None:
+    _, pem, pin, _ = _material()
+
+    verdict = verify_external_time_attestation(
+        invalid_attestation,  # type: ignore[arg-type]
+        RECEIPT,
+        pem,
+        pin,
+    )
+
+    _failed(verdict)
+    assert verdict.verification_status is TimeVerificationStatus.VERIFICATION_FAILED
+    assert verdict.reason == "attestation_bytes_invalid"
+    assert verdict.attestation_sha256 is None
+
+
 def test_external_class_cannot_be_forged_through_public_constructor() -> None:
     with pytest.raises(TypeError):
         AuthenticatedTimeVerdict(
