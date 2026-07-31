@@ -457,7 +457,7 @@ def evaluate_live_canary_authority(
         )
     if (
         submission_count is None
-        or isinstance(submission_count, bool)
+        or type(submission_count) is not int
         or submission_count < 0
         or type(jaa11_certified) is not bool
     ):

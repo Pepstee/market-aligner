@@ -127,6 +127,8 @@ def test_authority_exhausts_on_first_submission_or_certification() -> None:
         (None, False),
         (-1, False),
         (False, False),
+        (0.5, False),
+        ("0", False),
         (0, None),
         (0, "false"),
     ),
