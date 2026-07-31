@@ -22,6 +22,7 @@ from career_automation.models import PipelineState
 from career_automation.status_ingestion import (
     FROZEN_LOCAL_EXPORT_STATUS_CONTRACT,
     TERMINAL_STATUS_STATES,
+    CensoredSilence,
     FollowUpIntent,
     RawStatusEvidence,
     StatusObservation,
@@ -107,6 +108,44 @@ class StatusEvidenceStoreSnapshot:
                 raise StatusEvidenceIntegrityError(
                     "status evidence durable count is invalid"
                 )
+
+
+@dataclass(frozen=True)
+class StatusEvidenceStreamState:
+    observation_count: int
+    last_observed_at: str
+    current_state: PipelineState
+    terminal_state: PipelineState | None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.observation_count, int)
+            or self.observation_count <= 0
+        ):
+            raise StatusEvidenceIntegrityError(
+                "status evidence stream count is invalid"
+            )
+        if not isinstance(self.current_state, PipelineState):
+            raise StatusEvidenceIntegrityError(
+                "status evidence current state is invalid"
+            )
+        if (
+            self.terminal_state is not None
+            and (
+                not isinstance(self.terminal_state, PipelineState)
+                or self.terminal_state not in TERMINAL_STATUS_STATES
+                or self.current_state is not self.terminal_state
+            )
+        ):
+            raise StatusEvidenceIntegrityError(
+                "status evidence terminal state is invalid"
+            )
+        try:
+            _parsed_datetime(self.last_observed_at)
+        except (TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "status evidence stream time is invalid"
+            ) from exc
 
 
 @dataclass(frozen=True)
@@ -525,6 +564,388 @@ class StatusEvidenceStore:
             ) from exc
         finally:
             connection.close()
+
+    def read_observations(
+        self,
+        application_id: str,
+        job_key: str,
+    ) -> tuple[StatusObservation, ...]:
+        rows = self._verified_read_rows(
+            """
+            SELECT content_json FROM status_observation
+            WHERE application_id = ? AND job_key = ?
+            ORDER BY stream_sequence
+            """,
+            (application_id, job_key),
+        )
+        return tuple(
+            self._observation_from_document(
+                self._document(row["content_json"])
+            )
+            for row in rows
+        )
+
+    def read_stream_state(
+        self,
+        application_id: str,
+        job_key: str,
+    ) -> StatusEvidenceStreamState | None:
+        rows = self._verified_read_rows(
+            """
+            SELECT observation_count, last_observed_at,
+                   current_state, terminal_state
+            FROM status_application_stream
+            WHERE application_id = ? AND job_key = ?
+            """,
+            (application_id, job_key),
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise StatusEvidenceIntegrityError(
+                "status evidence stream lookup is ambiguous"
+            )
+        row = rows[0]
+        try:
+            return StatusEvidenceStreamState(
+                observation_count=int(row["observation_count"]),
+                last_observed_at=row["last_observed_at"],
+                current_state=PipelineState(row["current_state"]),
+                terminal_state=(
+                    None
+                    if row["terminal_state"] is None
+                    else PipelineState(row["terminal_state"])
+                ),
+            )
+        except StatusEvidenceIntegrityError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "status evidence stream reconstruction failed closed"
+            ) from exc
+
+    def read_timelines(
+        self,
+        application_id: str,
+        job_key: str,
+    ) -> tuple[StatusTimeline, ...]:
+        rows = self._verified_read_rows(
+            """
+            SELECT content_json FROM status_timeline_registration
+            WHERE application_id = ? AND job_key = ?
+            ORDER BY receipt_sequence
+            """,
+            (application_id, job_key),
+        )
+        return tuple(
+            self._timeline_from_document(
+                self._document(row["content_json"])
+            )
+            for row in rows
+        )
+
+    def read_timeline(self, timeline_id: str) -> StatusTimeline:
+        _digest(timeline_id, "status timeline identity")
+        rows = self._verified_read_rows(
+            """
+            SELECT content_json FROM status_timeline_registration
+            WHERE timeline_id = ?
+            """,
+            (timeline_id,),
+        )
+        if len(rows) != 1:
+            raise StatusEvidenceIntegrityError(
+                "durable status timeline is absent"
+            )
+        return self._timeline_from_document(
+            self._document(rows[0]["content_json"])
+        )
+
+    def read_follow_up_intents(
+        self,
+        application_id: str,
+        job_key: str,
+    ) -> tuple[FollowUpIntent, ...]:
+        rows = self._verified_read_rows(
+            """
+            SELECT content_json FROM follow_up_intent_registration
+            WHERE application_id = ? AND job_key = ?
+            ORDER BY receipt_sequence
+            """,
+            (application_id, job_key),
+        )
+        return tuple(
+            self._intent_from_document(
+                self._document(row["content_json"])
+            )
+            for row in rows
+        )
+
+    def read_follow_up_intent(
+        self,
+        idempotency_key: str,
+    ) -> FollowUpIntent:
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise ValueError("follow-up idempotency key is required")
+        rows = self._verified_read_rows(
+            """
+            SELECT content_json FROM follow_up_intent_registration
+            WHERE idempotency_key = ?
+            """,
+            (idempotency_key,),
+        )
+        if len(rows) != 1:
+            raise StatusEvidenceIntegrityError(
+                "durable follow-up intent is absent"
+            )
+        return self._intent_from_document(
+            self._document(rows[0]["content_json"])
+        )
+
+    def _verified_read_rows(
+        self,
+        statement: str,
+        parameters: tuple[object, ...],
+    ) -> list[sqlite3.Row]:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            self._verify_connection(connection)
+            rows = connection.execute(statement, parameters).fetchall()
+            connection.rollback()
+            return rows
+        except StatusEvidenceIntegrityError:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except (sqlite3.DatabaseError, KeyError, TypeError, ValueError) as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StatusEvidenceIntegrityError(
+                "durable status read failed closed"
+            ) from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _document(content_json: str) -> dict[str, object]:
+        try:
+            document = json.loads(content_json)
+        except (TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "durable typed content is malformed"
+            ) from exc
+        if (
+            not isinstance(document, dict)
+            or _canonical_json(document) != content_json
+        ):
+            raise StatusEvidenceIntegrityError(
+                "durable typed content is not canonical"
+            )
+        return document
+
+    @staticmethod
+    def _raw_evidence_from_document(
+        document: Mapping[str, object],
+    ) -> RawStatusEvidence:
+        try:
+            evidence = RawStatusEvidence(
+                contract_sha256=document["contract_sha256"],
+                application_id=document["application_id"],
+                job_key=document["job_key"],
+                source_kind=document["source_kind"],
+                source_record_id=document["source_record_id"],
+                source_sha256=document["source_sha256"],
+                parsed_status_code=document["parsed_status_code"],
+                observed_at=document["observed_at"],
+                evidence_id=document["evidence_id"],
+                source_reference_kind=document["source_reference_kind"],
+                untrusted_content=document["untrusted_content"],
+                instruction_authority=document["instruction_authority"],
+                candidate_fact_authority=document["candidate_fact_authority"],
+                schema_version=document["schema_version"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "raw status evidence reconstruction failed closed"
+            ) from exc
+        if _canonical_json(evidence.document()) != _canonical_json(document):
+            raise StatusEvidenceIntegrityError(
+                "raw status evidence does not round trip"
+            )
+        return evidence
+
+    @classmethod
+    def _observation_from_document(
+        cls,
+        document: Mapping[str, object],
+    ) -> StatusObservation:
+        raw_document = document.get("raw_evidence")
+        if not isinstance(raw_document, dict):
+            raise StatusEvidenceIntegrityError(
+                "status observation raw evidence is malformed"
+            )
+        try:
+            classified = document["classified_state"]
+            observation = StatusObservation(
+                raw_evidence=cls._raw_evidence_from_document(raw_document),
+                application_id=document["application_id"],
+                job_key=document["job_key"],
+                raw_evidence_id=document["raw_evidence_id"],
+                source_sha256=document["source_sha256"],
+                source_record_id=document["source_record_id"],
+                observed_at=document["observed_at"],
+                explicit_status_code=document["explicit_status_code"],
+                classified_state=(
+                    None
+                    if classified is None
+                    else PipelineState(classified)
+                ),
+                confidence_bp=document["confidence_bp"],
+                abstained=document["abstained"],
+                classifier_policy_sha256=document[
+                    "classifier_policy_sha256"
+                ],
+                observation_id=document["observation_id"],
+                instruction_authority=document["instruction_authority"],
+                candidate_fact_authority=document["candidate_fact_authority"],
+                schema_version=document["schema_version"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "status observation reconstruction failed closed"
+            ) from exc
+        if _canonical_json(observation.document()) != _canonical_json(document):
+            raise StatusEvidenceIntegrityError(
+                "status observation does not round trip"
+            )
+        return observation
+
+    @staticmethod
+    def _silence_from_document(
+        document: Mapping[str, object],
+    ) -> CensoredSilence:
+        try:
+            silence = CensoredSilence(
+                application_id=document["application_id"],
+                job_key=document["job_key"],
+                as_of=document["as_of"],
+                reason=document["reason"],
+                classified_state=(
+                    None
+                    if document["classified_state"] is None
+                    else PipelineState(document["classified_state"])
+                ),
+                rejection_inferred=document["rejection_inferred"],
+                schema_version=document["schema_version"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "censored silence reconstruction failed closed"
+            ) from exc
+        if _canonical_json(silence.document()) != _canonical_json(document):
+            raise StatusEvidenceIntegrityError(
+                "censored silence does not round trip"
+            )
+        return silence
+
+    @classmethod
+    def _timeline_from_document(
+        cls,
+        document: Mapping[str, object],
+    ) -> StatusTimeline:
+        observations = document.get("observations")
+        silence = document.get("censored_silence")
+        transitions = document.get("transitions")
+        if (
+            not isinstance(observations, list)
+            or not all(isinstance(row, dict) for row in observations)
+            or not isinstance(silence, list)
+            or not all(isinstance(row, dict) for row in silence)
+            or not isinstance(transitions, list)
+        ):
+            raise StatusEvidenceIntegrityError(
+                "status timeline typed content is malformed"
+            )
+        try:
+            timeline = StatusTimeline(
+                contract_sha256=document["contract_sha256"],
+                application_id=document["application_id"],
+                job_key=document["job_key"],
+                baseline_state=PipelineState(document["baseline_state"]),
+                observations=tuple(
+                    cls._observation_from_document(row)
+                    for row in observations
+                ),
+                transitions=tuple(tuple(row) for row in transitions),
+                censored_silence=tuple(
+                    cls._silence_from_document(row) for row in silence
+                ),
+                final_state=PipelineState(document["final_state"]),
+                timeline_id=document["timeline_id"],
+                dependency_satisfied=document["dependency_satisfied"],
+                connector_evidence=document["connector_evidence"],
+                production_certification=document[
+                    "production_certification"
+                ],
+                certifies_slice=document["certifies_slice"],
+                schema_version=document["schema_version"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "status timeline reconstruction failed closed"
+            ) from exc
+        if _canonical_json(timeline.document()) != _canonical_json(document):
+            raise StatusEvidenceIntegrityError(
+                "status timeline does not round trip"
+            )
+        return timeline
+
+    @classmethod
+    def _intent_from_document(
+        cls,
+        document: Mapping[str, object],
+    ) -> FollowUpIntent:
+        timeline_document = document.get("timeline")
+        if not isinstance(timeline_document, dict):
+            raise StatusEvidenceIntegrityError(
+                "follow-up intent timeline is malformed"
+            )
+        try:
+            intent = FollowUpIntent(
+                contract_sha256=document["contract_sha256"],
+                timeline=cls._timeline_from_document(timeline_document),
+                timeline_id=document["timeline_id"],
+                application_id=document["application_id"],
+                job_key=document["job_key"],
+                released_application_sha256=document[
+                    "released_application_sha256"
+                ],
+                draft_sha256=document["draft_sha256"],
+                last_observed_at=document["last_observed_at"],
+                due_at=document["due_at"],
+                policy_sha256=document["policy_sha256"],
+                idempotency_key=document["idempotency_key"],
+                max_sends=document["max_sends"],
+                sent_count=document["sent_count"],
+                connector_authority=document["connector_authority"],
+                send_authority=document["send_authority"],
+                dependency_satisfied=document["dependency_satisfied"],
+                production_certification=document[
+                    "production_certification"
+                ],
+                certifies_slice=document["certifies_slice"],
+                schema_version=document["schema_version"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StatusEvidenceIntegrityError(
+                "follow-up intent reconstruction failed closed"
+            ) from exc
+        if _canonical_json(intent.document()) != _canonical_json(document):
+            raise StatusEvidenceIntegrityError(
+                "follow-up intent does not round trip"
+            )
+        return intent
 
     def archive_raw_export(
         self,
