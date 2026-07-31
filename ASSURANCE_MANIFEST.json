@@ -762,6 +762,65 @@
             }
           }
         },
+        "frozen_replay_pair_recorder_stage_a": {
+          "status": "ACCEPT_STAGE_A_EXACT_SOURCE",
+          "scope": "bounded_frozen_fixture_replay_pair_recording_source_only",
+          "implemented_source_git_revision": "f372241cbe19970972e673fe5d8f929f7a271588",
+          "implemented_source_parent": "74ce01c02b5857217692d0f7ddfc3338a4c2c110",
+          "implemented_source_tree": "77f8f43016e2ea8feed422c8118ad16fd54523c9",
+          "implemented_source_content_revision": "sha256:994e2a376a1bfa356eb119b7a64c38ef85f1bfa012014b7e2903ff2f69c9a199",
+          "accepted_paths": [
+            {
+              "path": "career_automation/frozen_replay_pair_recorder.py",
+              "sha256": "f9b6b9bcf54342fa84f86b7ae8dbdea1acab94e3c735be9ff826b1fc56cce1bc"
+            },
+            {
+              "path": "test_jaa10_frozen_replay_pair_recorder.py",
+              "sha256": "2a7e99cffccb80b269ab71bd2f1757b9cf2c5dc12ee1aec396b3ab0ed541b98d"
+            },
+            {
+              "path": "test_jaa10_frozen_replay_pair_recorder_negative_controls.py",
+              "sha256": "8e60fcd335b6ff4415fff8727930e29ec69d7bf6e8a85147e477b10ea226b3ce"
+            }
+          ],
+          "design_authority": {
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/FABLE_JAA10_FROZEN_REPLAY_PAIR_STAGE_A_DESIGN_AUTHORITY.md",
+            "sha256": "6ac937c7aa33b6811522f4668d8d8d21a55159a991ba4f92b9e13b115dfc9035"
+          },
+          "sonnet_review": {
+            "session_id": "c162503e-ee9c-433c-854b-369ef3b07729",
+            "disposition": "JAA10_FROZEN_REPLAY_PAIR_STAGE_A_SONNET_REVIEW_DECISION: ACCEPT_WITH_FINDINGS",
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/sonnet-jaa10-frozen-replay-pair-stage-a-review-raw.json",
+            "sha256": "959478ef21b6dc3747f5be794016320e4a00464cc34e705c69d95052cd0927df"
+          },
+          "fable_exact_source_ruling": {
+            "session_id": "63d7673b-e53b-41a5-bec1-0c0dccecda5c",
+            "disposition": "JAA10_FROZEN_REPLAY_PAIR_STAGE_A_EXACT_SOURCE_DISPOSITION: ACCEPT_AND_AUTHORIZE_RECEIPT",
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/fable-jaa10-frozen-replay-pair-stage-a-exact-source-raw.json",
+            "sha256": "44df03581bd0f3ad7f5a65d8012fd8fd9945096f8cb2e5c0a10a20e752b50d33"
+          },
+          "acceptance_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/FABLE_JAA10_FROZEN_REPLAY_PAIR_STAGE_A_ACCEPTANCE.md",
+            "sha256": "51437c04ee3d786ee0e9bc600c072cac7b8caa7d272f924bbca74416fd61a679"
+          },
+          "independent_fable_acceptance": "stage_a_exact_source_accepted_2026-07-31",
+          "replay_pair_evidence": "not_collected",
+          "registry_pin_exists": false,
+          "metrics_evaluated": false,
+          "deterministic_replay_mismatch": "UNEVALUABLE",
+          "objective_satisfied": false,
+          "certifies_slice": false,
+          "live_time_separated_execution": "not_collected",
+          "production_certification": "withheld",
+          "external_action_capability": false,
+          "runner_controller_authority": "withheld",
+          "fixture_browser_cohort_authority": "withheld",
+          "real_applications_submitted": 0
+        },
         "phase_b_fixture_measures": {
           "status": "ACCEPT_PHASE_B_EXACT_SOURCE",
           "scope": "bounded_local_fixture_only",
@@ -1498,7 +1557,7 @@
           }
         ]
       },
-      "owns": ["career_automation/shadow_certification.py", "career_automation/shadow_observation_ledger.py"],
+      "owns": ["career_automation/shadow_certification.py", "career_automation/shadow_observation_ledger.py", "career_automation/frozen_replay_pair_recorder.py"],
       "inputs": ["career_automation/ats_fixture.py", "career_automation/browser_executor.py"],
       "interfaces": [],
       "environment": [],
@@ -1507,6 +1566,8 @@
         {"id": "JAA-10-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_negative_controls.py"], "files": ["test_jaa10_negative_controls.py"], "negative_control": true},
         {"id": "JAA-10-observation-ledger", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_shadow_observation_ledger.py"], "files": ["test_jaa10_shadow_observation_ledger.py"]},
         {"id": "JAA-10-observation-ledger-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_shadow_observation_ledger_negative_controls.py"], "files": ["test_jaa10_shadow_observation_ledger_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-10-frozen-replay-pair-recorder", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_frozen_replay_pair_recorder.py"], "files": ["test_jaa10_frozen_replay_pair_recorder.py"]},
+        {"id": "JAA-10-frozen-replay-pair-recorder-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa10_frozen_replay_pair_recorder_negative_controls.py"], "files": ["test_jaa10_frozen_replay_pair_recorder_negative_controls.py"], "negative_control": true},
         {
           "id": "JAA-10-mutation-cohort",
           "argv": [

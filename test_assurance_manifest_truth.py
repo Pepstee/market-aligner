@@ -737,6 +737,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         for key, value in jaa10_bounded.items()
         if key not in {
             "dependency_independent_hard_metrics_package",
+            "frozen_replay_pair_recorder_stage_a",
             "phase_b_fixture_measures",
             "phase_c_elapsed_cohort",
         }
@@ -1389,6 +1390,165 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             }
         ],
     }
+    replay_stage_a = jaa10_bounded[
+        "frozen_replay_pair_recorder_stage_a"
+    ]
+    assert replay_stage_a == {
+        "status": "ACCEPT_STAGE_A_EXACT_SOURCE",
+        "scope": "bounded_frozen_fixture_replay_pair_recording_source_only",
+        "implemented_source_git_revision": (
+            "f372241cbe19970972e673fe5d8f929f7a271588"
+        ),
+        "implemented_source_parent": (
+            "74ce01c02b5857217692d0f7ddfc3338a4c2c110"
+        ),
+        "implemented_source_tree": (
+            "77f8f43016e2ea8feed422c8118ad16fd54523c9"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:994e2a376a1bfa356eb119b7a64c38ef"
+            "85f1bfa012014b7e2903ff2f69c9a199"
+        ),
+        "accepted_paths": [
+            {
+                "path": (
+                    "career_automation/frozen_replay_pair_recorder.py"
+                ),
+                "sha256": (
+                    "f9b6b9bcf54342fa84f86b7ae8dbdea1"
+                    "acab94e3c735be9ff826b1fc56cce1bc"
+                ),
+            },
+            {
+                "path": "test_jaa10_frozen_replay_pair_recorder.py",
+                "sha256": (
+                    "2a7e99cffccb80b269ab71bd2f1757b9c"
+                    "f2c5dc12ee1aec396b3ab0ed541b98d"
+                ),
+            },
+            {
+                "path": (
+                    "test_jaa10_frozen_replay_pair_recorder_"
+                    "negative_controls.py"
+                ),
+                "sha256": (
+                    "8e60fcd335b6ff4415fff8727930e29ec"
+                    "69d7bf6e8a85147e477b10ea226b3ce"
+                ),
+            },
+        ],
+        "design_authority": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA10_FROZEN_REPLAY_PAIR_STAGE_A_"
+                "DESIGN_AUTHORITY.md"
+            ),
+            "sha256": (
+                "6ac937c7aa33b6811522f4668d8d8d21a"
+                "55159a991ba4f92b9e13b115dfc9035"
+            ),
+        },
+        "sonnet_review": {
+            "session_id": "c162503e-ee9c-433c-854b-369ef3b07729",
+            "disposition": (
+                "JAA10_FROZEN_REPLAY_PAIR_STAGE_A_"
+                "SONNET_REVIEW_DECISION: ACCEPT_WITH_FINDINGS"
+            ),
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "sonnet-jaa10-frozen-replay-pair-stage-a-review-raw.json"
+            ),
+            "sha256": (
+                "959478ef21b6dc3747f5be794016320e4a"
+                "00464cc34e705c69d95052cd0927df"
+            ),
+        },
+        "fable_exact_source_ruling": {
+            "session_id": "63d7673b-e53b-41a5-bec1-0c0dccecda5c",
+            "disposition": (
+                "JAA10_FROZEN_REPLAY_PAIR_STAGE_A_EXACT_SOURCE_"
+                "DISPOSITION: ACCEPT_AND_AUTHORIZE_RECEIPT"
+            ),
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-frozen-replay-pair-stage-a-"
+                "exact-source-raw.json"
+            ),
+            "sha256": (
+                "44df03581bd0f3ad7f5a65d8012fd8fd9"
+                "945096f8cb2e5c0a10a20e752b50d33"
+            ),
+        },
+        "acceptance_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA10_FROZEN_REPLAY_PAIR_STAGE_A_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "51437c04ee3d786ee0e9bc600c072cac7"
+                "b8caa7d272f924bbca74416fd61a679"
+            ),
+        },
+        "independent_fable_acceptance": (
+            "stage_a_exact_source_accepted_2026-07-31"
+        ),
+        "replay_pair_evidence": "not_collected",
+        "registry_pin_exists": False,
+        "metrics_evaluated": False,
+        "deterministic_replay_mismatch": "UNEVALUABLE",
+        "objective_satisfied": False,
+        "certifies_slice": False,
+        "live_time_separated_execution": "not_collected",
+        "production_certification": "withheld",
+        "external_action_capability": False,
+        "runner_controller_authority": "withheld",
+        "fixture_browser_cohort_authority": "withheld",
+        "real_applications_submitted": 0,
+    }
+    replay_revision = replay_stage_a["implemented_source_git_revision"]
+    assert _git(
+        "rev-parse", f"{replay_revision}^"
+    ).decode().strip() == replay_stage_a["implemented_source_parent"]
+    assert _git(
+        "rev-parse", f"{replay_revision}^{{tree}}"
+    ).decode().strip() == replay_stage_a["implemented_source_tree"]
+    assert _source_content_revision_at(replay_revision) == (
+        replay_stage_a["implemented_source_content_revision"]
+    )
+    assert subprocess.run(
+        ("git", "merge-base", "--is-ancestor", replay_revision, "HEAD"),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    for accepted_path in replay_stage_a["accepted_paths"]:
+        relative = accepted_path["path"]
+        payload = _git("show", f"{replay_revision}:{relative}")
+        assert hashlib.sha256(payload).hexdigest() == (
+            accepted_path["sha256"]
+        )
+        assert _git(
+            "rev-parse", f"{replay_revision}:{relative}"
+        ) == _git("rev-parse", f"HEAD:{relative}")
+    for key in (
+        "design_authority",
+        "sonnet_review",
+        "fable_exact_source_ruling",
+        "acceptance_receipt",
+    ):
+        pointer = replay_stage_a[key]
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
+        assert evidence_path.stat().st_mode & 0o777 == 0o444
     hard_metrics = jaa10_bounded[
         "dependency_independent_hard_metrics_package"
     ]
@@ -2805,6 +2965,16 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert tests_by_id[
         "JAA-10-observation-ledger-negative-controls"
     ]["negative_control"] is True
+    assert tests_by_id["JAA-10-frozen-replay-pair-recorder"]["files"] == [
+        "test_jaa10_frozen_replay_pair_recorder.py"
+    ]
+    replay_negative = tests_by_id[
+        "JAA-10-frozen-replay-pair-recorder-negative-controls"
+    ]
+    assert replay_negative["files"] == [
+        "test_jaa10_frozen_replay_pair_recorder_negative_controls.py"
+    ]
+    assert replay_negative["negative_control"] is True
     for relative in jaa10["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-10 materialised path missing: {relative}"
@@ -6995,6 +7165,13 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
         phase_path_revisions: dict[str, str] = {}
         if slice_id == "JAA-10":
             phase = block["observation_ledger_phase_a"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: phase["implemented_source_git_revision"]
+                    for item in phase["accepted_paths"]
+                }
+            )
+            phase = block["frozen_replay_pair_recorder_stage_a"]
             phase_path_revisions.update(
                 {
                     item["path"]: phase["implemented_source_git_revision"]
