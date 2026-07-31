@@ -2840,6 +2840,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     operator_intake = operator_composition.pop("operator_document_intake")
     operator_answers = operator_intake.pop("operator_application_answers")
     answer_composition = operator_answers.pop("operator_answer_composition")
+    application_package = answer_composition.pop(
+        "application_package_composition"
+    )
     assert jaa11_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
@@ -4106,6 +4109,294 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "dependency_satisfied": False,
         "real_applications_submitted": 0,
     }
+    assert application_package == {
+        "status": (
+            "bounded_application_package_composition_phase_a_"
+            "exact_source_accepted"
+        ),
+        "independent_fable_acceptance": (
+            "accept_and_authorize_receipt_"
+            "objective_unsatisfied_2026-07-31"
+        ),
+        "scope": (
+            "pure_in_memory_cross_subsystem_identity_binding_of_operator_"
+            "answer_composition_to_verified_application_source_artifacts_"
+            "and_release_manifest_no_external_capability"
+        ),
+        "package_schema": "jaa11.live-canary-application-package.v1",
+        "cross_object_bindings_enforced": 8,
+        "composition_binding": "in_memory_exact_bytes_sha256_only",
+        "verification_provenance": (
+            "full_replay_of_source_artifact_and_release_manifest_"
+            "verifiers_plus_answer_composition_hash_recomputation_"
+            "no_stored_verdict_trust"
+        ),
+        "accepted_dependencies_relationship": (
+            "python_import_edges_authority_answer_composition_"
+            "application_compiler_rendering_release_gate_"
+            "remaining_chain_integrity_pins"
+        ),
+        "implemented_source_git_revision": (
+            "9a60d40f0bcd9f85ab5296840d8450007d13e857"
+        ),
+        "implemented_source_parent_git_revision": (
+            "45f9146ab5979de07ac99fdc1f04fd1dc502b3e3"
+        ),
+        "implemented_source_tree": (
+            "f2493e5705d1fe97c9aa580b498f9fe111e6b053"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:4ccd7c2a059a7e83f5107c39bb9e5d7"
+            "de61382e305a4bd2f29208d80117fdd6d"
+        ),
+        "accepted_source_files": [
+            {
+                "path": (
+                    "career_automation/live_canary_application_package.py"
+                ),
+                "sha256": (
+                    "cb3cd55f74b5c2579f4bf9dc28e16df0"
+                    "af93d6cc59c4c760dd19d6cab9eaf447"
+                ),
+            },
+            {
+                "path": "test_jaa11_live_canary_application_package.py",
+                "sha256": (
+                    "00ff9ed70a0b990ce240344724ed05d59"
+                    "18cc5c026d8fdd1fa5073e5a3e73e31"
+                ),
+            },
+            {
+                "path": (
+                    "test_jaa11_live_canary_application_package_"
+                    "negative_controls.py"
+                ),
+                "sha256": (
+                    "232ed0b53fbaa30103281f01c3da87edb"
+                    "159791fc6fb2b6f9eadc316231af93b"
+                ),
+            },
+        ],
+        "accepted_dependencies": [
+            {
+                "path": "career_automation/live_canary_authority.py",
+                "sha256": (
+                    "e48372dc4e414212bc86d2bc0ba21d9ec"
+                    "75f80d12eeaa6e1dfc80179a958e1fc"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/live_canary_fixture_dry_run.py"
+                ),
+                "sha256": (
+                    "3e2341e3fbc3a9e4a199c0e55ccc121769"
+                    "90a647c7d83b2ffb545abffc1cfaea"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/live_canary_snapshot_document.py"
+                ),
+                "sha256": (
+                    "4a8cb89d5dc8b2268d5dcfb3aaa71d7c6"
+                    "0773c5255e4537b0ad9676fbceedfb0"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/"
+                    "live_canary_operator_fixture_composition.py"
+                ),
+                "sha256": (
+                    "6be3aa327a7ba38df219b91fc6a7211b0"
+                    "5c81231af90313148c2a5f6d77ea877"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/"
+                    "live_canary_operator_document_intake.py"
+                ),
+                "sha256": (
+                    "d5455f898f68f041bb0a86a3abc9707c2"
+                    "b16981d19f7dd30a01285b15e7bc63c"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/live_canary_operator_answers.py"
+                ),
+                "sha256": (
+                    "e0bb87bf5c19562bcb111e9773133e539"
+                    "a874fb266156ad5e740af6b3382f49c"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/"
+                    "live_canary_operator_answer_composition.py"
+                ),
+                "sha256": (
+                    "7e5c3d2fc017cb83b94c3f1c61160739"
+                    "6bc8f3d8cd02cff015aa82ae03affbc1"
+                ),
+            },
+            {
+                "path": "career_automation/application_compiler.py",
+                "sha256": (
+                    "3cf14a0a101169610a4c76cd28fcb92f4"
+                    "b4642da895bb62d78c400f61a083c0f"
+                ),
+            },
+            {
+                "path": "career_automation/rendering.py",
+                "sha256": (
+                    "c68a2a5038357a252ebfe4b2c0f1fe5f"
+                    "2f332e8dd5bd582cfb57d049cf9a382b"
+                ),
+            },
+            {
+                "path": "career_automation/release_gate.py",
+                "sha256": (
+                    "d9f9fc650d51edfa84f245a30b2b4a7d"
+                    "fef8885a08eb4b09e2c51bc720027d8a"
+                ),
+            },
+        ],
+        "phase_a_exact_source_acceptance": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA11_APPLICATION_PACKAGE_PHASE_A_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "bdf3bea0b01b9ab09a0fbe69c9ea10fe"
+                "af361e39becbe035e039308a1634097c"
+            ),
+        },
+        "composition_design_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa11-application-package-composition-"
+                "design-raw.json"
+            ),
+            "sha256": (
+                "62a99870c7bb34d698185e6e5103d78e"
+                "d517d96cc53be2efff57d3dfaac350b2"
+            ),
+        },
+        "phase_a_final_ruling": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa11-application-package-phase-a-final-raw.json"
+            ),
+            "sha256": (
+                "6567348535824afcc3cd532956163bdb"
+                "25187cdf7de3c8b08c3d6872c326d81e"
+            ),
+        },
+        "binding_postcommit_evidence": {
+            "focused_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa11-application-package-phase-a-"
+                    "focused-postcommit.log"
+                ),
+                "sha256": (
+                    "387865f562d7f3475f2da8f2681c5075"
+                    "ce5a2238a2afd234b7628c6afdd6da5a"
+                ),
+            },
+            "full_postcommit_v2_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa11-application-package-phase-a-"
+                    "full-postcommit-v2.log"
+                ),
+                "sha256": (
+                    "0d3ad28e17708f1ada4eeadda5e91e620"
+                    "18cc9bf7718726929f5f995cd6cba06"
+                ),
+            },
+            "ruff_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa11-application-package-phase-a-"
+                    "ruff-postcommit.log"
+                ),
+                "sha256": (
+                    "82b3e6a6c090a57601d22943bd23fca9"
+                    "218d1031dbe5a7b754092f9a156b4f18"
+                ),
+            },
+            "pycompile_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa11-application-package-phase-a-"
+                    "pycompile-postcommit.log"
+                ),
+                "sha256": (
+                    "e3b0c44298fc1c149afbf4c8996fb924"
+                    "27ae41e4649b934ca495991b7852b855"
+                ),
+            },
+            "diff_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa11-application-package-phase-a-"
+                    "diff-postcommit.log"
+                ),
+                "sha256": (
+                    "e3b0c44298fc1c149afbf4c8996fb924"
+                    "27ae41e4649b934ca495991b7852b855"
+                ),
+            },
+            "identity_log": {
+                "path_base": "operator_control_root",
+                "relative_path": (
+                    "jaa-single-codex-20260729/"
+                    "jaa11-application-package-phase-a-"
+                    "identity-postcommit.log"
+                ),
+                "sha256": (
+                    "f9d941d0601f4c9aea4645c0ef61d787"
+                    "6d3eb7071b6cf1347be1b8873ca1fa0f"
+                ),
+            },
+        },
+        "nonbinding_full_postcommit_log_disclosure": (
+            "quoted_glob_run_preserved_nonbinding_"
+            "superseded_by_binding_v2_log"
+        ),
+        "answers_used_for_external_submission": False,
+        "package_used_for_external_submission": False,
+        "live_or_authenticity_claim": False,
+        "acquisition_performed": False,
+        "external_vacancy_selection": False,
+        "application_receipt_exists": False,
+        "live_ranked_snapshot": False,
+        "external_action_capability": False,
+        "real_work_rights_ledger_ingested": False,
+        "real_statutory_law_source_ingested": False,
+        "real_statutory_floor_ingested": False,
+        "real_market_range_ingested": False,
+        "release_token": "withheld",
+        "token_consumed": False,
+        "operational_release": "withheld",
+        "real_submission_authority": "withheld",
+        "production_certification": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+        "real_applications_submitted": 0,
+    }
     answers_document_pointer = operator_answers[
         "operator_answers_document"
     ]
@@ -4123,6 +4414,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         operator_intake,
         operator_answers,
         answer_composition,
+        application_package,
     ):
         phase_pointer = phase["phase_a_exact_source_acceptance"]
         phase_path = (
@@ -4250,6 +4542,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "career_automation/live_canary_operator_document_intake.py",
         "career_automation/live_canary_operator_answers.py",
         "career_automation/live_canary_operator_answer_composition.py",
+        "career_automation/live_canary_application_package.py",
     ]
     assert [test["id"] for test in jaa11["tests"]] == [
         "JAA-11-contract",
@@ -4271,6 +4564,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "JAA-11-live-canary-operator-answers-negative-controls",
         "JAA-11-live-canary-operator-answer-composition",
         "JAA-11-live-canary-operator-answer-composition-negative-controls",
+        "JAA-11-live-canary-application-package",
+        "JAA-11-live-canary-application-package-negative-controls",
     ]
     tests_by_id = {test["id"]: test for test in jaa11["tests"]}
     assert tests_by_id[
@@ -4502,6 +4797,42 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     }
     assert tests_by_id[
         "JAA-11-live-canary-operator-answer-composition-negative-controls"
+    ]["negative_control"] is True
+    assert tests_by_id["JAA-11-live-canary-application-package"] == {
+        "id": "JAA-11-live-canary-application-package",
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            "test_jaa11_live_canary_application_package.py",
+        ],
+        "files": ["test_jaa11_live_canary_application_package.py"],
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-application-package-negative-controls"
+    ] == {
+        "id": "JAA-11-live-canary-application-package-negative-controls",
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            (
+                "test_jaa11_live_canary_application_package_"
+                "negative_controls.py"
+            ),
+        ],
+        "files": [
+            (
+                "test_jaa11_live_canary_application_package_"
+                "negative_controls.py"
+            )
+        ],
+        "negative_control": True,
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-application-package-negative-controls"
     ]["negative_control"] is True
     for relative in jaa11["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -6734,6 +7065,19 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                         "implemented_source_git_revision"
                     ]
                     for item in answer_composition_phase[
+                        "accepted_source_files"
+                    ]
+                }
+            )
+            application_package_phase = answer_composition_phase[
+                "application_package_composition"
+            ]
+            phase_path_revisions.update(
+                {
+                    item["path"]: application_package_phase[
+                        "implemented_source_git_revision"
+                    ]
+                    for item in application_package_phase[
                         "accepted_source_files"
                     ]
                 }
