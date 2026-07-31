@@ -3301,6 +3301,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     jaa12_contract = dict(jaa12["provisional_local_export_contract"])
     status_store = jaa12_contract.pop("durable_status_evidence_store")
     status_coordinator = jaa12_contract.pop("durable_status_coordinator")
+    typed_reads = jaa12_contract.pop("durable_typed_status_reads")
     assert jaa12_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
@@ -3942,6 +3943,327 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
             pointer["sha256"]
         )
+    assert set(typed_reads) == {
+        "status",
+        "scope",
+        "implemented_source_git_revision",
+        "implemented_source_tree",
+        "implemented_source_content_revision",
+        "accepted_source_files",
+        "upstream_dependency_satisfied",
+        "follow_up_reference_hashes",
+        "atomicity_across_steps",
+        "connector_authority",
+        "mailbox_access",
+        "portal_access",
+        "send_authority",
+        "objective_satisfied",
+        "dependency_satisfied",
+        "production_certification",
+        "certifies_slice",
+        "external_action_capability",
+        "real_applications_submitted",
+        "design_gate",
+        "sonnet_initial_review",
+        "sonnet_post_repair_review",
+        "phase_a_exact_source_gate",
+        "phase_a_acceptance_receipt",
+        "deterministic_logs",
+    }
+    assert {
+        key: typed_reads[key]
+        for key in (
+            "status",
+            "scope",
+            "implemented_source_git_revision",
+            "implemented_source_tree",
+            "implemented_source_content_revision",
+            "upstream_dependency_satisfied",
+            "follow_up_reference_hashes",
+            "atomicity_across_steps",
+            "connector_authority",
+            "mailbox_access",
+            "portal_access",
+            "send_authority",
+            "objective_satisfied",
+            "dependency_satisfied",
+            "production_certification",
+            "certifies_slice",
+            "external_action_capability",
+            "real_applications_submitted",
+        )
+    } == {
+        "status": "bounded_local_typed_reads_phase_a_accepted",
+        "scope": "bounded_local_no_external_capability",
+        "implemented_source_git_revision": (
+            "37d41f1b68bcd7684066ecaaef748114a907c538"
+        ),
+        "implemented_source_tree": (
+            "21dd386a2024e86a77cb54aede0eb357dcdf5b38"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:1c6c366e12c9dd42a3a91176ff08f40"
+            "9e7578767374c9e8ef57a418ecb562b56"
+        ),
+        "upstream_dependency_satisfied": False,
+        "follow_up_reference_hashes": (
+            "caller_supplied_structural_references"
+        ),
+        "atomicity_across_steps": "absent",
+        "connector_authority": "withheld",
+        "mailbox_access": "withheld",
+        "portal_access": "withheld",
+        "send_authority": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+        "production_certification": "withheld",
+        "certifies_slice": False,
+        "external_action_capability": False,
+        "real_applications_submitted": 0,
+    }
+    assert typed_reads["accepted_source_files"] == [
+        {
+            "path": "career_automation/status_evidence_store.py",
+            "sha256": (
+                "13fba08fbd51beb07ee03e3e87a7df94"
+                "69bda7ca916783a1299e1b50b9c0a732"
+            ),
+        },
+        {
+            "path": "test_jaa12_status_evidence_reader.py",
+            "sha256": (
+                "2788fe875601701004ff8dd2e9809489"
+                "d6a26e846adf87243e5403a43ba6944b"
+            ),
+        },
+        {
+            "path": (
+                "test_jaa12_status_evidence_reader_negative_controls.py"
+            ),
+            "sha256": (
+                "1445492bd071c41670f11d3738a1ccb3"
+                "88763b794d8c3d67ef5d8b087c5fc429"
+            ),
+        },
+    ]
+    assert {
+        key: typed_reads[key]["disposition"]
+        for key in (
+            "design_gate",
+            "sonnet_initial_review",
+            "sonnet_post_repair_review",
+            "phase_a_exact_source_gate",
+        )
+    } == {
+        "design_gate": "AUTHORIZE_BOUNDED_IMPLEMENTATION",
+        "sonnet_initial_review": "ACCEPT_WITH_FINDINGS",
+        "sonnet_post_repair_review": "ACCEPT",
+        "phase_a_exact_source_gate": "ACCEPT_AND_AUTHORIZE_PHASE_B",
+    }
+    for key in (
+        "design_gate",
+        "sonnet_initial_review",
+        "sonnet_post_repair_review",
+        "phase_a_exact_source_gate",
+    ):
+        assert set(typed_reads[key]) == {
+            "disposition",
+            "prompt",
+            "raw",
+            "stderr",
+        }
+    assert set(typed_reads["deterministic_logs"]) == {
+        "new_suites",
+        "standing_jaa12",
+        "downstream",
+        "truth_stale",
+        "ruff",
+        "pycompile",
+        "diff_check",
+        "allowlist",
+        "identity",
+    }
+    typed_read_pointers = {
+        "design_prompt": typed_reads["design_gate"]["prompt"],
+        "design_raw": typed_reads["design_gate"]["raw"],
+        "design_stderr": typed_reads["design_gate"]["stderr"],
+        "sonnet_initial_prompt": (
+            typed_reads["sonnet_initial_review"]["prompt"]
+        ),
+        "sonnet_initial_raw": typed_reads["sonnet_initial_review"]["raw"],
+        "sonnet_initial_stderr": (
+            typed_reads["sonnet_initial_review"]["stderr"]
+        ),
+        "sonnet_post_repair_prompt": (
+            typed_reads["sonnet_post_repair_review"]["prompt"]
+        ),
+        "sonnet_post_repair_raw": (
+            typed_reads["sonnet_post_repair_review"]["raw"]
+        ),
+        "sonnet_post_repair_stderr": (
+            typed_reads["sonnet_post_repair_review"]["stderr"]
+        ),
+        "phase_a_exact_source_prompt": (
+            typed_reads["phase_a_exact_source_gate"]["prompt"]
+        ),
+        "phase_a_exact_source_raw": (
+            typed_reads["phase_a_exact_source_gate"]["raw"]
+        ),
+        "phase_a_exact_source_stderr": (
+            typed_reads["phase_a_exact_source_gate"]["stderr"]
+        ),
+        "phase_a_acceptance_receipt": (
+            typed_reads["phase_a_acceptance_receipt"]
+        ),
+        **typed_reads["deterministic_logs"],
+    }
+    assert {
+        key: (pointer["relative_path"], pointer["sha256"])
+        for key, pointer in typed_read_pointers.items()
+    } == {
+        "design_prompt": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durable-read-recovery-design-gate-prompt.txt",
+            "b6146df7ccc1515bff67a26c261b9752"
+            "edd4454940f3063c197969d39acbdb9d",
+        ),
+        "design_raw": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durable-read-recovery-design-gate-raw.json",
+            "2a8ef1a4e7cb53693f9904ae9ba0fffe"
+            "831a6a0044a87b3a248ea45e3a98e0bc",
+        ),
+        "design_stderr": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durable-read-recovery-design-gate-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "sonnet_initial_prompt": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-reader-phase-a-review-prompt.txt",
+            "b2c12f8b06ec5b042afbdf600284445f"
+            "3b65971f252ae6355fd96fc98c083f8e",
+        ),
+        "sonnet_initial_raw": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-reader-phase-a-review-raw.json",
+            "a988febf628f7fa865ab88b96ae2a741b"
+            "850b8330d622f682355aec3cb4fef21",
+        ),
+        "sonnet_initial_stderr": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-reader-phase-a-review-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "sonnet_post_repair_prompt": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-reader-phase-a-postrepair-review-prompt.txt",
+            "a605e958b00293f3ddeb23d8c61de985"
+            "f8b61bf575a8bc637b271d85fee05320",
+        ),
+        "sonnet_post_repair_raw": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-reader-phase-a-postrepair-review-raw.json",
+            "5a4c5f5388ac463ca926ea10cddde05b"
+            "b66e059e5bfe6fef7c496515d6357d4f",
+        ),
+        "sonnet_post_repair_stderr": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-reader-phase-a-postrepair-review-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "phase_a_exact_source_prompt": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-status-reader-phase-a-exact-source-prompt.txt",
+            "124d9dea2c69b6da3eec4acb17c2ce04"
+            "cce9e7fd644409bb4c7f491a8f922b5b",
+        ),
+        "phase_a_exact_source_raw": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-status-reader-phase-a-exact-source-raw.json",
+            "5bfa84832416b93f163269ea12d473975"
+            "2a11bda66f6f12fc5d34e945013f0fa",
+        ),
+        "phase_a_exact_source_stderr": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-status-reader-phase-a-exact-source-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "phase_a_acceptance_receipt": (
+            "jaa-single-codex-20260729/"
+            "FABLE_JAA12_DURABLE_TYPED_READ_PHASE_A_ACCEPTANCE.md",
+            "4e46e22ed454dc3b48668e176b91d98f"
+            "bd2852d754aa01e27e729459f665e2ba",
+        ),
+        "new_suites": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-new-suites.log",
+            "b99f6ebf790c8ed7dc780f516066540c"
+            "0ac691a26cfb6152026bb7d4d37a265f",
+        ),
+        "standing_jaa12": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-standing.log",
+            "43686a0e54a2d7726fcf2ed91abe6333"
+            "d277c205733005cd52d238a85ea7aac4",
+        ),
+        "downstream": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-downstream.log",
+            "738de28bf7dede0efb71f64b6a8b55e"
+            "5dbcb739885bab9336601ff70556f2f17",
+        ),
+        "truth_stale": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-truth-stale.log",
+            "b8905ee1ad928bf5653960624af5db102"
+            "1d4866d7f8490bab42aa49a81909408",
+        ),
+        "ruff": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-ruff.log",
+            "82b3e6a6c090a57601d22943bd23fca9"
+            "218d1031dbe5a7b754092f9a156b4f18",
+        ),
+        "pycompile": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-pycompile.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "diff_check": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-diff-check.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "allowlist": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-allowlist.log",
+            "d41aac0f9766e7ec186df9da3f7a3861"
+            "c3be4f23f4ed33973582c03d879badb8",
+        ),
+        "identity": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-reader-phase-a-postrepair-identity.log",
+            "5456c43df9f617b9b603db25a63e4d7e"
+            "6ad5724c1242dd2318942fbff7a91972",
+        ),
+    }
+    for pointer in typed_read_pointers.values():
+        assert pointer["path_base"] == "operator_control_root"
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
     assert "certification" not in jaa12
     for key in (
         "deputy_authority",
@@ -3977,6 +4299,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "JAA-12-status-evidence-store-negative-controls",
         "JAA-12-status-store-coordinator",
         "JAA-12-status-store-coordinator-negative-controls",
+        "JAA-12-status-evidence-reader",
+        "JAA-12-status-evidence-reader-negative-controls",
     ]
     for relative in jaa12["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -4827,6 +5151,13 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                 }
             )
             phase = block["durable_status_coordinator"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: phase["implemented_source_git_revision"]
+                    for item in phase["accepted_source_files"]
+                }
+            )
+            phase = block["durable_typed_status_reads"]
             phase_path_revisions.update(
                 {
                     item["path"]: phase["implemented_source_git_revision"]

@@ -1981,6 +1981,164 @@
             "sha256": "c90f2ad7ad0c13c577653c5ed075ff94a76bc86c943a2e817674413bcd85c262"
           }
         },
+        "durable_typed_status_reads": {
+          "status": "bounded_local_typed_reads_phase_a_accepted",
+          "scope": "bounded_local_no_external_capability",
+          "implemented_source_git_revision": "37d41f1b68bcd7684066ecaaef748114a907c538",
+          "implemented_source_tree": "21dd386a2024e86a77cb54aede0eb357dcdf5b38",
+          "implemented_source_content_revision": "sha256:1c6c366e12c9dd42a3a91176ff08f409e7578767374c9e8ef57a418ecb562b56",
+          "accepted_source_files": [
+            {
+              "path": "career_automation/status_evidence_store.py",
+              "sha256": "13fba08fbd51beb07ee03e3e87a7df9469bda7ca916783a1299e1b50b9c0a732"
+            },
+            {
+              "path": "test_jaa12_status_evidence_reader.py",
+              "sha256": "2788fe875601701004ff8dd2e9809489d6a26e846adf87243e5403a43ba6944b"
+            },
+            {
+              "path": "test_jaa12_status_evidence_reader_negative_controls.py",
+              "sha256": "1445492bd071c41670f11d3738a1ccb388763b794d8c3d67ef5d8b087c5fc429"
+            }
+          ],
+          "upstream_dependency_satisfied": false,
+          "follow_up_reference_hashes": "caller_supplied_structural_references",
+          "atomicity_across_steps": "absent",
+          "connector_authority": "withheld",
+          "mailbox_access": "withheld",
+          "portal_access": "withheld",
+          "send_authority": "withheld",
+          "objective_satisfied": false,
+          "dependency_satisfied": false,
+          "production_certification": "withheld",
+          "certifies_slice": false,
+          "external_action_capability": false,
+          "real_applications_submitted": 0,
+          "design_gate": {
+            "disposition": "AUTHORIZE_BOUNDED_IMPLEMENTATION",
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durable-read-recovery-design-gate-prompt.txt",
+              "sha256": "b6146df7ccc1515bff67a26c261b9752edd4454940f3063c197969d39acbdb9d"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durable-read-recovery-design-gate-raw.json",
+              "sha256": "2a8ef1a4e7cb53693f9904ae9ba0fffe831a6a0044a87b3a248ea45e3a98e0bc"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durable-read-recovery-design-gate-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "sonnet_initial_review": {
+            "disposition": "ACCEPT_WITH_FINDINGS",
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-reader-phase-a-review-prompt.txt",
+              "sha256": "b2c12f8b06ec5b042afbdf600284445f3b65971f252ae6355fd96fc98c083f8e"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-reader-phase-a-review-raw.json",
+              "sha256": "a988febf628f7fa865ab88b96ae2a741b850b8330d622f682355aec3cb4fef21"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-reader-phase-a-review-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "sonnet_post_repair_review": {
+            "disposition": "ACCEPT",
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-reader-phase-a-postrepair-review-prompt.txt",
+              "sha256": "a605e958b00293f3ddeb23d8c61de985f8b61bf575a8bc637b271d85fee05320"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-reader-phase-a-postrepair-review-raw.json",
+              "sha256": "5a4c5f5388ac463ca926ea10cddde05bb66e059e5bfe6fef7c496515d6357d4f"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-reader-phase-a-postrepair-review-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "phase_a_exact_source_gate": {
+            "disposition": "ACCEPT_AND_AUTHORIZE_PHASE_B",
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-status-reader-phase-a-exact-source-prompt.txt",
+              "sha256": "124d9dea2c69b6da3eec4acb17c2ce04cce9e7fd644409bb4c7f491a8f922b5b"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-status-reader-phase-a-exact-source-raw.json",
+              "sha256": "5bfa84832416b93f163269ea12d4739752a11bda66f6f12fc5d34e945013f0fa"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-status-reader-phase-a-exact-source-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "phase_a_acceptance_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/FABLE_JAA12_DURABLE_TYPED_READ_PHASE_A_ACCEPTANCE.md",
+            "sha256": "4e46e22ed454dc3b48668e176b91d98fbd2852d754aa01e27e729459f665e2ba"
+          },
+          "deterministic_logs": {
+            "new_suites": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-new-suites.log",
+              "sha256": "b99f6ebf790c8ed7dc780f516066540c0ac691a26cfb6152026bb7d4d37a265f"
+            },
+            "standing_jaa12": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-standing.log",
+              "sha256": "43686a0e54a2d7726fcf2ed91abe6333d277c205733005cd52d238a85ea7aac4"
+            },
+            "downstream": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-downstream.log",
+              "sha256": "738de28bf7dede0efb71f64b6a8b55e5dbcb739885bab9336601ff70556f2f17"
+            },
+            "truth_stale": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-truth-stale.log",
+              "sha256": "b8905ee1ad928bf5653960624af5db1021d4866d7f8490bab42aa49a81909408"
+            },
+            "ruff": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-ruff.log",
+              "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+            },
+            "pycompile": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-pycompile.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "diff_check": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-diff-check.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "allowlist": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-allowlist.log",
+              "sha256": "d41aac0f9766e7ec186df9da3f7a3861c3be4f23f4ed33973582c03d879badb8"
+            },
+            "identity": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-reader-phase-a-postrepair-identity.log",
+              "sha256": "5456c43df9f617b9b603db25a63e4d7e6ad5724c1242dd2318942fbff7a91972"
+            }
+          }
+        },
         "upstream_dependency_satisfied": false,
         "follow_up_reference_hashes": "caller_supplied_structural_references",
         "mailbox_connector_status": "not_connected",
@@ -2049,7 +2207,9 @@
         {"id": "JAA-12-status-evidence-store", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_store.py"], "files": ["test_jaa12_status_evidence_store.py"]},
         {"id": "JAA-12-status-evidence-store-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_store_negative_controls.py"], "files": ["test_jaa12_status_evidence_store_negative_controls.py"], "negative_control": true},
         {"id": "JAA-12-status-store-coordinator", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_store_coordinator.py"], "files": ["test_jaa12_status_store_coordinator.py"]},
-        {"id": "JAA-12-status-store-coordinator-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_store_coordinator_negative_controls.py"], "files": ["test_jaa12_status_store_coordinator_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-12-status-store-coordinator-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_store_coordinator_negative_controls.py"], "files": ["test_jaa12_status_store_coordinator_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-12-status-evidence-reader", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_reader.py"], "files": ["test_jaa12_status_evidence_reader.py"]},
+        {"id": "JAA-12-status-evidence-reader-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_reader_negative_controls.py"], "files": ["test_jaa12_status_evidence_reader_negative_controls.py"], "negative_control": true}
       ],
       "evidence": []
     },
