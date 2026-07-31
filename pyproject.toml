@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 dependencies = [
+    "cryptography==49.0.0",
     "pyyaml==6.0.3",
     "requests==2.32.5",
     "openpyxl==3.1.5",

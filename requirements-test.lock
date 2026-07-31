@@ -1,13 +1,16 @@
 # Reproducible test/bootstrap input for CPython 3.12.
 # Regenerate deliberately after validating the complete suite; do not loosen pins here.
 certifi==2026.5.20
+cffi==2.1.0
 charset-normalizer==3.4.2
+cryptography==49.0.0
 et-xmlfile==2.0.0
 idna==3.18
 iniconfig==2.3.0
 openpyxl==3.1.5
 packaging==26.2
 pluggy==1.6.0
+pycparser==3.0
 Pygments==2.20.0
 pypdf==6.6.0
 pytest==9.0.3
