@@ -3780,11 +3780,11 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     }
     assert operator_answers == {
         "status": (
-            "bounded_operator_application_answers_"
-            "phase_a_exact_source_accepted"
+            "bounded_operator_application_answers_subtopic_"
+            "whitelist_phase_a_exact_source_accepted"
         ),
         "independent_fable_acceptance": (
-            "accept_and_authorize_receipt_"
+            "subtopic_whitelist_accept_and_authorize_receipt_"
             "objective_unsatisfied_2026-07-31"
         ),
         "scope": (
@@ -3792,17 +3792,17 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "operator_document_bytes_no_external_capability"
         ),
         "implemented_source_git_revision": (
-            "8495d16994df7696a35fbf1643f8ca48471543e9"
+            "c1bc7b206f299c959b4f3af1d676331da0101f1a"
         ),
         "implemented_source_parent_git_revision": (
-            "b12a423eaa3de466f686c1656b6d0cac252a2026"
+            "1bc1a84369d810267780b3adfeef4426d45e34f6"
         ),
         "implemented_source_tree": (
-            "877962152e98df8b1f06491ca42c5a26ed0402ae"
+            "b92a18d0c962908e03c89b8dc0c0835ea6df140c"
         ),
         "implemented_source_content_revision": (
-            "sha256:15f28e25bf1c4aca92bb033d0715702f"
-            "6697a8ccd58a88a4d3ea5c575322cb71"
+            "sha256:a3ea80dd4adf004894b81721a322c2ea"
+            "b478231351cfe663fbd51d982bf6e7e4"
         ),
         "accepted_source_files": [
             {
@@ -3810,15 +3810,15 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                     "career_automation/live_canary_operator_answers.py"
                 ),
                 "sha256": (
-                    "a51393e72d8df19c8384970b16839a296"
-                    "9b45f2173d5451c3e0c655588a61866"
+                    "e0bb87bf5c19562bcb111e9773133e539"
+                    "a874fb266156ad5e740af6b3382f49c"
                 ),
             },
             {
                 "path": "test_jaa11_live_canary_operator_answers.py",
                 "sha256": (
-                    "6724ada5d61239b5bcd4e5ce285557767"
-                    "2ffbb1ba28ddead493b9ae8965f37db"
+                    "de6651588921c359a10727cb4e151009"
+                    "f6957b01010789babf86f9783ed7676d"
                 ),
             },
             {
@@ -3827,8 +3827,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                     "negative_controls.py"
                 ),
                 "sha256": (
-                    "145872d9883b56bbe438666de8673c031"
-                    "86278e75e31b8a60e5dc6b1ef575d6b"
+                    "c1486aedf634c77b59398827d9708b9b"
+                    "b1d5d5d8a8515771124b26b2d5085b3a"
                 ),
             },
         ],
@@ -3897,6 +3897,18 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "path_base": "operator_control_root",
             "relative_path": (
                 "jaa-single-codex-20260729/"
+                "FABLE_JAA11_OPERATOR_ANSWERS_SUBTOPIC_WHITELIST_"
+                "PHASE_A_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "7f437e8b500132b9c4c0c2728cb0d63"
+                "b3e0f303b7d38cf2408b216a0910572e6"
+            ),
+        },
+        "superseded_phase_a_exact_source_acceptance": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
                 "FABLE_JAA11_OPERATOR_ANSWERS_PHASE_A_ACCEPTANCE.md"
             ),
             "sha256": (
@@ -3921,8 +3933,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "establishes_no_current_law"
         ),
         "subtopic_whitelist_parity": (
-            "recommended_future_bounded_hardening_not_an_"
-            "accepted_guarantee"
+            "accepted_bounded_guarantee_work_authorisation_"
+            "current_only_salary_free_text_market_statutory_"
+            "minimum_only_numeric_null_subtopic_only"
         ),
         "answers_binding": "in_memory_exact_bytes_sha256_only",
         "live_or_authenticity_claim": False,
