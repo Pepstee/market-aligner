@@ -1697,6 +1697,105 @@
               "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_RANKED_SNAPSHOT_FIXTURE_PHASE_B_ACCEPTANCE.md",
               "sha256": "81d2a9cb848ebb92bd808fb9d1038ce31b00760c659c294be99707edc60e0207"
             },
+            "operator_snapshot_document": {
+              "status": "bounded_operator_snapshot_document_phase_a_exact_source_accepted",
+              "independent_fable_acceptance": "accept_bounded_implementation_objective_unsatisfied_2026-07-31",
+              "scope": "exact_byte_size_capped_strict_json_normalization_into_accepted_fixture_schema_no_selection_no_external_capability",
+              "implemented_source_git_revision": "4f9f431bf791d95a66953864a209081a9d6e5523",
+              "implemented_source_parent_git_revision": "d81d8b19ae96aa49716bfcbb57d6959a582fce78",
+              "implemented_source_tree": "56398811c570b6362f61b3efb432a096c0862408",
+              "implemented_source_content_revision": "sha256:0eddb125cd74daacd965056159d2da773246de8a8fc5c482b5a3063f461f713c",
+              "accepted_source_files": [
+                {
+                  "path": "career_automation/live_canary_snapshot_document.py",
+                  "sha256": "4a8cb89d5dc8b2268d5dcfb3aaa71d7c60773c5255e4537b0ad9676fbceedfb0"
+                },
+                {
+                  "path": "test_jaa11_live_canary_snapshot_document.py",
+                  "sha256": "b2961a98f4f3f135d707b774fe19598cf186358e52b51b418ac217e1b72a1722"
+                },
+                {
+                  "path": "test_jaa11_live_canary_snapshot_document_negative_controls.py",
+                  "sha256": "73819707557c7d59ae2edf4ea4af1d21f4f1dc990a90132150ecda419af3eadf"
+                }
+              ],
+              "accepted_dependencies": [
+                {
+                  "path": "career_automation/live_canary_authority.py",
+                  "sha256": "e48372dc4e414212bc86d2bc0ba21d9ec75f80d12eeaa6e1dfc80179a958e1fc"
+                },
+                {
+                  "path": "career_automation/live_canary_fixture_dry_run.py",
+                  "sha256": "3e2341e3fbc3a9e4a199c0e55ccc12176990a647c7d83b2ffb545abffc1cfaea"
+                }
+              ],
+              "phase_a_exact_source_acceptance": {
+                "path_base": "operator_control_root",
+                "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_OPERATOR_SNAPSHOT_DOCUMENT_PHASE_A_ACCEPTANCE.md",
+                "sha256": "e73a62b52c75e1343cd249aa459122d8f2e084a8cac8b65ede9b9b484d146fa6"
+              },
+              "operator_document_fixture_composition": {
+                "status": "bounded_operator_document_fixture_composition_phase_a_exact_source_accepted",
+                "independent_fable_acceptance": "accept_and_authorize_receipt_objective_unsatisfied_2026-07-31",
+                "scope": "pure_in_memory_transitive_hash_binding_with_delegated_fixture_only_selection_and_authority_no_external_capability",
+                "implemented_source_git_revision": "b0bded5c5ca471c4eb4e25a699f1a75dbb7f8d9e",
+                "implemented_source_parent_git_revision": "4f9f431bf791d95a66953864a209081a9d6e5523",
+                "implemented_source_tree": "1a698239e4b093cfd9ce9f4b17930113e269d438",
+                "implemented_source_content_revision": "sha256:b08082304d5aba5044b9fdf2168219754a2dfa6396d988ea3d6d7b93d87d4e1f",
+                "accepted_source_files": [
+                  {
+                    "path": "career_automation/live_canary_operator_fixture_composition.py",
+                    "sha256": "6be3aa327a7ba38df219b91fc6a7211b05c81231af90313148c2a5f6d77ea877"
+                  },
+                  {
+                    "path": "test_jaa11_live_canary_operator_fixture_composition.py",
+                    "sha256": "d04ed90fe05175e20f09f8d77217c2fc4ccfd3ef25586119d2291215fc8ba3ac"
+                  },
+                  {
+                    "path": "test_jaa11_live_canary_operator_fixture_composition_negative_controls.py",
+                    "sha256": "e0967efe55f3a2eeccc58be4406eb67f1592c94bc607273633a2d86a06061010"
+                  }
+                ],
+                "accepted_dependencies": [
+                  {
+                    "path": "career_automation/live_canary_authority.py",
+                    "sha256": "e48372dc4e414212bc86d2bc0ba21d9ec75f80d12eeaa6e1dfc80179a958e1fc"
+                  },
+                  {
+                    "path": "career_automation/live_canary_fixture_dry_run.py",
+                    "sha256": "3e2341e3fbc3a9e4a199c0e55ccc12176990a647c7d83b2ffb545abffc1cfaea"
+                  },
+                  {
+                    "path": "career_automation/live_canary_snapshot_document.py",
+                    "sha256": "4a8cb89d5dc8b2268d5dcfb3aaa71d7c60773c5255e4537b0ad9676fbceedfb0"
+                  }
+                ],
+                "phase_a_exact_source_acceptance": {
+                  "path_base": "operator_control_root",
+                  "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_OPERATOR_DOCUMENT_FIXTURE_COMPOSITION_PHASE_A_ACCEPTANCE.md",
+                  "sha256": "2d8fbafc10e99b65a499eb9d66e6fb60420776d1b9605bedfc8222bb393f0548"
+                },
+                "operator_document_supplied": false,
+                "composition_binding": "in_memory_only",
+                "live_ranked_snapshot": false,
+                "external_action_capability": false,
+                "operational_release": "withheld",
+                "real_submission_authority": "withheld",
+                "production_certification": "withheld",
+                "objective_satisfied": false,
+                "dependency_satisfied": false,
+                "real_applications_submitted": 0
+              },
+              "operator_document_supplied": false,
+              "live_ranked_snapshot": false,
+              "external_action_capability": false,
+              "operational_release": "withheld",
+              "real_submission_authority": "withheld",
+              "production_certification": "withheld",
+              "objective_satisfied": false,
+              "dependency_satisfied": false,
+              "real_applications_submitted": 0
+            },
             "fixture_source": "caller_supplied_in_memory_only",
             "live_ranked_snapshot": false,
             "external_action_capability": false,
@@ -1805,7 +1904,7 @@
           }
         }
       },
-      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py", "career_automation/live_canary_authority.py", "career_automation/live_canary_fixture_dry_run.py"],
+      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py", "career_automation/live_canary_authority.py", "career_automation/live_canary_fixture_dry_run.py", "career_automation/live_canary_snapshot_document.py", "career_automation/live_canary_operator_fixture_composition.py"],
       "inputs": ["career_automation/browser_executor.py", "career_automation/release_gate.py"],
       "interfaces": [],
       "environment": [],
@@ -1818,7 +1917,11 @@
         {"id": "JAA-11-live-canary-authority-intake", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_authority_intake.py"], "files": ["test_jaa11_live_canary_authority_intake.py"]},
         {"id": "JAA-11-live-canary-authority-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_authority_negative_controls.py"], "files": ["test_jaa11_live_canary_authority_negative_controls.py"], "negative_control": true},
         {"id": "JAA-11-live-canary-fixture-dry-run", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_fixture_dry_run.py"], "files": ["test_jaa11_live_canary_fixture_dry_run.py"]},
-        {"id": "JAA-11-live-canary-fixture-dry-run-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_fixture_dry_run_negative_controls.py"], "files": ["test_jaa11_live_canary_fixture_dry_run_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-11-live-canary-fixture-dry-run-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_fixture_dry_run_negative_controls.py"], "files": ["test_jaa11_live_canary_fixture_dry_run_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-11-live-canary-snapshot-document", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_snapshot_document.py"], "files": ["test_jaa11_live_canary_snapshot_document.py"]},
+        {"id": "JAA-11-live-canary-snapshot-document-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_snapshot_document_negative_controls.py"], "files": ["test_jaa11_live_canary_snapshot_document_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-11-live-canary-operator-fixture-composition", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_operator_fixture_composition.py"], "files": ["test_jaa11_live_canary_operator_fixture_composition.py"]},
+        {"id": "JAA-11-live-canary-operator-fixture-composition-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_operator_fixture_composition_negative_controls.py"], "files": ["test_jaa11_live_canary_operator_fixture_composition_negative_controls.py"], "negative_control": true}
       ],
       "evidence": [
         {
