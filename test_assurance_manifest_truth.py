@@ -3225,8 +3225,11 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     }
     assert live_canary_authority == {
         "status": (
-            "bounded_local_authority_intake_phase_a_"
-            "implemented_pending_exact_source_review"
+            "bounded_local_authority_intake_phase_a_exact_source_accepted"
+        ),
+        "independent_fable_acceptance": (
+            "bounded_local_phase_a_exact_source_accepted_"
+            "objective_unsatisfied_2026-07-31"
         ),
         "scope": (
             "pure_data_authority_and_selection_contract_"
@@ -3278,6 +3281,18 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "7f03f8cfe5e9267b82e2ad6f2a9f77c"
             ),
         },
+        "phase_a_exact_source_acceptance": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA11_LIVE_CANARY_AUTHORITY_"
+                "PHASE_A_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "eec41f405e86b7a55074d9542bea1ca02"
+                "d11c3e0bb5399c94e265e15df9f6e0b"
+            ),
+        },
         "max_canaries": 1,
         "forbidden_rank_range": [1, 20],
         "minimum_selected_rank": 21,
@@ -3318,6 +3333,17 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert authority_path.is_file()
     assert hashlib.sha256(authority_path.read_bytes()).hexdigest() == (
         authority_pointer["sha256"]
+    )
+    acceptance_pointer = live_canary_authority[
+        "phase_a_exact_source_acceptance"
+    ]
+    acceptance_path = (
+        evidence_bases[acceptance_pointer["path_base"]]
+        / acceptance_pointer["relative_path"]
+    )
+    assert acceptance_path.is_file()
+    assert hashlib.sha256(acceptance_path.read_bytes()).hexdigest() == (
+        acceptance_pointer["sha256"]
     )
     authority_revision = live_canary_authority[
         "implemented_source_git_revision"

@@ -1636,7 +1636,8 @@
           "sha256": "f08bdda4e29585b184a7de565669337094d783aee0e7c6c64433c32ccf809250"
         },
         "live_canary_operator_authority": {
-          "status": "bounded_local_authority_intake_phase_a_implemented_pending_exact_source_review",
+          "status": "bounded_local_authority_intake_phase_a_exact_source_accepted",
+          "independent_fable_acceptance": "bounded_local_phase_a_exact_source_accepted_objective_unsatisfied_2026-07-31",
           "scope": "pure_data_authority_and_selection_contract_no_external_capability",
           "implemented_source_git_revision": "22a37046af1a78e75dc520128ad98d46bb2946eb",
           "implemented_source_tree": "afce9c089bd5710e20bd679bec9e222875195667",
@@ -1659,6 +1660,11 @@
             "path_base": "software_factory_root",
             "relative_path": "giga-user/reports/JAA11_LIVE_CANARY_OPERATOR_AUTHORITY_2026-07-31.md",
             "sha256": "b1cc3740a7d760ab905c27156bf8498bb7f03f8cfe5e9267b82e2ad6f2a9f77c"
+          },
+          "phase_a_exact_source_acceptance": {
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_LIVE_CANARY_AUTHORITY_PHASE_A_ACCEPTANCE.md",
+            "sha256": "eec41f405e86b7a55074d9542bea1ca02d11c3e0bb5399c94e265e15df9f6e0b"
           },
           "max_canaries": 1,
           "forbidden_rank_range": [1, 20],
