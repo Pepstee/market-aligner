@@ -1869,6 +1869,118 @@
             }
           }
         },
+        "durable_status_coordinator": {
+          "status": "bounded_local_coordinator_phase_a_accepted",
+          "implemented_source_git_revision": "d5f2f99f8165aabf53132eb3e6451a8b7a5eab79",
+          "implemented_source_tree": "bd8f472ddfff19bd41df92febe7bfb3d42252570",
+          "implemented_source_content_revision": "sha256:62c56f95a0439c29bb504ffc9a2d7db5756710e519e0443a0154174832058f91",
+          "coordinator_policy_sha256": "1c3874eaea9df15413984923f871aa1355a46b4fa5e0263b8c41f0d42b6383bd",
+          "contract_sha256": "bbeb6b6d8ac47b33898626e98f703faa67bc556a6e3814e3f53d756b12a0e327",
+          "accepted_source_files": [
+            {
+              "path": "career_automation/status_store_coordinator.py",
+              "sha256": "c521848d7f379a900dad50f9c4d991498ba6eea59a627897eb517cde6462d72c"
+            },
+            {
+              "path": "test_jaa12_status_store_coordinator.py",
+              "sha256": "3263b55bcf51fa66295a18a486d4fed3e26226fcabd6fc7ef86fe77cd1ec556e"
+            },
+            {
+              "path": "test_jaa12_status_store_coordinator_negative_controls.py",
+              "sha256": "bafdb8fe479bb779650061c0e84721cd160764bb8b325068abee0de249991723"
+            }
+          ],
+          "partial_progress": "truthful_receipted_steps",
+          "atomicity_across_steps": "absent",
+          "durable_read_api": "absent",
+          "follow_up_reference_hashes": "caller_supplied_structural_references",
+          "connector_authority": "withheld",
+          "mailbox_access": "withheld",
+          "portal_access": "withheld",
+          "send_authority": "withheld",
+          "objective_satisfied": false,
+          "dependency_satisfied": false,
+          "production_certification": "withheld",
+          "certifies_slice": false,
+          "external_action_capability": false,
+          "real_applications_submitted": 0,
+          "design_gate": {
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durable-ingestion-integration-design-gate-prompt.txt",
+              "sha256": "2b278662d1751c14aa806ea6f06c7b632f8c0d14fd864f6fb39f8f5466d4345f"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durable-ingestion-integration-design-gate-raw.json",
+              "sha256": "961fb134ba0314933f46d99768ad801c36d1b00d5a7963d8af6c59c26df35908"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durable-ingestion-integration-design-gate-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "phase_a_postcommit_logs": {
+            "new_suites": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-coordinator-phase-a-postcommit-new-suites.log",
+              "sha256": "cf38a20665d2d870cf1d74ceebd187ab669f1ec4e6085b63d9a4fd8ac050e1dd"
+            },
+            "standing_jaa12": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-coordinator-phase-a-postcommit-standing.log",
+              "sha256": "ec6f469ae5231b357cee6ed2d0ea8ac03abca2e07b108bbac7d021ca238a4ecf"
+            },
+            "manifest_truth": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-coordinator-phase-a-postcommit-manifest-truth.log",
+              "sha256": "03da38b2466e69b11a94af917faab419e5b45caa97a278e133cc767e94781913"
+            },
+            "ruff": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-coordinator-phase-a-postcommit-ruff.log",
+              "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+            },
+            "pycompile": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-coordinator-phase-a-postcommit-pycompile.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "allowlist": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-coordinator-phase-a-postcommit-allowlist.log",
+              "sha256": "52871b8f457617ba4dd967fa90813a5798b55b292e148f1fce712ae843681146"
+            },
+            "identity": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-status-coordinator-phase-a-postcommit-identity.log",
+              "sha256": "5531a72144191263d85c5f53ae7d041da1f1bb73b936169fbe641beac739c8a3"
+            }
+          },
+          "sonnet_phase_a_review": {
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-coordinator-phase-a-review-prompt.txt",
+              "sha256": "9a6654ee51030391e56c7c77a31d90cccb6605a6f4917d96419fd9372b6a8a06"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-coordinator-phase-a-review-raw.json",
+              "sha256": "7d72d712bd6deab29eaec5e2465d6c742f16f8857aa5ba7012b38bf4bb98ebdd"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-status-coordinator-phase-a-review-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "phase_a_acceptance_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/FABLE_JAA12_STATUS_COORDINATOR_PHASE_A_ACCEPTANCE.md",
+            "sha256": "c90f2ad7ad0c13c577653c5ed075ff94a76bc86c943a2e817674413bcd85c262"
+          }
+        },
         "upstream_dependency_satisfied": false,
         "follow_up_reference_hashes": "caller_supplied_structural_references",
         "mailbox_connector_status": "not_connected",
@@ -1927,7 +2039,7 @@
           "sha256": "8a39a140511d29d525f99ac958f50ee1c84e570b5e8f3439511e526b529495a5"
         }
       },
-      "owns": ["career_automation/status_ingestion.py", "career_automation/status_evidence_store.py"],
+      "owns": ["career_automation/status_ingestion.py", "career_automation/status_evidence_store.py", "career_automation/status_store_coordinator.py"],
       "inputs": ["career_automation/official_ats_adapter.py", "career_automation/database.py"],
       "interfaces": [],
       "environment": [],
@@ -1935,7 +2047,9 @@
         {"id": "JAA-12-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_independent_acceptance.py"], "files": ["test_jaa12_independent_acceptance.py"]},
         {"id": "JAA-12-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_negative_controls.py"], "files": ["test_jaa12_negative_controls.py"], "negative_control": true},
         {"id": "JAA-12-status-evidence-store", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_store.py"], "files": ["test_jaa12_status_evidence_store.py"]},
-        {"id": "JAA-12-status-evidence-store-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_store_negative_controls.py"], "files": ["test_jaa12_status_evidence_store_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-12-status-evidence-store-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_store_negative_controls.py"], "files": ["test_jaa12_status_evidence_store_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-12-status-store-coordinator", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_store_coordinator.py"], "files": ["test_jaa12_status_store_coordinator.py"]},
+        {"id": "JAA-12-status-store-coordinator-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_store_coordinator_negative_controls.py"], "files": ["test_jaa12_status_store_coordinator_negative_controls.py"], "negative_control": true}
       ],
       "evidence": []
     },

@@ -3300,6 +3300,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert jaa12["depends_on"] == executable_slices["JAA-12"]["depends_on"]
     jaa12_contract = dict(jaa12["provisional_local_export_contract"])
     status_store = jaa12_contract.pop("durable_status_evidence_store")
+    status_coordinator = jaa12_contract.pop("durable_status_coordinator")
     assert jaa12_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
@@ -3694,6 +3695,253 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
             pointer["sha256"]
         )
+    assert set(status_coordinator) == {
+        "status",
+        "implemented_source_git_revision",
+        "implemented_source_tree",
+        "implemented_source_content_revision",
+        "coordinator_policy_sha256",
+        "contract_sha256",
+        "accepted_source_files",
+        "partial_progress",
+        "atomicity_across_steps",
+        "durable_read_api",
+        "follow_up_reference_hashes",
+        "connector_authority",
+        "mailbox_access",
+        "portal_access",
+        "send_authority",
+        "objective_satisfied",
+        "dependency_satisfied",
+        "production_certification",
+        "certifies_slice",
+        "external_action_capability",
+        "real_applications_submitted",
+        "design_gate",
+        "phase_a_postcommit_logs",
+        "sonnet_phase_a_review",
+        "phase_a_acceptance_receipt",
+    }
+    assert {
+        key: status_coordinator[key]
+        for key in (
+            "status",
+            "implemented_source_git_revision",
+            "implemented_source_tree",
+            "implemented_source_content_revision",
+            "coordinator_policy_sha256",
+            "contract_sha256",
+            "partial_progress",
+            "atomicity_across_steps",
+            "durable_read_api",
+            "follow_up_reference_hashes",
+            "connector_authority",
+            "mailbox_access",
+            "portal_access",
+            "send_authority",
+            "objective_satisfied",
+            "dependency_satisfied",
+            "production_certification",
+            "certifies_slice",
+            "external_action_capability",
+            "real_applications_submitted",
+        )
+    } == {
+        "status": "bounded_local_coordinator_phase_a_accepted",
+        "implemented_source_git_revision": (
+            "d5f2f99f8165aabf53132eb3e6451a8b7a5eab79"
+        ),
+        "implemented_source_tree": (
+            "bd8f472ddfff19bd41df92febe7bfb3d42252570"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:62c56f95a0439c29bb504ffc9a2d7db5"
+            "756710e519e0443a0154174832058f91"
+        ),
+        "coordinator_policy_sha256": (
+            "1c3874eaea9df15413984923f871aa13"
+            "55a46b4fa5e0263b8c41f0d42b6383bd"
+        ),
+        "contract_sha256": (
+            "bbeb6b6d8ac47b33898626e98f703faa"
+            "67bc556a6e3814e3f53d756b12a0e327"
+        ),
+        "partial_progress": "truthful_receipted_steps",
+        "atomicity_across_steps": "absent",
+        "durable_read_api": "absent",
+        "follow_up_reference_hashes": (
+            "caller_supplied_structural_references"
+        ),
+        "connector_authority": "withheld",
+        "mailbox_access": "withheld",
+        "portal_access": "withheld",
+        "send_authority": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+        "production_certification": "withheld",
+        "certifies_slice": False,
+        "external_action_capability": False,
+        "real_applications_submitted": 0,
+    }
+    assert status_coordinator["accepted_source_files"] == [
+        {
+            "path": "career_automation/status_store_coordinator.py",
+            "sha256": (
+                "c521848d7f379a900dad50f9c4d99149"
+                "8ba6eea59a627897eb517cde6462d72c"
+            ),
+        },
+        {
+            "path": "test_jaa12_status_store_coordinator.py",
+            "sha256": (
+                "3263b55bcf51fa66295a18a486d4fed3"
+                "e26226fcabd6fc7ef86fe77cd1ec556e"
+            ),
+        },
+        {
+            "path": (
+                "test_jaa12_status_store_coordinator_negative_controls.py"
+            ),
+            "sha256": (
+                "bafdb8fe479bb779650061c0e84721cd"
+                "160764bb8b325068abee0de249991723"
+            ),
+        },
+    ]
+    assert set(status_coordinator["design_gate"]) == {
+        "prompt",
+        "raw",
+        "stderr",
+    }
+    assert set(status_coordinator["phase_a_postcommit_logs"]) == {
+        "new_suites",
+        "standing_jaa12",
+        "manifest_truth",
+        "ruff",
+        "pycompile",
+        "allowlist",
+        "identity",
+    }
+    assert set(status_coordinator["sonnet_phase_a_review"]) == {
+        "prompt",
+        "raw",
+        "stderr",
+    }
+    coordinator_pointers = {
+        "design_prompt": status_coordinator["design_gate"]["prompt"],
+        "design_raw": status_coordinator["design_gate"]["raw"],
+        "design_stderr": status_coordinator["design_gate"]["stderr"],
+        **status_coordinator["phase_a_postcommit_logs"],
+        "sonnet_prompt": (
+            status_coordinator["sonnet_phase_a_review"]["prompt"]
+        ),
+        "sonnet_raw": status_coordinator["sonnet_phase_a_review"]["raw"],
+        "sonnet_stderr": (
+            status_coordinator["sonnet_phase_a_review"]["stderr"]
+        ),
+        "phase_a_acceptance_receipt": (
+            status_coordinator["phase_a_acceptance_receipt"]
+        ),
+    }
+    assert {
+        key: (pointer["relative_path"], pointer["sha256"])
+        for key, pointer in coordinator_pointers.items()
+    } == {
+        "design_prompt": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durable-ingestion-integration-design-gate-prompt.txt",
+            "2b278662d1751c14aa806ea6f06c7b63"
+            "2f8c0d14fd864f6fb39f8f5466d4345f",
+        ),
+        "design_raw": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durable-ingestion-integration-design-gate-raw.json",
+            "961fb134ba0314933f46d99768ad801c"
+            "36d1b00d5a7963d8af6c59c26df35908",
+        ),
+        "design_stderr": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durable-ingestion-integration-design-gate-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "new_suites": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-coordinator-phase-a-postcommit-new-suites.log",
+            "cf38a20665d2d870cf1d74ceebd187ab"
+            "669f1ec4e6085b63d9a4fd8ac050e1dd",
+        ),
+        "standing_jaa12": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-coordinator-phase-a-postcommit-standing.log",
+            "ec6f469ae5231b357cee6ed2d0ea8ac0"
+            "3abca2e07b108bbac7d021ca238a4ecf",
+        ),
+        "manifest_truth": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-coordinator-phase-a-postcommit-manifest-truth.log",
+            "03da38b2466e69b11a94af917faab419"
+            "e5b45caa97a278e133cc767e94781913",
+        ),
+        "ruff": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-coordinator-phase-a-postcommit-ruff.log",
+            "82b3e6a6c090a57601d22943bd23fca9"
+            "218d1031dbe5a7b754092f9a156b4f18",
+        ),
+        "pycompile": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-coordinator-phase-a-postcommit-pycompile.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "allowlist": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-coordinator-phase-a-postcommit-allowlist.log",
+            "52871b8f457617ba4dd967fa90813a579"
+            "8b55b292e148f1fce712ae843681146",
+        ),
+        "identity": (
+            "jaa-single-codex-20260729/"
+            "jaa12-status-coordinator-phase-a-postcommit-identity.log",
+            "5531a72144191263d85c5f53ae7d041d"
+            "a1f1bb73b936169fbe641beac739c8a3",
+        ),
+        "sonnet_prompt": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-coordinator-phase-a-review-prompt.txt",
+            "9a6654ee51030391e56c7c77a31d90cc"
+            "cb6605a6f4917d96419fd9372b6a8a06",
+        ),
+        "sonnet_raw": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-coordinator-phase-a-review-raw.json",
+            "7d72d712bd6deab29eaec5e2465d6c7"
+            "42f16f8857aa5ba7012b38bf4bb98ebdd",
+        ),
+        "sonnet_stderr": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-status-coordinator-phase-a-review-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "phase_a_acceptance_receipt": (
+            "jaa-single-codex-20260729/"
+            "FABLE_JAA12_STATUS_COORDINATOR_PHASE_A_ACCEPTANCE.md",
+            "c90f2ad7ad0c13c577653c5ed075ff94"
+            "a76bc86c943a2e817674413bcd85c262",
+        ),
+    }
+    for pointer in coordinator_pointers.values():
+        assert pointer["path_base"] == "operator_control_root"
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
     assert "certification" not in jaa12
     for key in (
         "deputy_authority",
@@ -3720,12 +3968,15 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert jaa12["owns"] == [
         "career_automation/status_ingestion.py",
         "career_automation/status_evidence_store.py",
+        "career_automation/status_store_coordinator.py",
     ]
     assert [test["id"] for test in jaa12["tests"]] == [
         "JAA-12-contract",
         "JAA-12-negative-controls",
         "JAA-12-status-evidence-store",
         "JAA-12-status-evidence-store-negative-controls",
+        "JAA-12-status-store-coordinator",
+        "JAA-12-status-store-coordinator-negative-controls",
     ]
     for relative in jaa12["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -4569,6 +4820,13 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
             )
         if slice_id == "JAA-12":
             phase = block["durable_status_evidence_store"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: phase["implemented_source_git_revision"]
+                    for item in phase["accepted_source_files"]
+                }
+            )
+            phase = block["durable_status_coordinator"]
             phase_path_revisions.update(
                 {
                     item["path"]: phase["implemented_source_git_revision"]
