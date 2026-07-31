@@ -740,6 +740,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "frozen_replay_pair_recorder_stage_a",
             "phase_b_fixture_measures",
             "phase_c_elapsed_cohort",
+            "authenticated_time_verifier",
         }
     } == {
         "status": (
@@ -1389,6 +1390,75 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 },
             }
         ],
+    }
+    authenticated_time_verifier = jaa10_bounded[
+        "authenticated_time_verifier"
+    ]
+    assert authenticated_time_verifier == {
+        "status": (
+            "INDEPENDENT_FABLE_EXACT_SOURCE_CERTIFIED_"
+            "LOCAL_VERIFIER_ONLY_TIME_UNAUTHENTICATED"
+        ),
+        "gate_disposition": (
+            "JAA10_AUTHENTICATED_TIME_EXACT_SOURCE_GATE: CERTIFY"
+        ),
+        "implemented_commits": [
+            "6dd2033871e89c077bc33f7861a84fb3e3cf8cb8",
+            "8494d1da161e6b044f7cbde315b730dd1da2eaf8",
+        ],
+        "parent_revision": (
+            "0d31e471a78ed24b57d64d482a2ef0b6090bc259"
+        ),
+        "implemented_source_tree": (
+            "563e0b89fb5b317b93323b7bde6cd28c314c0b97"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:c3cec82500a9c4cf6bc43ff27b34c7d6"
+            "65f17b9da48051c5b52255013f5fb9e3"
+        ),
+        "file_sha256": {
+            "pyproject.toml": (
+                "39a80983449972b6fbbd60d6d13e1c7a"
+                "718e8f6a6a73ff4f30d00420a4f11874"
+            ),
+            "requirements-test.lock": (
+                "1cc20f0218f7d3995686fb28975ab946a"
+                "0dc803d07b49e55b6687d365c25754b"
+            ),
+            "career_automation/authenticated_time_witness.py": (
+                "2944427789531570e6bc3331a1be32851"
+                "2b8ba3e2ecc12197f71c7941da04354"
+            ),
+            "test_jaa10_authenticated_time_witness.py": (
+                "13fdf132e8ea5be08529c7e62bd2d628"
+                "88c0e3a10c50844ac4ec10aaf2da1e66"
+            ),
+            "test_jaa10_authenticated_time_witness_negative_controls.py": (
+                "ac28303e511490070cffa7e3cf423c941"
+                "20ca14a47c760b74696dc75c9d63b94"
+            ),
+        },
+        "focused_evidence_log_sha256": (
+            "e4e5c8451dc98cbb167ce157f7035df8"
+            "b20c59e693a2617083a7b1731dde7f0b"
+        ),
+        "focused_evidence_result": "73 passed in 4.17s",
+        "sonnet_exact_source_review_raw_sha256": (
+            "94b4e82a2a48b75c16b3cb8d26590944"
+            "65f31113a133fd150430818cf516ccef"
+        ),
+        "fable_exact_source_gate_raw_sha256": (
+            "0ab0811160ea173c0a6ed4f80ab472dd"
+            "8a34e7f90a4ce099105a992479dea257"
+        ),
+        "time_authenticated": False,
+        "external_attestation_present": False,
+        "live_evidence_acquired": False,
+        "authenticated_time_metrics_evaluable": False,
+        "production_certification": "withheld",
+        "withheld_reason": (
+            "no_external_time_attestation_time_remains_unauthenticated"
+        ),
     }
     replay_stage_a = jaa10_bounded[
         "frozen_replay_pair_recorder_stage_a"
