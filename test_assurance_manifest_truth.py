@@ -2838,6 +2838,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "operator_document_fixture_composition"
     )
     operator_intake = operator_composition.pop("operator_document_intake")
+    operator_answers = operator_intake.pop("operator_application_answers")
     assert jaa11_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
@@ -3777,7 +3778,183 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "dependency_satisfied": False,
         "real_applications_submitted": 0,
     }
-    for phase in (snapshot_document, operator_composition, operator_intake):
+    assert operator_answers == {
+        "status": (
+            "bounded_operator_application_answers_"
+            "phase_a_exact_source_accepted"
+        ),
+        "independent_fable_acceptance": (
+            "accept_and_authorize_receipt_"
+            "objective_unsatisfied_2026-07-31"
+        ),
+        "scope": (
+            "pure_data_topic_scoped_answer_evaluation_bound_to_exact_"
+            "operator_document_bytes_no_external_capability"
+        ),
+        "implemented_source_git_revision": (
+            "8495d16994df7696a35fbf1643f8ca48471543e9"
+        ),
+        "implemented_source_parent_git_revision": (
+            "b12a423eaa3de466f686c1656b6d0cac252a2026"
+        ),
+        "implemented_source_tree": (
+            "877962152e98df8b1f06491ca42c5a26ed0402ae"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:15f28e25bf1c4aca92bb033d0715702f"
+            "6697a8ccd58a88a4d3ea5c575322cb71"
+        ),
+        "accepted_source_files": [
+            {
+                "path": (
+                    "career_automation/live_canary_operator_answers.py"
+                ),
+                "sha256": (
+                    "a51393e72d8df19c8384970b16839a296"
+                    "9b45f2173d5451c3e0c655588a61866"
+                ),
+            },
+            {
+                "path": "test_jaa11_live_canary_operator_answers.py",
+                "sha256": (
+                    "6724ada5d61239b5bcd4e5ce285557767"
+                    "2ffbb1ba28ddead493b9ae8965f37db"
+                ),
+            },
+            {
+                "path": (
+                    "test_jaa11_live_canary_operator_answers_"
+                    "negative_controls.py"
+                ),
+                "sha256": (
+                    "145872d9883b56bbe438666de8673c031"
+                    "86278e75e31b8a60e5dc6b1ef575d6b"
+                ),
+            },
+        ],
+        "accepted_dependencies": [
+            {
+                "path": "career_automation/live_canary_authority.py",
+                "sha256": (
+                    "e48372dc4e414212bc86d2bc0ba21d9ec"
+                    "75f80d12eeaa6e1dfc80179a958e1fc"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/live_canary_fixture_dry_run.py"
+                ),
+                "sha256": (
+                    "3e2341e3fbc3a9e4a199c0e55ccc121769"
+                    "90a647c7d83b2ffb545abffc1cfaea"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/live_canary_snapshot_document.py"
+                ),
+                "sha256": (
+                    "4a8cb89d5dc8b2268d5dcfb3aaa71d7c6"
+                    "0773c5255e4537b0ad9676fbceedfb0"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/"
+                    "live_canary_operator_fixture_composition.py"
+                ),
+                "sha256": (
+                    "6be3aa327a7ba38df219b91fc6a7211b0"
+                    "5c81231af90313148c2a5f6d77ea877"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/"
+                    "live_canary_operator_document_intake.py"
+                ),
+                "sha256": (
+                    "d5455f898f68f041bb0a86a3abc9707c2"
+                    "b16981d19f7dd30a01285b15e7bc63c"
+                ),
+            },
+        ],
+        "accepted_dependencies_relationship": (
+            "chain_integrity_pins_no_python_import_edge"
+        ),
+        "operator_answers_document": {
+            "path_base": "software_factory_root",
+            "relative_path": (
+                "giga-user/reports/"
+                "JAA_OPERATOR_APPLICATION_ANSWERS_2026-07-31.md"
+            ),
+            "sha256": (
+                "670c873479589088a078c871500fa0ae99"
+                "9281f583afb08047dbb95465501652"
+            ),
+        },
+        "phase_a_exact_source_acceptance": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA11_OPERATOR_ANSWERS_PHASE_A_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "8967cf8b805a66eb3162a399122f753b3"
+                "2dc98618494c9d6867696f6108cb60c"
+            ),
+        },
+        "answer_permitted_semantics": (
+            "local_data_shape_and_consistency_verdict_only_not_proof_any_"
+            "real_source_is_real_approved_authentic_current_or_verified"
+        ),
+        "real_work_rights_ledger_ingested": False,
+        "real_statutory_law_source_ingested": False,
+        "real_statutory_floor_ingested": False,
+        "real_market_range_ingested": False,
+        "positive_work_rights_evidence": "fixture_only",
+        "compensation_period_basis": (
+            "caller_declared_shared_period_establishes_no_current_law"
+        ),
+        "age_basis_contract": (
+            "open_canonical_caller_law_declaration_"
+            "establishes_no_current_law"
+        ),
+        "subtopic_whitelist_parity": (
+            "recommended_future_bounded_hardening_not_an_"
+            "accepted_guarantee"
+        ),
+        "answers_binding": "in_memory_exact_bytes_sha256_only",
+        "live_or_authenticity_claim": False,
+        "acquisition_performed": False,
+        "external_vacancy_selection": False,
+        "application_receipt_exists": False,
+        "live_ranked_snapshot": False,
+        "external_action_capability": False,
+        "operational_release": "withheld",
+        "real_submission_authority": "withheld",
+        "production_certification": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+        "real_applications_submitted": 0,
+    }
+    answers_document_pointer = operator_answers[
+        "operator_answers_document"
+    ]
+    answers_document_path = (
+        evidence_bases[answers_document_pointer["path_base"]]
+        / answers_document_pointer["relative_path"]
+    )
+    assert answers_document_path.is_file()
+    assert hashlib.sha256(
+        answers_document_path.read_bytes()
+    ).hexdigest() == answers_document_pointer["sha256"]
+    for phase in (
+        snapshot_document,
+        operator_composition,
+        operator_intake,
+        operator_answers,
+    ):
         phase_pointer = phase["phase_a_exact_source_acceptance"]
         phase_path = (
             evidence_bases[phase_pointer["path_base"]]
@@ -3902,6 +4079,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "career_automation/live_canary_snapshot_document.py",
         "career_automation/live_canary_operator_fixture_composition.py",
         "career_automation/live_canary_operator_document_intake.py",
+        "career_automation/live_canary_operator_answers.py",
     ]
     assert [test["id"] for test in jaa11["tests"]] == [
         "JAA-11-contract",
@@ -3919,6 +4097,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "JAA-11-live-canary-operator-fixture-composition-negative-controls",
         "JAA-11-live-canary-operator-document-intake",
         "JAA-11-live-canary-operator-document-intake-negative-controls",
+        "JAA-11-live-canary-operator-answers",
+        "JAA-11-live-canary-operator-answers-negative-controls",
     ]
     tests_by_id = {test["id"]: test for test in jaa11["tests"]}
     assert tests_by_id[
@@ -4069,6 +4249,44 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     }
     assert tests_by_id[
         "JAA-11-live-canary-operator-document-intake-negative-controls"
+    ]["negative_control"] is True
+    assert tests_by_id["JAA-11-live-canary-operator-answers"] == {
+        "id": "JAA-11-live-canary-operator-answers",
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            "test_jaa11_live_canary_operator_answers.py",
+        ],
+        "files": ["test_jaa11_live_canary_operator_answers.py"],
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-operator-answers-negative-controls"
+    ] == {
+        "id": (
+            "JAA-11-live-canary-operator-answers-negative-controls"
+        ),
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            (
+                "test_jaa11_live_canary_operator_answers_"
+                "negative_controls.py"
+            ),
+        ],
+        "files": [
+            (
+                "test_jaa11_live_canary_operator_answers_"
+                "negative_controls.py"
+            )
+        ],
+        "negative_control": True,
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-operator-answers-negative-controls"
     ]["negative_control"] is True
     for relative in jaa11["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -6281,6 +6499,15 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                         "implemented_source_git_revision"
                     ]
                     for item in intake_phase["accepted_source_files"]
+                }
+            )
+            answers_phase = intake_phase["operator_application_answers"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: answers_phase[
+                        "implemented_source_git_revision"
+                    ]
+                    for item in answers_phase["accepted_source_files"]
                 }
             )
         if slice_id == "JAA-12":
