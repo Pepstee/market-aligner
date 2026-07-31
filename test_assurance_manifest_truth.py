@@ -2826,7 +2826,11 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert jaa11["objective_satisfied"] is False
     assert jaa11["claim"] == executable_slices["JAA-11"]["objective"]
     assert jaa11["depends_on"] == executable_slices["JAA-11"]["depends_on"]
-    assert jaa11["provisional_fixture_contract"] == {
+    jaa11_contract = dict(jaa11["provisional_fixture_contract"])
+    live_canary_authority = jaa11_contract.pop(
+        "live_canary_operator_authority"
+    )
+    assert jaa11_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
             "jaa11_fixture_adapter_identity_reconciled_with_standing_"
@@ -3219,6 +3223,115 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             },
         },
     }
+    assert live_canary_authority == {
+        "status": (
+            "bounded_local_authority_intake_phase_a_"
+            "implemented_pending_exact_source_review"
+        ),
+        "scope": (
+            "pure_data_authority_and_selection_contract_"
+            "no_external_capability"
+        ),
+        "implemented_source_git_revision": (
+            "a044a8da5f2e1a2fa322ae1f18b897bd9ce340ec"
+        ),
+        "implemented_source_tree": (
+            "8f53fd33d83d8531aca7f5761facc62dfeac7c11"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:20c4283cce3f723e339acebe9316f15dd"
+            "0d08026b2a48c21fef10d6cc59576a1"
+        ),
+        "accepted_source_files": [
+            {
+                "path": "career_automation/live_canary_authority.py",
+                "sha256": (
+                    "0088ac543afff20caea1481233319218b7"
+                    "9100fd185547b645c32ef6b58cf9af"
+                ),
+            },
+            {
+                "path": "test_jaa11_live_canary_authority_intake.py",
+                "sha256": (
+                    "5614eaf0d46e1b198d16315de6e004a04"
+                    "8160f007d038a27b1d9ecce44f37309"
+                ),
+            },
+            {
+                "path": (
+                    "test_jaa11_live_canary_authority_negative_controls.py"
+                ),
+                "sha256": (
+                    "4fab1cd79ef0ff65c1bcc73096c1eab8b"
+                    "cbdac0712801e8379b8a74b6fdce349"
+                ),
+            },
+        ],
+        "authority_document": {
+            "path_base": "software_factory_root",
+            "relative_path": (
+                "giga-user/reports/"
+                "JAA11_LIVE_CANARY_OPERATOR_AUTHORITY_2026-07-31.md"
+            ),
+            "sha256": (
+                "b1cc3740a7d760ab905c27156bf8498bb"
+                "7f03f8cfe5e9267b82e2ad6f2a9f77c"
+            ),
+        },
+        "max_canaries": 1,
+        "forbidden_rank_range": [1, 20],
+        "minimum_selected_rank": 21,
+        "ranked_snapshot_status": "not_collected",
+        "selected_vacancy_status": "not_selected",
+        "selection_contract": (
+            "deterministic_caller_supplied_snapshot_and_"
+            "vacancy_evidence_fail_closed"
+        ),
+        "authority_state_evaluator": (
+            "pure_data_permitted_exhausted_withheld"
+        ),
+        "optional_marketing_consent": "declined",
+        "fail_closed_triggers": [
+            "account_creation",
+            "captcha",
+            "login",
+            "mfa",
+            "missing_approved_fact",
+            "payment",
+        ],
+        "public_multi_vacancy_acquisition_authorized": False,
+        "public_acquisition_authority": (
+            "not_granted_referral_required"
+        ),
+        "operational_release": "withheld",
+        "external_action_capability": False,
+        "real_submission_authority": "withheld",
+        "production_certification": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+    }
+    authority_pointer = live_canary_authority["authority_document"]
+    authority_path = (
+        evidence_bases[authority_pointer["path_base"]]
+        / authority_pointer["relative_path"]
+    )
+    assert authority_path.is_file()
+    assert hashlib.sha256(authority_path.read_bytes()).hexdigest() == (
+        authority_pointer["sha256"]
+    )
+    authority_revision = live_canary_authority[
+        "implemented_source_git_revision"
+    ]
+    assert _git(
+        "rev-parse", f"{authority_revision}^{{tree}}"
+    ).decode().strip() == live_canary_authority["implemented_source_tree"]
+    assert _source_content_revision_at(authority_revision) == (
+        live_canary_authority["implemented_source_content_revision"]
+    )
+    for item in live_canary_authority["accepted_source_files"]:
+        assert hashlib.sha256(
+            _git("show", f"{authority_revision}:{item['path']}")
+        ).hexdigest() == item["sha256"]
     assert "certification" not in jaa11
     for pointer in jaa11["provisional_fixture_contract"][
         "adapter_identity_repair"
@@ -3272,6 +3385,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     assert jaa11["owns"] == [
         "career_automation/official_ats_adapter.py",
         "career_automation/durable_circuit_store.py",
+        "career_automation/live_canary_authority.py",
     ]
     assert [test["id"] for test in jaa11["tests"]] == [
         "JAA-11-contract",
@@ -3279,7 +3393,13 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "JAA-11-durable-circuit-contract",
         "JAA-11-durable-circuit-negative-controls",
         "JAA-11-durable-integration",
+        "JAA-11-live-canary-authority-intake",
+        "JAA-11-live-canary-authority-negative-controls",
     ]
+    tests_by_id = {test["id"]: test for test in jaa11["tests"]}
+    assert tests_by_id[
+        "JAA-11-live-canary-authority-negative-controls"
+    ]["negative_control"] is True
     for relative in jaa11["owns"]:
         assert (ROOT / relative).is_file(), (
             f"JAA-11 materialised path missing: {relative}"
@@ -5445,6 +5565,14 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                 {
                     item["path"]: phase["implemented_source_git_revision"]
                     for item in phase["accepted_paths"]
+                }
+            )
+        if slice_id == "JAA-11":
+            phase = block["live_canary_operator_authority"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: phase["implemented_source_git_revision"]
+                    for item in phase["accepted_source_files"]
                 }
             )
         if slice_id == "JAA-12":

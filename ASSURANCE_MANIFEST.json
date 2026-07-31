@@ -1635,6 +1635,56 @@
           "relative_path": "jaa-single-codex-20260729/jaa11-durable-integration-phase-a-ruff.log",
           "sha256": "f08bdda4e29585b184a7de565669337094d783aee0e7c6c64433c32ccf809250"
         },
+        "live_canary_operator_authority": {
+          "status": "bounded_local_authority_intake_phase_a_implemented_pending_exact_source_review",
+          "scope": "pure_data_authority_and_selection_contract_no_external_capability",
+          "implemented_source_git_revision": "a044a8da5f2e1a2fa322ae1f18b897bd9ce340ec",
+          "implemented_source_tree": "8f53fd33d83d8531aca7f5761facc62dfeac7c11",
+          "implemented_source_content_revision": "sha256:20c4283cce3f723e339acebe9316f15dd0d08026b2a48c21fef10d6cc59576a1",
+          "accepted_source_files": [
+            {
+              "path": "career_automation/live_canary_authority.py",
+              "sha256": "0088ac543afff20caea1481233319218b79100fd185547b645c32ef6b58cf9af"
+            },
+            {
+              "path": "test_jaa11_live_canary_authority_intake.py",
+              "sha256": "5614eaf0d46e1b198d16315de6e004a048160f007d038a27b1d9ecce44f37309"
+            },
+            {
+              "path": "test_jaa11_live_canary_authority_negative_controls.py",
+              "sha256": "4fab1cd79ef0ff65c1bcc73096c1eab8bcbdac0712801e8379b8a74b6fdce349"
+            }
+          ],
+          "authority_document": {
+            "path_base": "software_factory_root",
+            "relative_path": "giga-user/reports/JAA11_LIVE_CANARY_OPERATOR_AUTHORITY_2026-07-31.md",
+            "sha256": "b1cc3740a7d760ab905c27156bf8498bb7f03f8cfe5e9267b82e2ad6f2a9f77c"
+          },
+          "max_canaries": 1,
+          "forbidden_rank_range": [1, 20],
+          "minimum_selected_rank": 21,
+          "ranked_snapshot_status": "not_collected",
+          "selected_vacancy_status": "not_selected",
+          "selection_contract": "deterministic_caller_supplied_snapshot_and_vacancy_evidence_fail_closed",
+          "authority_state_evaluator": "pure_data_permitted_exhausted_withheld",
+          "optional_marketing_consent": "declined",
+          "fail_closed_triggers": [
+            "account_creation",
+            "captcha",
+            "login",
+            "mfa",
+            "missing_approved_fact",
+            "payment"
+          ],
+          "public_multi_vacancy_acquisition_authorized": false,
+          "public_acquisition_authority": "not_granted_referral_required",
+          "operational_release": "withheld",
+          "external_action_capability": false,
+          "real_submission_authority": "withheld",
+          "production_certification": "withheld",
+          "objective_satisfied": false,
+          "dependency_satisfied": false
+        },
         "adapter_identity_repair": {
           "phase_a_git_revision": "545b9e6489abc33896021957214e98396645188c",
           "phase_a_parent_git_revision": "7cebb831f457524b3eb1499d038e17caa86f0d6e",
@@ -1708,7 +1758,7 @@
           }
         }
       },
-      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py"],
+      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py", "career_automation/live_canary_authority.py"],
       "inputs": ["career_automation/browser_executor.py", "career_automation/release_gate.py"],
       "interfaces": [],
       "environment": [],
@@ -1717,7 +1767,9 @@
         {"id": "JAA-11-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_negative_controls.py"], "files": ["test_jaa11_negative_controls.py"], "negative_control": true},
         {"id": "JAA-11-durable-circuit-contract", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_durable_circuit_acceptance.py"], "files": ["test_jaa11_durable_circuit_acceptance.py"]},
         {"id": "JAA-11-durable-circuit-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_durable_circuit_negative_controls.py"], "files": ["test_jaa11_durable_circuit_negative_controls.py"], "negative_control": true},
-        {"id": "JAA-11-durable-integration", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_durable_integration.py"], "files": ["test_jaa11_durable_integration.py"]}
+        {"id": "JAA-11-durable-integration", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_durable_integration.py"], "files": ["test_jaa11_durable_integration.py"]},
+        {"id": "JAA-11-live-canary-authority-intake", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_authority_intake.py"], "files": ["test_jaa11_live_canary_authority_intake.py"]},
+        {"id": "JAA-11-live-canary-authority-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_authority_negative_controls.py"], "files": ["test_jaa11_live_canary_authority_negative_controls.py"], "negative_control": true}
       ],
       "evidence": [
         {
