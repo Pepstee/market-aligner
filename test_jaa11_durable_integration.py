@@ -26,7 +26,7 @@ from test_jaa11_independent_acceptance import _observation, _store
 
 
 CONTRACT_SHA256 = (
-    "8691979f13fcea9991f3184624dd407874f6d8f4bb94c7effb328f5ac5034a84"
+    "e4cb8ee1b416d75063bb70b72208a3554fb0ccc59998f6ff4d9ef44b3eced4e5"
 )
 
 

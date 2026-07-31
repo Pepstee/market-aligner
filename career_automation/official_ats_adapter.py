@@ -26,7 +26,8 @@ from career_automation.shadow_certification import FROZEN_SHADOW_CONTRACT
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 FIXTURE_ROUTE_URL = (
-    "http://127.0.0.1:0/applications/jaa10-frozen-platform-engineer"
+    "http://127.0.0.1:0/applications/"
+    f"{FROZEN_SHADOW_CONTRACT.application_id}"
 )
 FIXTURE_ROUTE_VERIFIED_AT = date(2030, 1, 1)
 FIXTURE_ROUTE_VALID_UNTIL = date(2030, 12, 31)

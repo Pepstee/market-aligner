@@ -278,6 +278,59 @@ def test_fixture_contract_rejects_external_or_actionable_route() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "route_url",
+    (
+        "http://example.test:0/applications/graphcore-build-engineer",
+        "http://127.0.0.1:1/applications/graphcore-build-engineer",
+        "http://127.0.0.1:0/applications/graphcore-build-engineer?next=1",
+        "http://127.0.0.1:0/applications/graphcore-build-engineer#review",
+        (
+            "http://user:secret@127.0.0.1:0/"
+            "applications/graphcore-build-engineer"
+        ),
+    ),
+)
+def test_each_nonfixture_route_component_fails_closed(
+    route_url: str,
+) -> None:
+    contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
+    with pytest.raises(ValueError, match="loopback HTTP on port zero"):
+        replace(
+            contract,
+            route_binding=replace(
+                contract.route_binding,
+                source_identity=route_url,
+            ),
+            route_url=route_url,
+        )
+
+
+def test_stale_application_identity_fails_route_binding() -> None:
+    with pytest.raises(ValueError, match="loopback HTTP on port zero"):
+        replace(
+            FROZEN_FIXTURE_ADAPTER_CONTRACT,
+            application_id="jaa10-frozen-platform-engineer",
+        )
+
+
+def test_route_policy_and_upstream_contract_substitution_fail_closed() -> None:
+    contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
+    with pytest.raises(ValueError, match="differs from policy"):
+        replace(
+            contract,
+            route_binding=replace(
+                contract.route_binding,
+                route_policy_sha256="0" * 64,
+            ),
+        )
+    with pytest.raises(ValueError, match="accepted JAA-10 contract"):
+        replace(
+            contract,
+            upstream_shadow_contract_sha256="0" * 64,
+        )
+
+
 def test_noncanonical_contract_cannot_assess_or_arm(
     tmp_path: Path,
 ) -> None:
@@ -359,6 +412,7 @@ def test_product_module_has_no_browser_network_or_submission_capability() -> Non
         "durable_circuit_store",
         "locator.click",
         "page.goto",
+        "jaa10-frozen-platform-engineer",
         "certifies_slice: bool = True",
     ):
         assert forbidden not in text

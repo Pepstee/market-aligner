@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from career_automation.ats_fixture import FixtureReceipt
 from career_automation.browser_workflows import SubmissionProof
@@ -92,6 +93,10 @@ def _store(path: Path) -> DurableCircuitStore:
 
 def test_frozen_fixture_contract_binds_exact_upstream_and_policy() -> None:
     contract = FROZEN_FIXTURE_ADAPTER_CONTRACT
+    expected_route = (
+        "http://127.0.0.1:0/applications/"
+        f"{FROZEN_SHADOW_CONTRACT.application_id}"
+    )
     assert contract.upstream_shadow_contract_sha256 == (
         FROZEN_SHADOW_CONTRACT.contract_sha256
     )
@@ -100,9 +105,27 @@ def test_frozen_fixture_contract_binds_exact_upstream_and_policy() -> None:
     assert contract.workflow_sha256 == (
         FROZEN_SHADOW_CONTRACT.workflow_sha256
     )
-    assert contract.route_url == FIXTURE_ROUTE_URL
+    assert FIXTURE_ROUTE_URL == expected_route
+    assert contract.route_url == expected_route
     assert contract.route_binding.source_identity == FIXTURE_ROUTE_URL
     assert contract.route_binding.route_policy_sha256 == ROUTE_POLICY_SHA256
+    parsed_route = urlsplit(FIXTURE_ROUTE_URL)
+    assert parsed_route.scheme == "http"
+    assert parsed_route.hostname == "127.0.0.1"
+    assert parsed_route.port == 0
+    assert parsed_route.path == "/applications/graphcore-build-engineer"
+    assert parsed_route.query == ""
+    assert parsed_route.fragment == ""
+    assert parsed_route.username is None
+    assert parsed_route.password is None
+    assert ROUTE_POLICY_SHA256 == (
+        "042de40c5633fe7f41c652d81fbce4502"
+        "f2192d79b53c3492a928e592376ea1c"
+    )
+    assert contract.contract_sha256 == (
+        "e4cb8ee1b416d75063bb70b72208a355"
+        "4fb0ccc59998f6ff4d9ef44b3eced4e5"
+    )
     assert FIXTURE_ROUTE_POLICY["external_route_verified"] is False
     assert FIXTURE_ROUTE_POLICY["validity_basis"] == (
         "synthetic_fixture_clock"
