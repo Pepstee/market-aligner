@@ -3302,6 +3302,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     status_store = jaa12_contract.pop("durable_status_evidence_store")
     status_coordinator = jaa12_contract.pop("durable_status_coordinator")
     typed_reads = jaa12_contract.pop("durable_typed_status_reads")
+    fault_controls = jaa12_contract.pop(
+        "durable_status_evidence_fault_controls"
+    )
     assert jaa12_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
@@ -4270,6 +4273,301 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
             pointer["sha256"]
         )
+    assert set(fault_controls) == {
+        "status",
+        "scope",
+        "implemented_source_git_revision",
+        "implemented_source_tree",
+        "implemented_source_content_revision",
+        "accepted_source_files",
+        "tested_boundaries",
+        "upstream_dependency_satisfied",
+        "follow_up_reference_hashes",
+        "atomicity_across_steps",
+        "connector_authority",
+        "mailbox_connector_status",
+        "portal_connector_status",
+        "mailbox_access",
+        "portal_access",
+        "send_authority",
+        "objective_satisfied",
+        "dependency_satisfied",
+        "production_certification",
+        "certifies_slice",
+        "external_action_capability",
+        "real_applications_submitted",
+        "design_gate",
+        "sonnet_exact_source_review",
+        "phase_a_exact_source_gate",
+        "phase_a_acceptance_receipt",
+        "deterministic_logs",
+    }
+    assert {
+        key: fault_controls[key]
+        for key in (
+            "status",
+            "scope",
+            "implemented_source_git_revision",
+            "implemented_source_tree",
+            "implemented_source_content_revision",
+            "upstream_dependency_satisfied",
+            "follow_up_reference_hashes",
+            "atomicity_across_steps",
+            "connector_authority",
+            "mailbox_connector_status",
+            "portal_connector_status",
+            "mailbox_access",
+            "portal_access",
+            "send_authority",
+            "objective_satisfied",
+            "dependency_satisfied",
+            "production_certification",
+            "certifies_slice",
+            "external_action_capability",
+            "real_applications_submitted",
+        )
+    } == {
+        "status": (
+            "bounded_local_test_only_fault_controls_phase_a_accepted"
+        ),
+        "scope": "bounded_local_no_external_capability",
+        "implemented_source_git_revision": (
+            "5ea2fdccef1851d2b7d4605feb7e99c0e4080406"
+        ),
+        "implemented_source_tree": (
+            "68ff93f2c5f2d9937c6cdc5ff6667f56449234bf"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:af5b036118893538e9fd55b5beb0b349"
+            "2491ed4252ca6a7c69da0c74947428f9"
+        ),
+        "upstream_dependency_satisfied": False,
+        "follow_up_reference_hashes": (
+            "caller_supplied_structural_references"
+        ),
+        "atomicity_across_steps": "absent",
+        "connector_authority": "withheld",
+        "mailbox_connector_status": "not_connected",
+        "portal_connector_status": "not_connected",
+        "mailbox_access": "withheld",
+        "portal_access": "withheld",
+        "send_authority": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+        "production_certification": "withheld",
+        "certifies_slice": False,
+        "external_action_capability": False,
+        "real_applications_submitted": 0,
+    }
+    assert fault_controls["accepted_source_files"] == [
+        {
+            "path": "test_jaa12_status_evidence_durability_faults.py",
+            "sha256": (
+                "2227daa3836e8f40810a350c1abfa63d"
+                "91db91e4a26b5caa5bfabcc42aedf1cd"
+            ),
+        }
+    ]
+    assert fault_controls["tested_boundaries"] == [
+        "fail_closed_detection_of_physical_sqlite_corruption",
+        (
+            "sqlite_transactional_rollback_atomicity_under_"
+            "injected_in_transaction_fault"
+        ),
+        (
+            "snapshot_isolation_of_in_flight_typed_reads_under_"
+            "committed_wal_append"
+        ),
+    ]
+    assert {
+        key: fault_controls[key]["disposition"]
+        for key in (
+            "design_gate",
+            "sonnet_exact_source_review",
+            "phase_a_exact_source_gate",
+        )
+    } == {
+        "design_gate": "AUTHORIZE_TEST_ONLY_PHASE_A",
+        "sonnet_exact_source_review": "ACCEPT",
+        "phase_a_exact_source_gate": "ACCEPT_AND_AUTHORIZE_PHASE_B",
+    }
+    for key in (
+        "design_gate",
+        "sonnet_exact_source_review",
+        "phase_a_exact_source_gate",
+    ):
+        assert set(fault_controls[key]) == {
+            "disposition",
+            "prompt",
+            "raw",
+            "stderr",
+        }
+    assert set(fault_controls["deterministic_logs"]) == {
+        "new_suite",
+        "standing_jaa12",
+        "downstream",
+        "ruff",
+        "pycompile",
+        "diff_check",
+        "allowlist",
+        "identity",
+    }
+    fault_control_pointers = {
+        "design_prompt": fault_controls["design_gate"]["prompt"],
+        "design_raw": fault_controls["design_gate"]["raw"],
+        "design_stderr": fault_controls["design_gate"]["stderr"],
+        "sonnet_prompt": (
+            fault_controls["sonnet_exact_source_review"]["prompt"]
+        ),
+        "sonnet_raw": fault_controls["sonnet_exact_source_review"]["raw"],
+        "sonnet_stderr": (
+            fault_controls["sonnet_exact_source_review"]["stderr"]
+        ),
+        "phase_a_prompt": (
+            fault_controls["phase_a_exact_source_gate"]["prompt"]
+        ),
+        "phase_a_raw": (
+            fault_controls["phase_a_exact_source_gate"]["raw"]
+        ),
+        "phase_a_stderr": (
+            fault_controls["phase_a_exact_source_gate"]["stderr"]
+        ),
+        "phase_a_acceptance_receipt": (
+            fault_controls["phase_a_acceptance_receipt"]
+        ),
+        **fault_controls["deterministic_logs"],
+    }
+    assert {
+        key: (pointer["relative_path"], pointer["sha256"])
+        for key, pointer in fault_control_pointers.items()
+    } == {
+        "design_prompt": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-status-reader-durability-hardening-"
+            "design-gate-prompt.txt",
+            "c441cb85eeb8d2ea10999ec228fd3236f"
+            "da407e0d3b5999493ea07eeb8b770a5",
+        ),
+        "design_raw": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-status-reader-durability-hardening-"
+            "design-gate-raw.json",
+            "cb6a311b2f9fdc9c96f85edeb3ffd969"
+            "7329fd14f6074ad05d34768112472036",
+        ),
+        "design_stderr": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-status-reader-durability-hardening-"
+            "design-gate-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "sonnet_prompt": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-durability-hardening-phase-a-review-prompt.txt",
+            "bd10a5f4c811782aa474a1a2c8ac4426"
+            "263eb3f3a8b7aa776ea0255954c734bf",
+        ),
+        "sonnet_raw": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-durability-hardening-phase-a-review-raw.json",
+            "da1358a07a7532836a8312de300b0d4d6"
+            "c83729b183f750464289cf16907626f",
+        ),
+        "sonnet_stderr": (
+            "jaa-single-codex-20260729/"
+            "sonnet-jaa12-durability-hardening-phase-a-review-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "phase_a_prompt": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durability-hardening-phase-a-"
+            "exact-source-prompt.txt",
+            "31574b9cb44dd29e4e53924f460b10395"
+            "ce9fdc9f0617f6d0703f61a991f49c3",
+        ),
+        "phase_a_raw": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durability-hardening-phase-a-"
+            "exact-source-raw.json",
+            "76f7fbeeaae291c780c6d016c55d15056"
+            "b29ce277d75f39bb761a5b46aedd73d",
+        ),
+        "phase_a_stderr": (
+            "jaa-single-codex-20260729/"
+            "fable-jaa12-durability-hardening-phase-a-"
+            "exact-source-stderr.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "phase_a_acceptance_receipt": (
+            "jaa-single-codex-20260729/"
+            "FABLE_JAA12_DURABILITY_HARDENING_PHASE_A_ACCEPTANCE.md",
+            "b36c9412ab3eb1fb6ece005e2b2c7daf"
+            "1c588b60c18c509031c47ed68d25716f",
+        ),
+        "new_suite": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-"
+            "new-suite.log",
+            "625cd9db075f0d063982baf4c6b81448"
+            "44ffe79aa412f50047a80fc4dcddb921",
+        ),
+        "standing_jaa12": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-standing.log",
+            "7c6056cf2d90910b4263e67703f7890e"
+            "c04062ca49a47d5b2c7b3a80df17eb2b",
+        ),
+        "downstream": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-downstream.log",
+            "f48d2d3a0714e7bb16afb72d45d4ecfd"
+            "091f663cbf38dd44f6162cd1d4a8ca35",
+        ),
+        "ruff": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-ruff.log",
+            "82b3e6a6c090a57601d22943bd23fca9"
+            "218d1031dbe5a7b754092f9a156b4f18",
+        ),
+        "pycompile": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-pycompile.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "diff_check": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-"
+            "diff-check.log",
+            "e3b0c44298fc1c149afbf4c8996fb924"
+            "27ae41e4649b934ca495991b7852b855",
+        ),
+        "allowlist": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-allowlist.log",
+            "ad72b7a240f86380e6cfddfa58ccd1780"
+            "3cb6678ebce8479adf33a8991a0cbe0",
+        ),
+        "identity": (
+            "jaa-single-codex-20260729/"
+            "jaa12-durability-hardening-phase-a-postcommit-identity.log",
+            "4435200c0c7b01db0b667ec2b0c8f0d"
+            "d1258caba45304f026303b5d9c23393b6",
+        ),
+    }
+    for pointer in fault_control_pointers.values():
+        assert pointer["path_base"] == "operator_control_root"
+        evidence_path = (
+            evidence_bases[pointer["path_base"]]
+            / pointer["relative_path"]
+        )
+        assert evidence_path.is_file()
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() == (
+            pointer["sha256"]
+        )
     assert "certification" not in jaa12
     for key in (
         "deputy_authority",
@@ -4307,6 +4605,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "JAA-12-status-store-coordinator-negative-controls",
         "JAA-12-status-evidence-reader",
         "JAA-12-status-evidence-reader-negative-controls",
+        "JAA-12-status-evidence-durability-faults",
     ]
     for relative in jaa12["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -5164,6 +5463,13 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                 }
             )
             phase = block["durable_typed_status_reads"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: phase["implemented_source_git_revision"]
+                    for item in phase["accepted_source_files"]
+                }
+            )
+            phase = block["durable_status_evidence_fault_controls"]
             phase_path_revisions.update(
                 {
                     item["path"]: phase["implemented_source_git_revision"]

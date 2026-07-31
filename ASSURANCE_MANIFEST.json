@@ -2141,6 +2141,140 @@
             }
           }
         },
+        "durable_status_evidence_fault_controls": {
+          "status": "bounded_local_test_only_fault_controls_phase_a_accepted",
+          "scope": "bounded_local_no_external_capability",
+          "implemented_source_git_revision": "5ea2fdccef1851d2b7d4605feb7e99c0e4080406",
+          "implemented_source_tree": "68ff93f2c5f2d9937c6cdc5ff6667f56449234bf",
+          "implemented_source_content_revision": "sha256:af5b036118893538e9fd55b5beb0b3492491ed4252ca6a7c69da0c74947428f9",
+          "accepted_source_files": [
+            {
+              "path": "test_jaa12_status_evidence_durability_faults.py",
+              "sha256": "2227daa3836e8f40810a350c1abfa63d91db91e4a26b5caa5bfabcc42aedf1cd"
+            }
+          ],
+          "tested_boundaries": [
+            "fail_closed_detection_of_physical_sqlite_corruption",
+            "sqlite_transactional_rollback_atomicity_under_injected_in_transaction_fault",
+            "snapshot_isolation_of_in_flight_typed_reads_under_committed_wal_append"
+          ],
+          "upstream_dependency_satisfied": false,
+          "follow_up_reference_hashes": "caller_supplied_structural_references",
+          "atomicity_across_steps": "absent",
+          "connector_authority": "withheld",
+          "mailbox_connector_status": "not_connected",
+          "portal_connector_status": "not_connected",
+          "mailbox_access": "withheld",
+          "portal_access": "withheld",
+          "send_authority": "withheld",
+          "objective_satisfied": false,
+          "dependency_satisfied": false,
+          "production_certification": "withheld",
+          "certifies_slice": false,
+          "external_action_capability": false,
+          "real_applications_submitted": 0,
+          "design_gate": {
+            "disposition": "AUTHORIZE_TEST_ONLY_PHASE_A",
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-status-reader-durability-hardening-design-gate-prompt.txt",
+              "sha256": "c441cb85eeb8d2ea10999ec228fd3236fda407e0d3b5999493ea07eeb8b770a5"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-status-reader-durability-hardening-design-gate-raw.json",
+              "sha256": "cb6a311b2f9fdc9c96f85edeb3ffd9697329fd14f6074ad05d34768112472036"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-status-reader-durability-hardening-design-gate-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "sonnet_exact_source_review": {
+            "disposition": "ACCEPT",
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-durability-hardening-phase-a-review-prompt.txt",
+              "sha256": "bd10a5f4c811782aa474a1a2c8ac4426263eb3f3a8b7aa776ea0255954c734bf"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-durability-hardening-phase-a-review-raw.json",
+              "sha256": "da1358a07a7532836a8312de300b0d4d6c83729b183f750464289cf16907626f"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa12-durability-hardening-phase-a-review-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "phase_a_exact_source_gate": {
+            "disposition": "ACCEPT_AND_AUTHORIZE_PHASE_B",
+            "prompt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durability-hardening-phase-a-exact-source-prompt.txt",
+              "sha256": "31574b9cb44dd29e4e53924f460b10395ce9fdc9f0617f6d0703f61a991f49c3"
+            },
+            "raw": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durability-hardening-phase-a-exact-source-raw.json",
+              "sha256": "76f7fbeeaae291c780c6d016c55d15056b29ce277d75f39bb761a5b46aedd73d"
+            },
+            "stderr": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa12-durability-hardening-phase-a-exact-source-stderr.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          },
+          "phase_a_acceptance_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": "jaa-single-codex-20260729/FABLE_JAA12_DURABILITY_HARDENING_PHASE_A_ACCEPTANCE.md",
+            "sha256": "b36c9412ab3eb1fb6ece005e2b2c7daf1c588b60c18c509031c47ed68d25716f"
+          },
+          "deterministic_logs": {
+            "new_suite": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-new-suite.log",
+              "sha256": "625cd9db075f0d063982baf4c6b8144844ffe79aa412f50047a80fc4dcddb921"
+            },
+            "standing_jaa12": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-standing.log",
+              "sha256": "7c6056cf2d90910b4263e67703f7890ec04062ca49a47d5b2c7b3a80df17eb2b"
+            },
+            "downstream": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-downstream.log",
+              "sha256": "f48d2d3a0714e7bb16afb72d45d4ecfd091f663cbf38dd44f6162cd1d4a8ca35"
+            },
+            "ruff": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-ruff.log",
+              "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+            },
+            "pycompile": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-pycompile.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "diff_check": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-diff-check.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "allowlist": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-allowlist.log",
+              "sha256": "ad72b7a240f86380e6cfddfa58ccd17803cb6678ebce8479adf33a8991a0cbe0"
+            },
+            "identity": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa12-durability-hardening-phase-a-postcommit-identity.log",
+              "sha256": "4435200c0c7b01db0b667ec2b0c8f0dd1258caba45304f026303b5d9c23393b6"
+            }
+          }
+        },
         "upstream_dependency_satisfied": false,
         "follow_up_reference_hashes": "caller_supplied_structural_references",
         "mailbox_connector_status": "not_connected",
@@ -2211,7 +2345,8 @@
         {"id": "JAA-12-status-store-coordinator", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_store_coordinator.py"], "files": ["test_jaa12_status_store_coordinator.py"]},
         {"id": "JAA-12-status-store-coordinator-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_store_coordinator_negative_controls.py"], "files": ["test_jaa12_status_store_coordinator_negative_controls.py"], "negative_control": true},
         {"id": "JAA-12-status-evidence-reader", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_reader.py"], "files": ["test_jaa12_status_evidence_reader.py"]},
-        {"id": "JAA-12-status-evidence-reader-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_reader_negative_controls.py"], "files": ["test_jaa12_status_evidence_reader_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-12-status-evidence-reader-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_reader_negative_controls.py"], "files": ["test_jaa12_status_evidence_reader_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-12-status-evidence-durability-faults", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa12_status_evidence_durability_faults.py"], "files": ["test_jaa12_status_evidence_durability_faults.py"], "negative_control": true}
       ],
       "evidence": []
     },
