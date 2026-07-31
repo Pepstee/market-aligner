@@ -1081,6 +1081,7 @@ class StatusEvidenceStore:
         evidence.verify()
         connection = self._connect()
         try:
+            connection.execute("BEGIN")
             self._verify_connection(connection)
             row = connection.execute(
                 """
@@ -1098,10 +1099,19 @@ class StatusEvidenceStore:
                 raise StatusEvidenceIntegrityError(
                     "raw evidence binding is absent or different"
                 )
-            return self._blob_bytes(connection, evidence.source_sha256)
+            raw_bytes = self._blob_bytes(
+                connection,
+                evidence.source_sha256,
+            )
+            connection.rollback()
+            return raw_bytes
         except StatusEvidenceIntegrityError:
+            if connection.in_transaction:
+                connection.rollback()
             raise
         except (sqlite3.DatabaseError, KeyError, TypeError, ValueError) as exc:
+            if connection.in_transaction:
+                connection.rollback()
             raise StatusEvidenceIntegrityError(
                 "raw export re-authentication failed closed"
             ) from exc

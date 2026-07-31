@@ -214,6 +214,7 @@ def test_reader_sees_one_consistent_snapshot_during_reserved_writer(
         assert store.read_timeline(result.timeline.timeline_id) == (
             result.timeline
         )
+        assert store.read_raw_export(result.evidence) == b"under_review"
     finally:
         writer.rollback()
         writer.close()
