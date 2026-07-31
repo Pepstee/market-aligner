@@ -2005,6 +2005,8 @@
           "follow_up_reference_hashes": "caller_supplied_structural_references",
           "atomicity_across_steps": "absent",
           "connector_authority": "withheld",
+          "mailbox_connector_status": "not_connected",
+          "portal_connector_status": "not_connected",
           "mailbox_access": "withheld",
           "portal_access": "withheld",
           "send_authority": "withheld",
