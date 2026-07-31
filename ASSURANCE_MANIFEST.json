@@ -1666,6 +1666,47 @@
             "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_LIVE_CANARY_AUTHORITY_PHASE_A_ACCEPTANCE.md",
             "sha256": "eec41f405e86b7a55074d9542bea1ca02d11c3e0bb5399c94e265e15df9f6e0b"
           },
+          "ranked_snapshot_fixture_dry_run": {
+            "status": "bounded_fixture_only_dry_run_phase_b_exact_source_accepted",
+            "independent_fable_acceptance": "accept_bounded_implementation_objective_unsatisfied_2026-07-31",
+            "scope": "caller_supplied_in_memory_fixture_ingestion_and_deterministic_selection_dry_run_no_external_capability",
+            "implemented_source_git_revision": "46415a8aa04a7e5682fc7cd09048a004969ef1c7",
+            "implemented_source_parent_git_revision": "275662573602b2f2fb00f621d9a5eab8fcff2672",
+            "implemented_source_tree": "68a9c9d9e075d51ff684f8ef5e3c7e885707885f",
+            "implemented_source_content_revision": "sha256:6da3fa878335d595e7c88b69d3dbab1bd2ee9cdea028f0e1a3ebb3823fe419c5",
+            "accepted_source_files": [
+              {
+                "path": "career_automation/live_canary_fixture_dry_run.py",
+                "sha256": "3e2341e3fbc3a9e4a199c0e55ccc12176990a647c7d83b2ffb545abffc1cfaea"
+              },
+              {
+                "path": "test_jaa11_live_canary_fixture_dry_run.py",
+                "sha256": "1126ef09c08e269d26aaddcbbd4a147ccebfd5351a07ed69293d278139ec1f62"
+              },
+              {
+                "path": "test_jaa11_live_canary_fixture_dry_run_negative_controls.py",
+                "sha256": "167073f1f6acbb2aa4235197679b670276583d7a925e140b1020df5e1d8bf1e8"
+              }
+            ],
+            "accepted_dependency": {
+              "path": "career_automation/live_canary_authority.py",
+              "sha256": "e48372dc4e414212bc86d2bc0ba21d9ec75f80d12eeaa6e1dfc80179a958e1fc"
+            },
+            "phase_b_exact_source_acceptance": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_RANKED_SNAPSHOT_FIXTURE_PHASE_B_ACCEPTANCE.md",
+              "sha256": "81d2a9cb848ebb92bd808fb9d1038ce31b00760c659c294be99707edc60e0207"
+            },
+            "fixture_source": "caller_supplied_in_memory_only",
+            "live_ranked_snapshot": false,
+            "external_action_capability": false,
+            "operational_release": "withheld",
+            "real_submission_authority": "withheld",
+            "production_certification": "withheld",
+            "objective_satisfied": false,
+            "dependency_satisfied": false,
+            "real_applications_submitted": 0
+          },
           "max_canaries": 1,
           "forbidden_rank_range": [1, 20],
           "minimum_selected_rank": 21,
@@ -1764,7 +1805,7 @@
           }
         }
       },
-      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py", "career_automation/live_canary_authority.py"],
+      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py", "career_automation/live_canary_authority.py", "career_automation/live_canary_fixture_dry_run.py"],
       "inputs": ["career_automation/browser_executor.py", "career_automation/release_gate.py"],
       "interfaces": [],
       "environment": [],
@@ -1775,7 +1816,9 @@
         {"id": "JAA-11-durable-circuit-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_durable_circuit_negative_controls.py"], "files": ["test_jaa11_durable_circuit_negative_controls.py"], "negative_control": true},
         {"id": "JAA-11-durable-integration", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_durable_integration.py"], "files": ["test_jaa11_durable_integration.py"]},
         {"id": "JAA-11-live-canary-authority-intake", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_authority_intake.py"], "files": ["test_jaa11_live_canary_authority_intake.py"]},
-        {"id": "JAA-11-live-canary-authority-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_authority_negative_controls.py"], "files": ["test_jaa11_live_canary_authority_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-11-live-canary-authority-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_authority_negative_controls.py"], "files": ["test_jaa11_live_canary_authority_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-11-live-canary-fixture-dry-run", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_fixture_dry_run.py"], "files": ["test_jaa11_live_canary_fixture_dry_run.py"]},
+        {"id": "JAA-11-live-canary-fixture-dry-run-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_fixture_dry_run_negative_controls.py"], "files": ["test_jaa11_live_canary_fixture_dry_run_negative_controls.py"], "negative_control": true}
       ],
       "evidence": [
         {

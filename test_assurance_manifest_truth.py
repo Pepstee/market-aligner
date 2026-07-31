@@ -2830,6 +2830,9 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     live_canary_authority = jaa11_contract.pop(
         "live_canary_operator_authority"
     )
+    fixture_dry_run = live_canary_authority.pop(
+        "ranked_snapshot_fixture_dry_run"
+    )
     assert jaa11_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
@@ -3325,6 +3328,122 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "objective_satisfied": False,
         "dependency_satisfied": False,
     }
+    assert fixture_dry_run == {
+        "status": (
+            "bounded_fixture_only_dry_run_phase_b_exact_source_accepted"
+        ),
+        "independent_fable_acceptance": (
+            "accept_bounded_implementation_objective_unsatisfied_2026-07-31"
+        ),
+        "scope": (
+            "caller_supplied_in_memory_fixture_ingestion_and_deterministic_"
+            "selection_dry_run_no_external_capability"
+        ),
+        "implemented_source_git_revision": (
+            "46415a8aa04a7e5682fc7cd09048a004969ef1c7"
+        ),
+        "implemented_source_parent_git_revision": (
+            "275662573602b2f2fb00f621d9a5eab8fcff2672"
+        ),
+        "implemented_source_tree": (
+            "68a9c9d9e075d51ff684f8ef5e3c7e885707885f"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:6da3fa878335d595e7c88b69d3dbab1b"
+            "d2ee9cdea028f0e1a3ebb3823fe419c5"
+        ),
+        "accepted_source_files": [
+            {
+                "path": "career_automation/live_canary_fixture_dry_run.py",
+                "sha256": (
+                    "3e2341e3fbc3a9e4a199c0e55ccc121769"
+                    "90a647c7d83b2ffb545abffc1cfaea"
+                ),
+            },
+            {
+                "path": "test_jaa11_live_canary_fixture_dry_run.py",
+                "sha256": (
+                    "1126ef09c08e269d26aaddcbbd4a147cce"
+                    "bfd5351a07ed69293d278139ec1f62"
+                ),
+            },
+            {
+                "path": (
+                    "test_jaa11_live_canary_fixture_dry_run_"
+                    "negative_controls.py"
+                ),
+                "sha256": (
+                    "167073f1f6acbb2aa4235197679b670276"
+                    "583d7a925e140b1020df5e1d8bf1e8"
+                ),
+            },
+        ],
+        "accepted_dependency": {
+            "path": "career_automation/live_canary_authority.py",
+            "sha256": (
+                "e48372dc4e414212bc86d2bc0ba21d9ec"
+                "75f80d12eeaa6e1dfc80179a958e1fc"
+            ),
+        },
+        "phase_b_exact_source_acceptance": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA11_RANKED_SNAPSHOT_FIXTURE_"
+                "PHASE_B_ACCEPTANCE.md"
+            ),
+            "sha256": (
+                "81d2a9cb848ebb92bd808fb9d1038ce31"
+                "b00760c659c294be99707edc60e0207"
+            ),
+        },
+        "fixture_source": "caller_supplied_in_memory_only",
+        "live_ranked_snapshot": False,
+        "external_action_capability": False,
+        "operational_release": "withheld",
+        "real_submission_authority": "withheld",
+        "production_certification": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+        "real_applications_submitted": 0,
+    }
+    fixture_acceptance_pointer = fixture_dry_run[
+        "phase_b_exact_source_acceptance"
+    ]
+    fixture_acceptance_path = (
+        evidence_bases[fixture_acceptance_pointer["path_base"]]
+        / fixture_acceptance_pointer["relative_path"]
+    )
+    assert fixture_acceptance_path.is_file()
+    assert hashlib.sha256(
+        fixture_acceptance_path.read_bytes()
+    ).hexdigest() == fixture_acceptance_pointer["sha256"]
+    fixture_revision = fixture_dry_run[
+        "implemented_source_git_revision"
+    ]
+    assert _git(
+        "rev-parse", f"{fixture_revision}^{{tree}}"
+    ).decode().strip() == fixture_dry_run["implemented_source_tree"]
+    assert _git(
+        "rev-parse", f"{fixture_revision}^"
+    ).decode().strip() == fixture_dry_run[
+        "implemented_source_parent_git_revision"
+    ]
+    assert _source_content_revision_at(fixture_revision) == (
+        fixture_dry_run["implemented_source_content_revision"]
+    )
+    assert subprocess.run(
+        ("git", "merge-base", "--is-ancestor", fixture_revision, "HEAD"),
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
+    for item in (
+        *fixture_dry_run["accepted_source_files"],
+        fixture_dry_run["accepted_dependency"],
+    ):
+        assert hashlib.sha256(
+            _git("show", f"{fixture_revision}:{item['path']}")
+        ).hexdigest() == item["sha256"]
     authority_pointer = live_canary_authority["authority_document"]
     authority_path = (
         evidence_bases[authority_pointer["path_base"]]
@@ -3412,6 +3531,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "career_automation/official_ats_adapter.py",
         "career_automation/durable_circuit_store.py",
         "career_automation/live_canary_authority.py",
+        "career_automation/live_canary_fixture_dry_run.py",
     ]
     assert [test["id"] for test in jaa11["tests"]] == [
         "JAA-11-contract",
@@ -3421,10 +3541,42 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "JAA-11-durable-integration",
         "JAA-11-live-canary-authority-intake",
         "JAA-11-live-canary-authority-negative-controls",
+        "JAA-11-live-canary-fixture-dry-run",
+        "JAA-11-live-canary-fixture-dry-run-negative-controls",
     ]
     tests_by_id = {test["id"]: test for test in jaa11["tests"]}
     assert tests_by_id[
         "JAA-11-live-canary-authority-negative-controls"
+    ]["negative_control"] is True
+    assert tests_by_id["JAA-11-live-canary-fixture-dry-run"] == {
+        "id": "JAA-11-live-canary-fixture-dry-run",
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            "test_jaa11_live_canary_fixture_dry_run.py",
+        ],
+        "files": ["test_jaa11_live_canary_fixture_dry_run.py"],
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-fixture-dry-run-negative-controls"
+    ] == {
+        "id": "JAA-11-live-canary-fixture-dry-run-negative-controls",
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            "test_jaa11_live_canary_fixture_dry_run_negative_controls.py",
+        ],
+        "files": [
+            "test_jaa11_live_canary_fixture_dry_run_negative_controls.py"
+        ],
+        "negative_control": True,
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-fixture-dry-run-negative-controls"
     ]["negative_control"] is True
     for relative in jaa11["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -5599,6 +5751,15 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                 {
                     item["path"]: phase["implemented_source_git_revision"]
                     for item in phase["accepted_source_files"]
+                }
+            )
+            fixture_phase = phase["ranked_snapshot_fixture_dry_run"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: fixture_phase[
+                        "implemented_source_git_revision"
+                    ]
+                    for item in fixture_phase["accepted_source_files"]
                 }
             )
         if slice_id == "JAA-12":
