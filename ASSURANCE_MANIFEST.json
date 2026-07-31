@@ -1539,10 +1539,10 @@
       "objective_satisfied": false,
       "provisional_fixture_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "durable_circuit_integrated_fixture_only_policy_v2_truth_finalization_pending",
-        "implemented_source_git_revision": "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
-        "implemented_source_tree": "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c",
-        "implemented_source_content_revision": "sha256:670bf5179703e9479c952d7ff3fc370cf334876547fa85fd83269f15f0b34b75",
+        "independent_fable_ratification": "jaa11_fixture_adapter_identity_reconciled_with_standing_jaa10_shadow_contract_truth_finalization_pending",
+        "implemented_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "implemented_source_tree": "890718412e31212b2306dbd710cbc8e389f96278",
+        "implemented_source_content_revision": "sha256:127cefe54cac785661cc704df66a6f33532fa98a15cb4501754f9d6ddb408f06",
         "target_ats_selected": false,
         "live_canary_status": "not_collected",
         "durable_circuit_latch": true,
@@ -1634,6 +1634,73 @@
           "path_base": "operator_control_root",
           "relative_path": "jaa-single-codex-20260729/jaa11-durable-integration-phase-a-ruff.log",
           "sha256": "f08bdda4e29585b184a7de565669337094d783aee0e7c6c64433c32ccf809250"
+        },
+        "adapter_identity_repair": {
+          "phase_a_git_revision": "545b9e6489abc33896021957214e98396645188c",
+          "phase_a_parent_git_revision": "7cebb831f457524b3eb1499d038e17caa86f0d6e",
+          "phase_a_tree": "890718412e31212b2306dbd710cbc8e389f96278",
+          "phase_a_source_content_revision": "sha256:127cefe54cac785661cc704df66a6f33532fa98a15cb4501754f9d6ddb408f06",
+          "route_url": "http://127.0.0.1:0/applications/graphcore-build-engineer",
+          "route_policy_sha256": "042de40c5633fe7f41c652d81fbce4502f2192d79b53c3492a928e592376ea1c",
+          "adapter_contract_sha256": "e4cb8ee1b416d75063bb70b72208a3554fb0ccc59998f6ff4d9ef44b3eced4e5",
+          "changed_file_sha256": {
+            "career_automation/official_ats_adapter.py": "c80f8281e7f5a531c423a31e48644a803493673e10d0b45a9dbd458f11dea37a",
+            "test_jaa11_independent_acceptance.py": "cbaaec9457b7f56195102eabe6c3301dfdae95b8924c6023ef3573cb0c302a87",
+            "test_jaa11_negative_controls.py": "e9228c9fcbe56d67be90d40d198e8e627b8d30590b49f59c66706e733f2e1e0a",
+            "test_jaa11_durable_integration.py": "f81a23e2f58380e745c84e07b8ccf8da2b37e5d4c8e2ffcb2b48761784c32bc7"
+          },
+          "evidence": {
+            "design_ruling": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa11-adapter-identity-repair-design-gate-raw.json",
+              "sha256": "ab211873f82ea254d5db62deebfda6a08c2cca887f39634e26086fd1af339521"
+            },
+            "sonnet_phase_a_review": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/sonnet-jaa11-adapter-identity-repair-phase-a-review-raw.json",
+              "sha256": "5c9a778f410fd32d30abfe7377dc53620475cfd3701b5f39247cacc4235ca39c"
+            },
+            "phase_a_receipt": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/JAA11_ADAPTER_IDENTITY_REPAIR_PHASE_A_RECEIPT.md",
+              "sha256": "827f7f1cb70bd6eec2baeb8e2db2074729d607cc01e18b03fa3eda9c3fafdb5c"
+            },
+            "fable_phase_a_acceptance": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa11-adapter-identity-repair-phase-a-exact-source-raw.json",
+              "sha256": "5208b1369db53d06592608fac7a4d03d0936e836d9cda817b79596a4c158f9b9"
+            },
+            "focused_log": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa11-adapter-identity-repair-phase-a-focused.log",
+              "sha256": "1b16c9e0a6485e078ab4b30bc47ff39b8e72176c12e336941ce2136ced11db47"
+            },
+            "downstream_log": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa11-adapter-identity-repair-phase-a-downstream.log",
+              "sha256": "6f67b85acd94f59bdeb58b2dd36b9b37fe38f7dd3b92ed8dce1af5ab14ee6b3d"
+            },
+            "collect_only_log": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa11-adapter-identity-repair-phase-a-collect-only.log",
+              "sha256": "a3c1386698d06fe7550236d76fa6fcd7cc6d91e725484f8cb46e559dd35d02ca"
+            },
+            "ruff_log": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa11-adapter-identity-repair-phase-a-ruff.log",
+              "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+            },
+            "pycompile_log": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa11-adapter-identity-repair-phase-a-pycompile.log",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "postcommit_stale_truth_log": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/jaa11-adapter-identity-repair-phase-a-postcommit-stale-truth.log",
+              "sha256": "f8c7cfc4ed809a3f897d336396f6f149a3b974e714910f1bcd8522a6c0545ede"
+            }
+          }
         }
       },
       "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py"],
@@ -1666,9 +1733,9 @@
       "provisional_local_export_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
-        "implemented_source_git_revision": "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
-        "implemented_source_tree": "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c",
-        "implemented_source_content_revision": "sha256:670bf5179703e9479c952d7ff3fc370cf334876547fa85fd83269f15f0b34b75",
+        "implemented_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "implemented_source_tree": "890718412e31212b2306dbd710cbc8e389f96278",
+        "implemented_source_content_revision": "sha256:127cefe54cac785661cc704df66a6f33532fa98a15cb4501754f9d6ddb408f06",
         "upstream_dependency_satisfied": false,
         "follow_up_reference_hashes": "caller_supplied_structural_references",
         "mailbox_connector_status": "not_connected",
@@ -1891,9 +1958,9 @@
       "provisional_local_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": "bounded_local_implementation_ratified_objective_unsatisfied_2026-07-30",
-        "implemented_source_git_revision": "37347dcb6d5d57eb285bcae5b02c276bf5aef092",
-        "implemented_source_tree": "d25a012e70539ddd71b76baf4e7d29fc9ea0fd2c",
-        "implemented_source_content_revision": "sha256:670bf5179703e9479c952d7ff3fc370cf334876547fa85fd83269f15f0b34b75",
+        "implemented_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "implemented_source_tree": "890718412e31212b2306dbd710cbc8e389f96278",
+        "implemented_source_content_revision": "sha256:127cefe54cac785661cc704df66a6f33532fa98a15cb4501754f9d6ddb408f06",
         "upstream_dependency_satisfied": false,
         "evidence_reference_authentication": "caller_asserted_digest_only",
         "real_runtime_evidence_verified": false,
