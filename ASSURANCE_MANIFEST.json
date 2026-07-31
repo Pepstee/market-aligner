@@ -1775,6 +1775,65 @@
                   "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_OPERATOR_DOCUMENT_FIXTURE_COMPOSITION_PHASE_A_ACCEPTANCE.md",
                   "sha256": "2d8fbafc10e99b65a499eb9d66e6fb60420776d1b9605bedfc8222bb393f0548"
                 },
+                "operator_document_intake": {
+                  "status": "bounded_operator_document_intake_phase_a_exact_source_accepted",
+                  "independent_fable_acceptance": "accept_and_authorize_receipt_objective_unsatisfied_2026-07-31",
+                  "scope": "function_path_sha256_witness_of_exact_fixture_bytes_bound_through_accepted_composition_no_external_capability",
+                  "implemented_source_git_revision": "526920a7acce4c8900b22c0a3ebfb43f50a658b0",
+                  "implemented_source_parent_git_revision": "85ba8b056dde9ce1c13afb5e2daed25692a137c9",
+                  "implemented_source_tree": "8614917ef081dfbffdbab88799bc1d8450488b62",
+                  "implemented_source_content_revision": "sha256:fa269d6c5ca6f851f392521d0f14861d34a8d536ceb93b8bf67b47c142275617",
+                  "accepted_source_files": [
+                    {
+                      "path": "career_automation/live_canary_operator_document_intake.py",
+                      "sha256": "d5455f898f68f041bb0a86a3abc9707c2b16981d19f7dd30a01285b15e7bc63c"
+                    },
+                    {
+                      "path": "test_jaa11_live_canary_operator_document_intake.py",
+                      "sha256": "4666ef62c4a53095c52749d1f9ca3225947555843b25a5d1eae407c6c92a8e35"
+                    },
+                    {
+                      "path": "test_jaa11_live_canary_operator_document_intake_negative_controls.py",
+                      "sha256": "b586abfe7de97320a3273e81e409e34e084fb332c1284ed6b15ac04d62147763"
+                    }
+                  ],
+                  "accepted_dependencies": [
+                    {
+                      "path": "career_automation/live_canary_authority.py",
+                      "sha256": "e48372dc4e414212bc86d2bc0ba21d9ec75f80d12eeaa6e1dfc80179a958e1fc"
+                    },
+                    {
+                      "path": "career_automation/live_canary_fixture_dry_run.py",
+                      "sha256": "3e2341e3fbc3a9e4a199c0e55ccc12176990a647c7d83b2ffb545abffc1cfaea"
+                    },
+                    {
+                      "path": "career_automation/live_canary_snapshot_document.py",
+                      "sha256": "4a8cb89d5dc8b2268d5dcfb3aaa71d7c60773c5255e4537b0ad9676fbceedfb0"
+                    },
+                    {
+                      "path": "career_automation/live_canary_operator_fixture_composition.py",
+                      "sha256": "6be3aa327a7ba38df219b91fc6a7211b05c81231af90313148c2a5f6d77ea877"
+                    }
+                  ],
+                  "phase_a_exact_source_acceptance": {
+                    "path_base": "operator_control_root",
+                    "relative_path": "jaa-single-codex-20260729/FABLE_JAA11_OPERATOR_DOCUMENT_INTAKE_TRUTH_TRANSITION.md",
+                    "sha256": "5d3812742d6f1d842bccb7f9787fbb49b92bc1b69a0c73515606fa619a84448d"
+                  },
+                  "sha256_sole_provenance_anchor": true,
+                  "document_byte_length_witness": "supplementary_function_path_derived_metadata_only_not_a_provenance_witness",
+                  "nb1_direct_construction_limitation": "direct_construction_can_self_seal_arbitrary_in_range_document_byte_length",
+                  "operator_document_supplied": false,
+                  "intake_binding": "in_memory_only",
+                  "live_ranked_snapshot": false,
+                  "external_action_capability": false,
+                  "operational_release": "withheld",
+                  "real_submission_authority": "withheld",
+                  "production_certification": "withheld",
+                  "objective_satisfied": false,
+                  "dependency_satisfied": false,
+                  "real_applications_submitted": 0
+                },
                 "operator_document_supplied": false,
                 "composition_binding": "in_memory_only",
                 "live_ranked_snapshot": false,
@@ -1904,7 +1963,7 @@
           }
         }
       },
-      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py", "career_automation/live_canary_authority.py", "career_automation/live_canary_fixture_dry_run.py", "career_automation/live_canary_snapshot_document.py", "career_automation/live_canary_operator_fixture_composition.py"],
+      "owns": ["career_automation/official_ats_adapter.py", "career_automation/durable_circuit_store.py", "career_automation/live_canary_authority.py", "career_automation/live_canary_fixture_dry_run.py", "career_automation/live_canary_snapshot_document.py", "career_automation/live_canary_operator_fixture_composition.py", "career_automation/live_canary_operator_document_intake.py"],
       "inputs": ["career_automation/browser_executor.py", "career_automation/release_gate.py"],
       "interfaces": [],
       "environment": [],
@@ -1921,7 +1980,9 @@
         {"id": "JAA-11-live-canary-snapshot-document", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_snapshot_document.py"], "files": ["test_jaa11_live_canary_snapshot_document.py"]},
         {"id": "JAA-11-live-canary-snapshot-document-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_snapshot_document_negative_controls.py"], "files": ["test_jaa11_live_canary_snapshot_document_negative_controls.py"], "negative_control": true},
         {"id": "JAA-11-live-canary-operator-fixture-composition", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_operator_fixture_composition.py"], "files": ["test_jaa11_live_canary_operator_fixture_composition.py"]},
-        {"id": "JAA-11-live-canary-operator-fixture-composition-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_operator_fixture_composition_negative_controls.py"], "files": ["test_jaa11_live_canary_operator_fixture_composition_negative_controls.py"], "negative_control": true}
+        {"id": "JAA-11-live-canary-operator-fixture-composition-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_operator_fixture_composition_negative_controls.py"], "files": ["test_jaa11_live_canary_operator_fixture_composition_negative_controls.py"], "negative_control": true},
+        {"id": "JAA-11-live-canary-operator-document-intake", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_operator_document_intake.py"], "files": ["test_jaa11_live_canary_operator_document_intake.py"]},
+        {"id": "JAA-11-live-canary-operator-document-intake-negative-controls", "argv": ["{python}", "-m", "pytest", "-q", "test_jaa11_live_canary_operator_document_intake_negative_controls.py"], "files": ["test_jaa11_live_canary_operator_document_intake_negative_controls.py"], "negative_control": true}
       ],
       "evidence": [
         {

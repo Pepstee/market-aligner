@@ -2837,6 +2837,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     operator_composition = snapshot_document.pop(
         "operator_document_fixture_composition"
     )
+    operator_intake = operator_composition.pop("operator_document_intake")
     assert jaa11_contract == {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
         "independent_fable_ratification": (
@@ -3650,7 +3651,133 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "dependency_satisfied": False,
         "real_applications_submitted": 0,
     }
-    for phase in (snapshot_document, operator_composition):
+    assert operator_intake == {
+        "status": (
+            "bounded_operator_document_intake_"
+            "phase_a_exact_source_accepted"
+        ),
+        "independent_fable_acceptance": (
+            "accept_and_authorize_receipt_"
+            "objective_unsatisfied_2026-07-31"
+        ),
+        "scope": (
+            "function_path_sha256_witness_of_exact_fixture_bytes_bound_"
+            "through_accepted_composition_no_external_capability"
+        ),
+        "implemented_source_git_revision": (
+            "526920a7acce4c8900b22c0a3ebfb43f50a658b0"
+        ),
+        "implemented_source_parent_git_revision": (
+            "85ba8b056dde9ce1c13afb5e2daed25692a137c9"
+        ),
+        "implemented_source_tree": (
+            "8614917ef081dfbffdbab88799bc1d8450488b62"
+        ),
+        "implemented_source_content_revision": (
+            "sha256:fa269d6c5ca6f851f392521d0f14861"
+            "d34a8d536ceb93b8bf67b47c142275617"
+        ),
+        "accepted_source_files": [
+            {
+                "path": (
+                    "career_automation/"
+                    "live_canary_operator_document_intake.py"
+                ),
+                "sha256": (
+                    "d5455f898f68f041bb0a86a3abc9707c2"
+                    "b16981d19f7dd30a01285b15e7bc63c"
+                ),
+            },
+            {
+                "path": (
+                    "test_jaa11_live_canary_operator_document_intake.py"
+                ),
+                "sha256": (
+                    "4666ef62c4a53095c52749d1f9ca32259"
+                    "47555843b25a5d1eae407c6c92a8e35"
+                ),
+            },
+            {
+                "path": (
+                    "test_jaa11_live_canary_operator_document_"
+                    "intake_negative_controls.py"
+                ),
+                "sha256": (
+                    "b586abfe7de97320a3273e81e409e34e0"
+                    "84fb332c1284ed6b15ac04d62147763"
+                ),
+            },
+        ],
+        "accepted_dependencies": [
+            {
+                "path": "career_automation/live_canary_authority.py",
+                "sha256": (
+                    "e48372dc4e414212bc86d2bc0ba21d9ec"
+                    "75f80d12eeaa6e1dfc80179a958e1fc"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/live_canary_fixture_dry_run.py"
+                ),
+                "sha256": (
+                    "3e2341e3fbc3a9e4a199c0e55ccc121769"
+                    "90a647c7d83b2ffb545abffc1cfaea"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/live_canary_snapshot_document.py"
+                ),
+                "sha256": (
+                    "4a8cb89d5dc8b2268d5dcfb3aaa71d7c6"
+                    "0773c5255e4537b0ad9676fbceedfb0"
+                ),
+            },
+            {
+                "path": (
+                    "career_automation/"
+                    "live_canary_operator_fixture_composition.py"
+                ),
+                "sha256": (
+                    "6be3aa327a7ba38df219b91fc6a7211b0"
+                    "5c81231af90313148c2a5f6d77ea877"
+                ),
+            },
+        ],
+        "phase_a_exact_source_acceptance": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "FABLE_JAA11_OPERATOR_DOCUMENT_INTAKE_"
+                "TRUTH_TRANSITION.md"
+            ),
+            "sha256": (
+                "5d3812742d6f1d842bccb7f9787fbb49b"
+                "92bc1b69a0c73515606fa619a84448d"
+            ),
+        },
+        "sha256_sole_provenance_anchor": True,
+        "document_byte_length_witness": (
+            "supplementary_function_path_derived_metadata_only_"
+            "not_a_provenance_witness"
+        ),
+        "nb1_direct_construction_limitation": (
+            "direct_construction_can_self_seal_arbitrary_"
+            "in_range_document_byte_length"
+        ),
+        "operator_document_supplied": False,
+        "intake_binding": "in_memory_only",
+        "live_ranked_snapshot": False,
+        "external_action_capability": False,
+        "operational_release": "withheld",
+        "real_submission_authority": "withheld",
+        "production_certification": "withheld",
+        "objective_satisfied": False,
+        "dependency_satisfied": False,
+        "real_applications_submitted": 0,
+    }
+    for phase in (snapshot_document, operator_composition, operator_intake):
         phase_pointer = phase["phase_a_exact_source_acceptance"]
         phase_path = (
             evidence_bases[phase_pointer["path_base"]]
@@ -3774,6 +3901,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "career_automation/live_canary_fixture_dry_run.py",
         "career_automation/live_canary_snapshot_document.py",
         "career_automation/live_canary_operator_fixture_composition.py",
+        "career_automation/live_canary_operator_document_intake.py",
     ]
     assert [test["id"] for test in jaa11["tests"]] == [
         "JAA-11-contract",
@@ -3789,6 +3917,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "JAA-11-live-canary-snapshot-document-negative-controls",
         "JAA-11-live-canary-operator-fixture-composition",
         "JAA-11-live-canary-operator-fixture-composition-negative-controls",
+        "JAA-11-live-canary-operator-document-intake",
+        "JAA-11-live-canary-operator-document-intake-negative-controls",
     ]
     tests_by_id = {test["id"]: test for test in jaa11["tests"]}
     assert tests_by_id[
@@ -3896,6 +4026,49 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
     }
     assert tests_by_id[
         "JAA-11-live-canary-operator-fixture-composition-negative-controls"
+    ]["negative_control"] is True
+    assert tests_by_id[
+        "JAA-11-live-canary-operator-document-intake"
+    ] == {
+        "id": "JAA-11-live-canary-operator-document-intake",
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            "test_jaa11_live_canary_operator_document_intake.py",
+        ],
+        "files": [
+            "test_jaa11_live_canary_operator_document_intake.py"
+        ],
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-operator-document-intake-negative-controls"
+    ] == {
+        "id": (
+            "JAA-11-live-canary-operator-document-intake-"
+            "negative-controls"
+        ),
+        "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            (
+                "test_jaa11_live_canary_operator_document_"
+                "intake_negative_controls.py"
+            ),
+        ],
+        "files": [
+            (
+                "test_jaa11_live_canary_operator_document_"
+                "intake_negative_controls.py"
+            )
+        ],
+        "negative_control": True,
+    }
+    assert tests_by_id[
+        "JAA-11-live-canary-operator-document-intake-negative-controls"
     ]["negative_control"] is True
     for relative in jaa11["owns"]:
         assert (ROOT / relative).is_file(), (
@@ -6099,6 +6272,15 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
                         "implemented_source_git_revision"
                     ]
                     for item in composition_phase["accepted_source_files"]
+                }
+            )
+            intake_phase = composition_phase["operator_document_intake"]
+            phase_path_revisions.update(
+                {
+                    item["path"]: intake_phase[
+                        "implemented_source_git_revision"
+                    ]
+                    for item in intake_phase["accepted_source_files"]
                 }
             )
         if slice_id == "JAA-12":
