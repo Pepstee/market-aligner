@@ -3233,21 +3233,21 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
             "no_external_capability"
         ),
         "implemented_source_git_revision": (
-            "a044a8da5f2e1a2fa322ae1f18b897bd9ce340ec"
+            "22a37046af1a78e75dc520128ad98d46bb2946eb"
         ),
         "implemented_source_tree": (
-            "8f53fd33d83d8531aca7f5761facc62dfeac7c11"
+            "afce9c089bd5710e20bd679bec9e222875195667"
         ),
         "implemented_source_content_revision": (
-            "sha256:20c4283cce3f723e339acebe9316f15dd"
-            "0d08026b2a48c21fef10d6cc59576a1"
+            "sha256:2eb6390a263a88045c5240e47b94ad9d"
+            "fe7eb90551d13ea5685e95a0b653c34f"
         ),
         "accepted_source_files": [
             {
                 "path": "career_automation/live_canary_authority.py",
                 "sha256": (
-                    "0088ac543afff20caea1481233319218b7"
-                    "9100fd185547b645c32ef6b58cf9af"
+                    "e48372dc4e414212bc86d2bc0ba21d9ec"
+                    "75f80d12eeaa6e1dfc80179a958e1fc"
                 ),
             },
             {
@@ -3262,8 +3262,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                     "test_jaa11_live_canary_authority_negative_controls.py"
                 ),
                 "sha256": (
-                    "4fab1cd79ef0ff65c1bcc73096c1eab8b"
-                    "cbdac0712801e8379b8a74b6fdce349"
+                    "56bf956a5fc2f693b9279585fabdee7296"
+                    "3900cd775b7d89b6faf701d63dfb7b"
                 ),
             },
         ],

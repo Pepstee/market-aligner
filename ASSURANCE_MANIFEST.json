@@ -1638,13 +1638,13 @@
         "live_canary_operator_authority": {
           "status": "bounded_local_authority_intake_phase_a_implemented_pending_exact_source_review",
           "scope": "pure_data_authority_and_selection_contract_no_external_capability",
-          "implemented_source_git_revision": "a044a8da5f2e1a2fa322ae1f18b897bd9ce340ec",
-          "implemented_source_tree": "8f53fd33d83d8531aca7f5761facc62dfeac7c11",
-          "implemented_source_content_revision": "sha256:20c4283cce3f723e339acebe9316f15dd0d08026b2a48c21fef10d6cc59576a1",
+          "implemented_source_git_revision": "22a37046af1a78e75dc520128ad98d46bb2946eb",
+          "implemented_source_tree": "afce9c089bd5710e20bd679bec9e222875195667",
+          "implemented_source_content_revision": "sha256:2eb6390a263a88045c5240e47b94ad9dfe7eb90551d13ea5685e95a0b653c34f",
           "accepted_source_files": [
             {
               "path": "career_automation/live_canary_authority.py",
-              "sha256": "0088ac543afff20caea1481233319218b79100fd185547b645c32ef6b58cf9af"
+              "sha256": "e48372dc4e414212bc86d2bc0ba21d9ec75f80d12eeaa6e1dfc80179a958e1fc"
             },
             {
               "path": "test_jaa11_live_canary_authority_intake.py",
@@ -1652,7 +1652,7 @@
             },
             {
               "path": "test_jaa11_live_canary_authority_negative_controls.py",
-              "sha256": "4fab1cd79ef0ff65c1bcc73096c1eab8bcbdac0712801e8379b8a74b6fdce349"
+              "sha256": "56bf956a5fc2f693b9279585fabdee72963900cd775b7d89b6faf701d63dfb7b"
             }
           ],
           "authority_document": {
