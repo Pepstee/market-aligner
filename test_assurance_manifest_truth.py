@@ -1493,13 +1493,97 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "b8caa7d272f924bbca74416fd61a679"
             ),
         },
+        "stage_b_fable_exact_source_ruling": {
+            "session_id": "66d93547-95c3-4be0-b0a4-74b41e5d78bf",
+            "disposition": (
+                "JAA10_FROZEN_REPLAY_PAIR_STAGE_B_EXACT_SOURCE: "
+                "ACCEPT_AND_AUTHORIZE_RECEIPT"
+            ),
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "fable-jaa10-frozen-replay-pair-stage-b-"
+                "exact-source-raw.json"
+            ),
+            "sha256": (
+                "2f9960b83e290e4693371a6877ce215f0"
+                "3b71d4e21f3329ed15c2c46707df9d9"
+            ),
+        },
+        "stage_b_implementation_receipt": {
+            "path_base": "operator_control_root",
+            "relative_path": (
+                "jaa-single-codex-20260729/"
+                "JAA10_FROZEN_REPLAY_PAIR_STAGE_B_"
+                "IMPLEMENTATION_RECEIPT.md"
+            ),
+            "sha256": (
+                "55d106ce00949c4bbdd1d13221d1d1a81"
+                "4de58601e00784cc3d8b8551221abc4"
+            ),
+        },
         "independent_fable_acceptance": (
             "stage_a_exact_source_accepted_2026-07-31"
         ),
-        "replay_pair_evidence": "not_collected",
-        "registry_pin_exists": False,
-        "metrics_evaluated": False,
-        "deterministic_replay_mismatch": "UNEVALUABLE",
+        "replay_pair_evidence": {
+            "status": "collected_primary_pair",
+            "path_base": "operator_control_root",
+            "control_directory": (
+                "jaa-single-codex-20260729/"
+                "JAA10_FROZEN_REPLAY_PAIR_PRIMARY_95caa725"
+            ),
+            "observation_1_file_sha256": (
+                "50078d1f0833f1f4f7f3dd38f00d82f2"
+                "e88713f3ebebac5c5e120eb8e878ed30"
+            ),
+            "observation_2_file_sha256": (
+                "8c54a38b2f93c124823f9e40271dd0079"
+                "df677f0c90f4bb53ee61631f4f849d1"
+            ),
+            "pair_file_sha256": (
+                "0b278e63b95fd3031d0f6b9181f7e5d78"
+                "3c08052a1a7abd591dbc1467662b786"
+            ),
+            "pair_receipt_sha256": (
+                "0c6830ebe0a6bd0018eee869a32ab1d9d"
+                "abbfe2ed9b78663c376feb040970cba"
+            ),
+            "execution_environment_sha256": (
+                "5cd96b3cb1ca8baeb87559d89df116701"
+                "14d795282188ae893a549daf7bab5f1"
+            ),
+            "replay_execution_identity": {
+                "source_git_revision": (
+                    "95caa7254973523734d9cf5a633160e89a8e277e"
+                ),
+                "source_tree": (
+                    "cd8866e519d3d0d55ebb482be371843920c05047"
+                ),
+                "source_content_revision": (
+                    "sha256:0fa45f68150decc7b99e2ae92759850bf"
+                    "690805de33f89cbfaa9f5f330ac4ab7"
+                ),
+            },
+            "time_authenticated": False,
+        },
+        "registry_pin_exists": True,
+        "metrics_evaluated": True,
+        "deterministic_replay_mismatch": {
+            "status": "PASS",
+            "numerator": 0,
+            "denominator": 1,
+            "value": 0,
+            "target": 0,
+            "unit": "count",
+            "evidence_class": "fixture_frozen",
+            "evidence_item_ids": [
+                "jaa10-frozen-replay-pair-primary-v1"
+            ],
+            "evidence_scope_id": (
+                "0c6830ebe0a6bd0018eee869a32ab1d9d"
+                "abbfe2ed9b78663c376feb040970cba"
+            ),
+        },
         "objective_satisfied": False,
         "certifies_slice": False,
         "live_time_separated_execution": "not_collected",
@@ -1538,6 +1622,8 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "sonnet_review",
         "fable_exact_source_ruling",
         "acceptance_receipt",
+        "stage_b_fable_exact_source_ruling",
+        "stage_b_implementation_receipt",
     ):
         pointer = replay_stage_a[key]
         evidence_path = (
@@ -1571,20 +1657,20 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "truth_transition_3514c880_ratified": True,
         "package_file_sha256": {
             "career_automation/hard_metrics_evaluation.py": (
-                "9fd5728fbaa2ed4bf77cd276c095899bf"
-                "2825df05781ee43ba696ef936fb8a3a"
+                "a409df8f2c0d2649458e5f6d598660d4"
+                "2a5112cb387d6da76e3e0ca6b2a1f498"
             ),
             "career_automation/certification_candidate_compiler.py": (
                 "99ff070060b816a4ae227f91ea09fd8f4"
                 "c4d1442c167d9b14494ccf6c9619671"
             ),
             "test_jaa10_hard_metrics_evaluation.py": (
-                "5cd052da903f71adb2b7c20638b5ed165"
-                "a19454ccabf9397cfcb2362083395a2"
+                "4a1887a2324b205cd8272ee55e597c7d7"
+                "091ef6c13089aad0f415f88848bc5d9"
             ),
             "test_jaa10_hard_metrics_evaluation_negative_controls.py": (
-                "07d5920a1fcebefed561e329ea40cbadd"
-                "85e5035dc7b7fa9c342564e1874d7c1"
+                "cdfac1346a4e54e0b208357435d2b2386"
+                "43b85902f66ffe6a4b65c3c61877a13"
             ),
             "test_jaa10_certification_candidate_compiler.py": (
                 "34385a1aceaa500d744b144c05462d103"
@@ -1601,7 +1687,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "derived_metric_statuses": {
             "ats_parse_success_bp": "PASS",
             "confirmed_without_receipt": "UNEVALUABLE",
-            "deterministic_replay_mismatch": "UNEVALUABLE",
+            "deterministic_replay_mismatch": "PASS",
             "duplicate_submissions": "UNEVALUABLE",
             "ineligible_submissions": "UNEVALUABLE",
             "released_employer_claims_without_citations": "UNEVALUABLE",
