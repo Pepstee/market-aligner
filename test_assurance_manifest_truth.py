@@ -2831,7 +2831,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         "independent_fable_ratification": (
             "jaa11_fixture_adapter_identity_reconciled_with_standing_"
             "jaa10_shadow_contract_"
-            "truth_finalization_pending"
+            "finalized_2026-07-31"
         ),
         "implemented_source_git_revision": (
             "545b9e6489abc33896021957214e98396645188c"
@@ -3202,6 +3202,18 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                     "sha256": (
                         "f8c7cfc4ed809a3f897d336396f6f149"
                         "a3b974e714910f1bcd8522a6c0545ede"
+                    ),
+                },
+                "fable_phase_b_final_acceptance": {
+                    "path_base": "operator_control_root",
+                    "relative_path": (
+                        "jaa-single-codex-20260729/"
+                        "fable-jaa11-adapter-identity-repair-"
+                        "phase-b-final-raw.json"
+                    ),
+                    "sha256": (
+                        "7ad9053d7eb9316d694f1580005dcc6ec"
+                        "aec761b18606b2e3c39fd4120ae099d"
                     ),
                 },
             },
@@ -4246,7 +4258,7 @@ def test_fable_ratified_local_implementation_truth_is_git_and_evidence_bound() -
         expected_marker = (
             "jaa11_fixture_adapter_identity_reconciled_with_standing_"
             "jaa10_shadow_contract_"
-            "truth_finalization_pending"
+            "finalized_2026-07-31"
             if slice_id == "JAA-11"
             else (
                 "real_frozen_vacancy_bounded_local_implementation_with_"

@@ -1539,7 +1539,7 @@
       "objective_satisfied": false,
       "provisional_fixture_contract": {
         "status": "TEMPORARY_SOL_DEPUTY_PENDING_FABLE_RATIFICATION",
-        "independent_fable_ratification": "jaa11_fixture_adapter_identity_reconciled_with_standing_jaa10_shadow_contract_truth_finalization_pending",
+        "independent_fable_ratification": "jaa11_fixture_adapter_identity_reconciled_with_standing_jaa10_shadow_contract_finalized_2026-07-31",
         "implemented_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
         "implemented_source_tree": "890718412e31212b2306dbd710cbc8e389f96278",
         "implemented_source_content_revision": "sha256:127cefe54cac785661cc704df66a6f33532fa98a15cb4501754f9d6ddb408f06",
@@ -1699,6 +1699,11 @@
               "path_base": "operator_control_root",
               "relative_path": "jaa-single-codex-20260729/jaa11-adapter-identity-repair-phase-a-postcommit-stale-truth.log",
               "sha256": "f8c7cfc4ed809a3f897d336396f6f149a3b974e714910f1bcd8522a6c0545ede"
+            },
+            "fable_phase_b_final_acceptance": {
+              "path_base": "operator_control_root",
+              "relative_path": "jaa-single-codex-20260729/fable-jaa11-adapter-identity-repair-phase-b-final-raw.json",
+              "sha256": "7ad9053d7eb9316d694f1580005dcc6ecaec761b18606b2e3c39fd4120ae099d"
             }
           }
         }
