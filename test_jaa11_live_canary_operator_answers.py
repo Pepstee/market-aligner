@@ -97,6 +97,30 @@ def test_jurisdiction_specific_work_authorisation_can_be_permitted() -> None:
     )
 
 
+def test_explicit_current_work_authorisation_subtopic_is_permitted() -> None:
+    decision = evaluate_operator_answer(
+        FROZEN_OPERATOR_ANSWERS,
+        OperatorAnswerRequest(
+            topic="work_authorisation",
+            answer_kind="boolean",
+            subtopic="current_work_authorisation",
+            jurisdiction="United Kingdom",
+            evidence=ApprovedEvidenceReference(
+                source_kind="identity_work_rights_ledger",
+                source_sha256=_hash("approved-uk-work-rights-evidence"),
+                topic="work_authorisation",
+                exact_claim="current_work_authorisation",
+                jurisdiction="United Kingdom",
+            ),
+        ),
+    )
+    assert decision.status == "ANSWER_PERMITTED"
+    assert decision.answer is True
+    assert decision.reasons == (
+        "jurisdiction_specific_work_rights_verified",
+    )
+
+
 def test_salary_free_text_is_exact_constant_not_generated() -> None:
     decision = evaluate_operator_answer(
         FROZEN_OPERATOR_ANSWERS,
@@ -115,6 +139,26 @@ def test_salary_free_text_is_exact_constant_not_generated() -> None:
         decision.answer
         == "Flexible and open to a market-competitive package appropriate "
         "to the role; any offer must meet applicable statutory minimums."
+    )
+
+
+def test_explicit_salary_free_text_subtopic_is_permitted() -> None:
+    decision = evaluate_operator_answer(
+        FROZEN_OPERATOR_ANSWERS,
+        OperatorAnswerRequest(
+            topic="salary",
+            answer_kind="free_text",
+            subtopic="market_competitive_statutory_minimum_free_text",
+            evidence=_document_evidence(
+                "salary",
+                "market_competitive_statutory_minimum_free_text",
+            ),
+        ),
+    )
+    assert decision.status == "ANSWER_PERMITTED"
+    assert decision.answer == APPROVED_SALARY_FREE_TEXT
+    assert decision.reasons == (
+        "exact_operator_approved_salary_free_text",
     )
 
 

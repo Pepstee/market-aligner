@@ -140,6 +140,46 @@ def test_work_authorisation_conflations_fail_closed(
         ),
     )
     assert decision.status == "FAIL_CLOSED"
+    assert decision.answer is None
+    assert decision.reasons == (
+        "work_authorisation_topic_cannot_be_inferred",
+    )
+
+
+@pytest.mark.parametrize(
+    "subtopic",
+    (
+        "authorised_everywhere_indefinitely",
+        "eu_wide_authorisation",
+        "",
+        "willing_to_relocate",
+        "market_competitive_statutory_minimum_free_text",
+    ),
+)
+def test_unapproved_work_authorisation_subtopics_fail_closed(
+    subtopic: str,
+) -> None:
+    decision = evaluate_operator_answer(
+        FROZEN_OPERATOR_ANSWERS,
+        OperatorAnswerRequest(
+            topic="work_authorisation",
+            answer_kind="boolean",
+            subtopic=subtopic,
+            jurisdiction="United Kingdom",
+            evidence=ApprovedEvidenceReference(
+                source_kind="identity_work_rights_ledger",
+                source_sha256=_hash("approved-uk-work-rights-evidence"),
+                topic="work_authorisation",
+                exact_claim="current_work_authorisation",
+                jurisdiction="United Kingdom",
+            ),
+        ),
+    )
+    assert decision.status == "FAIL_CLOSED"
+    assert decision.answer is None
+    assert decision.reasons == (
+        "work_authorisation_claim_not_approved",
+    )
 
 
 def test_jurisdiction_mismatch_and_unverified_evidence_fail_closed() -> None:
@@ -229,6 +269,88 @@ def test_unapproved_salary_inferences_fail_closed(subtopic: str) -> None:
         ),
     )
     assert decision.status == "FAIL_CLOSED"
+    assert decision.answer is None
+    assert decision.reasons == ("salary_topic_cannot_be_inferred",)
+
+
+@pytest.mark.parametrize(
+    "subtopic",
+    (
+        "total_compensation_target",
+        "signing_bonus_expectation",
+        "current_work_authorisation",
+    ),
+)
+def test_unapproved_salary_free_text_subtopics_fail_closed(
+    subtopic: str,
+) -> None:
+    decision = evaluate_operator_answer(
+        FROZEN_OPERATOR_ANSWERS,
+        OperatorAnswerRequest(
+            topic="salary",
+            answer_kind="free_text",
+            subtopic=subtopic,
+            evidence=_document_evidence(
+                "salary",
+                "market_competitive_statutory_minimum_free_text",
+            ),
+        ),
+    )
+    assert decision.status == "FAIL_CLOSED"
+    assert decision.answer is None
+    assert decision.reasons == ("salary_claim_not_approved",)
+
+
+@pytest.mark.parametrize(
+    "subtopic",
+    (
+        "market_competitive_statutory_minimum_free_text",
+        "numeric_salary_expectation",
+        "current_work_authorisation",
+    ),
+)
+def test_numeric_salary_rejects_every_non_null_subtopic(
+    subtopic: str,
+) -> None:
+    decision = evaluate_operator_answer(
+        FROZEN_OPERATOR_ANSWERS,
+        OperatorAnswerRequest(
+            topic="salary",
+            answer_kind="numeric",
+            subtopic=subtopic,
+            role_location="London, United Kingdom",
+            age_basis="age-21-and-over",
+            hours=40,
+            compensation_period="annual_gbp_minor_units",
+            statutory_floor_minor_units=2_500_000,
+            proposed_salary_minor_units=4_500_000,
+            law_evidence_sha256=_hash("current-authoritative-uk-law"),
+            market_range_evidence_sha256=_hash(
+                "market-range-for-role-and-location"
+            ),
+        ),
+    )
+    assert decision.status == "FAIL_CLOSED"
+    assert decision.answer is None
+    assert decision.reasons == ("salary_claim_not_approved",)
+
+
+def test_arbitrary_relocation_subtopic_preserves_allowlist_parity() -> None:
+    decision = evaluate_operator_answer(
+        FROZEN_OPERATOR_ANSWERS,
+        OperatorAnswerRequest(
+            topic="relocation",
+            answer_kind="boolean",
+            subtopic="open_to_anything",
+            evidence=_document_evidence(
+                "relocation",
+                "willing_to_relocate",
+            ),
+        ),
+    )
+    assert decision.status == "FAIL_CLOSED"
+    assert decision.answer is None
+    assert decision.reasons == ("relocation_claim_not_approved",)
 
 
 def test_frozen_authority_and_decision_cannot_open_external_boundary() -> None:

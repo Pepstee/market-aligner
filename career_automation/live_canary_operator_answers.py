@@ -44,11 +44,15 @@ WORK_AUTHORISATION_FAIL_CLOSED_TOPICS = (
     "unrestricted_status",
     "permanent_status",
 )
+WORK_AUTHORISATION_ACCEPTED_SUBTOPICS = ("current_work_authorisation",)
 SALARY_FAIL_CLOSED_TOPICS = (
     "current_salary",
     "desired_benefits",
     "equity_expectations",
     "unpaid_work",
+)
+SALARY_FREE_TEXT_ACCEPTED_SUBTOPICS = (
+    "market_competitive_statutory_minimum_free_text",
 )
 
 AnswerStatus = Literal["ANSWER_PERMITTED", "FAIL_CLOSED", "OUT_OF_SCOPE"]
@@ -372,6 +376,15 @@ def _evaluate_work_authorisation(
             request.topic,
             "work_authorisation_topic_cannot_be_inferred",
         )
+    if request.subtopic not in {
+        None,
+        *WORK_AUTHORISATION_ACCEPTED_SUBTOPICS,
+    }:
+        return _decision(
+            "FAIL_CLOSED",
+            request.topic,
+            "work_authorisation_claim_not_approved",
+        )
     jurisdiction = _clean_text(request.jurisdiction)
     evidence = request.evidence
     if (
@@ -426,6 +439,15 @@ def _evaluate_salary(
             "salary_topic_cannot_be_inferred",
         )
     if request.answer_kind == "free_text":
+        if request.subtopic not in {
+            None,
+            *SALARY_FREE_TEXT_ACCEPTED_SUBTOPICS,
+        }:
+            return _decision(
+                "FAIL_CLOSED",
+                request.topic,
+                "salary_claim_not_approved",
+            )
         if not _matches_operator_document(
             request.evidence,
             topic="salary",
@@ -447,6 +469,12 @@ def _evaluate_salary(
             "FAIL_CLOSED",
             request.topic,
             "unsupported_salary_answer_kind",
+        )
+    if request.subtopic is not None:
+        return _decision(
+            "FAIL_CLOSED",
+            request.topic,
+            "salary_claim_not_approved",
         )
     if not _salary_numeric_inputs_are_complete(request):
         return _decision(
