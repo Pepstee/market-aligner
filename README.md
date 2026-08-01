@@ -19,3 +19,31 @@ This is the canonical reconciliation lineage. Audited predecessor trees remain r
 until every useful component has been adopted, tested, and recorded in the migration
 ledger.
 
+Implemented local slices include:
+
+- 34 registered board adapters, an uncapped parallel collector, durable restart state and the
+  complete Scrapling sidecar protocol;
+- generic opaque profiles, an external evidence ledger and loss-conscious legacy importers;
+- deterministic normalisation, deduplication, viability, eligibility and scoring;
+- validated semantic extraction/evidence-alignment schemas and content-bound LLM receipts;
+- an opportunity-before-research database gate, leased research workers and cited dossiers;
+- profile-scoped ranking, skill-frequency and interactive opportunity/fit reports;
+- a local service layer and provisional, versioned JAA contracts.
+
+Fit is always reported as `uncalibrated`. This is a ranking heuristic, not a hiring probability.
+
+## Local commands
+
+```bash
+export MARKET_ALIGNER_DATA_HOME="$HOME/.local/share/market-aligner"
+
+market-aligner profiles list
+market-aligner profiles create-synthetic
+market-aligner profiles import --format evidence-led --source /private/profile.yaml
+market-aligner assess --profile-id prf_<opaque-id> --request /private/request.json
+```
+
+Live collection configuration is external and injected into adapters. The automatic Scrapling
+fallback uses static then dynamic fetching; stealth/challenge-solving capabilities require an
+explicit source policy. Final submission and legal consent are never authorized by Market
+Aligner.
