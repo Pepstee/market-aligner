@@ -11,6 +11,8 @@ from market_aligner import __version__
 from market_aligner.profiler.importers import import_evidence_led, import_guided_profile
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
+from market_aligner.assessment.scoring import AssessmentAxes
+from market_aligner.service.api import AssessmentRequest, MarketAlignerService
 
 
 def _add_data_home(parser: argparse.ArgumentParser) -> None:
@@ -82,6 +84,19 @@ def _profile_command(args: argparse.Namespace) -> int:
     raise AssertionError(f"unhandled profile action: {args.profile_action}")
 
 
+def _assess_command(args: argparse.Namespace) -> int:
+    payload = json.loads(args.request.read_text(encoding="utf-8"))
+    axes = AssessmentAxes(**payload.pop("axes"))
+    request = AssessmentRequest(profile_id=args.profile_id, axes=axes, **payload)
+    service = MarketAlignerService(args.data_home)
+    result = service.assess(request)
+    output = asdict(result)
+    if args.apply_opportunity_gate:
+        output["opportunity_gate"] = asdict(service.gate(args.profile_id, request.job_key))
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True, default=str))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="market-aligner")
     parser.add_argument("--version", action="version", version=__version__)
@@ -115,6 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("profile_id")
     _add_data_home(show)
     show.set_defaults(handler=_profile_command)
+
+    assess = commands.add_parser("assess", help="Assess one vacancy for an opaque profile ID.")
+    assess.add_argument("--profile-id", required=True)
+    assess.add_argument("--request", type=Path, required=True)
+    assess.add_argument("--apply-opportunity-gate", action="store_true")
+    _add_data_home(assess)
+    assess.set_defaults(handler=_assess_command)
     return parser
 
 
