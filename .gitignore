@@ -9,6 +9,7 @@ htmlcov/
 build/
 dist/
 .venv/
+.venv-*/
 venv/
 .env
 .env.*
@@ -30,4 +31,3 @@ credentials/
 
 # Platform noise.
 .DS_Store
-
