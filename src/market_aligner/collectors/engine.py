@@ -104,7 +104,9 @@ class Collector:
             return raw, result.engine
 
     def migrate_existing(self) -> None:
-        added, fetched = self.db.import_existing(self.urls_path, self.raw_cache)
+        configured = list(((self.cfg.get("io") or {}).get("raw_cache_roots") or ()))
+        roots = [self.root / str(path) for path in configured] if configured else [self.raw_cache]
+        added, fetched = self.db.import_existing_roots(self.urls_path, roots)
         if added or fetched:
             self.log(f"[migrate] preserved {added} discovered and {fetched} fetched legacy rows")
 

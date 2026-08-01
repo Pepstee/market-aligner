@@ -73,6 +73,7 @@ class ProfileTests(unittest.TestCase):
             profile, evidence = import_guided_profile(guided)
             self.assertEqual([], evidence)
             self.assertFalse(profile.tracks["track"].evidence_ids)
+            self.assertEqual(0.0, profile.tracks["track"].market_readiness)
             self.assertIn("no itemised evidence ledger", profile.unknowns[0].lower())
 
             combined = root / "combined.yaml"

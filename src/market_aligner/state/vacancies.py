@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 from market_aligner.domain.contracts import JobUrl, RawPosting, read_jsonl, write_jsonl
+from market_aligner.state.importers import iter_raw_cache_roots
 
 
 SCHEMA = """
@@ -129,23 +130,24 @@ class JobDatabase:
         return write_jsonl(path, rows)
 
     def import_existing(self, urls_path: str | Path, raw_cache: str | Path) -> tuple[int, int]:
+        return self.import_existing_roots(urls_path, [raw_cache])
+
+    def import_existing_roots(
+        self,
+        urls_path: str | Path,
+        raw_cache_roots: Iterable[str | Path],
+    ) -> tuple[int, int]:
         urls = Path(urls_path)
         added = fetched = 0
         if urls.exists():
             for row in read_jsonl(urls, JobUrl):
                 added += int(self.upsert_discovered(row))
-        base = Path(raw_cache)
-        if base.exists():
-            for path in base.glob("*/*.json"):
-                try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                    row = RawPosting(**{k: payload.get(k) for k in
-                                       ("board", "job_id", "url", "fetched_at", "raw_text", "raw_json")})
-                    if not self.has_raw(row.key):
-                        self.store_raw(row)
-                        fetched += 1
-                except (OSError, ValueError, TypeError):
-                    continue
+        for row in iter_raw_cache_roots(raw_cache_roots):
+            if not self.has_raw(row.key):
+                if self.upsert_discovered(JobUrl(row.board, row.job_id, row.url)):
+                    added += 1
+                self.store_raw(row)
+                fetched += 1
         return added, fetched
 
     def sync_jsonl(self, path: str | Path, table: str, json_column: str) -> int:

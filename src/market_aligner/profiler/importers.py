@@ -83,10 +83,13 @@ def import_guided_profile(
             interest=float(raw.get("interest")),
             demonstrated_skill=float(raw.get("skill")),
             confidence=float(raw.get("confidence")),
-            market_readiness=float(raw.get("market_readiness", raw.get("skill", 0.0))),
+            market_readiness=float(raw.get("market_readiness", 0.0)),
             evidence_ids=(),
             rationale="Imported legacy guided/probe score; requires evidence-led verification.",
-            gaps=("No itemised evidence ledger in the legacy source.",),
+            gaps=(
+                "No itemised evidence ledger in the legacy source.",
+                "Market readiness was not measured in the legacy source.",
+            ),
         )
         for name, raw in block.items()
         if isinstance(raw, dict) and {"interest", "skill", "confidence"}.issubset(raw)
