@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+graphify-out/
+.scrapling_cache/
+
+# Runtime state is never product source.
+.market-aligner-data/
+profiles/
+outputs/
+caches/
+credentials/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.pid
+
+# Platform noise.
+.DS_Store
+
