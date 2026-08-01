@@ -325,3 +325,28 @@ class AssessmentStore:
                 (dossier.profile_id, dossier.job_key),
             )
         return digest
+
+    def fail_research(
+        self,
+        profile_id: str,
+        job_key: str,
+        worker_id: str,
+        error: str,
+        *,
+        retry_seconds: int = 300,
+    ) -> None:
+        available_at = datetime.now(timezone.utc) + timedelta(seconds=max(1, retry_seconds))
+        with self.transaction() as connection:
+            lease = connection.execute(
+                """SELECT lease_owner,status FROM employer_research_queue
+                   WHERE profile_id=? AND job_key=?""",
+                (profile_id, job_key),
+            ).fetchone()
+            if lease is None or lease["status"] != "leased" or lease["lease_owner"] != worker_id:
+                raise RuntimeError("research failure requires the active lease")
+            connection.execute(
+                """UPDATE employer_research_queue SET status='queued',lease_owner=NULL,
+                     lease_until=NULL,last_error=?,available_at=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE profile_id=? AND job_key=?""",
+                (error[:2000], available_at.isoformat(), profile_id, job_key),
+            )
