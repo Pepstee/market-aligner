@@ -13,6 +13,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -20,6 +21,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
+from career_automation.observation_route_manifest import (
+    ObservationRouteManifest,
+    RouteManifestError,
+)
 from career_automation.public_access import (
     PublicAccessController,
     PublicAccessDenied,
@@ -130,11 +135,46 @@ def _utc_datetime(value: datetime, *, label: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _is_structurally_admitted_lever_list_url(value: object) -> bool:
+    """Recognize the exact route shape when verifying historical ledger bytes.
+
+    This does not authorize a transfer.  New transfers additionally require exact
+    membership in a loaded hash-bound manifest through ``_validate_content_url``.
+    """
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    prefix = "/v0/postings/"
+    if not parsed.path.startswith(prefix):
+        return False
+    employer_id = parsed.path[len(prefix):]
+    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", employer_id) is None:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "api.lever.co"
+        and parsed.hostname == "api.lever.co"
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+        and parsed.path == f"{prefix}{employer_id}"
+        and parsed.query == "limit=1&mode=json&skip=0"
+        and not parsed.fragment
+        and value
+        == f"https://api.lever.co{prefix}{employer_id}?limit=1&mode=json&skip=0"
+    )
+
+
 def _validate_content_url(
     url: str,
     *,
     allowed_hosts: frozenset[str] | None = None,
     route_class: str = LEVER_LIST_ROUTE_CLASS,
+    route_manifest: ObservationRouteManifest | None = None,
 ) -> tuple[str, str, str]:
     """Return (scheme, host, port) after strict content-URL validation.
 
@@ -189,9 +229,32 @@ def _validate_content_url(
         raise ObservationAcquisitionError(
             f"ROUTE_DENIED: unsupported route classification {route_class!r}"
         )
-    if url != AUTHORIZED_LEVER_LIST_URL:
+    if route_manifest is None:
+        if not _is_structurally_admitted_lever_list_url(url):
+            raise ObservationAcquisitionError(
+                "ROUTE_DENIED: URL is not an exact admitted Lever list route"
+            )
+        return scheme, host, port
+    if not isinstance(route_manifest, ObservationRouteManifest):
         raise ObservationAcquisitionError(
-            "ROUTE_DENIED: this increment admits only the exact Lever list route"
+            "ROUTE_DENIED: route_manifest must be a loaded ObservationRouteManifest"
+        )
+    try:
+        reloaded_manifest = ObservationRouteManifest.load(
+            route_manifest.source_path,
+            expected_sha256=route_manifest.manifest_sha256,
+        )
+    except (OSError, RouteManifestError) as exc:
+        raise ObservationAcquisitionError(
+            f"ROUTE_DENIED: route manifest is not currently valid: {exc}"
+        ) from exc
+    if reloaded_manifest != route_manifest:
+        raise ObservationAcquisitionError(
+            "ROUTE_DENIED: in-memory route manifest differs from exact source"
+        )
+    if not reloaded_manifest.admits(url, route_class):
+        raise ObservationAcquisitionError(
+            "ROUTE_DENIED: route is outside the exact hash-bound manifest"
         )
     return scheme, host, port
 
@@ -265,11 +328,13 @@ class _LedgeredStaticClient:
         inner_client: Any,
         ledger_path: Path,
         *,
+        route_manifest: ObservationRouteManifest | None = None,
         wall_clock: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> None:
         self._inner = inner_client
         self._ledger_path = Path(ledger_path).resolve()
+        self._route_manifest = route_manifest
         self._wall_clock: Callable[[], float] = wall_clock if wall_clock is not None else time.time
         self._sleeper: Callable[[float], None] = sleeper if sleeper is not None else time.sleep
         self._issued_reservations: dict[str, dict[str, Any]] = {}
@@ -324,7 +389,10 @@ class _LedgeredStaticClient:
                 purpose == "robots"
                 and url != "https://api.lever.co/robots.txt"
             )
-            or (purpose == "list" and url != AUTHORIZED_LEVER_LIST_URL)
+            or (
+                purpose == "list"
+                and not _is_structurally_admitted_lever_list_url(url)
+            )
         ):
             raise ObservationAcquisitionError(
                 f"LEDGER_CORRUPT: request route mismatch at line {line_num}"
@@ -728,7 +796,14 @@ class _LedgeredStaticClient:
             raise ObservationAcquisitionError(
                 "FETCH_REJECTED: fetch_content() rejects /robots.txt"
             )
-        _, host, _ = _validate_content_url(url)
+        _, host, _ = _validate_content_url(
+            url,
+            route_manifest=self._route_manifest,
+        )
+        if self._route_manifest is None:
+            raise ObservationAcquisitionError(
+                "ROUTE_DENIED: content transfer requires a hash-bound route manifest"
+            )
         kwargs = self._build_fetch_kwargs({})
         request = self._request(url, host, purpose, kwargs)
 
@@ -1017,6 +1092,8 @@ def acquire_list_observation(
     policy: PublicAccessPolicy,
     allowed_hosts: frozenset[str],
     route_class: str,
+    manifest_path: Path,
+    manifest_sha256: str,
     ledger_path: Path,
     evidence_dir: Path,
     inner_client: Any,
@@ -1042,10 +1119,20 @@ def acquire_list_observation(
     policy_check_time = _utc_datetime(
         _now_fn(), label="POLICY_DENIED"
     )
+    try:
+        route_manifest = ObservationRouteManifest.load(
+            manifest_path,
+            expected_sha256=manifest_sha256,
+        )
+    except (OSError, RouteManifestError) as exc:
+        raise ObservationAcquisitionError(
+            f"MANIFEST_REJECTED: {exc}"
+        ) from exc
     _validate_content_url(
         content_url,
         allowed_hosts=allowed_hosts,
         route_class=route_class,
+        route_manifest=route_manifest,
     )
     _, content_host, _ = _public_origin(content_url)
     policy = _revalidate_policy(policy, url=content_url, at=policy_check_time)
@@ -1079,6 +1166,7 @@ def acquire_list_observation(
     ledgered = _LedgeredStaticClient(
         inner_client,
         ledger_path,
+        route_manifest=route_manifest,
         wall_clock=wall_clock,
         sleeper=sleeper,
     )

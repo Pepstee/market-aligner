@@ -20,6 +20,11 @@ from career_automation.external_observation_acquisition import (
     _LedgeredStaticClient,
     acquire_list_observation,
 )
+from career_automation.observation_route_manifest import (
+    REPLACEMENT_RULE,
+    ROUTE_MANIFEST_SCHEMA,
+    ObservationRouteManifest,
+)
 from career_automation.public_access import PublicAccessPolicy, policy_records_hash
 
 TEST_HOST = "api.lever.co"
@@ -63,6 +68,43 @@ def _make_policy(
         "records_hash": policy_records_hash(records),
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode() + b"\n")
     return PublicAccessPolicy.load(path, now=now)
+
+
+def _make_route_manifest(tmp_path: Path) -> ObservationRouteManifest:
+    employers = (
+        "lever", "jobgether", "palantir", "spotify", "octoenergy", "firstup",
+        "electric-twin", "moneyboxapp", "starcompliance", "kitmanlabs", "gearset",
+    )
+    document = {
+        "schema": ROUTE_MANIFEST_SCHEMA,
+        "route_class": LEVER_LIST_ROUTE_CLASS,
+        "required_observation_units": 10,
+        "minimum_fully_verified_units": 8,
+        "minimum_distinct_employers_or_boards": 3,
+        "maximum_candidate_attempts": len(employers),
+        "replacement_rule": REPLACEMENT_RULE,
+        "candidates": [
+            {
+                "employer_or_board_id": employer,
+                "url": (
+                    f"https://api.lever.co/v0/postings/{employer}"
+                    "?limit=1&mode=json&skip=0"
+                ),
+            }
+            for employer in employers
+        ],
+    }
+    raw = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode() + b"\n"
+    path = tmp_path / "route-manifest.json"
+    path.write_bytes(raw)
+    path.chmod(0o444)
+    return ObservationRouteManifest.load(path, expected_sha256=_sha256(raw))
 
 
 def _robots_response(host: str = TEST_HOST) -> dict[str, Any]:
@@ -362,6 +404,15 @@ def test_fetch_content_purpose_page_rejected(tmp_path: Path) -> None:
     assert nc.calls == []
 
 
+def test_fetch_content_without_manifest_rejected_before_reservation(tmp_path: Path) -> None:
+    nc = NeverCalledClient()
+    adapter = _make_adapter(tmp_path, nc)
+    with pytest.raises(ObservationAcquisitionError, match="hash-bound route manifest"):
+        adapter.fetch_content(CONTENT_URL, "list")
+    assert nc.calls == []
+    assert not (tmp_path / "ledger.jsonl").exists()
+
+
 # ---------------------------------------------------------------------------
 # N4: content URL SSRF validation — fails before reservation
 # ---------------------------------------------------------------------------
@@ -606,6 +657,84 @@ def test_non_finite_now_rejected(tmp_path: Path) -> None:
 # Policy failures — fail before evidence dir / ledger creation
 # ---------------------------------------------------------------------------
 
+def test_outside_manifest_route_fails_before_evidence_or_reservation(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    evidence = tmp_path / "evidence"
+    client = NeverCalledClient()
+    manifest = _make_route_manifest(tmp_path)
+    outside_url = (
+        "https://api.lever.co/v0/postings/not-listed"
+        "?limit=1&mode=json&skip=0"
+    )
+
+    with pytest.raises(ObservationAcquisitionError, match="outside.*manifest"):
+        acquire_list_observation(
+            outside_url,
+            policy=_make_policy(tmp_path),
+            allowed_hosts=frozenset({TEST_HOST}),
+            route_class=LEVER_LIST_ROUTE_CLASS,
+            manifest_path=manifest.source_path,
+            manifest_sha256=manifest.manifest_sha256,
+            ledger_path=ledger,
+            evidence_dir=evidence,
+            inner_client=client,
+        )
+
+    assert client.calls == []
+    assert not ledger.exists()
+    assert not evidence.exists()
+
+
+def test_wrong_route_class_fails_before_evidence_or_reservation(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    evidence = tmp_path / "evidence"
+    client = NeverCalledClient()
+    manifest = _make_route_manifest(tmp_path)
+
+    with pytest.raises(ObservationAcquisitionError, match="unsupported route"):
+        acquire_list_observation(
+            CONTENT_URL,
+            policy=_make_policy(tmp_path),
+            allowed_hosts=frozenset({TEST_HOST}),
+            route_class="lever_detail.v1",
+            manifest_path=manifest.source_path,
+            manifest_sha256=manifest.manifest_sha256,
+            ledger_path=ledger,
+            evidence_dir=evidence,
+            inner_client=client,
+        )
+
+    assert client.calls == []
+    assert not ledger.exists()
+    assert not evidence.exists()
+
+
+def test_manifest_hash_mismatch_fails_before_reservation(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    evidence = tmp_path / "evidence"
+    client = NeverCalledClient()
+    manifest = _make_route_manifest(tmp_path)
+
+    with pytest.raises(ObservationAcquisitionError, match="MANIFEST_REJECTED"):
+        acquire_list_observation(
+            CONTENT_URL,
+            policy=_make_policy(tmp_path),
+            allowed_hosts=frozenset({TEST_HOST}),
+            route_class=LEVER_LIST_ROUTE_CLASS,
+            manifest_path=manifest.source_path,
+            manifest_sha256="0" * 64,
+            ledger_path=ledger,
+            evidence_dir=evidence,
+            inner_client=client,
+        )
+
+    assert client.calls == []
+    assert not ledger.exists()
+    assert not evidence.exists()
+
+
 def test_host_not_in_policy_rejected(tmp_path: Path) -> None:
     """Content URL host not in policy attestations → fails before ledger."""
     ledger = tmp_path / "ledger.jsonl"
@@ -613,12 +742,15 @@ def test_host_not_in_policy_rejected(tmp_path: Path) -> None:
     # Policy has only 'greenhouse.io', not api.lever.co.
     policy = _make_policy(tmp_path, host="greenhouse.io")
     nc = NeverCalledClient()
+    manifest = _make_route_manifest(tmp_path)
     with pytest.raises(ObservationAcquisitionError, match="POLICY_DENIED"):
         acquire_list_observation(
             CONTENT_URL,
             policy=policy,
             allowed_hosts=frozenset({TEST_HOST}),
             route_class=LEVER_LIST_ROUTE_CLASS,
+            manifest_path=manifest.source_path,
+            manifest_sha256=manifest.manifest_sha256,
             ledger_path=ledger,
             evidence_dir=ev,
             inner_client=nc,

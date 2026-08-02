@@ -23,6 +23,11 @@ from career_automation.external_observation_acquisition import (
     acquire_list_observation,
     replay_list_observation,
 )
+from career_automation.observation_route_manifest import (
+    REPLACEMENT_RULE,
+    ROUTE_MANIFEST_SCHEMA,
+    ObservationRouteManifest,
+)
 from career_automation.public_access import PublicAccessPolicy, policy_records_hash
 
 TEST_HOST = "api.lever.co"
@@ -77,6 +82,40 @@ def _make_policy(
         "records_hash": policy_records_hash(records),
     }) + b"\n")
     return PublicAccessPolicy.load(path, now=now)
+
+
+def _make_route_manifest(tmp_path: Path) -> ObservationRouteManifest:
+    employers = (
+        "lever", "jobgether", "palantir", "spotify", "octoenergy", "firstup",
+        "electric-twin", "moneyboxapp", "starcompliance", "kitmanlabs", "gearset",
+    )
+    document = {
+        "schema": ROUTE_MANIFEST_SCHEMA,
+        "route_class": LEVER_LIST_ROUTE_CLASS,
+        "required_observation_units": 10,
+        "minimum_fully_verified_units": 8,
+        "minimum_distinct_employers_or_boards": 3,
+        "maximum_candidate_attempts": len(employers),
+        "replacement_rule": REPLACEMENT_RULE,
+        "candidates": [
+            {
+                "employer_or_board_id": employer,
+                "url": (
+                    f"https://api.lever.co/v0/postings/{employer}"
+                    "?limit=1&mode=json&skip=0"
+                ),
+            }
+            for employer in employers
+        ],
+    }
+    path = tmp_path / "route-manifest.json"
+    raw = _canonical_json(document) + b"\n"
+    if not path.exists():
+        path.write_bytes(raw)
+        path.chmod(0o444)
+    else:
+        assert path.read_bytes() == raw
+    return ObservationRouteManifest.load(path, expected_sha256=_sha256(raw))
 
 
 def _robots_response(host: str = TEST_HOST, body: bytes = ROBOTS_BODY) -> dict[str, Any]:
@@ -177,11 +216,14 @@ def _run_acquire(
         wall_clock = _clock(1_000_000.0, 1_000_031.0)
     if sleeper is None:
         sleeper = _noop_sleeper
+    route_manifest = _make_route_manifest(tmp_path)
     return acquire_list_observation(
         content_url,
         policy=policy,
         allowed_hosts=frozenset({host}),
         route_class=LEVER_LIST_ROUTE_CLASS,
+        manifest_path=route_manifest.source_path,
+        manifest_sha256=route_manifest.manifest_sha256,
         ledger_path=ledger_path,
         evidence_dir=evidence_dir,
         inner_client=inner,
@@ -519,12 +561,15 @@ def test_reservation_precedes_get_on_crash(tmp_path: Path) -> None:
             raise RuntimeError("crash after recording")
 
     client = CrashAfterReservation()
+    route_manifest = _make_route_manifest(tmp_path)
     with pytest.raises(ObservationAcquisitionError):
         acquire_list_observation(
             CONTENT_URL,
             policy=_make_policy(tmp_path),
             allowed_hosts=frozenset({TEST_HOST}),
             route_class=LEVER_LIST_ROUTE_CLASS,
+            manifest_path=route_manifest.source_path,
+            manifest_sha256=route_manifest.manifest_sha256,
             ledger_path=ledger,
             evidence_dir=tmp_path / "ev",
             inner_client=client,
@@ -765,6 +810,41 @@ def test_success_evidence_replays_without_network(tmp_path: Path) -> None:
     assert receipt["request"]["url"] == AUTHORIZED_LEVER_LIST_URL
 
 
+def test_manifest_member_generalization_and_replay(tmp_path: Path) -> None:
+    content_url = (
+        "https://api.lever.co/v0/postings/jobgether"
+        "?limit=1&mode=json&skip=0"
+    )
+    manifest = _make_route_manifest(tmp_path)
+    policy = _make_policy(tmp_path)
+    evidence_dir = tmp_path / "manifest-member-evidence"
+    inner = FakeInnerClient([
+        _robots_response(),
+        _content_response(url=content_url),
+    ])
+
+    receipt = acquire_list_observation(
+        content_url,
+        policy=policy,
+        allowed_hosts=frozenset({TEST_HOST}),
+        route_class=LEVER_LIST_ROUTE_CLASS,
+        manifest_path=manifest.source_path,
+        manifest_sha256=manifest.manifest_sha256,
+        ledger_path=tmp_path / "manifest-member-ledger.jsonl",
+        evidence_dir=evidence_dir,
+        inner_client=inner,
+        wall_clock=_clock(1_000_000.0, 1_000_031.0),
+        sleeper=_noop_sleeper,
+        now_fn=lambda: TEST_NOW,
+    )
+
+    assert receipt["request"]["url"] == content_url
+    assert replay_list_observation(
+        evidence_dir,
+        policy=policy,
+    ) == receipt
+
+
 def test_receipt_time_follows_robots_retrieval_and_replays(tmp_path: Path) -> None:
     ev = tmp_path / "ev"
     policy = _make_policy(tmp_path)
@@ -773,11 +853,14 @@ def test_receipt_time_follows_robots_retrieval_and_replays(tmp_path: Path) -> No
         datetime(2026, 8, 2, 0, 0, 1, tzinfo=timezone.utc),
         datetime(2026, 8, 2, 0, 0, 2, tzinfo=timezone.utc),
     ])
+    route_manifest = _make_route_manifest(tmp_path)
     receipt = acquire_list_observation(
         CONTENT_URL,
         policy=policy,
         allowed_hosts=frozenset({TEST_HOST}),
         route_class=LEVER_LIST_ROUTE_CLASS,
+        manifest_path=route_manifest.source_path,
+        manifest_sha256=route_manifest.manifest_sha256,
         ledger_path=tmp_path / "ledger.jsonl",
         evidence_dir=ev,
         inner_client=FakeInnerClient([_robots_response(), _content_response()]),
