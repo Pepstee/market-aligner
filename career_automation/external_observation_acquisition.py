@@ -1095,7 +1095,6 @@ def acquire_list_observation(
     robots_receipt: RobotsReceipt | None = None
     robots_body: bytes | None = None
     content_body: bytes | None = None
-    acquired_at = policy_check_time.isoformat()
 
     try:
         robots_receipt = controller.authorize(content_url)
@@ -1124,6 +1123,9 @@ def acquire_list_observation(
             status,
         ) = _validate_response(raw_response, content_host, content_url)
         _write_evidence_file(evidence_dir / "raw_content.bin", content_body)
+        acquired_at = _utc_datetime(
+            _now_fn(), label="RECEIPT_TIME_REJECTED"
+        ).isoformat()
     except Exception as exc:
         _preserve_represented_response(
             evidence_dir,

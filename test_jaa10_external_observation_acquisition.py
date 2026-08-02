@@ -765,6 +765,30 @@ def test_success_evidence_replays_without_network(tmp_path: Path) -> None:
     assert receipt["request"]["url"] == AUTHORIZED_LEVER_LIST_URL
 
 
+def test_receipt_time_follows_robots_retrieval_and_replays(tmp_path: Path) -> None:
+    ev = tmp_path / "ev"
+    policy = _make_policy(tmp_path)
+    moments = iter([
+        datetime(2026, 8, 2, 0, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 2, 0, 0, 1, tzinfo=timezone.utc),
+        datetime(2026, 8, 2, 0, 0, 2, tzinfo=timezone.utc),
+    ])
+    receipt = acquire_list_observation(
+        CONTENT_URL,
+        policy=policy,
+        allowed_hosts=frozenset({TEST_HOST}),
+        route_class=LEVER_LIST_ROUTE_CLASS,
+        ledger_path=tmp_path / "ledger.jsonl",
+        evidence_dir=ev,
+        inner_client=FakeInnerClient([_robots_response(), _content_response()]),
+        wall_clock=_clock(1_000_000.0, 1_000_031.0),
+        sleeper=_noop_sleeper,
+        now_fn=lambda: next(moments),
+    )
+    assert receipt["robots_binding"]["retrieved_at"] < receipt["acquired_at"]
+    assert replay_list_observation(ev, policy=policy) == receipt
+
+
 @pytest.mark.parametrize(
     ("name", "old", "new"),
     [
