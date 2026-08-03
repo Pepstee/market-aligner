@@ -74,9 +74,12 @@ from test_jaa09_independent_acceptance import (
 
 ROOT = Path(__file__).resolve().parent
 CERTIFIED_CORPUS = Path(
-    "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
-    "runtime/.jaa04-corpus-v3-a4f4490-releases/"
-    "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258"
+    os.environ.get(
+        "JAA_CERTIFIED_CORPUS_ROOT",
+        "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
+        "runtime/.jaa04-corpus-v3-a4f4490-releases/"
+        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+    )
 )
 TRACKED_SEED = ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"
 DIGEST = hashlib.sha256(b"jaa09-real-vacancy-phase-a").hexdigest()
@@ -621,7 +624,6 @@ def test_verified_graphcore_authority_precedes_real_browser_execution(
     ) == tuple(anchor.text for anchor in authority.requirement_anchors)
 
     release_inputs = _real_issued_release_inputs(tmp_path, authority)
-    source = release_inputs[4]
     vacancy = FixtureVacancy(
         "graphcore-build-engineer",
         authority.job_key,

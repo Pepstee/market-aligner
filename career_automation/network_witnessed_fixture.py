@@ -157,9 +157,10 @@ DISCLOSURE = (
     "deterministic approved fixture candidate projection; not a real person"
 )
 FIXED_CORPUS = Path(
-    "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
-    "runtime/.jaa04-corpus-v3-a4f4490-releases/"
-    "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258"
+    os.environ.get(
+        "JAA_CERTIFIED_CORPUS_ROOT",
+        "__JAA_CERTIFIED_CORPUS_ROOT_REQUIRED__",
+    )
 )
 TRACKED_SEED_RELATIVE = Path(
     "career_automation/fixtures/jaa04_admitted_queue.json"

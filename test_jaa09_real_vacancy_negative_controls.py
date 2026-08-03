@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -55,9 +56,12 @@ from test_jaa09_real_vacancy_acceptance import (
 
 ROOT = Path(__file__).resolve().parent
 CERTIFIED_CORPUS = Path(
-    "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
-    "runtime/.jaa04-corpus-v3-a4f4490-releases/"
-    "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258"
+    os.environ.get(
+        "JAA_CERTIFIED_CORPUS_ROOT",
+        "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
+        "runtime/.jaa04-corpus-v3-a4f4490-releases/"
+        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+    )
 )
 TRACKED_SEED = ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"
 

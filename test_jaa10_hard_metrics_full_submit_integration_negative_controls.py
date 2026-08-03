@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -22,20 +23,23 @@ from career_automation.hard_metrics_evaluation import (
 
 
 ROOT = Path(__file__).resolve().parent
+CONTROL_ROOT = Path(
+    os.environ.get("JAA_OPERATOR_CONTROL_ROOT", ROOT.parent.parent / ".control")
+)
 FIXTURE = ROOT / "career_automation/fixtures/jaa07_locked_application_packs.json"
 REPORT = (
-    ROOT.parent.parent
-    / ".control/jaa-single-codex-20260729/"
+    CONTROL_ROOT
+    / "jaa-single-codex-20260729/"
     / "jaa07-post-review-repair-evaluator.log"
 )
 PAIR = (
-    ROOT.parent.parent
-    / ".control/jaa-single-codex-20260729/"
+    CONTROL_ROOT
+    / "jaa-single-codex-20260729/"
     / "JAA10_FROZEN_REPLAY_PAIR_PRIMARY_95caa725/replay-pair.json"
 )
 COHORT = (
-    ROOT.parent.parent
-    / ".control/jaa-post-interval-20260803/"
+    CONTROL_ROOT
+    / "jaa-post-interval-20260803/"
     / "jaa10-full-submit-cohort-v2/evidence/cohort.json"
 )
 

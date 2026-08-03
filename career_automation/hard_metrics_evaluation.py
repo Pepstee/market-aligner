@@ -449,18 +449,30 @@ def _repository_root() -> Path:
 
 
 def _operator_control_root(repository_root: Path) -> Path:
-    parent = repository_root.parent
-    if parent.name == ".worktrees":
-        factory_root = parent.parent
+    configured = os.environ.get("JAA_OPERATOR_CONTROL_ROOT")
+    if configured is not None:
+        if not configured or "\0" in configured:
+            raise EvidenceRegistryError("operator control root configuration is invalid")
+        control = Path(configured)
+        if not control.is_absolute() or control.is_symlink():
+            raise EvidenceRegistryError(
+                "operator control root configuration must be an absolute non-symlink"
+            )
     else:
-        factory_root = parent
-    control = factory_root / ".control"
+        parent = repository_root.parent
+        if parent.name == ".worktrees":
+            factory_root = parent.parent
+        else:
+            factory_root = parent
+        control = factory_root / ".control"
     try:
         resolved = control.resolve(strict=True)
     except OSError as exc:
         raise EvidenceRegistryError("operator control root is unavailable") from exc
     if not resolved.is_dir():
         raise EvidenceRegistryError("operator control root is not a directory")
+    if configured is not None and resolved != control:
+        raise EvidenceRegistryError("operator control root must be lexical and canonical")
     return resolved
 
 

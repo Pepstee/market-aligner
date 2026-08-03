@@ -77,7 +77,9 @@ COOPERATIVE_WORKER_INVENTORY_DOMAIN_V1 = (
 COOPERATIVE_REQUEST_SCHEMA_VERSION = (
     "jaa10.network-witnessed-fixture-request.v2"
 )
-RUNTIME_TMP_HOME_ANCHOR = Path("/home/gutua")
+RUNTIME_TMP_HOME_ANCHOR = Path(
+    os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", str(Path.home()))
+)
 AF_UNIX_PATH_CAPACITY = 107
 # Pinned Chromium's `/org.chromium.Chromium.XXXXXX/SingletonSocket` suffix.
 # Any Chromium identity change requires a fresh boundary probe.
