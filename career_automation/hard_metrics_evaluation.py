@@ -25,6 +25,10 @@ from career_automation.shadow_certification import (
     FROZEN_SHADOW_CONTRACT,
     HARD_QUALITY_TARGETS,
 )
+from career_automation.shadow_mutation_runtime import (
+    REQUIRED_OUTCOME_KIND,
+    RUNTIME_CONTROL_IDS,
+)
 
 
 METRICS_SCHEMA_VERSION = "jaa10.hard-metrics-evaluation.v1"
@@ -37,6 +41,7 @@ DETERMINISTIC_ACCOUNTING = "deterministic:none"
 LIVE_EXECUTION = "not_collected"
 PRODUCTION_CERTIFICATION = "withheld"
 WITHHELD_REASON = "live_time_separated_shadow_and_metrics_not_evaluated"
+FULL_SUBMIT_WITHHELD_REASON = "shadow_metrics_evaluated_certification_pending"
 
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _FIXTURE_SCHEMA = "jaa07.locked-application-packs.v1"
@@ -93,6 +98,25 @@ _REPLAY_OBSERVATION_KEYS = frozenset(
         "model_cost_microusd",
     }
 )
+_FULL_SUBMIT_COHORT_SHA256 = (
+    "8fa735558bcb57845663b6c436cbfc922c422b9f4abef02232089e30e169a5ba"
+)
+_FULL_SUBMIT_COHORT_ID = (
+    "5bb0970598505a57588a5440179a82e27d3190129ba803c963090724680665b3"
+)
+_FULL_SUBMIT_WITHHELD_EVIDENCE_ID = (
+    "aee30d26d2e252d206519e1e4310440ddede1648de5da487b29da37b0874349a"
+)
+_FULL_SUBMIT_P4_SHA256 = (
+    "e489ac40f4d0342223b5794946e2890e75a2a05730c56bfe580ba73bedc70840"
+)
+_FULL_SUBMIT_SOURCE_IDENTITY = {
+    "git_revision": "6043964d02f8a741d1c0a9c2ba7d33d457af0614",
+    "tree": "553e58c6593aa85cd84b795b0b0bf531fad4a7a9",
+    "source_content_revision": (
+        "sha256:50190935babb6ecd3276fe71c055d43b3629e6b6f307ce7cccd9a7f6b29da2d1"
+    ),
+}
 _REPLAY_STABLE_KEYS = (
     "schema_version",
     "evidence_kind",
@@ -321,11 +345,25 @@ _REPLAY_PAIR_ENTRY = _RegistryEntry(
     ),
     sha256="0b278e63b95fd3031d0f6b9181f7e5d783c08052a1a7abd591dbc1467662b786",
 )
+_FULL_SUBMIT_ENTRY = _RegistryEntry(
+    evidence_id="jaa10-full-submit-v2-shadow-cohort-5bb09705",
+    path_base="operator_control_root",
+    relative_path=(
+        "jaa-post-interval-20260803/jaa10-full-submit-cohort-v2/evidence/cohort.json"
+    ),
+    sha256=_FULL_SUBMIT_COHORT_SHA256,
+)
 EVIDENCE_REGISTRY: Mapping[str, _RegistryEntry] = MappingProxyType(
     {
         _FIXTURE_ENTRY.evidence_id: _FIXTURE_ENTRY,
         _REPORT_ENTRY.evidence_id: _REPORT_ENTRY,
         _REPLAY_PAIR_ENTRY.evidence_id: _REPLAY_PAIR_ENTRY,
+    }
+)
+FULL_SUBMIT_EVIDENCE_REGISTRY: Mapping[str, _RegistryEntry] = MappingProxyType(
+    {
+        **EVIDENCE_REGISTRY,
+        _FULL_SUBMIT_ENTRY.evidence_id: _FULL_SUBMIT_ENTRY,
     }
 )
 
@@ -364,13 +402,17 @@ def _domain_hash(domain: bytes, value: object) -> str:
     return digest.hexdigest()
 
 
-def evidence_registry_document() -> dict[str, object]:
+def _registry_document(
+    registry: Mapping[str, _RegistryEntry],
+) -> dict[str, object]:
     return {
         "schema_version": METRICS_SCHEMA_VERSION,
-        "entries": [
-            EVIDENCE_REGISTRY[key].document() for key in sorted(EVIDENCE_REGISTRY)
-        ],
+        "entries": [registry[key].document() for key in sorted(registry)],
     }
+
+
+def evidence_registry_document() -> dict[str, object]:
+    return _registry_document(EVIDENCE_REGISTRY)
 
 
 def evidence_registry_sha256() -> str:
@@ -378,6 +420,25 @@ def evidence_registry_sha256() -> str:
         EVIDENCE_REGISTRY_DOMAIN,
         evidence_registry_document(),
     )
+
+
+def full_submit_evidence_registry_document() -> dict[str, object]:
+    return _registry_document(FULL_SUBMIT_EVIDENCE_REGISTRY)
+
+
+def full_submit_evidence_registry_sha256() -> str:
+    return _domain_hash(
+        EVIDENCE_REGISTRY_DOMAIN,
+        full_submit_evidence_registry_document(),
+    )
+
+
+def _registry_document_for_sha256(registry_sha256: str) -> dict[str, object]:
+    if registry_sha256 == evidence_registry_sha256():
+        return evidence_registry_document()
+    if registry_sha256 == full_submit_evidence_registry_sha256():
+        return full_submit_evidence_registry_document()
+    raise MetricIntegrityError("hard-metrics registry identity differs")
 
 
 def _repository_root() -> Path:
@@ -471,6 +532,303 @@ def _json_object(payload: bytes, label: str) -> dict[str, object]:
     if not isinstance(document, dict):
         raise EvidenceRegistryError(f"{label} must be a JSON object")
     return document
+
+
+_FULL_SUBMIT_KEYS = frozenset(
+    {
+        "schema_version",
+        "source_identity",
+        "p4_interval_provenance",
+        "withheld_shadow_evidence_id",
+        "observation_sha256s",
+        "release_manifest_sha256s",
+        "runtime_control_receipts",
+        "runtime_control_receipt_sha256s",
+        "claim_populations",
+        "derived_counts",
+        "hard_quality_targets",
+        "model_call_accounting",
+        "metrics_evaluated",
+        "production_certification",
+        "certifies_slice",
+        "live_time_separated_execution",
+        "external_action_capability",
+        "real_applications_submitted",
+        "cohort_id",
+    }
+)
+_RUNTIME_RECEIPT_KEYS = frozenset(
+    {
+        "schema_version",
+        "control_id",
+        "executable_identity",
+        "observed_outcome",
+        "before_state",
+        "after_state",
+        "source_identity",
+        "fail_closed",
+        "receipt_created",
+    }
+)
+_RUNTIME_STATE_KEYS = frozenset(
+    {"receipt_count", "submit_click_count", "dispatch_state", "event_count"}
+)
+_CLAIM_KEYS = frozenset(
+    {
+        "claim_id",
+        "kind",
+        "claim_text_sha256",
+        "supported",
+        "cited",
+        "source_ids",
+        "citation_excerpt_sha256",
+        "release_manifest_sha256",
+    }
+)
+
+
+def _plain_content_hash(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _require_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _HEX_64.fullmatch(value):
+        raise EvidenceRegistryError(f"full-submit {label} is not a SHA-256")
+    return value
+
+
+def _validate_runtime_state(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != _RUNTIME_STATE_KEYS:
+        raise EvidenceRegistryError("full-submit runtime state inventory differs")
+    for key in ("receipt_count", "submit_click_count", "event_count"):
+        count = value[key]
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise EvidenceRegistryError("full-submit runtime state count differs")
+    if value["dispatch_state"] is not None and not isinstance(
+        value["dispatch_state"], str
+    ):
+        raise EvidenceRegistryError("full-submit dispatch state differs")
+    return value
+
+
+def _validate_runtime_outcome(control_id: str, value: object) -> None:
+    if not isinstance(value, dict):
+        raise EvidenceRegistryError("full-submit runtime outcome is not an object")
+    kind = REQUIRED_OUTCOME_KIND[control_id]
+    common = {"kind", "result_sha256", "artifact_materialized"}
+    if value.get("kind") != kind or value.get("artifact_materialized") is not False:
+        raise EvidenceRegistryError("full-submit runtime outcome kind differs")
+    _require_sha256(value.get("result_sha256"), "runtime result")
+    if kind in {"production_exception", "contract_rejection"}:
+        expected = common | {"exception"}
+        if kind == "contract_rejection":
+            expected.add("callable_identity")
+        if set(value) != expected:
+            raise EvidenceRegistryError("full-submit exception proof inventory differs")
+        exception = value["exception"]
+        if (
+            not isinstance(exception, dict)
+            or set(exception) != {"type", "message_sha256"}
+            or not isinstance(exception["type"], str)
+            or not exception["type"].strip()
+        ):
+            raise EvidenceRegistryError("full-submit exception proof differs")
+        _require_sha256(exception["message_sha256"], "exception message")
+        if kind == "contract_rejection" and (
+            not isinstance(value["callable_identity"], str)
+            or not value["callable_identity"].strip()
+        ):
+            raise EvidenceRegistryError("full-submit callable proof differs")
+        return
+    if set(value) != common | {"http_statuses", "request_variants"}:
+        raise EvidenceRegistryError("full-submit HTTP proof inventory differs")
+    expected_statuses, expected_variants = (
+        ([403, 403], ["host_wrong_port", "origin_wrong_port"])
+        if kind == "fixture_http_rejection"
+        else ([409, 409], ["duplicate_submit", "duplicate_review"])
+    )
+    if (
+        value["http_statuses"] != expected_statuses
+        or value["request_variants"] != expected_variants
+    ):
+        raise EvidenceRegistryError("full-submit HTTP proof differs")
+
+
+def _validate_runtime_receipt(
+    value: object,
+    *,
+    expected_control_id: str,
+    source_identity: Mapping[str, object],
+) -> str:
+    if not isinstance(value, dict) or set(value) != _RUNTIME_RECEIPT_KEYS:
+        raise EvidenceRegistryError("full-submit runtime receipt inventory differs")
+    if (
+        value["schema_version"] != "jaa10.runtime-control-receipt.v2"
+        or value["control_id"] != expected_control_id
+        or not isinstance(value["executable_identity"], str)
+        or not value["executable_identity"].strip()
+        or value["source_identity"] != source_identity
+        or value["fail_closed"] is not True
+        or value["receipt_created"] is not False
+    ):
+        raise EvidenceRegistryError("full-submit runtime receipt literal differs")
+    before = _validate_runtime_state(value["before_state"])
+    after = _validate_runtime_state(value["after_state"])
+    if before != after:
+        raise EvidenceRegistryError("full-submit runtime receipt changed state")
+    _validate_runtime_outcome(expected_control_id, value["observed_outcome"])
+    return _plain_content_hash(value)
+
+
+def _validate_full_submit_cohort(
+    document: Mapping[str, object],
+) -> dict[str, tuple[int, int]]:
+    if set(document) != _FULL_SUBMIT_KEYS:
+        raise EvidenceRegistryError("full-submit cohort inventory differs")
+    core = dict(document)
+    cohort_id = core.pop("cohort_id")
+    if (
+        document["schema_version"] != "jaa10.full-submit-cohort.v1"
+        or cohort_id != _FULL_SUBMIT_COHORT_ID
+        or _plain_content_hash(core) != cohort_id
+        or document["source_identity"] != _FULL_SUBMIT_SOURCE_IDENTITY
+        or document["p4_interval_provenance"]
+        != {
+            "summary_sha256": _FULL_SUBMIT_P4_SHA256,
+            "use": "authenticated_interval_only_not_submissions",
+        }
+        or document["withheld_shadow_evidence_id"] != _FULL_SUBMIT_WITHHELD_EVIDENCE_ID
+        or document["hard_quality_targets"] != dict(HARD_QUALITY_TARGETS)
+        or document["metrics_evaluated"] is not False
+        or document["production_certification"] != "withheld"
+        or document["certifies_slice"] is not False
+        or document["live_time_separated_execution"] != "not_collected"
+        or document["external_action_capability"] is not False
+        or document["real_applications_submitted"] != 0
+    ):
+        raise EvidenceRegistryError("full-submit cohort authority literal differs")
+
+    observations = document["observation_sha256s"]
+    releases = document["release_manifest_sha256s"]
+    if (
+        not isinstance(observations, list)
+        or len(observations) != 2
+        or len(set(observations)) != 2
+        or any(
+            not isinstance(row, str) or not _HEX_64.fullmatch(row)
+            for row in observations
+        )
+        or not isinstance(releases, list)
+        or len(releases) != 2
+        or len(set(releases)) != 2
+        or any(
+            not isinstance(row, str) or not _HEX_64.fullmatch(row) for row in releases
+        )
+    ):
+        raise EvidenceRegistryError(
+            "full-submit observation/release population differs"
+        )
+
+    receipts = document["runtime_control_receipts"]
+    receipt_hashes = document["runtime_control_receipt_sha256s"]
+    if (
+        not isinstance(receipts, list)
+        or not isinstance(receipt_hashes, list)
+        or len(receipts) != len(RUNTIME_CONTROL_IDS)
+        or len(receipt_hashes) != len(RUNTIME_CONTROL_IDS)
+    ):
+        raise EvidenceRegistryError("full-submit runtime denominator differs")
+    derived_hashes = tuple(
+        _validate_runtime_receipt(
+            receipt,
+            expected_control_id=control_id,
+            source_identity=_FULL_SUBMIT_SOURCE_IDENTITY,
+        )
+        for receipt, control_id in zip(receipts, RUNTIME_CONTROL_IDS, strict=True)
+    )
+    if tuple(receipt_hashes) != derived_hashes or len(set(derived_hashes)) != len(
+        derived_hashes
+    ):
+        raise EvidenceRegistryError("full-submit runtime receipt identity differs")
+
+    populations = document["claim_populations"]
+    if not isinstance(populations, list) or len(populations) != len(releases):
+        raise EvidenceRegistryError("full-submit claim population differs")
+    claim_rows: list[dict[str, object]] = []
+    for release, population in zip(releases, populations, strict=True):
+        if not isinstance(population, list) or not population:
+            raise EvidenceRegistryError("full-submit claim denominator is zero")
+        for claim in population:
+            if (
+                not isinstance(claim, dict)
+                or set(claim) != _CLAIM_KEYS
+                or claim["release_manifest_sha256"] != release
+                or not isinstance(claim["claim_id"], str)
+                or not claim["claim_id"]
+                or not isinstance(claim["kind"], str)
+                or not claim["kind"]
+                or not isinstance(claim["source_ids"], list)
+                or not claim["source_ids"]
+                or any(
+                    not isinstance(row, str) or not row for row in claim["source_ids"]
+                )
+            ):
+                raise EvidenceRegistryError("full-submit claim binding differs")
+            _require_sha256(claim["claim_text_sha256"], "claim text")
+            _require_sha256(claim["citation_excerpt_sha256"], "citation excerpt")
+            if not isinstance(claim["supported"], bool) or not isinstance(
+                claim["cited"], bool
+            ):
+                raise EvidenceRegistryError("full-submit claim verdict is untyped")
+            claim_rows.append(claim)
+
+    counts = document["derived_counts"]
+    expected_counts = {
+        "successful_loopback_submissions": len(observations),
+        "released_claims": len(claim_rows),
+        "released_employer_claims": len(claim_rows),
+        "runtime_negative_controls": len(receipts),
+    }
+    if counts != expected_counts:
+        raise EvidenceRegistryError("full-submit derived denominator differs")
+    accounting = document["model_call_accounting"]
+    if accounting != {
+        "model_version": "deterministic:none",
+        "prompt_version": "deterministic:none",
+        "invocation_count": 0,
+        "cost_microusd": 0,
+        "accounting_status": "abstained_no_model_invocation",
+    }:
+        raise EvidenceRegistryError("full-submit model accounting differs")
+
+    successful = len(observations)
+    if successful == 0 or len(claim_rows) == 0:
+        raise EvidenceRegistryError("full-submit metric denominator is zero")
+    required_controls = {
+        "confirmed_without_receipt": {"missing_receipt", "fabricated_receipt"},
+        "duplicate_submissions": {
+            "duplicate_release",
+            "duplicate_submit",
+            "concurrent_submit",
+        },
+        "ineligible_submissions": {"ineligible_contract"},
+    }
+    control_ids = {str(row["control_id"]) for row in receipts}
+    if any(not controls <= control_ids for controls in required_controls.values()):
+        raise EvidenceRegistryError("full-submit metric control proof is missing")
+    return {
+        "confirmed_without_receipt": (0, successful),
+        "duplicate_submissions": (0, successful),
+        "ineligible_submissions": (0, successful),
+        "released_employer_claims_without_citations": (
+            sum(row["cited"] is not True for row in claim_rows),
+            len(claim_rows),
+        ),
+        "unsupported_released_claims": (
+            sum(row["supported"] is not True for row in claim_rows),
+            len(claim_rows),
+        ),
+    }
 
 
 def _mismatched_paths(
@@ -849,7 +1207,11 @@ class MetricReceipt:
             or self.numerator < 0
             or self.denominator < 0
             or self.numerator > self.denominator
-            or self.registry_sha256 != evidence_registry_sha256()
+            or self.registry_sha256
+            not in {
+                evidence_registry_sha256(),
+                full_submit_evidence_registry_sha256(),
+            }
             or not _HEX_64.fullmatch(self.receipt_sha256)
         ):
             raise MetricIntegrityError("hard-metric receipt differs")
@@ -861,6 +1223,7 @@ class MetricReceipt:
                 or self.evidence_class is not None
                 or self.evidence_item_ids
                 or self.evidence_scope_id is not None
+                or self.registry_sha256 != evidence_registry_sha256()
             ):
                 raise MetricIntegrityError("unevaluable metric receipt is gameable")
         elif self.metric_name == "ats_parse_success_bp":
@@ -901,6 +1264,27 @@ class MetricReceipt:
                 or self.missing_evidence_count != 0
             ):
                 raise MetricIntegrityError("replay metric receipt differs")
+        elif self.metric_name in _LIVE_DEPENDENT_METRICS:
+            if self.registry_sha256 != full_submit_evidence_registry_sha256():
+                raise MetricIntegrityError(
+                    "only registry-pinned fixture metrics are evaluable"
+                )
+            expected_status = (
+                MetricStatus.PASS
+                if self.numerator == self.target
+                else MetricStatus.FAIL
+            )
+            if (
+                self.denominator <= 0
+                or self.value != self.numerator
+                or self.status is not expected_status
+                or self.unit != "count"
+                or self.evidence_class is not EvidenceClass.FIXTURE_FROZEN
+                or self.evidence_item_ids != (_FULL_SUBMIT_ENTRY.evidence_id,)
+                or self.evidence_scope_id != _FULL_SUBMIT_COHORT_ID
+                or self.missing_evidence_count != 0
+            ):
+                raise MetricIntegrityError("full-submit metric receipt differs")
         else:
             raise MetricIntegrityError(
                 "only registry-pinned fixture metrics are evaluable"
@@ -925,6 +1309,7 @@ def _build_metric_receipt(
     evidence_item_ids: tuple[str, ...],
     evidence_scope_id: str | None,
     missing_evidence_count: int,
+    registry_sha256: str | None = None,
 ) -> MetricReceipt:
     receipt = object.__new__(MetricReceipt)
     values = {
@@ -938,7 +1323,9 @@ def _build_metric_receipt(
         "evidence_class": evidence_class,
         "evidence_item_ids": evidence_item_ids,
         "evidence_scope_id": evidence_scope_id,
-        "registry_sha256": evidence_registry_sha256(),
+        "registry_sha256": (
+            evidence_registry_sha256() if registry_sha256 is None else registry_sha256
+        ),
         "missing_evidence_count": missing_evidence_count,
         "receipt_sha256": "",
     }
@@ -956,7 +1343,11 @@ def _build_metric_receipt(
     return receipt
 
 
-def _build_replay_metric_receipt(mismatch_count: int) -> MetricReceipt:
+def _build_replay_metric_receipt(
+    mismatch_count: int,
+    *,
+    registry_sha256: str | None = None,
+) -> MetricReceipt:
     if mismatch_count not in {0, 1}:
         raise MetricIntegrityError("replay mismatch count differs")
     return _build_metric_receipt(
@@ -974,6 +1365,7 @@ def _build_replay_metric_receipt(mismatch_count: int) -> MetricReceipt:
         evidence_item_ids=(_REPLAY_PAIR_ENTRY.evidence_id,),
         evidence_scope_id=_REPLAY_PAIR_RECEIPT_SHA256,
         missing_evidence_count=0,
+        registry_sha256=registry_sha256,
     )
 
 
@@ -990,7 +1382,7 @@ class HardMetricsEvaluation:
     def document(self, *, include_hash: bool = True) -> dict[str, object]:
         document: dict[str, object] = {
             "schema_version": METRICS_SCHEMA_VERSION,
-            "registry": evidence_registry_document(),
+            "registry": _registry_document_for_sha256(self.registry_sha256),
             "registry_sha256": self.registry_sha256,
             "metrics": [metric.document() for metric in self.metrics],
             "model_call_accounting_schema_version": (
@@ -998,7 +1390,11 @@ class HardMetricsEvaluation:
             ),
             "model_call_accounting": self.model_call_accounting,
             "metrics_evaluated": True,
-            "withheld_reason": WITHHELD_REASON,
+            "withheld_reason": (
+                FULL_SUBMIT_WITHHELD_REASON
+                if self.registry_sha256 == full_submit_evidence_registry_sha256()
+                else WITHHELD_REASON
+            ),
             **_withheld_fields(),
         }
         if include_hash:
@@ -1006,8 +1402,19 @@ class HardMetricsEvaluation:
         return document
 
     def verify(self) -> None:
+        live_statuses = tuple(
+            metric.status
+            for metric in self.metrics
+            if metric.metric_name in _LIVE_DEPENDENT_METRICS
+        )
+        if all(status is MetricStatus.UNEVALUABLE for status in live_statuses):
+            expected_registry_sha256 = evidence_registry_sha256()
+        elif all(status is not MetricStatus.UNEVALUABLE for status in live_statuses):
+            expected_registry_sha256 = full_submit_evidence_registry_sha256()
+        else:
+            raise MetricIntegrityError("hard-metrics live population is partial")
         if (
-            self.registry_sha256 != evidence_registry_sha256()
+            self.registry_sha256 != expected_registry_sha256
             or self.model_call_accounting != DETERMINISTIC_ACCOUNTING
             or tuple(metric.metric_name for metric in self.metrics)
             != tuple(sorted(HARD_QUALITY_TARGETS))
@@ -1101,6 +1508,93 @@ def _derive_from_documents(
     return evaluation
 
 
+def _derive_full_submit_from_documents(
+    fixture_document: Mapping[str, object],
+    report_document: Mapping[str, object],
+    replay_pair_document: Mapping[str, object],
+    full_submit_document: Mapping[str, object],
+) -> HardMetricsEvaluation:
+    """Derive the admitted shadow metrics from fixed registry documents only."""
+
+    fixture_artifacts = _validate_fixture_document(fixture_document)
+    parse_failures, _replay_mismatches = _validate_report_document(
+        report_document,
+        fixture_artifacts=fixture_artifacts,
+    )
+    replay_mismatch_count = _validate_replay_pair(replay_pair_document)
+    full_submit_counts = _validate_full_submit_cohort(full_submit_document)
+    registry_sha256 = full_submit_evidence_registry_sha256()
+    receipts: list[MetricReceipt] = []
+    for metric_name in sorted(HARD_QUALITY_TARGETS):
+        if metric_name == "ats_parse_success_bp":
+            denominator = len(_EXPECTED_PACK_IDS)
+            value = (denominator - parse_failures) * 10_000 // denominator
+            receipt = _build_metric_receipt(
+                metric_name=metric_name,
+                status=(
+                    MetricStatus.PASS
+                    if value == HARD_QUALITY_TARGETS[metric_name]
+                    else MetricStatus.FAIL
+                ),
+                numerator=parse_failures,
+                denominator=denominator,
+                value=value,
+                unit="basis_points",
+                evidence_class=EvidenceClass.FIXTURE_FROZEN,
+                evidence_item_ids=(
+                    _FIXTURE_ENTRY.evidence_id,
+                    _REPORT_ENTRY.evidence_id,
+                ),
+                evidence_scope_id=_REPORT_SCOPE_ID,
+                missing_evidence_count=0,
+                registry_sha256=registry_sha256,
+            )
+        elif metric_name == "deterministic_replay_mismatch":
+            receipt = _build_replay_metric_receipt(
+                replay_mismatch_count,
+                registry_sha256=registry_sha256,
+            )
+        else:
+            numerator, denominator = full_submit_counts[metric_name]
+            receipt = _build_metric_receipt(
+                metric_name=metric_name,
+                status=(
+                    MetricStatus.PASS
+                    if numerator == HARD_QUALITY_TARGETS[metric_name]
+                    else MetricStatus.FAIL
+                ),
+                numerator=numerator,
+                denominator=denominator,
+                value=numerator,
+                unit="count",
+                evidence_class=EvidenceClass.FIXTURE_FROZEN,
+                evidence_item_ids=(_FULL_SUBMIT_ENTRY.evidence_id,),
+                evidence_scope_id=_FULL_SUBMIT_COHORT_ID,
+                missing_evidence_count=0,
+                registry_sha256=registry_sha256,
+            )
+        receipts.append(receipt)
+    evaluation = object.__new__(HardMetricsEvaluation)
+    object.__setattr__(evaluation, "metrics", tuple(receipts))
+    object.__setattr__(evaluation, "registry_sha256", registry_sha256)
+    object.__setattr__(
+        evaluation,
+        "model_call_accounting",
+        DETERMINISTIC_ACCOUNTING,
+    )
+    object.__setattr__(evaluation, "evaluation_sha256", "")
+    object.__setattr__(
+        evaluation,
+        "evaluation_sha256",
+        _domain_hash(
+            METRICS_EVALUATION_DOMAIN,
+            evaluation.document(include_hash=False),
+        ),
+    )
+    evaluation.verify()
+    return evaluation
+
+
 def evaluate_hard_metrics() -> HardMetricsEvaluation:
     """Evaluate only the authority-registry evidence; accepts no caller input."""
     repository_root = _repository_root()
@@ -1129,6 +1623,42 @@ def evaluate_hard_metrics() -> HardMetricsEvaluation:
         _json_object(fixture_payload, "locked application-pack fixture"),
         _json_object(report_payload, "locked evaluation report"),
         replay_pair_document,
+    )
+
+
+def evaluate_full_submit_hard_metrics() -> HardMetricsEvaluation:
+    """Evaluate the admitted, registry-pinned localhost full-submit cohort."""
+
+    repository_root = _repository_root()
+    control_root = _operator_control_root(repository_root)
+    payloads = {
+        evidence_id: _read_registry_entry(
+            entry,
+            repository_root=repository_root,
+            control_root=control_root,
+        )
+        for evidence_id, entry in FULL_SUBMIT_EVIDENCE_REGISTRY.items()
+    }
+    fixture_payload = payloads[_FIXTURE_ENTRY.evidence_id]
+    report_payload = payloads[_REPORT_ENTRY.evidence_id]
+    replay_pair_payload = payloads[_REPLAY_PAIR_ENTRY.evidence_id]
+    full_submit_payload = payloads[_FULL_SUBMIT_ENTRY.evidence_id]
+    replay_pair_document = _json_object(replay_pair_payload, "frozen replay pair")
+    full_submit_document = _json_object(
+        full_submit_payload,
+        "full-submit shadow cohort",
+    )
+    for payload, document, label in (
+        (replay_pair_payload, replay_pair_document, "frozen replay pair"),
+        (full_submit_payload, full_submit_document, "full-submit shadow cohort"),
+    ):
+        if payload != (_canonical_json(document) + "\n").encode("utf-8"):
+            raise EvidenceRegistryError(f"{label} is not canonical JSON")
+    return _derive_full_submit_from_documents(
+        _json_object(fixture_payload, "locked application-pack fixture"),
+        _json_object(report_payload, "locked evaluation report"),
+        replay_pair_document,
+        full_submit_document,
     )
 
 
