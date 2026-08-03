@@ -26,10 +26,13 @@ from career_automation.shadow_full_submit_cohort import (
     compile_full_submit_cohort,
 )
 from career_automation.shadow_mutation_runtime import (
+    REQUIRED_OUTCOME_KIND,
     RUNTIME_CONTROL_IDS,
     RuntimeControlReceipt,
     mutation_observations_from_runtime,
     observe_fail_closed_control,
+    record_fixture_http_rejection,
+    record_store_state_invariance,
 )
 
 
@@ -50,16 +53,51 @@ def _state() -> dict[str, object]:
 def _receipts() -> tuple[RuntimeControlReceipt, ...]:
     rows = []
     for control_id in RUNTIME_CONTROL_IDS:
+        executable = MUTATION_TEST_NODES.get(control_id) or f"runtime-twin:{control_id}"
+        if control_id == "local_origin_drift":
+            rows.append(
+                record_fixture_http_rejection(
+                    executable_identity=executable,
+                    http_statuses=(403, 403),
+                    request_variants=("host_wrong_port", "origin_wrong_port"),
+                    result_sha256=hashlib.sha256(control_id.encode()).hexdigest(),
+                    before_state=_state(),
+                    after_state=_state(),
+                    source_git_revision=REVISION,
+                    source_tree=TREE,
+                    source_content_revision=SOURCE_CONTENT,
+                )
+            )
+            continue
+        if control_id == "duplicate_submit":
+            duplicate_state = {
+                "receipt_count": 1,
+                "submit_click_count": 1,
+                "dispatch_state": "receipt_recorded",
+                "event_count": 1,
+            }
+            rows.append(
+                record_store_state_invariance(
+                    executable_identity=executable,
+                    http_statuses=(409, 409),
+                    request_variants=("duplicate_submit", "duplicate_review"),
+                    result_sha256=hashlib.sha256(control_id.encode()).hexdigest(),
+                    before_state=duplicate_state,
+                    after_state=duplicate_state,
+                    source_git_revision=REVISION,
+                    source_tree=TREE,
+                    source_content_revision=SOURCE_CONTENT,
+                )
+            )
+            continue
+
         def blocked(control: str = control_id) -> None:
             raise ValueError(f"blocked:{control}")
 
         rows.append(
             observe_fail_closed_control(
                 control_id=control_id,
-                executable_identity=(
-                    MUTATION_TEST_NODES.get(control_id)
-                    or f"runtime-twin:{control_id}"
-                ),
+                executable_identity=executable,
                 operation=blocked,
                 state_probe=_state,
                 source_git_revision=REVISION,
@@ -177,6 +215,9 @@ def test_exact_two_runtime_bound_executions_compile_but_do_not_certify() -> None
     assert len(cohort.withheld_shadow.observations) == 2
     assert len(set(cohort.withheld_shadow.release_manifest_sha256s)) == 2
     assert tuple(row.control_id for row in receipts) == RUNTIME_CONTROL_IDS
+    assert tuple(row.observed_outcome.kind for row in receipts) == tuple(
+        REQUIRED_OUTCOME_KIND[control_id] for control_id in RUNTIME_CONTROL_IDS
+    )
     assert cohort.document()["derived_counts"] == {
         "successful_loopback_submissions": 2,
         "released_claims": 2,

@@ -8,13 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from career_automation.shadow_full_submit_cohort import compile_full_submit_cohort
+from career_automation.shadow_full_submit_cohort import (
+    compile_full_submit_cohort,
+    observe_duplicate_submit,
+    observe_local_origin_drift,
+)
 from career_automation.shadow_mutation_runtime import (
     ADDITIONAL_RUNTIME_TWINS,
+    REQUIRED_OUTCOME_KIND,
     RUNTIME_CONTROL_IDS,
+    ObservedOutcome,
     RuntimeControlReceipt,
     mutation_observations_from_runtime,
     observe_fail_closed_control,
+    record_fixture_http_rejection,
+    record_observed_exception,
+    record_store_state_invariance,
     read_immutable_runtime_receipt,
 )
 from test_jaa10_full_submit_cohort import (
@@ -79,17 +88,108 @@ def test_legacy_mutation_inventory_requires_runtime_receipts_in_exact_order() ->
 
 def test_cross_source_receipt_and_caller_selected_state_are_rejected() -> None:
     receipt = _receipts()[0]
-    with pytest.raises(ValueError, match="source revision"):
+    with pytest.raises(ValueError, match="runtime factory"):
         replace(receipt, source_git_revision="not-a-revision")
-    with pytest.raises(ValueError, match="unsupported field inventory"):
+    with pytest.raises(ValueError, match="runtime factory"):
         RuntimeControlReceipt(
             control_id="caller_state",
             executable_identity="runtime-twin:caller_state",
-            exception_type="builtins.ValueError",
-            exception_message_sha256="4" * 64,
+            observed_outcome=receipt.observed_outcome,
             before_state={**_state(), "caller_verdict": True},
             after_state=_state(),
+            source_git_revision=REVISION,
+            source_tree=TREE,
+            source_content_revision=SOURCE_CONTENT,
+        )
+    crossed = record_observed_exception(
+        control_id="unsupported_metric",
+        executable_identity="runtime:cross-source",
+        exception_type="builtins.ValueError",
+        exception_message_sha256="4" * 64,
+        result_sha256="5" * 64,
+        state=_state(),
+        source_git_revision="4" * 40,
+        source_tree=TREE,
+        source_content_revision=SOURCE_CONTENT,
+    )
+    assert crossed.source_git_revision != receipt.source_git_revision
+
+
+def test_observed_outcome_kind_is_fixed_and_cannot_be_caller_constructed() -> None:
+    with pytest.raises(ValueError, match="runtime factory"):
+        ObservedOutcome(
+            kind="fixture_http_rejection",
             result_sha256="5" * 64,
+            http_statuses=(403, 403),
+            request_variants=("host_wrong_port", "origin_wrong_port"),
+        )
+    with pytest.raises(ValueError, match="non-exception observation"):
+        observe_fail_closed_control(
+            control_id="local_origin_drift",
+            executable_identity="runtime:wrong-kind",
+            operation=_blocked,
+            state_probe=_state,
+            source_git_revision=REVISION,
+            source_tree=TREE,
+            source_content_revision=SOURCE_CONTENT,
+        )
+    assert REQUIRED_OUTCOME_KIND["local_origin_drift"] == (
+        "fixture_http_rejection"
+    )
+    assert REQUIRED_OUTCOME_KIND["duplicate_submit"] == (
+        "store_state_invariance"
+    )
+
+
+def test_in_process_http_and_store_observations_capture_exact_runtime_proof() -> None:
+    assertion_hash = "6" * 64
+    origin = observe_local_origin_drift(
+        assertion_result_sha256=assertion_hash,
+        source_git_revision=REVISION,
+        source_tree=TREE,
+        source_content_revision=SOURCE_CONTENT,
+    )
+    duplicate = observe_duplicate_submit(
+        assertion_result_sha256=assertion_hash,
+        source_git_revision=REVISION,
+        source_tree=TREE,
+        source_content_revision=SOURCE_CONTENT,
+    )
+    assert origin.observed_outcome.http_statuses == (403, 403)
+    assert origin.before_state == origin.after_state
+    assert duplicate.observed_outcome.http_statuses == (409, 409)
+    assert duplicate.before_state == duplicate.after_state
+    assert duplicate.after_state["receipt_count"] == 1
+
+
+def test_http_and_store_proof_mismatch_fails_closed() -> None:
+    with pytest.raises(ValueError, match="HTTP rejection proof"):
+        record_fixture_http_rejection(
+            executable_identity="runtime:local-origin",
+            http_statuses=(403,),
+            request_variants=("host_wrong_port",),
+            result_sha256="6" * 64,
+            before_state=_state(),
+            after_state=_state(),
+            source_git_revision=REVISION,
+            source_tree=TREE,
+            source_content_revision=SOURCE_CONTENT,
+        )
+    before = {
+        "receipt_count": 1,
+        "submit_click_count": 1,
+        "dispatch_state": "receipt_recorded",
+        "event_count": 1,
+    }
+    after = {**before, "receipt_count": 2}
+    with pytest.raises(ValueError, match="created a receipt"):
+        record_store_state_invariance(
+            executable_identity="runtime:duplicate",
+            http_statuses=(409, 409),
+            request_variants=("duplicate_submit", "duplicate_review"),
+            result_sha256="6" * 64,
+            before_state=before,
+            after_state=after,
             source_git_revision=REVISION,
             source_tree=TREE,
             source_content_revision=SOURCE_CONTENT,

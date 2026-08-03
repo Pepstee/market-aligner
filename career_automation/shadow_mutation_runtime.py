@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
@@ -42,6 +42,37 @@ ADDITIONAL_RUNTIME_TWINS = (
     "caller_state",
 )
 RUNTIME_CONTROL_IDS = REQUIRED_MUTATION_CONTROLS + ADDITIONAL_RUNTIME_TWINS
+OUTCOME_KINDS = (
+    "production_exception",
+    "fixture_http_rejection",
+    "store_state_invariance",
+    "contract_rejection",
+)
+_FIXTURE_HTTP_CONTROLS = {"local_origin_drift"}
+_STORE_STATE_CONTROLS = {"duplicate_submit"}
+_CONTRACT_CONTROLS = {
+    "stub_executor",
+    "zero_denominator",
+    "omitted_unit",
+    "cross_cohort_substitution",
+    "caller_verdict",
+    "caller_target",
+}
+REQUIRED_OUTCOME_KIND: Mapping[str, str] = MappingProxyType(
+    {
+        control_id: (
+            "fixture_http_rejection"
+            if control_id in _FIXTURE_HTTP_CONTROLS
+            else "store_state_invariance"
+            if control_id in _STORE_STATE_CONTROLS
+            else "contract_rejection"
+            if control_id in _CONTRACT_CONTROLS
+            else "production_exception"
+        )
+        for control_id in RUNTIME_CONTROL_IDS
+    }
+)
+_FACTORY_TOKEN = object()
 
 
 def _canonical_json(value: object) -> bytes:
@@ -83,30 +114,119 @@ def _state_document(state: Mapping[str, object]) -> dict[str, object]:
 
 
 @dataclass(frozen=True)
+class ObservedOutcome:
+    """Typed proof emitted by an executed control, never a caller verdict."""
+
+    kind: str
+    result_sha256: str
+    exception_type: str | None = None
+    exception_message_sha256: str | None = None
+    http_statuses: tuple[int, ...] = ()
+    request_variants: tuple[str, ...] = ()
+    callable_identity: str | None = None
+    artifact_materialized: bool = False
+    _creation_token: InitVar[object] = None
+
+    def __post_init__(self, _creation_token: object) -> None:
+        if _creation_token is not _FACTORY_TOKEN:
+            raise ValueError("observed outcome must be derived by a runtime factory")
+        if self.kind not in OUTCOME_KINDS:
+            raise ValueError("observed outcome kind is outside the closed inventory")
+        _digest(self.result_sha256, "observed outcome result hash")
+        if self.artifact_materialized:
+            raise ValueError("fail-closed outcome materialized an artifact")
+        exception_kind = self.kind in {
+            "production_exception",
+            "contract_rejection",
+        }
+        if exception_kind:
+            if not self.exception_type or not self.exception_type.strip():
+                raise ValueError("exception outcome lacks an exception type")
+            if self.exception_message_sha256 is None:
+                raise ValueError("exception outcome lacks a message hash")
+            _digest(self.exception_message_sha256, "exception message hash")
+            if self.http_statuses or self.request_variants:
+                raise ValueError("exception outcome cannot carry HTTP proof")
+            if self.kind == "contract_rejection" and not self.callable_identity:
+                raise ValueError("contract rejection lacks callable identity")
+            if self.kind == "production_exception" and self.callable_identity is not None:
+                raise ValueError("production exception cannot claim call-contract proof")
+        elif self.kind == "fixture_http_rejection":
+            if self.http_statuses != (403, 403) or self.request_variants != (
+                "host_wrong_port",
+                "origin_wrong_port",
+            ):
+                raise ValueError("fixture HTTP rejection proof is incomplete")
+            if any(
+                value is not None
+                for value in (
+                    self.exception_type,
+                    self.exception_message_sha256,
+                    self.callable_identity,
+                )
+            ):
+                raise ValueError("fixture HTTP outcome cannot claim exception proof")
+        else:
+            if self.http_statuses != (409, 409) or self.request_variants != (
+                "duplicate_submit",
+                "duplicate_review",
+            ):
+                raise ValueError("store-state invariance proof is incomplete")
+            if any(
+                value is not None
+                for value in (
+                    self.exception_type,
+                    self.exception_message_sha256,
+                    self.callable_identity,
+                )
+            ):
+                raise ValueError("store-state outcome cannot claim exception proof")
+
+    def document(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "kind": self.kind,
+            "result_sha256": self.result_sha256,
+            "artifact_materialized": False,
+        }
+        if self.exception_type is not None:
+            result["exception"] = {
+                "type": self.exception_type,
+                "message_sha256": self.exception_message_sha256,
+            }
+        if self.http_statuses:
+            result["http_statuses"] = self.http_statuses
+            result["request_variants"] = self.request_variants
+        if self.callable_identity is not None:
+            result["callable_identity"] = self.callable_identity
+        return result
+
+
+@dataclass(frozen=True)
 class RuntimeControlReceipt:
     """Canonical observation of one executed fail-closed control."""
 
     control_id: str
     executable_identity: str
-    exception_type: str
-    exception_message_sha256: str
+    observed_outcome: ObservedOutcome
     before_state: Mapping[str, object]
     after_state: Mapping[str, object]
-    result_sha256: str
     source_git_revision: str
     source_tree: str
     source_content_revision: str
-    schema_version: str = "jaa10.runtime-control-receipt.v1"
+    schema_version: str = "jaa10.runtime-control-receipt.v2"
+    _creation_token: InitVar[object] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _creation_token: object) -> None:
+        if _creation_token is not _FACTORY_TOKEN:
+            raise ValueError("runtime receipt must be derived by a runtime factory")
         if self.control_id not in RUNTIME_CONTROL_IDS:
             raise ValueError("runtime control is outside the closed inventory")
         if not self.executable_identity.strip():
             raise ValueError("runtime control requires executable identity")
-        if not self.exception_type.strip():
-            raise ValueError("runtime control did not observe an exception")
-        _digest(self.exception_message_sha256, "exception message hash")
-        _digest(self.result_sha256, "runtime result hash")
+        if not isinstance(self.observed_outcome, ObservedOutcome):
+            raise TypeError("runtime control requires a typed observed outcome")
+        if self.observed_outcome.kind != REQUIRED_OUTCOME_KIND[self.control_id]:
+            raise ValueError("runtime control carries the wrong observed outcome kind")
         if not re.fullmatch(r"[0-9a-f]{40}", self.source_git_revision):
             raise ValueError("runtime source revision is invalid")
         if not re.fullmatch(r"[0-9a-f]{40}", self.source_tree):
@@ -119,11 +239,11 @@ class RuntimeControlReceipt:
         after = _state_document(self.after_state)
         object.__setattr__(self, "before_state", MappingProxyType(before))
         object.__setattr__(self, "after_state", MappingProxyType(after))
-        if after["receipt_count"] > before["receipt_count"]:
+        if after["receipt_count"] != before["receipt_count"]:
             raise ValueError("fail-closed runtime control created a receipt")
-        if after["submit_click_count"] > before["submit_click_count"]:
+        if after["submit_click_count"] != before["submit_click_count"]:
             raise ValueError("fail-closed runtime control performed a submit click")
-        if self.schema_version != "jaa10.runtime-control-receipt.v1":
+        if self.schema_version != "jaa10.runtime-control-receipt.v2":
             raise ValueError("runtime control receipt schema is unsupported")
 
     @property
@@ -139,13 +259,9 @@ class RuntimeControlReceipt:
             "schema_version": self.schema_version,
             "control_id": self.control_id,
             "executable_identity": self.executable_identity,
-            "observed_exception": {
-                "type": self.exception_type,
-                "message_sha256": self.exception_message_sha256,
-            },
+            "observed_outcome": self.observed_outcome.document(),
             "before_state": dict(self.before_state),
             "after_state": dict(self.after_state),
-            "result_sha256": self.result_sha256,
             "source_identity": {
                 "git_revision": self.source_git_revision,
                 "tree": self.source_tree,
@@ -181,6 +297,9 @@ def observe_fail_closed_control(
 
     if control_id not in RUNTIME_CONTROL_IDS:
         raise ValueError("runtime control is outside the closed inventory")
+    required_kind = REQUIRED_OUTCOME_KIND[control_id]
+    if required_kind not in {"production_exception", "contract_rejection"}:
+        raise ValueError("runtime control requires a non-exception observation factory")
     before = _state_document(state_probe())
     try:
         operation()
@@ -198,17 +317,141 @@ def observe_fail_closed_control(
         "before_state": before,
         "after_state": after,
     }
+    result_sha256 = _content_hash(result_document)
+    outcome = ObservedOutcome(
+        kind=required_kind,
+        result_sha256=result_sha256,
+        exception_type=exception_type,
+        exception_message_sha256=message_hash,
+        callable_identity=(
+            executable_identity if required_kind == "contract_rejection" else None
+        ),
+        _creation_token=_FACTORY_TOKEN,
+    )
     return RuntimeControlReceipt(
         control_id=control_id,
         executable_identity=executable_identity,
-        exception_type=exception_type,
-        exception_message_sha256=message_hash,
+        observed_outcome=outcome,
         before_state=before,
         after_state=after,
-        result_sha256=_content_hash(result_document),
         source_git_revision=source_git_revision,
         source_tree=source_tree,
         source_content_revision=source_content_revision,
+        _creation_token=_FACTORY_TOKEN,
+    )
+
+
+def record_observed_exception(
+    *,
+    control_id: str,
+    executable_identity: str,
+    exception_type: str,
+    exception_message_sha256: str,
+    result_sha256: str,
+    state: Mapping[str, object],
+    source_git_revision: str,
+    source_tree: str,
+    source_content_revision: str,
+    callable_identity: str | None = None,
+) -> RuntimeControlReceipt:
+    """Bind an externally captured exception to the control's fixed kind."""
+
+    if control_id not in RUNTIME_CONTROL_IDS:
+        raise ValueError("runtime control is outside the closed inventory")
+    kind = REQUIRED_OUTCOME_KIND[control_id]
+    if kind not in {"production_exception", "contract_rejection"}:
+        raise ValueError("runtime control requires HTTP or store-state observation")
+    outcome = ObservedOutcome(
+        kind=kind,
+        result_sha256=result_sha256,
+        exception_type=exception_type,
+        exception_message_sha256=exception_message_sha256,
+        callable_identity=(
+            callable_identity or executable_identity
+            if kind == "contract_rejection"
+            else None
+        ),
+        _creation_token=_FACTORY_TOKEN,
+    )
+    frozen_state = _state_document(state)
+    return RuntimeControlReceipt(
+        control_id=control_id,
+        executable_identity=executable_identity,
+        observed_outcome=outcome,
+        before_state=frozen_state,
+        after_state=frozen_state,
+        source_git_revision=source_git_revision,
+        source_tree=source_tree,
+        source_content_revision=source_content_revision,
+        _creation_token=_FACTORY_TOKEN,
+    )
+
+
+def record_fixture_http_rejection(
+    *,
+    executable_identity: str,
+    http_statuses: tuple[int, ...],
+    request_variants: tuple[str, ...],
+    result_sha256: str,
+    before_state: Mapping[str, object],
+    after_state: Mapping[str, object],
+    source_git_revision: str,
+    source_tree: str,
+    source_content_revision: str,
+) -> RuntimeControlReceipt:
+    """Record the exact two 403 loopback-origin rejections."""
+
+    outcome = ObservedOutcome(
+        kind="fixture_http_rejection",
+        result_sha256=result_sha256,
+        http_statuses=http_statuses,
+        request_variants=request_variants,
+        _creation_token=_FACTORY_TOKEN,
+    )
+    return RuntimeControlReceipt(
+        control_id="local_origin_drift",
+        executable_identity=executable_identity,
+        observed_outcome=outcome,
+        before_state=before_state,
+        after_state=after_state,
+        source_git_revision=source_git_revision,
+        source_tree=source_tree,
+        source_content_revision=source_content_revision,
+        _creation_token=_FACTORY_TOKEN,
+    )
+
+
+def record_store_state_invariance(
+    *,
+    executable_identity: str,
+    http_statuses: tuple[int, ...],
+    request_variants: tuple[str, ...],
+    result_sha256: str,
+    before_state: Mapping[str, object],
+    after_state: Mapping[str, object],
+    source_git_revision: str,
+    source_tree: str,
+    source_content_revision: str,
+) -> RuntimeControlReceipt:
+    """Record duplicate submit/review 409s with one receipt unchanged."""
+
+    outcome = ObservedOutcome(
+        kind="store_state_invariance",
+        result_sha256=result_sha256,
+        http_statuses=http_statuses,
+        request_variants=request_variants,
+        _creation_token=_FACTORY_TOKEN,
+    )
+    return RuntimeControlReceipt(
+        control_id="duplicate_submit",
+        executable_identity=executable_identity,
+        observed_outcome=outcome,
+        before_state=before_state,
+        after_state=after_state,
+        source_git_revision=source_git_revision,
+        source_tree=source_tree,
+        source_content_revision=source_content_revision,
+        _creation_token=_FACTORY_TOKEN,
     )
 
 

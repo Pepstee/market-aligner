@@ -17,6 +17,9 @@ from pathlib import Path
 from time import perf_counter_ns
 from types import MappingProxyType
 from typing import Any, Mapping
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from playwright.sync_api import sync_playwright
 
@@ -91,6 +94,8 @@ from .shadow_mutation_runtime import (
     RUNTIME_CONTROL_IDS,
     RuntimeControlReceipt,
     mutation_observations_from_runtime,
+    record_fixture_http_rejection,
+    record_store_state_invariance,
 )
 
 
@@ -111,6 +116,7 @@ P4_SUMMARY_SHA256 = (
     "e489ac40f4d0342223b5794946e2890e75a2a05730c56bfe580ba73bedc70840"
 )
 POLICY = MatchingPolicy()
+FIXTURE_PDF = b"%PDF-1.4\nsynthetic fixture PDF\n%%EOF\n"
 
 
 def _canonical_json(value: object) -> bytes:
@@ -121,6 +127,229 @@ def _canonical_json(value: object) -> bytes:
 
 def _content_hash(value: object) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _control_vacancy() -> FixtureVacancy:
+    return FixtureVacancy(
+        "platform-engineer",
+        "fixture:platform-engineer",
+        "Platform Engineer",
+        "Example Systems Ltd",
+    )
+
+
+def _fixture_state(
+    fixture: LocalATSFixture,
+    *,
+    submit_click_count: int,
+    event_count: int,
+    dispatch_state: str,
+) -> dict[str, object]:
+    return {
+        "receipt_count": int(fixture.receipt is not None),
+        "submit_click_count": submit_click_count,
+        "dispatch_state": dispatch_state,
+        "event_count": event_count,
+    }
+
+
+def _fixture_multipart() -> tuple[bytes, str]:
+    boundary = "jaa10-runtime-fixture-boundary"
+    fields = {
+        "fixture_token": FORM_TOKEN,
+        "full_name": "Alex Example",
+        "email": "alex@example.test",
+        "phone": "+44 7700 900123",
+        "city": "London",
+        "work_authorisation": "authorised",
+        "sponsorship_details": "",
+        "cover_note": "Delivered a synthetic migration example.",
+    }
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode(),
+                b"\r\n",
+            )
+        )
+    for name, filename in (
+        ("cv", "alex-cv.pdf"),
+        ("cover_letter", "alex-cover-letter.pdf"),
+    ):
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                (
+                    f'Content-Disposition: form-data; name="{name}"; '
+                    f'filename="{filename}"\r\n'
+                ).encode(),
+                b"Content-Type: application/pdf\r\n\r\n",
+                FIXTURE_PDF,
+                b"\r\n",
+            )
+        )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _fixture_review(fixture: LocalATSFixture) -> str:
+    body, content_type = _fixture_multipart()
+    request = Request(
+        fixture.application_url + "/review",
+        data=body,
+        headers={"Content-Type": content_type},
+        method="POST",
+    )
+    with urlopen(request, timeout=5) as response:
+        if response.status != 200:
+            raise RuntimeError("fixture review did not succeed")
+        return response.read().decode("utf-8")
+
+
+def observe_local_origin_drift(
+    *,
+    assertion_result_sha256: str,
+    source_git_revision: str,
+    source_tree: str,
+    source_content_revision: str,
+) -> RuntimeControlReceipt:
+    """Observe both wrong-loopback-authority requests returning exact 403s."""
+
+    with LocalATSFixture(
+        _control_vacancy(), nonce=lambda: NONCE, form_token=FORM_TOKEN
+    ) as fixture:
+        before = _fixture_state(
+            fixture,
+            submit_click_count=0,
+            event_count=0,
+            dispatch_state="fixture_started",
+        )
+        parsed = urlsplit(fixture.application_url)
+        wrong_port = int(parsed.port or 0) + 1
+        statuses: list[int] = []
+        for headers in (
+            {"Host": f"{parsed.hostname}:{wrong_port}"},
+            {"Origin": f"http://{parsed.hostname}:{wrong_port}"},
+        ):
+            try:
+                urlopen(Request(fixture.application_url, headers=headers), timeout=5)
+            except HTTPError as error:
+                statuses.append(error.code)
+            else:
+                raise RuntimeError("wrong loopback authority was accepted")
+        after = _fixture_state(
+            fixture,
+            submit_click_count=0,
+            event_count=0,
+            dispatch_state="fixture_started",
+        )
+    result_sha256 = _content_hash(
+        {
+            "assertion_result_sha256": assertion_result_sha256,
+            "http_statuses": statuses,
+            "request_variants": ("host_wrong_port", "origin_wrong_port"),
+            "before_state": before,
+            "after_state": after,
+        }
+    )
+    return record_fixture_http_rejection(
+        executable_identity=(
+            "test_jaa09_negative_controls.py::"
+            "test_fixture_refuses_other_loopback_host_port_or_origin"
+        ),
+        http_statuses=tuple(statuses),
+        request_variants=("host_wrong_port", "origin_wrong_port"),
+        result_sha256=result_sha256,
+        before_state=before,
+        after_state=after,
+        source_git_revision=source_git_revision,
+        source_tree=source_tree,
+        source_content_revision=source_content_revision,
+    )
+
+
+def observe_duplicate_submit(
+    *,
+    assertion_result_sha256: str,
+    source_git_revision: str,
+    source_tree: str,
+    source_content_revision: str,
+) -> RuntimeControlReceipt:
+    """Observe duplicate submit/review 409s with exactly one receipt retained."""
+
+    with LocalATSFixture(
+        _control_vacancy(), nonce=lambda: NONCE, form_token=FORM_TOKEN
+    ) as fixture:
+        review = _fixture_review(fixture)
+        nonce = re.search(r'name="review_nonce" value="([^"]+)"', review)
+        if nonce is None:
+            raise RuntimeError("fixture review nonce is missing")
+        data = (
+            f"review_nonce={nonce.group(1)}&fixture_token={FORM_TOKEN}"
+        ).encode()
+
+        def submit() -> int:
+            request = Request(
+                fixture.application_url + "/submit",
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(request, timeout=5) as response:
+                return response.status
+
+        if submit() != 201 or fixture.receipt is None:
+            raise RuntimeError("fixture baseline submit did not create one receipt")
+        first_receipt = fixture.receipt
+        before = _fixture_state(
+            fixture,
+            submit_click_count=1,
+            event_count=1,
+            dispatch_state="receipt_recorded",
+        )
+        statuses: list[int] = []
+        for operation in (submit, lambda: _fixture_review(fixture)):
+            try:
+                operation()
+            except HTTPError as error:
+                statuses.append(error.code)
+            else:
+                raise RuntimeError("duplicate fixture operation was accepted")
+        if fixture.receipt is not first_receipt:
+            raise RuntimeError("duplicate fixture operation replaced the receipt")
+        after = _fixture_state(
+            fixture,
+            submit_click_count=1,
+            event_count=1,
+            dispatch_state="receipt_recorded",
+        )
+    result_sha256 = _content_hash(
+        {
+            "assertion_result_sha256": assertion_result_sha256,
+            "http_statuses": statuses,
+            "request_variants": ("duplicate_submit", "duplicate_review"),
+            "before_state": before,
+            "after_state": after,
+            "receipt_id": first_receipt.receipt_id,
+        }
+    )
+    return record_store_state_invariance(
+        executable_identity=(
+            "test_jaa09_negative_controls.py::"
+            "test_duplicate_submit_and_second_review_produce_no_second_receipt"
+        ),
+        http_statuses=tuple(statuses),
+        request_variants=("duplicate_submit", "duplicate_review"),
+        result_sha256=result_sha256,
+        before_state=before,
+        after_state=after,
+        source_git_revision=source_git_revision,
+        source_tree=source_tree,
+        source_content_revision=source_content_revision,
+    )
 
 
 def _fixture_date(database: CareerDatabase) -> date:
