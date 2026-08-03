@@ -103,10 +103,24 @@ def test_execute_records_failure_without_execution_receipt(
     assert bundle["execution_receipt"] is None
 
 
-def test_executable_rejects_symlink(tmp_path: Path) -> None:
+def test_executable_rejects_arbitrary_symlink(tmp_path: Path) -> None:
     link = tmp_path / "python"
     link.symlink_to(Path(sys.executable).resolve())
     with pytest.raises(
-        runner.profile.CertificationProfileError, match="non-symlink"
+        runner.profile.CertificationProfileError, match="virtual-environment"
     ):
-        runner._executable(link)
+        runner._executable(link, tmp_path)
+
+
+def test_executable_allows_and_binds_repository_venv_launcher(
+    tmp_path: Path,
+) -> None:
+    bin_directory = tmp_path / ".venv" / "bin"
+    bin_directory.mkdir(parents=True)
+    link = bin_directory / "python"
+    link.symlink_to(Path(sys.executable).resolve())
+    launcher, identity = runner._executable(link, tmp_path)
+    assert launcher == link
+    assert identity["launcher_is_symlink"] is True
+    assert identity["resolved_target"] == str(Path(sys.executable).resolve())
+    assert len(identity["resolved_target_sha256"]) == 64

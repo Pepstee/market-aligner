@@ -31,10 +31,15 @@ def _new_directory(path: Path) -> Path:
     return path
 
 
-def _executable(path: Path) -> Path:
-    if not path.is_absolute() or path.is_symlink():
+def _executable(
+    path: Path, repository_root: Path
+) -> tuple[Path, dict[str, object]]:
+    if not path.is_absolute() or "\0" in os.fspath(path):
+        raise profile.CertificationProfileError("Python executable must be absolute")
+    is_symlink = path.is_symlink()
+    if is_symlink and path.parent != repository_root / ".venv" / "bin":
         raise profile.CertificationProfileError(
-            "Python executable must be an absolute non-symlink"
+            "Python symlink must be the repository virtual-environment launcher"
         )
     try:
         resolved = path.resolve(strict=True)
@@ -45,7 +50,29 @@ def _executable(path: Path) -> Path:
     metadata = resolved.stat(follow_symlinks=False)
     if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
         raise profile.CertificationProfileError("Python executable is invalid")
-    return resolved
+    launcher_metadata = path.lstat()
+    identity: dict[str, object] = {
+        "launcher": str(path),
+        "launcher_is_symlink": is_symlink,
+        "launcher_link_target": os.readlink(path) if is_symlink else None,
+        "launcher_lstat": {
+            "device": launcher_metadata.st_dev,
+            "inode": launcher_metadata.st_ino,
+            "size": launcher_metadata.st_size,
+            "mtime_ns": launcher_metadata.st_mtime_ns,
+            "ctime_ns": launcher_metadata.st_ctime_ns,
+        },
+        "resolved_target": str(resolved),
+        "resolved_target_sha256": profile._file_sha256(resolved),
+        "resolved_target_stat": {
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "size": metadata.st_size,
+            "mtime_ns": metadata.st_mtime_ns,
+            "ctime_ns": metadata.st_ctime_ns,
+        },
+    }
+    return path, identity
 
 
 def _write_bytes(path: Path, payload: bytes) -> str:
@@ -74,7 +101,9 @@ def execute(
     repository_root = profile._absolute_lexical_directory(
         repository_root, "repository root"
     )
-    python_executable = _executable(python_executable)
+    python_executable, python_identity = _executable(
+        python_executable, repository_root
+    )
     hooks = profile.load_evidence_config(evidence_config)
     document = profile.build_profile(repository_root, hooks)
     output_directory = _new_directory(output_directory)
@@ -160,6 +189,11 @@ def execute(
         )
 
     all_passed = all(value == "passed" for value in outcomes.values())
+    _, python_identity_after = _executable(python_executable, repository_root)
+    if python_identity_after != python_identity:
+        raise profile.CertificationProfileError(
+            "Python runtime identity changed during certification"
+        )
     execution_receipt: dict[str, object] | None = None
     if all_passed:
         execution_receipt = profile.bind_execution_results(document, outcomes)
@@ -167,6 +201,7 @@ def execute(
         "schema_version": RUN_BUNDLE_SCHEMA,
         "profile": document,
         "selection_receipt": profile.selection_receipt(document),
+        "python_runtime": python_identity,
         "runs": runs,
         "execution_receipt": execution_receipt,
         "claims": {
