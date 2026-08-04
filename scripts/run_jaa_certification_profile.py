@@ -130,6 +130,7 @@ def execute(
             "JAA_OPERATOR_CONTROL_ROOT": str(
                 evidence_by_id["jaa10_external_control"].root
             ),
+            "JAA_CERTIFICATION_EVIDENCE_CONFIG": str(evidence_config),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )

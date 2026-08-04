@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -393,27 +394,39 @@ def test_unknown_or_missing_test_file_is_rejected(tmp_path: Path) -> None:
 
 
 def test_actual_imported_jaa09_manifest_and_inventory_are_exact() -> None:
-    evidence = Path(
-        "/Users/admin/Projects/"
-        "job-application-automation-gutua-20260803-evidence/external-control"
-    )
-    manifest = evidence / (
-        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258"
-        ".files.sha256"
-    )
-    root = evidence / (
-        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258"
-    )
+    configured = os.environ.get("JAA_CERTIFICATION_EVIDENCE_CONFIG")
+    if configured:
+        hook = next(
+            item
+            for item in profile.load_evidence_config(Path(configured))
+            if item.evidence_id == "jaa09_exact_corpus"
+        )
+        manifest = hook.manifest
+        root = hook.root
+        manifest_prefix = hook.manifest_path_prefix
+    else:
+        evidence = Path(
+            "/Users/admin/Projects/"
+            "job-application-automation-gutua-20260803-evidence/external-control"
+        )
+        manifest = evidence / (
+            "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258"
+            ".files.sha256"
+        )
+        root = evidence / (
+            "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258"
+        )
+        manifest_prefix = (
+            "/Users/admin/Projects/"
+            "job-application-automation-gutua-20260803-evidence/external-control/"
+            "jaa09-corpus-f93733a"
+        )
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == (
         profile.JAA09_CORPUS_MANIFEST_SHA256
     )
     entries = profile._parse_sha256_manifest(
         manifest.read_bytes(),
-        absolute_prefix=(
-            "/Users/admin/Projects/"
-            "job-application-automation-gutua-20260803-evidence/external-control/"
-            "jaa09-corpus-f93733a"
-        ),
+        absolute_prefix=manifest_prefix,
     )
     assert entries["corpus_inventory.json"] == profile.JAA09_CORPUS_INVENTORY_SHA256
     assert hashlib.sha256((root / "corpus_inventory.json").read_bytes()).hexdigest() == (
