@@ -82,6 +82,11 @@ REQUIRED_REQUIREMENT_KEYS = (
     "learning_curiosity",
     "team_communication",
 )
+RELEASE_CLAIM_REQUIREMENT_KEYS = (
+    "cloud_automation",
+    "major_cloud",
+    "team_communication",
+)
 PROOF_CLASS_BY_KIND = {
     "credential": "credential",
     "portfolio_artifact": "portfolio_artifact",
@@ -139,6 +144,7 @@ class CloudCopsReleasePreparation:
     contact: CandidateContact | None = field(default=None, repr=False)
     questions: dict[str, tuple[str, str]] | None = field(default=None, repr=False)
     issued: IssuedRelease | None = field(default=None, repr=False)
+    advisory_gap_codes: tuple[str, ...] = ()
 
     @property
     def token_sha256(self) -> str | None:
@@ -154,6 +160,7 @@ class CloudCopsReleasePreparation:
             "fit_status": self.fit.status,
             "blocker_codes": list(self.blocker_codes),
             "matched_evidence": dict(sorted(self.matched_evidence.items())),
+            "advisory_gap_codes": list(self.advisory_gap_codes),
             "artifact_set_sha256": (
                 None if self.publication is None else self.publication.artifact_set_sha256
             ),
@@ -472,7 +479,7 @@ def _requirements(capture: Mapping[str, Any], job_key: str, payload_hash: str) -
                 body.index(str(rows[key]["text"])) + len(str(rows[key]["text"])),
             ),
         )
-        for key in REQUIRED_REQUIREMENT_KEYS
+        for key in RELEASE_CLAIM_REQUIREMENT_KEYS
     )
 
 
@@ -558,7 +565,9 @@ def _seed_candidate_graph(
 ) -> tuple[CandidateContact, tuple[MatchProposal, ...], dict[str, str]]:
     graph = CandidateGraph(database.path)
     policy_hash = packet_sha256
-    key_by_requirement = dict(zip(requirements, REQUIRED_REQUIREMENT_KEYS, strict=True))
+    key_by_requirement = dict(
+        zip(requirements, RELEASE_CLAIM_REQUIREMENT_KEYS, strict=True)
+    )
     matched: dict[str, str] = {}
     evidence_added: set[str] = set()
     for requirement, key in key_by_requirement.items():
@@ -702,7 +711,7 @@ def _seed_candidate_graph(
                 0 if evidence_id is None else 10_000,
                 "none" if evidence_id is None else "direct",
                 (
-                    "no approved verbatim evidence satisfies the mandatory requirement"
+                    "no approved verbatim evidence supports this application claim"
                     if evidence_id is None
                     else "exact operator-approved statement satisfies the configured criterion"
                 ),
@@ -796,6 +805,12 @@ def prepare_cloudcops_release(
     entry = _exact_rank_entry(snapshot, raw_bytes)
     capture = _official_capture(_object(capture_bytes, "official-role capture"), capture_bytes)
     statements = _approved_statements(_object(packet_bytes, "approved evidence packet"))
+    advisory_gap_codes = tuple(
+        f"cloudcops-{key.replace('_', '-')}"
+        for key in REQUIRED_REQUIREMENT_KEYS
+        if key not in RELEASE_CLAIM_REQUIREMENT_KEYS
+        and not any(_support(key, str(row["statement"])) for row in statements.values())
+    )
     contact_values, contact_profile_sha256 = _contact_record(
         _object(contact_bytes, "contact record")
     )
@@ -870,6 +885,7 @@ def prepare_cloudcops_release(
             fit,
             blockers,
             matched,
+            advisory_gap_codes=advisory_gap_codes,
         )
 
     strategy = ApplicationStrategyStore(database.path).compile_and_record(
@@ -961,6 +977,7 @@ def prepare_cloudcops_release(
             artifacts,
             candidate_contact,
             questions,
+            advisory_gap_codes=advisory_gap_codes,
         )
 
     assert inputs.operator_authority is not None
@@ -991,6 +1008,7 @@ def prepare_cloudcops_release(
         candidate_contact,
         questions,
         issued,
+        advisory_gap_codes,
     )
 
 

@@ -273,8 +273,18 @@ def _authority() -> tuple[JAA08ReleaseAuthority, FakeGate]:
         gate=gate,  # type: ignore[arg-type]
         release_token=token,
         source=object(),  # type: ignore[arg-type]
-        artifacts=object(),  # type: ignore[arg-type]
-        contact=object(),  # type: ignore[arg-type]
+        artifacts=SimpleNamespace(
+            cv_pdf=SimpleNamespace(
+                pdf_sha256=_hash(
+                    b"%PDF-1.4\nsynthetic approved CloudCops CV\n"
+                )
+            )
+        ),  # type: ignore[arg-type]
+        contact=SimpleNamespace(
+            full_name="Canary Person",
+            email="canary@example.test",
+            phone="+44 7000 000000",
+        ),  # type: ignore[arg-type]
         questions=None,
         artifact_root=Path("/synthetic/artifacts"),
         repository_root=Path("/synthetic/repository"),
@@ -283,6 +293,44 @@ def _authority() -> tuple[JAA08ReleaseAuthority, FakeGate]:
         consumed_at=datetime(2026, 8, 4, 1, 15, tzinfo=timezone.utc),
     )
     return authority, gate
+
+
+def test_submit_rejects_payload_not_bound_to_release_before_population(
+    tmp_path: Path,
+) -> None:
+    application = _application(tmp_path)
+    authority, gate = _authority()
+    authority = JAA08ReleaseAuthority(
+        gate=authority.gate,
+        release_token=authority.release_token,
+        source=authority.source,
+        artifacts=SimpleNamespace(
+            cv_pdf=SimpleNamespace(pdf_sha256=_hash(b"different released CV"))
+        ),  # type: ignore[arg-type]
+        contact=authority.contact,
+        questions=authority.questions,
+        artifact_root=authority.artifact_root,
+        repository_root=authority.repository_root,
+        jurisdiction=authority.jurisdiction,
+        contract_type=authority.contract_type,
+        consumed_at=authority.consumed_at,
+    )
+    page = FakePage()
+    with pytest.raises(PersonioSchemaError, match="differs from the exact"):
+        PersonioLiveAdapter(
+            PersonioOneUseCircuit(tmp_path / "mismatch.sqlite3")
+        ).submit(
+            page,
+            application=application,
+            network_trace=_trace(),
+            authority=authority,
+        )
+    assert gate.calls == []
+    assert page.clicks == 0
+    assert all(
+        state["input_value"] == "" and state["file_count"] == 0
+        for state in page.controls.values()
+    )
 
 
 def test_inventory_is_exact_current_personio_schema() -> None:

@@ -877,6 +877,34 @@ class PersonioLiveAdapter:
             }
         )
 
+    @staticmethod
+    def _assert_release_binding(
+        application: PersonioApplication,
+        authority: JAA08ReleaseAuthority,
+    ) -> None:
+        """Require the live payload to be the exact JAA-08 released payload."""
+        try:
+            released_cv_sha256 = authority.artifacts.cv_pdf.pdf_sha256
+            released_name = authority.contact.full_name
+            released_email = authority.contact.email
+            released_phone = authority.contact.phone
+        except AttributeError as exc:
+            raise PersonioSchemaError(
+                "release authority lacks an exact contact/CV binding"
+            ) from exc
+        submitted_name = (
+            f"{application.contact.first_name} {application.contact.last_name}"
+        )
+        if (
+            application.cv_sha256 != released_cv_sha256
+            or submitted_name != released_name
+            or application.contact.email != released_email
+            or application.contact.phone != released_phone
+        ):
+            raise PersonioSchemaError(
+                "Personio payload differs from the exact JAA-08 release"
+            )
+
     def prepare_review(
         self,
         page: Page,
@@ -942,6 +970,7 @@ class PersonioLiveAdapter:
         network_trace: PersonioNetworkTrace,
         authority: JAA08ReleaseAuthority,
     ) -> OfficialSuccessReceipt:
+        self._assert_release_binding(application, authority)
         try:
             review = self.prepare_review(
                 page,

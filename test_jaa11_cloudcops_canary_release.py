@@ -241,16 +241,17 @@ def _inputs(
     )
 
 
-def test_currently_unmatched_mandatory_requirements_block_before_jaa06(tmp_path: Path) -> None:
+def test_unmatched_role_preferences_do_not_masquerade_as_release_gates(tmp_path: Path) -> None:
     result = prepare_cloudcops_release(_inputs(tmp_path, complete_evidence=False))
-    assert result.status == "blocked_unmatched_mandatory_requirements"
-    assert result.fit.status == "blocked"
-    assert {
+    assert result.status == "prepared_not_issued"
+    assert result.fit.status == "ready"
+    assert result.blocker_codes == ()
+    assert result.advisory_gap_codes == (
         "cloudcops-linux",
         "cloudcops-shell",
         "cloudcops-learning-curiosity",
-    }.issubset(result.blocker_codes)
-    assert result.publication is None
+    )
+    assert result.publication is not None
     assert result.issued is None
 
 
