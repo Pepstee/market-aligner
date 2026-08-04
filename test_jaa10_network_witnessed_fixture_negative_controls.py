@@ -452,8 +452,12 @@ def test_runtime_tmp_contract_literals_and_schema_versions_are_pinned() -> None:
         ROOT / "career_automation/network_witnessed_fixture.py"
     ).read_text(encoding="utf-8")
 
+    assert (
+        'os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", str(Path.home()))'
+        in witness_source
+    )
+    assert 'RUNTIME_TMP_HOME_ANCHOR = Path("/home/gutua")' not in witness_source
     for literal in (
-        'RUNTIME_TMP_HOME_ANCHOR = Path("/home/gutua")',
         "AF_UNIX_PATH_CAPACITY = 107",
         "CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES = 45",
         'b"jaa10-network-witnessed-runtime-tmp-path-v1\\0"',
