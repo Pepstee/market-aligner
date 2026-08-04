@@ -266,6 +266,24 @@ def test_symlink_evidence_root_is_rejected(
         profile._validate_evidence_hook(bad)
 
 
+def test_tool_hash_accepts_stable_executable_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "tool-target"
+    target.write_bytes(b"pinned-tool")
+    target.chmod(0o700)
+    link = tmp_path / "tool-link"
+    link.symlink_to(target.name)
+    assert profile._tool_hash(str(link)) == hashlib.sha256(b"pinned-tool").hexdigest()
+
+
+def test_tool_hash_rejects_broken_or_nonexecutable_target(tmp_path: Path) -> None:
+    broken = tmp_path / "broken"
+    broken.symlink_to("missing")
+    assert profile._tool_hash(str(broken)) is None
+    target = tmp_path / "not-executable"
+    target.write_bytes(b"tool")
+    assert profile._tool_hash(str(target)) is None
+
+
 def test_symlink_member_is_rejected(
     hooks: list[profile.EvidenceHook], tmp_path: Path
 ) -> None:

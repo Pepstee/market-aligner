@@ -251,6 +251,68 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _tool_hash(path: str) -> str | None:
+    """Hash stable executable bytes, including a stable lexical symlink."""
+    candidate = Path(path)
+    try:
+        lexical_before = candidate.lstat()
+        link_before = os.readlink(candidate) if candidate.is_symlink() else None
+        resolved_before = candidate.resolve(strict=True)
+        target_before = resolved_before.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISREG(target_before.st_mode) or not os.access(candidate, os.X_OK):
+        return None
+    try:
+        digest = _file_sha256(resolved_before)
+        lexical_after = candidate.lstat()
+        link_after = os.readlink(candidate) if candidate.is_symlink() else None
+        resolved_after = candidate.resolve(strict=True)
+        target_after = resolved_after.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    lexical_identity_before = (
+        lexical_before.st_dev,
+        lexical_before.st_ino,
+        lexical_before.st_mode,
+        lexical_before.st_size,
+        lexical_before.st_mtime_ns,
+        lexical_before.st_ctime_ns,
+    )
+    lexical_identity_after = (
+        lexical_after.st_dev,
+        lexical_after.st_ino,
+        lexical_after.st_mode,
+        lexical_after.st_size,
+        lexical_after.st_mtime_ns,
+        lexical_after.st_ctime_ns,
+    )
+    target_identity_before = (
+        target_before.st_dev,
+        target_before.st_ino,
+        target_before.st_mode,
+        target_before.st_size,
+        target_before.st_mtime_ns,
+        target_before.st_ctime_ns,
+    )
+    target_identity_after = (
+        target_after.st_dev,
+        target_after.st_ino,
+        target_after.st_mode,
+        target_after.st_size,
+        target_after.st_mtime_ns,
+        target_after.st_ctime_ns,
+    )
+    if (
+        lexical_identity_before != lexical_identity_after
+        or target_identity_before != target_identity_after
+        or link_before != link_after
+        or resolved_before != resolved_after
+    ):
+        return None
+    return digest
+
+
 def _absolute_lexical_directory(path: Path, label: str) -> Path:
     if not path.is_absolute() or "\0" in os.fspath(path):
         raise CertificationProfileError(f"{label} must be an absolute directory")
@@ -519,19 +581,13 @@ class HostCapabilities:
 
 
 def detect_host_capabilities() -> HostCapabilities:
-    def tool_hash(path: str) -> str | None:
-        candidate = Path(path)
-        if not candidate.is_file() or candidate.is_symlink():
-            return None
-        return _file_sha256(candidate)
-
     return HostCapabilities(
         system=platform.system(),
         machine=platform.machine(),
         has_proc=Path("/proc/self/status").is_file(),
-        unshare_sha256=tool_hash("/usr/bin/unshare"),
-        ip_sha256=tool_hash("/usr/sbin/ip"),
-        setpriv_sha256=tool_hash("/usr/bin/setpriv"),
+        unshare_sha256=_tool_hash("/usr/bin/unshare"),
+        ip_sha256=_tool_hash("/usr/sbin/ip"),
+        setpriv_sha256=_tool_hash("/usr/bin/setpriv"),
     )
 
 
