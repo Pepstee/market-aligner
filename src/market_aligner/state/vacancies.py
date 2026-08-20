@@ -462,6 +462,7 @@ def _convert_legacy_committed_refresh(value: Mapping[str, object]) -> dict[str, 
     basis = {
         **legacy_basis,
         "journal_migration": "market-aligner.vacancy-refresh-036d-to-current.v1",
+        "legacy_archive_row_sha256": _legacy_row_identity(value),
         "legacy_transition_sha256": legacy_transition_sha256,
     }
     receipt_basis_sha256 = _canonical_hash(basis)
@@ -526,6 +527,99 @@ def _verify_quarantined_legacy_row(
     return legacy
 
 
+def _validate_legacy_dispositions(
+    conn: sqlite3.Connection,
+    *,
+    job_key: str | None = None,
+) -> None:
+    archive_exists = conn.execute(
+        """SELECT 1 FROM sqlite_master WHERE type='table'
+           AND name='vacancy_refreshes_legacy_036d'"""
+    ).fetchone() is not None
+    clause = " WHERE job_key=?" if job_key is not None else ""
+    arguments: tuple[object, ...] = (job_key,) if job_key is not None else ()
+    quarantined = conn.execute(
+        """SELECT operation_id,refresh_id,job_key,expected_content_sha256,
+                  legacy_status,legacy_row_sha256
+           FROM vacancy_refresh_migration_quarantine""" + clause,
+        arguments,
+    ).fetchall()
+    if quarantined and not archive_exists:
+        raise VacancyRefreshConflict("legacy quarantine archive is unavailable")
+    quarantine_by_operation = {str(row[0]): row for row in quarantined}
+    if len(quarantine_by_operation) != len(quarantined):
+        raise VacancyRefreshConflict("legacy refresh has duplicate quarantine dispositions")
+    for row in quarantined:
+        _verify_quarantined_legacy_row(conn, row)
+
+    current_rows = conn.execute(
+        f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes"
+        + (" WHERE job_key=?" if job_key is not None else ""),
+        arguments,
+    ).fetchall()
+    current_by_operation = {str(row[1]): row for row in current_rows}
+    if len(current_by_operation) != len(current_rows):
+        raise VacancyRefreshConflict("legacy refresh has duplicate current dispositions")
+
+    archived_rows: list[tuple[object, ...]] = []
+    if archive_exists:
+        archived_rows = conn.execute(
+            f"SELECT {','.join(LEGACY_VACANCY_REFRESH_COLUMNS)} "
+            "FROM vacancy_refreshes_legacy_036d" + clause,
+            arguments,
+        ).fetchall()
+    archive_by_operation = {
+        str(row[1]): dict(zip(LEGACY_VACANCY_REFRESH_COLUMNS, row, strict=True))
+        for row in archived_rows
+    }
+    if len(archive_by_operation) != len(archived_rows):
+        raise VacancyRefreshConflict("legacy refresh archive has duplicate operations")
+
+    for operation_id, legacy in archive_by_operation.items():
+        current_row = current_by_operation.get(operation_id)
+        quarantine_row = quarantine_by_operation.get(operation_id)
+        if (current_row is None) == (quarantine_row is None):
+            raise VacancyRefreshConflict(
+                "legacy refresh must have exactly one current or quarantine disposition"
+            )
+        if quarantine_row is not None:
+            _verify_quarantined_legacy_row(conn, quarantine_row)
+            continue
+        assert current_row is not None
+        try:
+            expected = _convert_legacy_committed_refresh(legacy)
+        except (TypeError, ValueError, VacancyRefreshConflict) as exc:
+            raise VacancyRefreshConflict(
+                "legacy refresh current disposition is not representable"
+            ) from exc
+        current = _refresh_transition_from_row(current_row)
+        for key in (
+            "refresh_id", "operation_id", "context_sha256", "context", "job_key",
+            "expected_content_sha256", "status", "started_at", "old_content_sha256",
+            "old_fetched_at", "old_raw_bytes", "old_object_sha256",
+            "new_content_sha256", "new_fetched_at", "new_raw_bytes",
+            "new_object_sha256", "receipt_basis", "receipt_basis_sha256",
+            "transition_sha256",
+        ):
+            if current[key] != expected[key]:
+                raise VacancyRefreshConflict(
+                    "legacy refresh current disposition differs from archived authority"
+                )
+
+    for operation_id, row in current_by_operation.items():
+        current = _refresh_transition_from_row(row)
+        receipt = current.get("receipt_basis")
+        if (
+            isinstance(receipt, dict)
+            and receipt.get("journal_migration")
+            == "market-aligner.vacancy-refresh-036d-to-current.v1"
+            and operation_id not in archive_by_operation
+        ):
+            raise VacancyRefreshConflict(
+                "migrated vacancy refresh has no archived legacy authority"
+            )
+
+
 class JobDatabase:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -540,20 +634,7 @@ class JobDatabase:
     def _validate_vacancy_refresh_rows(conn: sqlite3.Connection) -> None:
         for row in conn.execute(f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes"):
             _refresh_transition_from_row(row)
-        quarantined = conn.execute(
-            """SELECT operation_id,refresh_id,job_key,expected_content_sha256,
-                      legacy_status,legacy_row_sha256
-               FROM vacancy_refresh_migration_quarantine ORDER BY operation_id"""
-        ).fetchall()
-        if quarantined:
-            archive = conn.execute(
-                """SELECT 1 FROM sqlite_master WHERE type='table'
-                   AND name='vacancy_refreshes_legacy_036d'"""
-            ).fetchone()
-            if archive is None:
-                raise VacancyRefreshConflict("legacy quarantine archive is unavailable")
-        for row in quarantined:
-            _verify_quarantined_legacy_row(conn, row)
+        _validate_legacy_dispositions(conn)
 
     @staticmethod
     def _migrate_vacancy_refresh_schema(conn: sqlite3.Connection) -> None:
@@ -765,6 +846,7 @@ class JobDatabase:
         """Load one exact refresh journal, rejecting operation-ID substitution."""
 
         with closing(self.connect()) as conn:
+            _validate_legacy_dispositions(conn)
             row = conn.execute(
                 f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE operation_id=?",
                 (operation_id,),
@@ -827,6 +909,7 @@ class JobDatabase:
         old_object_sha256 = hashlib.sha256(old_raw_bytes).hexdigest()
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            _validate_legacy_dispositions(conn, job_key=job_key)
             existing = conn.execute(
                 "SELECT context_sha256 FROM vacancy_refreshes WHERE operation_id=?",
                 (operation_id,),
@@ -921,6 +1004,7 @@ class JobDatabase:
         """Durably enter the irreducible official-fetch window before I/O."""
 
         with closing(self.connect()) as conn, conn:
+            _validate_legacy_dispositions(conn)
             row = conn.execute(
                 f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),
@@ -943,6 +1027,7 @@ class JobDatabase:
         """Seal an unresolved fetch window so it can never auto-refetch."""
 
         with closing(self.connect()) as conn, conn:
+            _validate_legacy_dispositions(conn)
             row = conn.execute(
                 f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),
@@ -973,6 +1058,7 @@ class JobDatabase:
         new_content_sha256 = raw_posting_content_sha256(new_raw)
         new_object_sha256 = hashlib.sha256(new_raw_bytes).hexdigest()
         with closing(self.connect()) as conn, conn:
+            _validate_legacy_dispositions(conn)
             current = conn.execute(
                 f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),
@@ -1012,6 +1098,7 @@ class JobDatabase:
         """Record that the journalled new response has a durable CAS object."""
 
         with closing(self.connect()) as conn, conn:
+            _validate_legacy_dispositions(conn)
             row = conn.execute(
                 f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),
@@ -1042,6 +1129,7 @@ class JobDatabase:
 
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            _validate_legacy_dispositions(conn)
             row = conn.execute(
                 f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),

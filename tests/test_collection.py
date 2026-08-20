@@ -438,6 +438,142 @@ class CollectionTests(unittest.TestCase):
             ):
                 JobDatabase(database.path)
 
+    def test_036d_disposition_orphan_duplicate_and_projection_substitution_fail_closed(
+        self,
+    ) -> None:
+        class ForbiddenAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, _job, live=False):
+                self.calls["fetch"] += 1
+                raise AssertionError("invalid legacy disposition must block before fetch")
+
+        for corruption in ("orphan", "duplicate", "projection", "archive"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                adapter = ForbiddenAdapter()
+                config, database, old_hash, calls, _factory = self._refresh_fixture(root, adapter)
+                legacy_status = "intent" if corruption == "orphan" else "committed"
+                legacy = self._install_legacy_refresh(
+                    root, config, database, old_hash, status=legacy_status
+                )
+                reopened = JobDatabase(database.path)
+                with sqlite3.connect(database.path) as conn:
+                    if corruption == "orphan":
+                        conn.execute(
+                            "DELETE FROM vacancy_refresh_migration_quarantine WHERE operation_id=?",
+                            (legacy["operation_id"],),
+                        )
+                    elif corruption == "duplicate":
+                        archived = conn.execute(
+                            """SELECT refresh_id,job_key,expected_content_sha256,status
+                               FROM vacancy_refreshes_legacy_036d WHERE operation_id=?""",
+                            (legacy["operation_id"],),
+                        ).fetchone()
+                        receipt = json.loads(conn.execute(
+                            "SELECT receipt_basis_json FROM vacancy_refreshes WHERE operation_id=?",
+                            (legacy["operation_id"],),
+                        ).fetchone()[0])
+                        conn.execute(
+                            """INSERT INTO vacancy_refresh_migration_quarantine(
+                                 operation_id,refresh_id,job_key,expected_content_sha256,
+                                 legacy_status,legacy_table,legacy_row_sha256,reason
+                               ) VALUES(?,?,?,?,?,'vacancy_refreshes_legacy_036d',?,?)""",
+                            (
+                                legacy["operation_id"], archived[0], archived[1], archived[2],
+                                archived[3], receipt["legacy_archive_row_sha256"],
+                                "injected duplicate disposition",
+                            ),
+                        )
+                    elif corruption == "archive":
+                        conn.execute(
+                            """UPDATE vacancy_refreshes_legacy_036d SET old_raw_bytes=?
+                               WHERE operation_id=?""",
+                            (b"substituted archive", legacy["operation_id"]),
+                        )
+                    else:
+                        row = conn.execute(
+                            """SELECT context_sha256,expected_content_sha256,job_key,
+                                      new_content_sha256,new_fetched_at,new_object_sha256,
+                                      old_content_sha256,old_fetched_at,old_object_sha256,
+                                      operation_id,refresh_id,started_at,receipt_basis_json
+                               FROM vacancy_refreshes WHERE operation_id=?""",
+                            (legacy["operation_id"],),
+                        ).fetchone()
+                        receipt = json.loads(row[12])
+                        receipt.pop("receipt_basis_sha256")
+                        receipt.pop("transition_sha256")
+                        receipt["legacy_archive_row_sha256"] = "f" * 64
+                        basis_sha = self._canonical_hash(receipt)
+                        transition_document = {
+                            "context_sha256": row[0],
+                            "expected_content_sha256": row[1],
+                            "job_key": row[2],
+                            "new_content_sha256": row[3],
+                            "new_fetched_at": row[4],
+                            "new_raw_object_sha256": row[5],
+                            "old_content_sha256": row[6],
+                            "old_fetched_at": row[7],
+                            "old_raw_object_sha256": row[8],
+                            "operation_id": row[9],
+                            "receipt_basis_sha256": basis_sha,
+                            "refresh_id": row[10],
+                            "schema_version": "market-aligner.vacancy-refresh-transition.v1",
+                            "started_at": row[11],
+                            "status": "committed",
+                        }
+                        transition_sha = self._canonical_hash(transition_document)
+                        resealed = {
+                            **receipt,
+                            "receipt_basis_sha256": basis_sha,
+                            "transition_sha256": transition_sha,
+                        }
+                        conn.execute(
+                            """UPDATE vacancy_refreshes SET receipt_basis_json=?,
+                                 receipt_basis_sha256=?,transition_sha256=?
+                               WHERE operation_id=?""",
+                            (
+                                json.dumps(resealed, sort_keys=True, separators=(",", ":")),
+                                basis_sha, transition_sha, legacy["operation_id"],
+                            ),
+                        )
+                    conn.commit()
+
+                if corruption == "orphan":
+                    context = {
+                        "config_sha256": "1" * 64,
+                        "expected_content_sha256": old_hash,
+                        "job_key": "injected:tenant:1",
+                        "operation_id": "blocked-after-quarantine-deletion",
+                        "schema_version": "market-aligner.vacancy-refresh-context.v1",
+                        "source_sha256": "2" * 64,
+                    }
+                    context_sha = self._canonical_hash(context)
+                    refresh_id = self._canonical_hash({
+                        "context_sha256": context_sha,
+                        "schema_version": "market-aligner.vacancy-refresh-id.v1",
+                    })
+                    with self.assertRaisesRegex(
+                        VacancyRefreshConflict, "exactly one current or quarantine"
+                    ):
+                        reopened.begin_vacancy_refresh(
+                            refresh_id=refresh_id,
+                            operation_id="blocked-after-quarantine-deletion",
+                            context_sha256=context_sha,
+                            context_document=context,
+                            job_key="injected:tenant:1",
+                            expected_content_sha256=old_hash,
+                            started_at="2026-08-21T00:00:00Z",
+                            old_raw_bytes=legacy["old_bytes"],
+                        )
+                else:
+                    with self.assertRaises(VacancyRefreshConflict):
+                        JobDatabase(database.path)
+                self.assertEqual(0, calls["fetch"])
+
     def test_refresh_objects_reject_symlinked_directory_and_object(self) -> None:
         class Adapter:
             board = "injected"
