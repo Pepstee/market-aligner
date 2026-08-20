@@ -4,6 +4,7 @@ from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from market_aligner.assessment.geography import (
     GeographicPreferencePolicy,
     classify_geographic_preference,
 )
+from market_aligner.assessment.viability import FirstJobScopePolicy
 from market_aligner.domain.contracts import JobUrl, RawPosting
 from market_aligner.llm.contracts import (
     EvidenceAlignment,
@@ -165,6 +167,58 @@ def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_processing_schema_migrates_legacy_rows_as_non_current_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "vacancies.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.executescript(
+                    """CREATE TABLE processing_jobs (
+                         profile_id TEXT NOT NULL, track TEXT NOT NULL,
+                         job_key TEXT NOT NULL, authority_sha256 TEXT NOT NULL,
+                         source_content_sha256 TEXT NOT NULL, status TEXT NOT NULL,
+                         lease_owner TEXT, lease_until REAL, result_json TEXT,
+                         error TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                         PRIMARY KEY(
+                           profile_id,track,job_key,authority_sha256,source_content_sha256
+                         )
+                       );
+                       CREATE INDEX processing_jobs_resume ON processing_jobs(
+                         profile_id,track,authority_sha256,status,lease_until
+                       );"""
+                )
+                connection.execute(
+                    """INSERT INTO processing_jobs(
+                         profile_id,track,job_key,authority_sha256,source_content_sha256,
+                         status,result_json
+                       ) VALUES(?,?,?,?,?,'completed',?)""",
+                    ("profile", "track", "board:1", "a" * 64, "b" * 64, '{"included":true}'),
+                )
+
+            database = JobDatabase(path)
+            with database.connect() as connection:
+                columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(processing_jobs)"
+                    )
+                }
+                migrated = connection.execute(
+                    """SELECT processing_config_sha256,status,result_json
+                       FROM processing_jobs"""
+                ).fetchone()
+            self.assertIn("processing_config_sha256", columns)
+            self.assertEqual(("0" * 64, "completed", '{"included":true}'), migrated)
+            self.assertEqual(
+                {"included": True},
+                database.reusable_processing_result(
+                    profile_id="profile",
+                    track="track",
+                    job_key="board:1",
+                    authority_sha256="a" * 64,
+                    source_content_sha256="b" * 64,
+                    processing_config_sha256="c" * 64,
+                ),
+            )
+
     def test_same_service_code_runs_multiple_profiles_and_new_user(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = ProfileStore(temporary)
@@ -232,6 +286,7 @@ class ServiceTests(unittest.TestCase):
                 profile_id=profile_id,
                 track="automation",
                 authority_sha256=str(first["evidence_authority_sha256"]),
+                processing_config_sha256=str(first["config_sha256"]),
             )
             self.assertEqual(64, len(str(completed_rows[0]["opportunity_axes"]["facts_sha256"])))
             self.assertEqual(
@@ -278,6 +333,7 @@ class ServiceTests(unittest.TestCase):
                     profile_id=profile_id,
                     track="automation",
                     authority_sha256=str(failed["evidence_authority_sha256"]),
+                    processing_config_sha256=str(failed["config_sha256"]),
                 ),
             )
 
@@ -608,6 +664,7 @@ class ServiceTests(unittest.TestCase):
                 profile_id=profile_id,
                 track="automation",
                 authority_sha256=str(receipt["evidence_authority_sha256"]),
+                processing_config_sha256=str(receipt["config_sha256"]),
             )
             self.assertEqual(2, len(results))
             self.assertTrue(all(not result["included"] for result in results))
@@ -620,6 +677,63 @@ class ServiceTests(unittest.TestCase):
                 == receipt["first_job_scope_policy_sha256"]
                 for result in results
             ))
+
+    def test_policy_change_reprocesses_stale_completed_row_from_semantic_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root, jobs=0)
+            database = JobDatabase(root / "state" / "vacancies.sqlite3")
+            row = JobUrl("workable", "senior", "https://jobs.example.test/senior")
+            database.upsert_discovered(row)
+            database.store_raw(
+                RawPosting(
+                    row.board,
+                    row.job_id,
+                    row.url,
+                    "2026-08-20T00:00:00Z",
+                    raw_json={
+                        "title": "Sr. Automation Engineer",
+                        "company": "Example",
+                        "location": "Remote UK",
+                        "description": "Build reliable Python automation.",
+                    },
+                )
+            )
+            config.write_text(
+                "processing:\n  shard_size: 10\n  lease_seconds: 60\n",
+                encoding="utf-8",
+            )
+            worker = FixtureSemanticWorker()
+            permissive = FirstJobScopePolicy(senior_title_patterns=(r"$^",))
+            stale = ProcessingService(root, worker, first_job_policy=permissive).process(
+                config, profile_id=profile_id, track="automation", worker_id="old-policy"
+            )
+            self.assertEqual((1, 1, 1), (
+                stale["ranked_count"], worker.extractions, worker.alignments,
+            ))
+
+            current = ProcessingService(root, worker).process(
+                config, profile_id=profile_id, track="automation", worker_id="new-policy"
+            )
+            self.assertNotEqual(stale["config_sha256"], current["config_sha256"])
+            self.assertEqual((1, 1), (worker.extractions, worker.alignments))
+            self.assertEqual((1, 0, 1, 0), (
+                current["shard_claimed"], current["ranked_count"],
+                current["semantic_extractions_reused"],
+                current["evidence_alignments_reused"],
+            ))
+            current_rows = database.completed_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=str(current["evidence_authority_sha256"]),
+                processing_config_sha256=str(current["config_sha256"]),
+            )
+            self.assertEqual(1, len(current_rows))
+            self.assertFalse(current_rows[0]["included"])
+            self.assertEqual(
+                "explicit_senior_title",
+                current_rows[0]["first_job_scope"]["reason"],
+            )
 
 
 if __name__ == "__main__":

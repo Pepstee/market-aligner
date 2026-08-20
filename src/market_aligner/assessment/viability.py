@@ -37,7 +37,8 @@ class FirstJobScopePolicy:
         r"\bspecialist\b", r"\btechnician\b", r"\bcoordinator\b",
     )
     senior_title_patterns: tuple[str, ...] = (
-        r"\bsenior\b", r"\bprincipal\b", r"\bstaff\b", r"\bdirector\b",
+        r"\bsenior\b", r"\bsr\.?(?=\s|$)", r"\bprincipal\b", r"\bstaff\b",
+        r"\bdirector\b",
         r"\blead\b.*\b(engineer|engineering|developer|architect|platform|software|technical|data|automation)\b",
         r"\b(engineer|engineering|developer|architect|platform|software|technical|data|automation)\b.*\blead\b",
     )
@@ -45,6 +46,13 @@ class FirstJobScopePolicy:
         r"\bsecurity clearance\b.*\b(required|eligible|eligibility|must|needed)\b",
         r"\b(required|must|need|eligible|eligibility)\b.*\bsecurity clearance\b",
         r"\b(sc|dv|nato)\s+(cleared|clearance)\b",
+        r"\b(already|currently|must)\s+(holds?|holding|held)\b.{0,80}\bsecurity clearance\b",
+        r"\balready[- ]held\b.{0,80}\bsecurity clearance\b",
+    )
+    citizenship_residence_requirement_patterns: tuple[str, ...] = (
+        r"\b(uk|british)\s+(citizens?|citizenship)\b",
+        r"\b\d+\s+years?(?:'|’)?\s+(continuous\s+)?(uk\s+)?residen(?:ce|cy)\b",
+        r"\bresiden(?:t|ce|cy)\s+in\s+(the\s+)?uk\b.{0,40}\b\d+\s+years?\b",
     )
 
     def __post_init__(self) -> None:
@@ -146,6 +154,12 @@ def assess_first_job_scope(
             return FirstJobScopeDecision(
                 vacancy.key, "exclude", "explicit_clearance_barrier", pattern,
                 facts_sha256, policy.policy_hash,
+            )
+    for pattern in policy.citizenship_residence_requirement_patterns:
+        if re.search(pattern, requirements, re.IGNORECASE):
+            return FirstJobScopeDecision(
+                vacancy.key, "exclude", "explicit_citizenship_or_residence_barrier",
+                pattern, facts_sha256, policy.policy_hash,
             )
     for pattern in policy.senior_title_patterns:
         if re.search(pattern, title, re.IGNORECASE):

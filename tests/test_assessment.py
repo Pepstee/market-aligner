@@ -121,6 +121,8 @@ class AssessmentTests(unittest.TestCase):
 
         for title in (
             "Senior Full Stack Developer",
+            "Sr. Full Stack Developer",
+            "Sr Platform Engineer",
             "Principal Platform Engineer",
             "Staff Software Engineer",
             "Engineering Lead",
@@ -131,12 +133,51 @@ class AssessmentTests(unittest.TestCase):
                 decision.decision, decision.reason,
             ))
 
+        for title in (
+            "SRE Engineer",
+            "CSR Automation Analyst",
+            "Research Engineer",
+            "User Support Engineer",
+        ):
+            self.assertNotEqual(
+                "explicit_senior_title",
+                assess_first_job_scope(vacancy(title=title)).reason,
+            )
+
         clearance = assess_first_job_scope(
             vacancy(title="Azure Platform Engineer - UK Security Clearance eligibility required")
         )
         self.assertEqual(("exclude", "explicit_clearance_barrier"), (
             clearance.decision, clearance.reason,
         ))
+        already_cleared = assess_first_job_scope(
+            vacancy(
+                title="Systems Engineer",
+                required_qualifications=(
+                    "Candidate already holds high-level UK security clearance",
+                ),
+            )
+        )
+        self.assertEqual(("exclude", "explicit_clearance_barrier"), (
+            already_cleared.decision, already_cleared.reason,
+        ))
+        citizenship = assess_first_job_scope(
+            vacancy(
+                title="Systems Engineer",
+                work_authorisation=("Must be a UK citizen",),
+            )
+        )
+        residence = assess_first_job_scope(
+            vacancy(
+                title="Systems Engineer",
+                required_qualifications=("10 years continuous UK residence",),
+            )
+        )
+        for decision in (citizenship, residence):
+            self.assertEqual(
+                ("exclude", "explicit_citizenship_or_residence_barrier"),
+                (decision.decision, decision.reason),
+            )
         task_leadership = assess_first_job_scope(
             vacancy(
                 title="Automation Engineer",

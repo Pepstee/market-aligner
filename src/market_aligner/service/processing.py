@@ -172,6 +172,49 @@ def _ranked(result_rows: list[dict[str, object]]) -> list[RankedVacancy]:
     return ranked
 
 
+_VACANCY_SEQUENCE_FIELDS = (
+    "responsibilities", "required_skills", "preferred_skills",
+    "required_qualifications", "preferred_qualifications", "work_authorisation",
+)
+
+
+def _cached_vacancy(
+    prior: Mapping[str, object] | None,
+    *,
+    job_key: str,
+    source_content_sha256: str,
+) -> Vacancy | None:
+    """Replay only an exact-content accepted vacancy from processing state."""
+
+    if not prior or not isinstance(prior.get("vacancy"), Mapping):
+        return None
+    value = dict(prior["vacancy"])  # type: ignore[arg-type]
+    for key in _VACANCY_SEQUENCE_FIELDS:
+        value[key] = tuple(value.get(key) or ())
+    vacancy = Vacancy(**value)
+    if vacancy.key != job_key or vacancy.source_content_sha256 != source_content_sha256:
+        raise ValueError("cached semantic vacancy differs from exact posting evidence")
+    return vacancy
+
+
+def _cached_alignment_axes(prior: Mapping[str, object] | None) -> tuple[float, float] | None:
+    """Recover authority-bound alignment axes from an accepted prior score."""
+
+    if not prior or prior.get("included") is not True:
+        return None
+    score_value = prior.get("score")
+    if not isinstance(score_value, Mapping):
+        return None
+    subscores = score_value.get("fit_subscores")
+    if not isinstance(subscores, Mapping):
+        return None
+    technical = float(subscores.get("technical_alignment", -1))
+    evidence_match = float(subscores.get("evidence_match", -1))
+    if not 0 <= technical <= 1 or not 0 <= evidence_match <= 1:
+        raise ValueError("cached evidence alignment axes are outside [0,1]")
+    return technical * 10, evidence_match * 10
+
+
 class ProcessingService:
     """One shard per invocation; repeated invocations resume until no work remains."""
 
@@ -258,6 +301,7 @@ class ProcessingService:
             profile_id=profile_id,
             track=track,
             authority_sha256=authority_sha256,
+            processing_config_sha256=config_sha256,
             worker_id=worker_id,
             limit=processing["shard_size"],
             lease_seconds=processing["lease_seconds"],
@@ -266,26 +310,47 @@ class ProcessingService:
             max_total=processing["max_total"],
         )
         completed = rejected = parked = errors = 0
+        extraction_reuses = alignment_reuses = 0
         for raw in claimed:
             try:
-                shell = vacancy_shell_from_raw(raw)
-                raw_context = {
-                    "board": raw.board,
-                    "content_sha256": raw.content_sha256,
-                    "deterministic_shell": asdict(shell),
-                    "fetched_at": raw.fetched_at,
-                    "job_id": raw.job_id,
-                    "raw_json": raw.raw_json,
-                    "raw_text": raw.raw_text,
-                    "url": raw.url,
-                }
-                extraction, extraction_receipt = self.worker.extract_vacancy(raw_context)
-                _receipt(
-                    extraction_receipt,
-                    task="semantic_vacancy_extraction",
-                    inputs=raw_context,
+                source_content_sha256 = str(raw.content_sha256)
+                prior = self.jobs.reusable_processing_result(
+                    profile_id=profile_id,
+                    track=track,
+                    job_key=raw.key,
+                    authority_sha256=authority_sha256,
+                    source_content_sha256=source_content_sha256,
+                    processing_config_sha256=config_sha256,
                 )
-                vacancy = accept_extraction(raw, extraction, extraction_receipt)
+                vacancy = _cached_vacancy(
+                    prior,
+                    job_key=raw.key,
+                    source_content_sha256=source_content_sha256,
+                )
+                extraction_receipt_value: object | None = None
+                if vacancy is not None:
+                    extraction_reuses += 1
+                    extraction_receipt_value = prior.get("extraction_receipt") if prior else None
+                else:
+                    shell = vacancy_shell_from_raw(raw)
+                    raw_context = {
+                        "board": raw.board,
+                        "content_sha256": raw.content_sha256,
+                        "deterministic_shell": asdict(shell),
+                        "fetched_at": raw.fetched_at,
+                        "job_id": raw.job_id,
+                        "raw_json": raw.raw_json,
+                        "raw_text": raw.raw_text,
+                        "url": raw.url,
+                    }
+                    extraction, extraction_receipt = self.worker.extract_vacancy(raw_context)
+                    _receipt(
+                        extraction_receipt,
+                        task="semantic_vacancy_extraction",
+                        inputs=raw_context,
+                    )
+                    vacancy = accept_extraction(raw, extraction, extraction_receipt)
+                    extraction_receipt_value = asdict(extraction_receipt)
                 geographic_preference = classify_geographic_preference(
                     location=vacancy.location,
                     remote_policy=vacancy.remote_policy,
@@ -301,36 +366,54 @@ class ProcessingService:
                         "viability": asdict(viability),
                         "vacancy": asdict(vacancy),
                     }
+                    if extraction_receipt_value is not None:
+                        result["extraction_receipt"] = extraction_receipt_value
                     if viability.decision != "include" or first_job_scope.decision == "exclude":
                         rejected += 1
                     else:
                         parked += 1
                 else:
-                    alignment_context = {
-                        "evidence_authority_sha256": authority_sha256,
-                        "profile": profile_context,
-                        "track": track,
-                        "vacancy": asdict(vacancy),
-                    }
-                    alignment, alignment_receipt = self.worker.align_evidence(alignment_context)
-                    _receipt(
-                        alignment_receipt,
-                        task="evidence_alignment",
-                        inputs=alignment_context,
-                    )
-                    if (
-                        alignment.profile_id != profile.profile_id
-                        or alignment.profile_version != profile.version
-                        or alignment.job_key != vacancy.key
-                    ):
-                        raise ValueError("evidence alignment identity differs from exact authorities")
-                    accepted: EvidenceAlignment = accept_alignment(
-                        alignment, evidence, alignment_receipt
-                    )
+                    reused_axes = _cached_alignment_axes(prior)
+                    alignment_receipt_value: object | None = None
+                    if reused_axes is not None:
+                        technical_alignment, evidence_match = reused_axes
+                        alignment_reuses += 1
+                        alignment_receipt_value = (
+                            prior.get("alignment_receipt") if prior else None
+                        )
+                    else:
+                        alignment_context = {
+                            "evidence_authority_sha256": authority_sha256,
+                            "profile": profile_context,
+                            "track": track,
+                            "vacancy": asdict(vacancy),
+                        }
+                        alignment, alignment_receipt = self.worker.align_evidence(
+                            alignment_context
+                        )
+                        _receipt(
+                            alignment_receipt,
+                            task="evidence_alignment",
+                            inputs=alignment_context,
+                        )
+                        if (
+                            alignment.profile_id != profile.profile_id
+                            or alignment.profile_version != profile.version
+                            or alignment.job_key != vacancy.key
+                        ):
+                            raise ValueError(
+                                "evidence alignment identity differs from exact authorities"
+                            )
+                        accepted: EvidenceAlignment = accept_alignment(
+                            alignment, evidence, alignment_receipt
+                        )
+                        technical_alignment = accepted.technical_alignment * 10
+                        evidence_match = accepted.evidence_match * 10
+                        alignment_receipt_value = asdict(alignment_receipt)
                     opportunity = derive_opportunity_axes(vacancy, self.opportunity_policy)
                     axes = AssessmentAxes(
-                        technical_alignment=accepted.technical_alignment * 10,
-                        evidence_match=accepted.evidence_match * 10,
+                        technical_alignment=technical_alignment,
+                        evidence_match=evidence_match,
                         market_demand=opportunity.market_demand,
                         barrier_to_entry=opportunity.barrier_to_entry,
                         growth_potential=opportunity.growth_potential,
@@ -344,8 +427,6 @@ class ProcessingService:
                         extraction_confidence=vacancy.extraction_confidence,
                     )
                     result = {
-                        "alignment_receipt": asdict(alignment_receipt),
-                        "extraction_receipt": asdict(extraction_receipt),
                         "first_job_scope": asdict(first_job_scope),
                         "geographic_preference": asdict(geographic_preference),
                         "included": True,
@@ -354,13 +435,24 @@ class ProcessingService:
                         "vacancy": asdict(vacancy),
                         "viability": asdict(viability),
                     }
+                    if alignment_receipt_value is not None:
+                        result["alignment_receipt"] = alignment_receipt_value
+                    if extraction_receipt_value is not None:
+                        result["extraction_receipt"] = extraction_receipt_value
                     completed += 1
+                result["processing_config_sha256"] = config_sha256
+                if prior is not None:
+                    result["semantic_cache"] = {
+                        "prior_result_sha256": _sha256(prior),
+                        "source_content_sha256": source_content_sha256,
+                    }
                 self.jobs.complete_processing(
                     profile_id=profile_id,
                     track=track,
                     job_key=raw.key,
                     authority_sha256=authority_sha256,
                     source_content_sha256=str(raw.content_sha256),
+                    processing_config_sha256=config_sha256,
                     worker_id=worker_id,
                     result=result,
                 )
@@ -372,6 +464,7 @@ class ProcessingService:
                     job_key=raw.key,
                     authority_sha256=authority_sha256,
                     source_content_sha256=str(raw.content_sha256),
+                    processing_config_sha256=config_sha256,
                     worker_id=worker_id,
                     error=repr(exc),
                 )
@@ -380,6 +473,7 @@ class ProcessingService:
             profile_id=profile_id,
             track=track,
             authority_sha256=authority_sha256,
+            processing_config_sha256=config_sha256,
             include_boards=processing["include_boards"],
             exclude_boards=processing["exclude_boards"],
             max_total=processing["max_total"],
@@ -395,6 +489,7 @@ class ProcessingService:
             profile_id=profile_id,
             track=track,
             authority_sha256=authority_sha256,
+            processing_config_sha256=config_sha256,
             include_boards=processing["include_boards"],
             exclude_boards=processing["exclude_boards"],
             max_total=processing["max_total"],
@@ -405,6 +500,7 @@ class ProcessingService:
             "config_sha256": config_sha256,
             "errors": errors,
             "evidence_authority_sha256": authority_sha256,
+            "evidence_alignments_reused": alignment_reuses,
             "geographic_preference_policy_sha256": geographic_policy.policy_hash,
             "first_job_scope_policy_sha256": first_job_policy.policy_hash,
             "included": completed,
@@ -423,6 +519,7 @@ class ProcessingService:
             "scope": scope,
             "scope_counts": scope_counts,
             "scope_sha256": scope_sha256,
+            "semantic_extractions_reused": extraction_reuses,
             "track": track,
             "worker_id": worker_id,
         }

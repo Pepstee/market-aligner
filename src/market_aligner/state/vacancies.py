@@ -15,6 +15,9 @@ from market_aligner.domain.contracts import JobUrl, RawPosting, read_jsonl, writ
 from market_aligner.state.importers import iter_raw_cache_roots
 
 
+LEGACY_PROCESSING_CONFIG_SHA256 = "0" * 64
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=30000;
@@ -46,17 +49,19 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
   job_key TEXT NOT NULL,
   authority_sha256 TEXT NOT NULL,
   source_content_sha256 TEXT NOT NULL,
+  processing_config_sha256 TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('leased','completed','failed')),
   lease_owner TEXT,
   lease_until REAL,
   result_json TEXT,
   error TEXT,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY(profile_id,track,job_key,authority_sha256,source_content_sha256),
+  PRIMARY KEY(
+    profile_id,track,job_key,authority_sha256,source_content_sha256,
+    processing_config_sha256
+  ),
   FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS processing_jobs_resume
-  ON processing_jobs(profile_id,track,authority_sha256,status,lease_until);
 """
 
 
@@ -73,6 +78,70 @@ class JobDatabase:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as conn, conn:
             conn.executescript(SCHEMA)
+            self._migrate_processing_identity(conn)
+
+    @staticmethod
+    def _migrate_processing_identity(conn: sqlite3.Connection) -> None:
+        """Bind legacy processing rows to an explicit, non-current config identity.
+
+        SQLite cannot extend a primary key in place.  Existing v1 rows are copied
+        intact under a reserved digest.  They remain available as semantic cache,
+        but no current-config report or resume query can mistake them for a fresh
+        decision.
+        """
+
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(processing_jobs)")
+        }
+        if "processing_config_sha256" in columns:
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS processing_jobs_resume ON processing_jobs(
+                     profile_id,track,authority_sha256,processing_config_sha256,
+                     status,lease_until
+                   )"""
+            )
+            return
+        conn.execute("DROP INDEX IF EXISTS processing_jobs_resume")
+        conn.execute("ALTER TABLE processing_jobs RENAME TO processing_jobs_v1")
+        conn.execute(
+            """CREATE TABLE processing_jobs (
+                 profile_id TEXT NOT NULL,
+                 track TEXT NOT NULL,
+                 job_key TEXT NOT NULL,
+                 authority_sha256 TEXT NOT NULL,
+                 source_content_sha256 TEXT NOT NULL,
+                 processing_config_sha256 TEXT NOT NULL,
+                 status TEXT NOT NULL CHECK(status IN ('leased','completed','failed')),
+                 lease_owner TEXT,
+                 lease_until REAL,
+                 result_json TEXT,
+                 error TEXT,
+                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY(
+                   profile_id,track,job_key,authority_sha256,source_content_sha256,
+                   processing_config_sha256
+                 ),
+                 FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE CASCADE
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO processing_jobs(
+                 profile_id,track,job_key,authority_sha256,source_content_sha256,
+                 processing_config_sha256,status,lease_owner,lease_until,result_json,
+                 error,updated_at
+               )
+               SELECT profile_id,track,job_key,authority_sha256,source_content_sha256,
+                      ?,status,lease_owner,lease_until,result_json,error,updated_at
+               FROM processing_jobs_v1""",
+            (LEGACY_PROCESSING_CONFIG_SHA256,),
+        )
+        conn.execute("DROP TABLE processing_jobs_v1")
+        conn.execute(
+            """CREATE INDEX processing_jobs_resume ON processing_jobs(
+                 profile_id,track,authority_sha256,processing_config_sha256,
+                 status,lease_until
+               )"""
+        )
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
@@ -377,6 +446,7 @@ class JobDatabase:
         profile_id: str,
         track: str,
         authority_sha256: str,
+        processing_config_sha256: str = LEGACY_PROCESSING_CONFIG_SHA256,
         worker_id: str,
         limit: int,
         lease_seconds: int = 900,
@@ -406,19 +476,27 @@ class JobDatabase:
                    LEFT JOIN processing_jobs q
                      ON q.profile_id=? AND q.track=? AND q.job_key=p.key
                     AND q.authority_sha256=? AND q.source_content_sha256=p.content_hash
+                    AND q.processing_config_sha256=?
                    WHERE p.fetch_status='fetched' AND p.content_hash IS NOT NULL
                      AND (q.status IS NULL OR q.status='failed'
                           OR (q.status='leased' AND q.lease_until<?))
                    ORDER BY p.key LIMIT ?""",
-                (*scope_params, profile_id, track, authority_sha256, now, limit),
+                (
+                    *scope_params, profile_id, track, authority_sha256,
+                    processing_config_sha256, now, limit,
+                ),
             ).fetchall()
             for row in rows:
                 conn.execute(
                     """INSERT INTO processing_jobs(
                          profile_id,track,job_key,authority_sha256,source_content_sha256,
-                         status,lease_owner,lease_until,result_json,error
-                       ) VALUES(?,?,?,?,?,'leased',?,?,NULL,NULL)
-                       ON CONFLICT(profile_id,track,job_key,authority_sha256,source_content_sha256)
+                         processing_config_sha256,status,lease_owner,lease_until,
+                         result_json,error
+                       ) VALUES(?,?,?,?,?,?,'leased',?,?,NULL,NULL)
+                       ON CONFLICT(
+                         profile_id,track,job_key,authority_sha256,source_content_sha256,
+                         processing_config_sha256
+                       )
                        DO UPDATE SET status='leased',lease_owner=excluded.lease_owner,
                          lease_until=excluded.lease_until,result_json=NULL,error=NULL,
                          updated_at=CURRENT_TIMESTAMP""",
@@ -428,6 +506,7 @@ class JobDatabase:
                         row[0],
                         authority_sha256,
                         row[7],
+                        processing_config_sha256,
                         worker_id,
                         lease_until,
                     ),
@@ -453,6 +532,7 @@ class JobDatabase:
         job_key: str,
         authority_sha256: str,
         source_content_sha256: str,
+        processing_config_sha256: str = LEGACY_PROCESSING_CONFIG_SHA256,
         worker_id: str,
         result: dict[str, object],
     ) -> None:
@@ -462,7 +542,8 @@ class JobDatabase:
                 """UPDATE processing_jobs SET status='completed',lease_owner=NULL,
                      lease_until=NULL,result_json=?,error=NULL,updated_at=CURRENT_TIMESTAMP
                    WHERE profile_id=? AND track=? AND job_key=? AND authority_sha256=?
-                     AND source_content_sha256=? AND status='leased' AND lease_owner=?""",
+                     AND source_content_sha256=? AND processing_config_sha256=?
+                     AND status='leased' AND lease_owner=?""",
                 (
                     payload,
                     profile_id,
@@ -470,6 +551,7 @@ class JobDatabase:
                     job_key,
                     authority_sha256,
                     source_content_sha256,
+                    processing_config_sha256,
                     worker_id,
                 ),
             )
@@ -484,6 +566,7 @@ class JobDatabase:
         job_key: str,
         authority_sha256: str,
         source_content_sha256: str,
+        processing_config_sha256: str = LEGACY_PROCESSING_CONFIG_SHA256,
         worker_id: str,
         error: str,
     ) -> None:
@@ -492,7 +575,8 @@ class JobDatabase:
                 """UPDATE processing_jobs SET status='failed',lease_owner=NULL,
                      lease_until=NULL,result_json=NULL,error=?,updated_at=CURRENT_TIMESTAMP
                    WHERE profile_id=? AND track=? AND job_key=? AND authority_sha256=?
-                     AND source_content_sha256=? AND status='leased' AND lease_owner=?""",
+                     AND source_content_sha256=? AND processing_config_sha256=?
+                     AND status='leased' AND lease_owner=?""",
                 (
                     error[:2000],
                     profile_id,
@@ -500,6 +584,7 @@ class JobDatabase:
                     job_key,
                     authority_sha256,
                     source_content_sha256,
+                    processing_config_sha256,
                     worker_id,
                 ),
             )
@@ -512,6 +597,7 @@ class JobDatabase:
         profile_id: str,
         track: str,
         authority_sha256: str,
+        processing_config_sha256: str = LEGACY_PROCESSING_CONFIG_SHA256,
         include_boards: Iterable[str] = (),
         exclude_boards: Iterable[str] = (),
         max_total: int | None = None,
@@ -528,9 +614,13 @@ class JobDatabase:
                    JOIN scoped p ON p.key=q.job_key
                     AND p.content_hash=q.source_content_sha256
                    WHERE q.profile_id=? AND q.track=? AND q.authority_sha256=?
+                     AND q.processing_config_sha256=?
                      AND q.status='completed' AND q.result_json IS NOT NULL
                    ORDER BY q.job_key""",
-                (*scope_params, profile_id, track, authority_sha256),
+                (
+                    *scope_params, profile_id, track, authority_sha256,
+                    processing_config_sha256,
+                ),
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
 
@@ -540,6 +630,7 @@ class JobDatabase:
         profile_id: str,
         track: str,
         authority_sha256: str,
+        processing_config_sha256: str = LEGACY_PROCESSING_CONFIG_SHA256,
         include_boards: Iterable[str] = (),
         exclude_boards: Iterable[str] = (),
         max_total: int | None = None,
@@ -576,9 +667,13 @@ class JobDatabase:
                       SUM(CASE WHEN q.status IS NULL OR q.status='failed'
                                 OR (q.status='leased' AND q.lease_until<?) THEN 1 ELSE 0 END)
                     FROM scoped p LEFT JOIN processing_jobs q
-                      ON q.profile_id=? AND q.track=? AND q.job_key=p.key
-                     AND q.authority_sha256=? AND q.source_content_sha256=p.content_hash""",
-                (*scope_params, now, now, profile_id, track, authority_sha256),
+                     ON q.profile_id=? AND q.track=? AND q.job_key=p.key
+                     AND q.authority_sha256=? AND q.source_content_sha256=p.content_hash
+                     AND q.processing_config_sha256=?""",
+                (
+                    *scope_params, now, now, profile_id, track, authority_sha256,
+                    processing_config_sha256,
+                ),
             ).fetchone()
         scoped = int(row[0] or 0)
         return {
@@ -600,6 +695,7 @@ class JobDatabase:
         profile_id: str,
         track: str,
         authority_sha256: str,
+        processing_config_sha256: str = LEGACY_PROCESSING_CONFIG_SHA256,
         include_boards: Iterable[str] = (),
         exclude_boards: Iterable[str] = (),
         max_total: int | None = None,
@@ -620,15 +716,50 @@ class JobDatabase:
                        JOIN scoped p ON p.key=q.job_key
                         AND p.content_hash=q.source_content_sha256
                        WHERE q.profile_id=? AND q.track=? AND q.authority_sha256=?
+                         AND q.processing_config_sha256=?
                          AND q.status='completed' AND q.result_json IS NOT NULL
                        ORDER BY q.job_key""",
-                    (*scope_params, profile_id, track, authority_sha256),
+                    (
+                        *scope_params, profile_id, track, authority_sha256,
+                        processing_config_sha256,
+                    ),
                 ).fetchall()
                 yield [json.loads(row[0]) for row in rows]
                 conn.commit()
             except BaseException:
                 conn.rollback()
                 raise
+
+    def reusable_processing_result(
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        job_key: str,
+        authority_sha256: str,
+        source_content_sha256: str,
+        processing_config_sha256: str,
+    ) -> dict[str, object] | None:
+        """Return a prior exact-evidence result from another config identity.
+
+        The caller must re-run all deterministic policy decisions.  This method
+        only avoids repeating already accepted semantic extraction/alignment.
+        """
+
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """SELECT result_json FROM processing_jobs
+                   WHERE profile_id=? AND track=? AND job_key=?
+                     AND authority_sha256=? AND source_content_sha256=?
+                     AND processing_config_sha256!=?
+                     AND status='completed' AND result_json IS NOT NULL
+                   ORDER BY updated_at DESC, processing_config_sha256 DESC LIMIT 1""",
+                (
+                    profile_id, track, job_key, authority_sha256,
+                    source_content_sha256, processing_config_sha256,
+                ),
+            ).fetchone()
+        return None if row is None else json.loads(row[0])
 
 
 def _processing_board_where(
