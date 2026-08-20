@@ -208,6 +208,30 @@ def _refresh_vacancy_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refresh_research_command(args: argparse.Namespace) -> int:
+    service = MarketAlignerService(args.data_home)
+    queued = service.assessments.refresh_completed_research_if_needed(
+        args.profile_id,
+        args.job_key,
+        collection_refresh_receipt_path=args.collection_refresh_receipt,
+        collector_database=service.jobs,
+    )
+    print(
+        json.dumps(
+            {
+                "application_authority": False,
+                "authority_scope": "research_requeue_only",
+                "job_key": args.job_key,
+                "profile_id": args.profile_id,
+                "queued": queued,
+                "research_completed": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _codex_gateway(args: argparse.Namespace) -> CodexSemanticGateway:
     return CodexSemanticGateway(
         model=args.model,
@@ -357,6 +381,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_data_home(refresh)
     refresh.set_defaults(handler=_refresh_vacancy_command)
+
+    refresh_research = commands.add_parser(
+        "refresh-research",
+        help="Admit one exact unchanged collection receipt and requeue stale research.",
+    )
+    refresh_research.add_argument("--profile-id", required=True)
+    refresh_research.add_argument("--job-key", required=True)
+    refresh_research.add_argument(
+        "--collection-refresh-receipt", type=Path, required=True
+    )
+    _add_data_home(refresh_research)
+    refresh_research.set_defaults(handler=_refresh_research_command)
 
     process = commands.add_parser(
         "process",

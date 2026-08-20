@@ -14,6 +14,10 @@ from typing import Any, Iterator
 
 from market_aligner.assessment.scoring import ScoreResult
 from market_aligner.profiler.schema import validate_profile_id
+from market_aligner.state.vacancies import (
+    JobDatabase,
+    VerifiedVacancyRefreshReceipt,
+)
 
 from .models import (
     RESEARCH_ARCHIVE_ROOT_POLICY_SHA256,
@@ -698,11 +702,30 @@ class AssessmentStore:
             return False
 
     def refresh_completed_research_if_needed(
-        self, profile_id: str, job_key: str
+        self,
+        profile_id: str,
+        job_key: str,
+        *,
+        collection_refresh_receipt_path: str | Path | None = None,
+        collector_database: JobDatabase | None = None,
     ) -> bool:
-        """Requeue completed research only when its current v2 evidence is invalid."""
+        """Requeue invalid v2 evidence or admit one exact unchanged refresh."""
 
         validate_profile_id(profile_id)
+        if (collection_refresh_receipt_path is None) != (collector_database is None):
+            raise ValueError(
+                "collection refresh admission requires both receipt and collector database"
+            )
+        if collection_refresh_receipt_path is not None:
+            if type(collector_database) is not JobDatabase:
+                raise TypeError("collection refresh requires the canonical JobDatabase")
+            assert collector_database is not None
+            return self._requeue_from_unchanged_collection_refresh(
+                profile_id,
+                job_key,
+                receipt_path=Path(collection_refresh_receipt_path),
+                collector_database=collector_database,
+            )
         with self.transaction() as connection:
             row = connection.execute(
                 """SELECT q.status,q.job_key,a.title,a.company,a.url,
@@ -774,6 +797,149 @@ class AssessmentStore:
                 ),
             )
             return True
+
+    def _requeue_from_unchanged_collection_refresh(
+        self,
+        profile_id: str,
+        job_key: str,
+        *,
+        receipt_path: Path,
+        collector_database: JobDatabase,
+    ) -> bool:
+        """Atomically bind a locked collector snapshot to the research requeue."""
+
+        expected_collector = (self.data_home / "state" / "vacancies.sqlite3").absolute()
+        supplied_collector = collector_database.path.absolute()
+        if supplied_collector != expected_collector:
+            raise ValueError("collector database is outside the assessment data home")
+        connection = self.connect()
+        try:
+            connection.execute("ATTACH DATABASE ? AS collector", (str(expected_collector),))
+            attached = {
+                str(row[1]): Path(str(row[2])).absolute()
+                for row in connection.execute("PRAGMA database_list")
+            }
+            if attached.get("collector") != expected_collector:
+                raise ValueError("attached collector database identity differs")
+            # BEGIN IMMEDIATE reserves both the assessment and attached collector
+            # databases.  No collector writer can change the row between exact
+            # verification and the assessment-side commit.
+            connection.execute("BEGIN IMMEDIATE")
+            verified = collector_database.verify_vacancy_refresh_receipt(
+                receipt_path,
+                job_key=job_key,
+                connection=connection,
+                schema="collector",
+            )
+            row = connection.execute(
+                """SELECT q.status,q.job_key,a.state,
+                          p.source_content_sha256,
+                          p.receipt_sha256 AS promotion_receipt_sha256,
+                          d.dossier_hash
+                   FROM employer_research_queue q JOIN assessments a
+                     ON a.profile_id=q.profile_id AND a.job_key=q.job_key
+                   LEFT JOIN assessment_promotions p
+                     ON p.profile_id=q.profile_id AND p.job_key=q.job_key
+                   LEFT JOIN employer_dossiers d
+                     ON d.profile_id=q.profile_id AND d.job_key=q.job_key
+                   WHERE q.profile_id=? AND q.job_key=?""",
+                (profile_id, job_key),
+            ).fetchone()
+            if row is None:
+                raise KeyError((profile_id, job_key))
+            if (
+                verified.changed
+                or verified.old_content_sha256 != verified.new_content_sha256
+            ):
+                raise ValueError(
+                    "changed vacancy content requires assessment promotion supersession"
+                )
+            promotion_source = row["source_content_sha256"]
+            if (
+                promotion_source is None
+                or promotion_source != verified.old_content_sha256
+                or promotion_source != verified.new_content_sha256
+            ):
+                raise ValueError(
+                    "refresh content differs from the current assessment promotion"
+                )
+            event_key = (
+                f"research-collection-refresh:{profile_id}:{job_key}:"
+                f"{verified.transition_sha256}"
+            )
+            if connection.execute(
+                "SELECT 1 FROM assessment_events WHERE idempotency_key=?", (event_key,)
+            ).fetchone() is not None:
+                connection.rollback()
+                return False
+            if row["status"] != "completed":
+                raise ValueError(
+                    "collection refresh can requeue only completed employer research"
+                )
+
+            connection.execute(
+                """UPDATE employer_research_queue SET status='queued',
+                     available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,
+                     last_error=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE profile_id=? AND job_key=? AND status='completed'""",
+                (
+                    "canonical vacancy fetched_at changed under unchanged content",
+                    profile_id,
+                    job_key,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM employer_research_evidence WHERE profile_id=? AND job_key=?",
+                (profile_id, job_key),
+            )
+            connection.execute(
+                """UPDATE assessments SET state='employer_research_queued',
+                     updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND job_key=?""",
+                (profile_id, job_key),
+            )
+            payload = {
+                "collection_context_sha256": verified.context_sha256,
+                "collection_operation_id": verified.operation_id,
+                "collection_receipt_file_sha256": verified.receipt_file_sha256,
+                "collection_receipt_sha256": verified.receipt_sha256,
+                "collection_refresh_id": verified.refresh_id,
+                "collection_transition_sha256": verified.transition_sha256,
+                "new_fetched_at": verified.new_fetched_at,
+                "new_raw_object_sha256": verified.new_raw_object_sha256,
+                "prior_dossier_hash": row["dossier_hash"],
+                "promotion_receipt_sha256": row["promotion_receipt_sha256"],
+                "source_content_sha256": promotion_source,
+            }
+            connection.execute(
+                """INSERT INTO assessment_events(
+                     profile_id,job_key,event_type,actor_kind,payload_json,idempotency_key
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    profile_id,
+                    job_key,
+                    "employer_research_collection_refresh_queued",
+                    "deterministic",
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    event_key,
+                ),
+            )
+            # A second call through the same canonical verifier occurs while the
+            # collector reservation is still held and before assessment commit.
+            revalidated = collector_database.verify_vacancy_refresh_receipt(
+                receipt_path,
+                job_key=job_key,
+                connection=connection,
+                schema="collector",
+            )
+            if revalidated != verified:
+                raise ValueError("collector refresh changed during assessment admission")
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def complete_research(
         self,

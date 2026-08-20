@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import stat
 import time
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping
@@ -31,6 +34,53 @@ class VacancyRefreshConflict(RuntimeError):
 
 class VacancyRefreshIndeterminate(VacancyRefreshConflict):
     """An official fetch may have occurred but no exact response was persisted."""
+
+
+@dataclass(frozen=True)
+class VerifiedVacancyRefreshReceipt:
+    """Exact, non-authoritative evidence for one committed collector refresh."""
+
+    job_key: str
+    changed: bool
+    old_content_sha256: str
+    new_content_sha256: str
+    old_fetched_at: str
+    new_fetched_at: str
+    operation_id: str
+    refresh_id: str
+    context_sha256: str
+    transition_sha256: str
+    receipt_sha256: str
+    receipt_file_sha256: str
+    receipt_path: Path
+    new_raw_object_sha256: str
+
+
+def _read_exact_private_file(path: Path, *, label: str) -> bytes:
+    """Read an owner-private regular file without following its final symlink."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise VacancyRefreshConflict(f"{label} is unavailable or unsafe") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise VacancyRefreshConflict(f"{label} metadata is unsafe")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 def raw_posting_content_sha256(row: RawPosting) -> str:
@@ -836,6 +886,150 @@ class JobDatabase:
         if job.key != key:
             raise ValueError(f"stored vacancy identity does not match key: {key}")
         return job, str(row[4]), str(row[5])
+
+    def verify_vacancy_refresh_receipt(
+        self,
+        receipt_path: str | Path,
+        *,
+        job_key: str,
+        connection: sqlite3.Connection | None = None,
+        schema: str = "main",
+    ) -> VerifiedVacancyRefreshReceipt:
+        """Verify one exact external receipt against its journal, CAS, and current row.
+
+        A caller may supply a connection with this collector database attached as
+        ``collector``.  That seam lets another SQLite store hold a write-reserving
+        transaction over both databases while this method performs the canonical
+        collector revalidation.
+        """
+
+        if schema not in {"main", "collector"}:
+            raise ValueError("collector verification schema is unsupported")
+        if not job_key or ":" not in job_key:
+            raise ValueError("refresh receipt requires a board-qualified job key")
+        data_home = self.path.parent.parent.absolute()
+        expected_directory = data_home / "state" / "collection-refresh-receipts"
+        supplied = Path(receipt_path)
+        absolute = supplied if supplied.is_absolute() else supplied.absolute()
+        if absolute.parent != expected_directory or absolute.name in {"", ".", ".."}:
+            raise VacancyRefreshConflict(
+                "refresh receipt path is outside the canonical external data home"
+            )
+        for directory in (data_home, data_home / "state", expected_directory):
+            try:
+                metadata = directory.lstat()
+            except OSError as exc:
+                raise VacancyRefreshConflict(
+                    "refresh receipt ancestor is unavailable"
+                ) from exc
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise VacancyRefreshConflict("refresh receipt ancestor is unsafe")
+        receipt_bytes = _read_exact_private_file(absolute, label="refresh receipt")
+        try:
+            receipt = json.loads(receipt_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise VacancyRefreshConflict("refresh receipt is not canonical JSON") from exc
+        if not isinstance(receipt, dict):
+            raise VacancyRefreshConflict("refresh receipt is not an object")
+        canonical_receipt = json.dumps(
+            receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        if canonical_receipt != receipt_bytes:
+            raise VacancyRefreshConflict("refresh receipt bytes are not canonical")
+        body = dict(receipt)
+        receipt_sha256 = body.pop("receipt_sha256", None)
+        if not isinstance(receipt_sha256, str) or _canonical_hash(body) != receipt_sha256:
+            raise VacancyRefreshConflict("refresh receipt identity differs")
+        if absolute.name != f"{receipt_sha256}.json":
+            raise VacancyRefreshConflict("refresh receipt filename differs from identity")
+        if (
+            receipt.get("schema_version")
+            != "market-aligner.vacancy-refresh-receipt.v2"
+            or receipt.get("job_key") != job_key
+            or receipt.get("application_authority") is not False
+            or receipt.get("authority_scope") != "collection_only"
+            or type(receipt.get("changed")) is not bool
+        ):
+            raise VacancyRefreshConflict("refresh receipt authority or vacancy differs")
+
+        owns_connection = connection is None
+        collector_connection = self.connect() if connection is None else connection
+        prefix = "" if schema == "main" else "collector."
+        try:
+            if schema == "main":
+                _validate_legacy_dispositions(collector_connection, job_key=job_key)
+            row = collector_connection.execute(
+                f"SELECT {_REFRESH_SELECT} FROM {prefix}vacancy_refreshes "
+                "WHERE operation_id=?",
+                (receipt.get("operation_id"),),
+            ).fetchone()
+            if row is None:
+                raise VacancyRefreshConflict("refresh receipt has no exact journal")
+            transition = _refresh_transition_from_row(row)
+            if transition["job_key"] != job_key or transition["status"] != "committed":
+                raise VacancyRefreshConflict("refresh journal is not the committed vacancy")
+            sealed = transition.get("receipt_basis")
+            if not isinstance(sealed, dict) or body != sealed:
+                raise VacancyRefreshConflict("refresh receipt differs from sealed journal")
+            posting = collector_connection.execute(
+                f"""SELECT board,job_id,url,fetched_at,raw_text,raw_json,
+                           content_hash,fetch_status
+                    FROM {prefix}postings WHERE key=?""",
+                (job_key,),
+            ).fetchone()
+            if posting is None or posting[7] != "fetched":
+                raise VacancyRefreshConflict("refresh vacancy is not currently fetched")
+            try:
+                raw_json = None if posting[5] is None else json.loads(str(posting[5]))
+            except json.JSONDecodeError as exc:
+                raise VacancyRefreshConflict("current collector raw JSON is invalid") from exc
+            current_raw = RawPosting(
+                board=str(posting[0]),
+                job_id=str(posting[1]),
+                url=str(posting[2]),
+                fetched_at=str(posting[3]),
+                raw_text=posting[4],
+                raw_json=raw_json,
+            )
+            if (
+                current_raw.key != job_key
+                or posting[6] != transition["new_content_sha256"]
+                or raw_posting_content_sha256(current_raw)
+                != transition["new_content_sha256"]
+                or raw_posting_bytes(current_raw) != transition["new_raw_bytes"]
+            ):
+                raise VacancyRefreshConflict(
+                    "current collector row differs from the sealed refresh"
+                )
+        finally:
+            if owns_connection:
+                collector_connection.close()
+
+        # Reuse the collector's accepted descriptor-relative CAS verifier; this
+        # avoids a second serialization or object-integrity implementation.
+        from market_aligner.collectors.engine import _verify_refresh_objects
+
+        _verify_refresh_objects(data_home, transition)
+        return VerifiedVacancyRefreshReceipt(
+            job_key=job_key,
+            changed=bool(receipt["changed"]),
+            old_content_sha256=str(receipt["old_content_sha256"]),
+            new_content_sha256=str(receipt["new_content_sha256"]),
+            old_fetched_at=str(receipt["old_fetched_at"]),
+            new_fetched_at=str(receipt["new_fetched_at"]),
+            operation_id=str(receipt["operation_id"]),
+            refresh_id=str(receipt["refresh_id"]),
+            context_sha256=str(receipt["context_sha256"]),
+            transition_sha256=str(receipt["transition_sha256"]),
+            receipt_sha256=receipt_sha256,
+            receipt_file_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+            receipt_path=absolute,
+            new_raw_object_sha256=str(receipt["new_raw_object_sha256"]),
+        )
 
     def refresh_transition(
         self,
