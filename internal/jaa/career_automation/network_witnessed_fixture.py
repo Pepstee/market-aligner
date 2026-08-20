@@ -31,6 +31,7 @@ from tracked_source_revision import source_content_revision
 
 from .application_artifacts import publish_application_artifacts
 from .application_compiler import CandidateContact, ProductionApplicationCompiler
+from cv_generation.service import validate_application_cv
 from .application_strategy import ApplicationStrategyStore
 from .ats_fixture import FixtureReceipt, FixtureVacancy, LocalATSFixture
 from .browser_executor import (
@@ -792,7 +793,7 @@ def _fit_database(
             statement=(
                 f"Fixture claim for {requirement.text}; {DISCLOSURE}."
             ),
-            claim_type="achievement",
+            claim_type=("capability", "project", "education")[(index - 1) % 3],
             state="evidence",
             source_identity=f"fixture:candidate-claim:{index}",
             valid_until=valid_until,
@@ -904,8 +905,10 @@ def _issued_release_inputs(
         as_of=as_of,
         contact=contact,
         questions=questions,
+        cv_layout="four_section",
     )
     artifacts = render_pdf_artifacts(source)
+    cv_constraint = validate_application_cv(source, artifacts)
     artifact_root = output_root / "published"
     publication = publish_application_artifacts(
         source,
@@ -970,6 +973,8 @@ def _issued_release_inputs(
         jurisdiction="GB",
         contract_type="employee",
         evaluated_at=as_of,
+        cv_constraint_receipt=cv_constraint.document(),
+        expected_cv_policy_sha256=cv_constraint.policy_sha256,
     )
     return (
         database,

@@ -64,6 +64,7 @@ from .release_gate import (
     ReleaseGateStore,
 )
 from .rendering import ApplicationArtifacts, render_pdf_artifacts
+from cv_generation.service import validate_application_cv
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -605,9 +606,9 @@ def _seed_candidate_graph(
             claim_type=(
                 "education"
                 if str(row["kind"]) == "credential"
-                else "skill"
-                if key in {"major_cloud", "git", "linux", "shell"}
                 else "capability"
+                if key in {"major_cloud", "git", "linux", "shell"}
+                else "project"
             ),
             state="evidence",
             source_identity=f"approved-packet:sha256:{packet_sha256}:{evidence_id}",
@@ -898,10 +899,12 @@ def prepare_cloudcops_release(
         as_of=as_of,
         contact=candidate_contact,
         questions=questions,
+        cv_layout="four_section",
     )
     if source.job_key != FROZEN_KEY or source.role_title != ROLE_TITLE:
         raise CloudCopsReleaseError("JAA-07 source differs from CloudCops authority")
     artifacts = render_pdf_artifacts(source)
+    cv_constraint = validate_application_cv(source, artifacts)
     publication = publish_application_artifacts(
         source,
         artifacts,
@@ -993,6 +996,8 @@ def prepare_cloudcops_release(
         jurisdiction="GB",
         contract_type="employee",
         evaluated_at=as_of,
+        cv_constraint_receipt=cv_constraint.document(),
+        expected_cv_policy_sha256=cv_constraint.policy_sha256,
     )
     return CloudCopsReleasePreparation(
         "issued_not_consumed",

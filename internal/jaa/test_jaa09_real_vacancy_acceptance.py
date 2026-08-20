@@ -64,6 +64,7 @@ from career_automation.release_gate import (
     ReleaseGateStore,
 )
 from career_automation.rendering import render_pdf_artifacts
+from cv_generation.service import validate_application_cv
 from test_jaa08_independent_acceptance import _fixture_date, _fixture_now
 from test_jaa09_independent_acceptance import (
     FORM_TOKEN,
@@ -284,7 +285,7 @@ def _real_fit_database(
                 f"Fixture claim for {requirement.text}; "
                 f"{CANDIDATE_FIXTURE_DISCLOSURE}."
             ),
-            claim_type="achievement",
+            claim_type=("capability", "project", "education")[(index - 1) % 3],
             state="evidence",
             source_identity=f"fixture:candidate-claim:{index}",
             valid_until=date.today().replace(
@@ -397,11 +398,13 @@ def _real_issued_release_inputs(
         as_of=as_of,
         contact=contact,
         questions=questions,
+        cv_layout="four_section",
     )
     assert source.job_key == authority.job_key
     assert source.role_title == authority.title
     assert source.company_name == authority.company
     artifacts = render_pdf_artifacts(source)
+    cv_constraint = validate_application_cv(source, artifacts)
     artifact_root = tmp_path / "published"
     publication = publish_application_artifacts(
         source,
@@ -470,6 +473,8 @@ def _real_issued_release_inputs(
         jurisdiction="GB",
         contract_type="employee",
         evaluated_at=as_of,
+        cv_constraint_receipt=cv_constraint.document(),
+        expected_cv_policy_sha256=cv_constraint.policy_sha256,
     )
     return (
         database,

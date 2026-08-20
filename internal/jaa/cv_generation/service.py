@@ -239,6 +239,31 @@ def _validate_artifact_cv(
     )
 
 
+def validate_application_cv(
+    source: ApplicationSource,
+    artifacts: ApplicationArtifacts,
+) -> CVConstraintReceipt:
+    """Validate the exact rendered CV and return its non-authorising receipt."""
+    verify_application_source(source)
+    verify_application_artifacts(artifacts)
+    if artifacts.source_id != source.source_id:
+        raise CVCompositionServiceError("rendered artifacts target another source")
+    facts = {row.sentence_id: row.text for row in source.facts}
+    return validate_generated_cv(
+        source_id=source.source_id,
+        candidate_name=source.contact.full_name,
+        candidate_city=source.contact.city,
+        cv_text=artifacts.editable.cv_text,
+        cv_sha256=artifacts.editable.cv_sha256,
+        sections={
+            section.heading: tuple(facts[value] for value in section.sentence_ids)
+            for section in source.cv_sections
+        },
+        rendered_pages=artifacts.cv_pdf.rendered_lines,
+        target_role_title=source.role_title,
+    )
+
+
 @dataclass(frozen=True)
 class CVCompositionOrchestrationResult:
     editorial_receipt: EditorialCompositionReceipt
@@ -502,5 +527,6 @@ __all__ = [
     "RecruiterAssessor",
     "build_candidate_application_package",
     "run_cv_composition_orchestration",
+    "validate_application_cv",
     "verify_poppler_cv_quality",
 ]

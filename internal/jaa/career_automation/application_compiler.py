@@ -643,9 +643,7 @@ def _validate_sections(
             or headings[0] != "Professional Summary"
             or len(set(headings)) != len(headings)
             or positions != tuple(sorted(positions))
-            or not any(
-                value in headings for value in ("Experience", "Skills", "Education")
-            )
+            or len(headings) < 2
         ):
             raise ValueError("cv sections are not canonical")
     elif headings != expected_headings:
@@ -1066,8 +1064,11 @@ class ProductionApplicationCompiler:
         as_of: date,
         contact: CandidateContact,
         questions: Mapping[str, tuple[str, str]] | None = None,
+        cv_layout: str = "legacy",
     ) -> ApplicationSource:
         """Compile routine prose without accepting caller-authored factual text."""
+        if cv_layout not in {"legacy", "four_section"}:
+            raise ValueError("unsupported CV layout")
         question_rows = questions or {}
         strategy = self.strategies.load(strategy_id, as_of=as_of)
         if strategy.decision != "apply_now":
@@ -1199,30 +1200,51 @@ class ProductionApplicationCompiler:
             for row in cv_facts
             if claim_type_by_sentence.get(row.sentence_id) == "education"
         )
-        skills = tuple(
+        capabilities = tuple(
             row.sentence_id
             for row in cv_facts
             if claim_type_by_sentence.get(row.sentence_id)
             in {"skill", "capability", "certification"}
         )
-        used_special = set((*education, *skills))
-        experience = tuple(
+        used_special = set((*education, *capabilities))
+        projects = tuple(
             row.sentence_id for row in cv_facts if row.sentence_id not in used_special
         )
-        if not experience:
-            experience = tuple(row.sentence_id for row in cv_facts)
-        cv_sections: list[DocumentSection] = [
-            DocumentSection(
-                "Professional Summary",
-                (cv_facts[0].sentence_id,),
-                (cv_slot.slot_id,),
+        if cv_layout == "four_section":
+            summary_id = (
+                projects[0]
+                if projects
+                else capabilities[0]
+                if capabilities
+                else education[0]
             )
-        ]
-        if education:
-            cv_sections.append(DocumentSection("Education", education))
-        cv_sections.append(DocumentSection("Experience", experience))
-        if skills:
-            cv_sections.append(DocumentSection("Skills", skills))
+            cv_sections: list[DocumentSection] = [
+                DocumentSection(
+                    "Professional Summary",
+                    (summary_id,),
+                    (cv_slot.slot_id,),
+                )
+            ]
+            if capabilities:
+                cv_sections.append(DocumentSection("Core Capabilities", capabilities))
+            if projects:
+                cv_sections.append(DocumentSection("Projects", projects))
+            if education:
+                cv_sections.append(DocumentSection("Education", education))
+        else:
+            experience = projects or tuple(row.sentence_id for row in cv_facts)
+            cv_sections = [
+                DocumentSection(
+                    "Professional Summary",
+                    (cv_facts[0].sentence_id,),
+                    (cv_slot.slot_id,),
+                )
+            ]
+            if education:
+                cv_sections.append(DocumentSection("Education", education))
+            cv_sections.append(DocumentSection("Experience", experience))
+            if capabilities:
+                cv_sections.append(DocumentSection("Skills", capabilities))
 
         answers: list[StructuredAnswer] = []
         for requirement_id, (question_id, question_text) in sorted(

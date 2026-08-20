@@ -69,6 +69,18 @@ def _digest(value: object, label: str) -> str:
     return value
 
 
+def _cv_layout(source: ApplicationSource) -> str:
+    """Select the deterministic compiler projection already bound by source."""
+    return (
+        "four_section"
+        if any(
+            section.heading == "Core Capabilities"
+            for section in source.cv_sections
+        )
+        else "legacy"
+    )
+
+
 def cv_constraint_release_binding(
     *,
     receipt_document: Mapping[str, object],
@@ -613,6 +625,7 @@ class ApplicationCompilationStore:
             as_of=as_of,
             contact=contact,
             questions=question_rows,
+            cv_layout=_cv_layout(source),
         )
         if expected_source != source:
             raise ValueError("application source differs from current authority")
@@ -1600,6 +1613,7 @@ class ReleaseGateStore:
                 as_of=evaluated_at,
                 contact=contact,
                 questions=(ApplicationCompilationStore._questions_document(questions)),
+                cv_layout=_cv_layout(source),
             )
             current_artifacts = render_pdf_artifacts(current_source)
             publication = verify_published_application_artifacts(
@@ -1964,6 +1978,7 @@ class ReleaseGateStore:
             as_of=consumed_utc.date(),
             contact=contact,
             questions=(ApplicationCompilationStore._questions_document(questions)),
+            cv_layout=_cv_layout(source),
         )
         current_artifacts = render_pdf_artifacts(current_source)
         publication = verify_published_application_artifacts(

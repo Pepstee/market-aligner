@@ -26,6 +26,7 @@ from playwright.sync_api import sync_playwright
 
 from .application_artifacts import publish_application_artifacts
 from .application_compiler import CandidateContact, ProductionApplicationCompiler
+from cv_generation.service import validate_application_cv
 from .application_strategy import ApplicationStrategyStore
 from .ats_fixture import FixtureReceipt, FixtureVacancy, LocalATSFixture
 from .browser_executor import (
@@ -540,7 +541,7 @@ def _fit_database(
                 f"Fixture claim for {requirement.text}; "
                 f"{CANDIDATE_FIXTURE_DISCLOSURE}."
             ),
-            claim_type="achievement",
+            claim_type=("capability", "project", "education")[(index - 1) % 3],
             state="evidence",
             source_identity=f"fixture:candidate-claim:{index}",
             valid_until=date.today().replace(year=date.today().year + 1).isoformat(),
@@ -640,7 +641,11 @@ def _release_inputs(work_root: Path, authority: FrozenVacancyAuthority):
         for index, requirement in enumerate(requirements, 1)
     }
     source = ProductionApplicationCompiler(database.path).compile(
-        strategy.strategy_id, as_of=as_of, contact=contact, questions=questions
+        strategy.strategy_id,
+        as_of=as_of,
+        contact=contact,
+        questions=questions,
+        cv_layout="four_section",
     )
     if (
         source.job_key != authority.job_key
@@ -649,6 +654,7 @@ def _release_inputs(work_root: Path, authority: FrozenVacancyAuthority):
     ):
         raise ValueError("compiled application differs from frozen vacancy")
     artifacts = render_pdf_artifacts(source)
+    cv_constraint = validate_application_cv(source, artifacts)
     artifact_root = work_root / "published"
     publication = publish_application_artifacts(
         source,
@@ -713,6 +719,8 @@ def _release_inputs(work_root: Path, authority: FrozenVacancyAuthority):
         jurisdiction="GB",
         contract_type="employee",
         evaluated_at=as_of,
+        cv_constraint_receipt=cv_constraint.document(),
+        expected_cv_policy_sha256=cv_constraint.policy_sha256,
     )
     return (
         database,
