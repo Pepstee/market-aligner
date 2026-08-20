@@ -39,7 +39,6 @@ from .market_aligner_handoff import (
 )
 from .migrations import apply_jaa_operational_migrations
 
-
 VERIFICATION_SCHEMA = "jaa.market-aligner-handoff-verification.v1"
 FORWARD_VALIDATION_SCHEMA = "jaa.market-aligner-forward-validation.v1"
 LEGACY_VERIFICATION_SCHEMA = "jaa.legacy-scored-jsonl-admission.v1"
@@ -205,8 +204,13 @@ class SelectionPolicyRules:
             self.maximum_vacancy_age_seconds,
             self.maximum_dossier_age_seconds,
         )
-        if any(type(value) is not int or not 0 <= value <= MAX_SAFE_INTEGER for value in values):
-            raise ValueError("selection-policy intervals must be safe non-negative integers")
+        if any(
+            type(value) is not int or not 0 <= value <= MAX_SAFE_INTEGER
+            for value in values
+        ):
+            raise ValueError(
+                "selection-policy intervals must be safe non-negative integers"
+            )
         if type(self.employer_dossier_required) is not bool:
             raise ValueError("selection-policy dossier requirement must be boolean")
 
@@ -281,17 +285,37 @@ class ProtectedLocalOutbox:
         repository_root: str | Path,
         expected_source_record_sha256: str,
         allowed_producer_commits: frozenset[str],
+        bundle_descriptor: int | None = None,
     ) -> None:
-        self.bundle_path = Path(bundle_path).resolve(strict=True)
+        supplied_bundle = Path(bundle_path)
+        self._bundle_descriptor = (
+            None if bundle_descriptor is None else os.dup(bundle_descriptor)
+        )
+        if self._bundle_descriptor is None:
+            self.bundle_path = supplied_bundle.resolve(strict=True)
+        else:
+            metadata = os.fstat(self._bundle_descriptor)
+            current = supplied_bundle.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_dev != current.st_dev
+                or metadata.st_ino != current.st_ino
+            ):
+                os.close(self._bundle_descriptor)
+                self._bundle_descriptor = None
+                raise HandoffAdmissionError(
+                    "outbox_permissions", "pinned bundle identity differs"
+                )
+            self.bundle_path = supplied_bundle.absolute()
         repository = Path(repository_root).resolve(strict=True)
         if repository == self.bundle_path or repository in self.bundle_path.parents:
             raise HandoffAdmissionError(
-                "outbox_location", "protected handoff bundle must be outside the repository"
+                "outbox_location",
+                "protected handoff bundle must be outside the repository",
             )
         _digest(expected_source_record_sha256, "expected source record")
-        if (
-            not allowed_producer_commits
-            or any(not _COMMIT.fullmatch(value) for value in allowed_producer_commits)
+        if not allowed_producer_commits or any(
+            not _COMMIT.fullmatch(value) for value in allowed_producer_commits
         ):
             raise HandoffAdmissionError(
                 "outbox_configuration", "producer commit allowlist is invalid"
@@ -301,24 +325,45 @@ class ProtectedLocalOutbox:
         self._assert_private_tree()
         self._manifest_bytes = self._read("manifest.json")
         self._manifest = self._decode(self._manifest_bytes, "outbox manifest")
-        if set(self._manifest) != {
-            "context_sha256",
-            "handoff_root_sha256",
-            "schema_version",
-            "source_record_sha256",
-        } or self._manifest.get("schema_version") != "market-aligner.protected-handoff-bundle.v1":
-            raise HandoffAdmissionError("outbox_manifest", "outbox manifest schema differs")
+        if (
+            set(self._manifest)
+            != {
+                "context_sha256",
+                "handoff_root_sha256",
+                "schema_version",
+                "source_record_sha256",
+            }
+            or self._manifest.get("schema_version")
+            != "market-aligner.protected-handoff-bundle.v1"
+        ):
+            raise HandoffAdmissionError(
+                "outbox_manifest", "outbox manifest schema differs"
+            )
         self._source_record_bytes = self._read("source-record.json")
-        if hashlib.sha256(self._source_record_bytes).hexdigest() != expected_source_record_sha256:
-            raise HandoffAdmissionError("outbox_pin", "source record differs from configured pin")
-        self._source_record = self._decode(self._source_record_bytes, "outbox source record")
+        if (
+            hashlib.sha256(self._source_record_bytes).hexdigest()
+            != expected_source_record_sha256
+        ):
+            raise HandoffAdmissionError(
+                "outbox_pin", "source record differs from configured pin"
+            )
+        self._source_record = self._decode(
+            self._source_record_bytes, "outbox source record"
+        )
         if self._manifest.get("source_record_sha256") != expected_source_record_sha256:
             raise HandoffAdmissionError("outbox_pin", "manifest source record differs")
-        if self._source_record.get("producer_commit_sha") not in allowed_producer_commits:
-            raise HandoffAdmissionError("outbox_producer", "producer commit is not allowed")
+        if (
+            self._source_record.get("producer_commit_sha")
+            not in allowed_producer_commits
+        ):
+            raise HandoffAdmissionError(
+                "outbox_producer", "producer commit is not allowed"
+            )
         rows = self._source_record.get("entries")
         if not isinstance(rows, list) or not rows:
-            raise HandoffAdmissionError("outbox_manifest", "source record has no entries")
+            raise HandoffAdmissionError(
+                "outbox_manifest", "source record has no entries"
+            )
         self._entries = {
             str(row["reference_key"]): dict(row)
             for row in rows
@@ -326,7 +371,9 @@ class ProtectedLocalOutbox:
             and set(row) == {"metadata_sha256", "object_sha256", "reference_key"}
         }
         if len(self._entries) != len(rows):
-            raise HandoffAdmissionError("outbox_manifest", "source record entries are ambiguous")
+            raise HandoffAdmissionError(
+                "outbox_manifest", "source record entries are ambiguous"
+            )
         identity = {
             "allowed_producer_commits": sorted(allowed_producer_commits),
             "source_record_sha256": expected_source_record_sha256,
@@ -336,7 +383,9 @@ class ProtectedLocalOutbox:
             canonical_json_bytes({"kind": "protected-local-outbox-context", **identity})
         ).hexdigest()
         self.resolver_identity_sha256 = hashlib.sha256(
-            canonical_json_bytes({"kind": "protected-local-outbox-resolver", **identity})
+            canonical_json_bytes(
+                {"kind": "protected-local-outbox-resolver", **identity}
+            )
         ).hexdigest()
 
     @staticmethod
@@ -349,14 +398,33 @@ class ProtectedLocalOutbox:
             raise HandoffAdmissionError("outbox_schema", f"{label} must be an object")
         return document
 
+    def close(self) -> None:
+        if self._bundle_descriptor is not None:
+            os.close(self._bundle_descriptor)
+            self._bundle_descriptor = None
+
     def _assert_private_tree(self) -> None:
+        if self._bundle_descriptor is not None:
+            metadata = os.fstat(self._bundle_descriptor)
+            if (
+                metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise HandoffAdmissionError(
+                    "outbox_permissions", "pinned bundle is not private"
+                )
+            return
         current = self.bundle_path
         while True:
             metadata = current.lstat()
             if current.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-                raise HandoffAdmissionError("outbox_permissions", "outbox path is not a real directory")
+                raise HandoffAdmissionError(
+                    "outbox_permissions", "outbox path is not a real directory"
+                )
             if stat.S_IMODE(metadata.st_mode) & 0o022:
-                raise HandoffAdmissionError("outbox_permissions", "outbox is group/other writable")
+                raise HandoffAdmissionError(
+                    "outbox_permissions", "outbox is group/other writable"
+                )
             if current == current.parent:
                 break
             # The bundle and its content-addressed parent are the protected
@@ -366,21 +434,98 @@ class ProtectedLocalOutbox:
             current = current.parent
 
     def _read(self, relative: str) -> bytes:
+        if self._bundle_descriptor is not None:
+            parts = Path(relative).parts
+            if not parts or len(parts) > 2 or ".." in parts:
+                raise HandoffAdmissionError(
+                    "outbox_permissions", "outbox relative path is invalid"
+                )
+            parent_descriptor = os.dup(self._bundle_descriptor)
+            try:
+                if len(parts) == 2:
+                    next_descriptor = os.open(
+                        parts[0],
+                        os.O_RDONLY
+                        | os.O_DIRECTORY
+                        | os.O_CLOEXEC
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_descriptor,
+                    )
+                    os.close(parent_descriptor)
+                    parent_descriptor = next_descriptor
+                    category = os.fstat(parent_descriptor)
+                    if (
+                        category.st_uid != os.geteuid()
+                        or stat.S_IMODE(category.st_mode) != 0o700
+                    ):
+                        raise HandoffAdmissionError(
+                            "outbox_permissions", "outbox category is not private"
+                        )
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                )
+                descriptor = os.open(parts[-1], flags, dir_fd=parent_descriptor)
+            except OSError as exc:
+                raise HandoffAdmissionError(
+                    "outbox_missing", f"outbox object is absent: {relative}"
+                ) from exc
+            finally:
+                os.close(parent_descriptor)
+            try:
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_nlink != 1
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                ):
+                    raise HandoffAdmissionError(
+                        "outbox_permissions", "outbox file is not private"
+                    )
+                chunks: list[bytes] = []
+                remaining = MAX_WIRE_BYTES + 1
+                while remaining:
+                    chunk = os.read(descriptor, min(remaining, 65536))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                value = b"".join(chunks)
+                if not value or len(value) > MAX_WIRE_BYTES:
+                    raise HandoffAdmissionError(
+                        "outbox_bytes", "outbox file size is invalid"
+                    )
+                return value
+            finally:
+                os.close(descriptor)
         path = self.bundle_path / relative
         if path.is_symlink():
-            raise HandoffAdmissionError("outbox_permissions", "outbox files cannot be symlinks")
+            raise HandoffAdmissionError(
+                "outbox_permissions", "outbox files cannot be symlinks"
+            )
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
             descriptor = os.open(path, flags)
         except OSError as exc:
-            raise HandoffAdmissionError("outbox_missing", f"outbox object is absent: {relative}") from exc
+            raise HandoffAdmissionError(
+                "outbox_missing", f"outbox object is absent: {relative}"
+            ) from exc
         try:
             metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
-                raise HandoffAdmissionError("outbox_permissions", "outbox file is not private")
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+            ):
+                raise HandoffAdmissionError(
+                    "outbox_permissions", "outbox file is not private"
+                )
             value = os.read(descriptor, MAX_WIRE_BYTES + 1)
             if not value or len(value) > MAX_WIRE_BYTES:
-                raise HandoffAdmissionError("outbox_bytes", "outbox file size is invalid")
+                raise HandoffAdmissionError(
+                    "outbox_bytes", "outbox file size is invalid"
+                )
             return value
         finally:
             os.close(descriptor)
@@ -389,14 +534,18 @@ class ProtectedLocalOutbox:
     def handoff_bytes(self) -> bytes:
         value = self._read("handoff.json")
         if hashlib.sha256(value).hexdigest() != self._manifest["handoff_root_sha256"]:
-            raise HandoffAdmissionError("outbox_handoff", "handoff differs from manifest")
+            raise HandoffAdmissionError(
+                "outbox_handoff", "handoff differs from manifest"
+            )
         return value
 
     @property
     def context_bytes(self) -> bytes:
         value = self._read("context.json")
         if hashlib.sha256(value).hexdigest() != self._manifest["context_sha256"]:
-            raise HandoffAdmissionError("outbox_context", "context differs from manifest")
+            raise HandoffAdmissionError(
+                "outbox_context", "context differs from manifest"
+            )
         return value
 
     def authenticate(
@@ -411,20 +560,33 @@ class ProtectedLocalOutbox:
     ) -> None:
         del evaluated_at
         if context_bytes is not None and handoff_bytes is not None:
-            if context_bytes != self.context_bytes or handoff_bytes != self.handoff_bytes:
-                raise HandoffAdmissionError("outbox_context", "admission bytes differ from pinned bundle")
+            if (
+                context_bytes != self.context_bytes
+                or handoff_bytes != self.handoff_bytes
+            ):
+                raise HandoffAdmissionError(
+                    "outbox_context", "admission bytes differ from pinned bundle"
+                )
             context = self._decode(context_bytes, "outbox context")
             basis = dict(context)
             proof = basis.pop("trust_proof_sha256", None)
             if (
-                context.get("source_record_sha256") != self.expected_source_record_sha256
-                or context.get("producer_commit_sha") not in self.allowed_producer_commits
+                context.get("source_record_sha256")
+                != self.expected_source_record_sha256
+                or context.get("producer_commit_sha")
+                not in self.allowed_producer_commits
                 or proof != hashlib.sha256(canonical_json_bytes(basis)).hexdigest()
             ):
                 raise HandoffAdmissionError("outbox_context", "context proof differs")
             return
-        if metadata_bytes is None or exact_bytes is None or admission_context_bytes is None:
-            raise HandoffAdmissionError("outbox_authentication", "authentication inputs are incomplete")
+        if (
+            metadata_bytes is None
+            or exact_bytes is None
+            or admission_context_bytes is None
+        ):
+            raise HandoffAdmissionError(
+                "outbox_authentication", "authentication inputs are incomplete"
+            )
         metadata = self._decode(metadata_bytes, "outbox reference metadata")
         context = self._decode(admission_context_bytes, "outbox context")
         basis = dict(metadata)
@@ -447,11 +609,15 @@ class ProtectedLocalOutbox:
         except KeyError as exc:
             raise FileNotFoundError(request.spec.reference_key) from exc
         if row["object_sha256"] != request.sha256:
-            raise HandoffAdmissionError("outbox_reference", "reference object digest differs")
+            raise HandoffAdmissionError(
+                "outbox_reference", "reference object digest differs"
+            )
         exact = self._read(f"objects/{row['object_sha256']}")
         metadata = self._read(f"metadata/{row['metadata_sha256']}")
         if hashlib.sha256(metadata).hexdigest() != row["metadata_sha256"]:
-            raise HandoffAdmissionError("outbox_reference", "reference metadata digest differs")
+            raise HandoffAdmissionError(
+                "outbox_reference", "reference metadata digest differs"
+            )
         return ResolvedReference(exact, metadata)
 
 
@@ -565,23 +731,31 @@ class VerifiedDownstreamResult:
 
 def _digest(value: object, label: str) -> str:
     if not isinstance(value, str) or not _SHA256.fullmatch(value):
-        raise HandoffAdmissionError("invalid_digest", f"{label} must be lowercase SHA-256")
+        raise HandoffAdmissionError(
+            "invalid_digest", f"{label} must be lowercase SHA-256"
+        )
     return value
 
 
 def _identity(value: object, label: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
-        raise HandoffAdmissionError("invalid_identity", f"{label} must be non-empty and trimmed")
+        raise HandoffAdmissionError(
+            "invalid_identity", f"{label} must be non-empty and trimmed"
+        )
     return value
 
 
 def _timestamp(value: object, label: str) -> tuple[str, datetime]:
     if not isinstance(value, str) or not _TIMESTAMP.fullmatch(value):
-        raise HandoffAdmissionError("invalid_timestamp", f"{label} must be whole-second UTC")
+        raise HandoffAdmissionError(
+            "invalid_timestamp", f"{label} must be whole-second UTC"
+        )
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
-        raise HandoffAdmissionError("invalid_timestamp", f"{label} is not a real instant") from exc
+        raise HandoffAdmissionError(
+            "invalid_timestamp", f"{label} is not a real instant"
+        ) from exc
     return value, parsed
 
 
@@ -589,21 +763,29 @@ def _handoff_timestamp(value: object, label: str) -> tuple[str, datetime]:
     if not isinstance(value, str) or not re.fullmatch(
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value
     ):
-        raise HandoffAdmissionError("invalid_timestamp", f"{label} must be RFC 3339 UTC")
+        raise HandoffAdmissionError(
+            "invalid_timestamp", f"{label} must be RFC 3339 UTC"
+        )
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
-        raise HandoffAdmissionError("invalid_timestamp", f"{label} is not a real instant") from exc
+        raise HandoffAdmissionError(
+            "invalid_timestamp", f"{label} is not a real instant"
+        ) from exc
     return value, parsed
 
 
 def _evaluation_time(value: datetime | None) -> tuple[str, datetime]:
     evaluated = value or datetime.now(timezone.utc).replace(microsecond=0)
     if evaluated.tzinfo is None or evaluated.utcoffset() is None:
-        raise HandoffAdmissionError("invalid_timestamp", "evaluation time must be timezone-aware")
+        raise HandoffAdmissionError(
+            "invalid_timestamp", "evaluation time must be timezone-aware"
+        )
     evaluated = evaluated.astimezone(timezone.utc)
     if evaluated.microsecond:
-        raise HandoffAdmissionError("invalid_timestamp", "evaluation time must be whole-second")
+        raise HandoffAdmissionError(
+            "invalid_timestamp", "evaluation time must be whole-second"
+        )
     return evaluated.strftime("%Y-%m-%dT%H:%M:%SZ"), evaluated
 
 
@@ -622,7 +804,9 @@ def _context_document(
     evaluated_at: str,
 ) -> tuple[dict[str, Any], str, str]:
     try:
-        decoded_context = decode_canonical_json(context_bytes, label="admission context")
+        decoded_context = decode_canonical_json(
+            context_bytes, label="admission context"
+        )
     except HandoffContractError as exc:
         raise HandoffAdmissionError(
             "context_bytes", exc.message, pointer=exc.pointer
@@ -643,29 +827,43 @@ def _context_document(
         "admission context",
     )
     if document["environment"] not in {"production", "synthetic"}:
-        raise HandoffAdmissionError("context_environment", "context environment is unsupported")
+        raise HandoffAdmissionError(
+            "context_environment", "context environment is unsupported"
+        )
     if document["trust_mode"] not in AUTHENTICATED_TRUST_MODES:
-        raise HandoffAdmissionError("context_trust_mode", "context trust mode is unsupported")
+        raise HandoffAdmissionError(
+            "context_trust_mode", "context trust mode is unsupported"
+        )
     if document["producer_product"] != "market-aligner":
-        raise HandoffAdmissionError("context_producer", "context producer must be market-aligner")
+        raise HandoffAdmissionError(
+            "context_producer", "context producer must be market-aligner"
+        )
     if not isinstance(document["producer_commit_sha"], str) or not _COMMIT.fullmatch(
         document["producer_commit_sha"]
     ):
-        raise HandoffAdmissionError("context_producer", "context producer commit is malformed")
+        raise HandoffAdmissionError(
+            "context_producer", "context producer commit is malformed"
+        )
     for key in ("handoff_root_sha256", "source_record_sha256", "trust_proof_sha256"):
         _digest(document[key], f"context {key}")
     _identity(document["trust_root_id"], "context trust root")
     _, issued = _timestamp(document["issued_at"], "context issued_at")
     _, admitted = _timestamp(evaluated_at, "admission time")
     if issued > admitted:
-        raise HandoffAdmissionError("context_future", "context was issued after admission")
+        raise HandoffAdmissionError(
+            "context_future", "context was issued after admission"
+        )
     if document["handoff_root_sha256"] != handoff.root_sha256:
-        raise HandoffAdmissionError("context_root_swap", "context binds a different handoff root")
+        raise HandoffAdmissionError(
+            "context_root_swap", "context binds a different handoff root"
+        )
     if (
         document["producer_product"] != handoff.payload["producer"]["product"]
         or document["producer_commit_sha"] != handoff.payload["producer"]["commit_sha"]
     ):
-        raise HandoffAdmissionError("context_producer_swap", "context producer differs from handoff")
+        raise HandoffAdmissionError(
+            "context_producer_swap", "context producer differs from handoff"
+        )
     authenticator_identity = _digest(
         getattr(authenticator, "authenticator_identity_sha256", None),
         "context authenticator identity",
@@ -691,7 +889,9 @@ def _candidate_intent(exact_bytes: bytes, handoff: ParsedHandoff) -> str:
         decoded_intent = decode_canonical_json(exact_bytes, label="candidate intent")
     except HandoffContractError as exc:
         raise HandoffAdmissionError(
-            "candidate_intent_bytes", exc.message, pointer=exc.pointer,
+            "candidate_intent_bytes",
+            exc.message,
+            pointer=exc.pointer,
             reference_key="candidate_intent",
         ) from exc
     document = _exact_mapping(
@@ -709,15 +909,21 @@ def _candidate_intent(exact_bytes: bytes, handoff: ParsedHandoff) -> str:
         "candidate intent",
     )
     if document["schema_version"] != CANDIDATE_INTENT_SCHEMA:
-        raise HandoffAdmissionError("candidate_intent_schema", "candidate intent version differs")
+        raise HandoffAdmissionError(
+            "candidate_intent_schema", "candidate intent version differs"
+        )
     if (
         type(document["authority_revision"]) is not int
         or not 1 <= document["authority_revision"] <= MAX_SAFE_INTEGER
     ):
-        raise HandoffAdmissionError("candidate_intent_revision", "authority revision is invalid")
+        raise HandoffAdmissionError(
+            "candidate_intent_revision", "authority revision is invalid"
+        )
     _handoff_timestamp(document["created_at"], "candidate intent created_at")
     if tuple(document["geography_priority"]) != _GEOGRAPHY:
-        raise HandoffAdmissionError("candidate_intent_geography", "normative geography order differs")
+        raise HandoffAdmissionError(
+            "candidate_intent_geography", "normative geography order differs"
+        )
     if (
         document["profile_id"] != handoff.payload["profile_id"]
         or document["profile_version"] != handoff.payload["profile_version"]
@@ -727,14 +933,20 @@ def _candidate_intent(exact_bytes: bytes, handoff: ParsedHandoff) -> str:
     if (
         type(roles) is not list
         or not roles
-        or any(not isinstance(row, str) or not row or row != row.strip() for row in roles)
+        or any(
+            not isinstance(row, str) or not row or row != row.strip() for row in roles
+        )
         or roles != sorted(set(roles))
     ):
-        raise HandoffAdmissionError("candidate_intent_roles", "role tracks are not sorted unique IDs")
+        raise HandoffAdmissionError(
+            "candidate_intent_roles", "role tracks are not sorted unique IDs"
+        )
     return _digest(document["authority_source_sha256"], "candidate authority source")
 
 
-def _reference_requests(handoff: ParsedHandoff, evaluated_at: str) -> list[ReferenceRequest]:
+def _reference_requests(
+    handoff: ParsedHandoff, evaluated_at: str
+) -> list[ReferenceRequest]:
     payload = handoff.payload
     vacancy = payload["vacancy"]
     snapshot = vacancy["vacancy_snapshot_sha256"]
@@ -745,7 +957,9 @@ def _reference_requests(handoff: ParsedHandoff, evaluated_at: str) -> list[Refer
         "vacancy_snapshot_sha256": snapshot,
     }
 
-    def request(key: str, digest: str, *, spec: ReferenceSpec | None = None) -> ReferenceRequest:
+    def request(
+        key: str, digest: str, *, spec: ReferenceSpec | None = None
+    ) -> ReferenceRequest:
         chosen = spec or REFERENCE_REGISTRY[key]
         return ReferenceRequest(
             sha256=digest,
@@ -758,8 +972,12 @@ def _reference_requests(handoff: ParsedHandoff, evaluated_at: str) -> list[Refer
     rows = [
         request("candidate_intent", payload["candidate_intent_sha256"]),
         request("evidence_ledger", payload["evidence_ledger_sha256"]),
-        request("eligibility.receipt", payload["eligibility"]["eligibility_receipt_sha256"]),
-        request("assessment.receipt", payload["assessment"]["assessment_receipt_sha256"]),
+        request(
+            "eligibility.receipt", payload["eligibility"]["eligibility_receipt_sha256"]
+        ),
+        request(
+            "assessment.receipt", payload["assessment"]["assessment_receipt_sha256"]
+        ),
         request(
             "assessment.scoring_parameters",
             payload["assessment"]["scoring_parameters_sha256"],
@@ -827,11 +1045,19 @@ def _verify_resolution(
         ) from exc
     if not isinstance(resolved, ResolvedReference):
         raise HandoffAdmissionError(
-            "resolver_contract", "resolver returned the wrong result type", reference_key=request.spec.reference_key
+            "resolver_contract",
+            "resolver returned the wrong result type",
+            reference_key=request.spec.reference_key,
         )
-    if type(resolved.exact_bytes) is not bytes or not resolved.exact_bytes or len(resolved.exact_bytes) > MAX_WIRE_BYTES:
+    if (
+        type(resolved.exact_bytes) is not bytes
+        or not resolved.exact_bytes
+        or len(resolved.exact_bytes) > MAX_WIRE_BYTES
+    ):
         raise HandoffAdmissionError(
-            "resolver_contract", "resolved object bytes are invalid", reference_key=request.spec.reference_key
+            "resolver_contract",
+            "resolved object bytes are invalid",
+            reference_key=request.spec.reference_key,
         )
     resolved_digest = hashlib.sha256(resolved.exact_bytes).hexdigest()
     if resolved_digest != request.sha256:
@@ -882,7 +1108,11 @@ def _verify_resolution(
     }
     for key, expected in exact_values.items():
         if metadata[key] != expected:
-            code = "reference_trust_root_swap" if key == "trust_root_id" else "reference_type_mismatch"
+            code = (
+                "reference_trust_root_swap"
+                if key == "trust_root_id"
+                else "reference_type_mismatch"
+            )
             raise HandoffAdmissionError(
                 code,
                 f"metadata {key} differs from the registry/request",
@@ -894,35 +1124,49 @@ def _verify_resolution(
             "metadata schema_version differs from the registry/request",
             reference_key=spec.reference_key,
         )
-    if type(metadata["subject"]) is not dict or metadata["subject"] != dict(request.expected_subject):
+    if type(metadata["subject"]) is not dict or metadata["subject"] != dict(
+        request.expected_subject
+    ):
         raise HandoffAdmissionError(
-            "reference_subject_swap", "metadata subject differs from the handoff", reference_key=spec.reference_key
+            "reference_subject_swap",
+            "metadata subject differs from the handoff",
+            reference_key=spec.reference_key,
         )
     issuer = _identity(metadata["issuer_id"], "resolver issuer")
     proof = _digest(metadata["trust_proof_sha256"], "resolver trust proof")
     issued_at, issued = _timestamp(metadata["issued_at"], "resolver issued_at")
-    _, handoff_time = _handoff_timestamp(request.handoff_created_at, "handoff created_at")
+    _, handoff_time = _handoff_timestamp(
+        request.handoff_created_at, "handoff created_at"
+    )
     _, evaluated = _timestamp(request.evaluated_at, "resolver evaluation time")
     valid_until: str | None
     if spec.freshness_class == "immutable":
         if metadata["valid_until"] is not None:
             raise HandoffAdmissionError(
-                "reference_validity", "immutable reference must have null valid_until", reference_key=spec.reference_key
+                "reference_validity",
+                "immutable reference must have null valid_until",
+                reference_key=spec.reference_key,
             )
         valid_until = None
         if issued > handoff_time or issued > evaluated:
             raise HandoffAdmissionError(
-                "reference_future", "immutable reference was issued after use", reference_key=spec.reference_key
+                "reference_future",
+                "immutable reference was issued after use",
+                reference_key=spec.reference_key,
             )
     else:
         if metadata["valid_until"] is None:
             raise HandoffAdmissionError(
-                "reference_validity", "freshness-bound reference lacks valid_until", reference_key=spec.reference_key
+                "reference_validity",
+                "freshness-bound reference lacks valid_until",
+                reference_key=spec.reference_key,
             )
         valid_until, valid = _timestamp(metadata["valid_until"], "resolver valid_until")
         if not (issued <= handoff_time < valid and issued <= evaluated < valid):
             raise HandoffAdmissionError(
-                "stale_reference", "reference is not current at handoff and evaluation", reference_key=spec.reference_key
+                "stale_reference",
+                "reference is not current at handoff and evaluation",
+                reference_key=spec.reference_key,
             )
     if authenticate:
         try:
@@ -1012,7 +1256,10 @@ def _verify_graph(
     # Consumer currentness/skew settings are separately configured and recorded;
     # they are not inferred from Market-owned inner bytes.
     rules = consumer_policy_rules
-    if rules.employer_dossier_required and handoff.payload["employer_dossier_sha256"] is None:
+    if (
+        rules.employer_dossier_required
+        and handoff.payload["employer_dossier_sha256"] is None
+    ):
         raise HandoffAdmissionError(
             "missing_dossier", "selection policy requires a current employer dossier"
         )
@@ -1088,7 +1335,10 @@ class HandoffAdmissionStore:
         self.context_authenticator = context_authenticator
         self.resolver = resolver
         self.current_time_witness = current_time_witness
-        if type(maximum_clock_skew_seconds) is not int or maximum_clock_skew_seconds < 0:
+        if (
+            type(maximum_clock_skew_seconds) is not int
+            or maximum_clock_skew_seconds < 0
+        ):
             raise ValueError("maximum clock skew is invalid")
         self.maximum_clock_skew_seconds = maximum_clock_skew_seconds
         self.consumer_policy_rules = consumer_policy_rules or SelectionPolicyRules(
@@ -1139,7 +1389,8 @@ class HandoffAdmissionStore:
             )
         except sqlite3.IntegrityError as exc:
             raise HandoffAdmissionError(
-                "time_replay", "authenticated current-time evidence was already consumed"
+                "time_replay",
+                "authenticated current-time evidence was already consumed",
             ) from exc
 
     def _root_replay(self, raw: bytes) -> HandoffAdmission | None:
@@ -1154,7 +1405,9 @@ class HandoffAdmissionStore:
         if row is None:
             return None
         if bytes(row["original_bytes"]) != raw:
-            raise HandoffAdmissionError("hash_collision", "stored root has different exact bytes")
+            raise HandoffAdmissionError(
+                "hash_collision", "stored root has different exact bytes"
+            )
         return self._stored_result(row, created=False)
 
     def admit_authenticated(
@@ -1178,7 +1431,9 @@ class HandoffAdmissionStore:
         try:
             handoff = parse_handoff(raw)
         except HandoffContractError as exc:
-            raise HandoffAdmissionError(exc.code, exc.message, pointer=exc.pointer) from exc
+            raise HandoffAdmissionError(
+                exc.code, exc.message, pointer=exc.pointer
+            ) from exc
         time_subject = self._time_subject(
             {
                 "admission_context_sha256": hashlib.sha256(context_bytes).hexdigest(),
@@ -1205,7 +1460,8 @@ class HandoffAdmissionStore:
         )
         if context["environment"] != time_evidence.environment:
             raise HandoffAdmissionError(
-                "time_environment", "admission context and current-time environment differ"
+                "time_environment",
+                "admission context and current-time environment differ",
             )
         graph = _verify_graph(
             handoff,
@@ -1260,13 +1516,17 @@ class HandoffAdmissionStore:
         try:
             handoff = parse_handoff(raw)
         except HandoffContractError as exc:
-            raise HandoffAdmissionError(exc.code, exc.message, pointer=exc.pointer) from exc
+            raise HandoffAdmissionError(
+                exc.code, exc.message, pointer=exc.pointer
+            ) from exc
         trust_root_id = _identity(
-            getattr(resolver, "synthetic_trust_root_id", None), "synthetic resolver trust root"
+            getattr(resolver, "synthetic_trust_root_id", None),
+            "synthetic resolver trust root",
         )
         if not trust_root_id.startswith("synthetic-"):
             raise HandoffAdmissionError(
-                "synthetic_trust_root", "direct fixture resolver must use a synthetic-* trust root"
+                "synthetic_trust_root",
+                "direct fixture resolver must use a synthetic-* trust root",
             )
         graph = _verify_graph(
             handoff,
@@ -1321,8 +1581,14 @@ class HandoffAdmissionStore:
         time_evidence: AuthenticatedTimeEvidence | None,
     ) -> HandoffAdmission:
         payload = handoff.payload
-        logical_json = canonical_json_bytes(handoff.logical_identity_document).decode("utf-8")
-        admission_kind = ADMISSION_KIND_V1 if handoff.strict_profile else ADMISSION_KIND_COMPATIBILITY
+        logical_json = canonical_json_bytes(handoff.logical_identity_document).decode(
+            "utf-8"
+        )
+        admission_kind = (
+            ADMISSION_KIND_V1
+            if handoff.strict_profile
+            else ADMISSION_KIND_COMPATIBILITY
+        )
         receipt_sha256 = hashlib.sha256(verification_receipt).hexdigest()
         connection = self._connect()
         try:
@@ -1333,7 +1599,9 @@ class HandoffAdmissionStore:
             ).fetchone()
             if existing_root is not None:
                 if bytes(existing_root["original_bytes"]) != handoff.original_bytes:
-                    raise HandoffAdmissionError("hash_collision", "root collision changed exact bytes")
+                    raise HandoffAdmissionError(
+                        "hash_collision", "root collision changed exact bytes"
+                    )
                 connection.commit()
                 return self._stored_result(existing_root, created=False)
             conflict = connection.execute(
@@ -1425,11 +1693,16 @@ class HandoffAdmissionStore:
                         reference.trust_proof_sha256,
                     ),
                 )
-            if connection.execute(
-                "UPDATE application_admissions SET sealed=1 WHERE application_id=?",
-                (handoff.application_id,),
-            ).rowcount != 1:
-                raise HandoffAdmissionError("persistence_failure", "admission could not be sealed")
+            if (
+                connection.execute(
+                    "UPDATE application_admissions SET sealed=1 WHERE application_id=?",
+                    (handoff.application_id,),
+                ).rowcount
+                != 1
+            ):
+                raise HandoffAdmissionError(
+                    "persistence_failure", "admission could not be sealed"
+                )
             connection.commit()
             row = connection.execute(
                 "SELECT * FROM application_admissions WHERE application_id=?",
@@ -1446,30 +1719,49 @@ class HandoffAdmissionStore:
             if winner is not None:
                 return winner
             raise HandoffAdmissionError(
-                "persistence_conflict", "concurrent admission won with conflicting immutable identity"
+                "persistence_conflict",
+                "concurrent admission won with conflicting immutable identity",
             ) from exc
         finally:
             connection.close()
 
     def admit_legacy_scored_jsonl(self, exact_line_bytes: bytes) -> HandoffAdmission:
         """Persist one exact legacy score row without fabricating v1 provenance."""
-        if type(exact_line_bytes) is not bytes or not exact_line_bytes or len(exact_line_bytes) > MAX_WIRE_BYTES:
-            raise HandoffAdmissionError("legacy_wire", "legacy score row must be non-empty exact bytes")
-        body = exact_line_bytes[:-1] if exact_line_bytes.endswith(b"\n") else exact_line_bytes
+        if (
+            type(exact_line_bytes) is not bytes
+            or not exact_line_bytes
+            or len(exact_line_bytes) > MAX_WIRE_BYTES
+        ):
+            raise HandoffAdmissionError(
+                "legacy_wire", "legacy score row must be non-empty exact bytes"
+            )
+        body = (
+            exact_line_bytes[:-1]
+            if exact_line_bytes.endswith(b"\n")
+            else exact_line_bytes
+        )
         if b"\n" in body or b"\r" in body:
-            raise HandoffAdmissionError("legacy_wire", "legacy adapter accepts exactly one JSONL row")
+            raise HandoffAdmissionError(
+                "legacy_wire", "legacy adapter accepts exactly one JSONL row"
+            )
         try:
             payload = decode_canonical_json(body, label="legacy scored JSONL row")
         except HandoffContractError as exc:
-            raise HandoffAdmissionError(exc.code, exc.message, pointer=exc.pointer) from exc
+            raise HandoffAdmissionError(
+                exc.code, exc.message, pointer=exc.pointer
+            ) from exc
         if type(payload) is not dict:
-            raise HandoffAdmissionError("legacy_schema", "legacy score row must be an object")
+            raise HandoffAdmissionError(
+                "legacy_schema", "legacy score row must be an object"
+            )
         if payload.get("schema_version") == HANDOFF_SCHEMA or set(payload) == {
             "payload",
             "payload_sha256",
             "schema_version",
         }:
-            raise HandoffAdmissionError("legacy_masquerade", "v1-shaped bytes cannot use legacy admission")
+            raise HandoffAdmissionError(
+                "legacy_masquerade", "v1-shaped bytes cannot use legacy admission"
+            )
         try:
             job = scored_job_from_payload(payload)
         except (TypeError, ValueError) as exc:
@@ -1496,7 +1788,9 @@ class HandoffAdmissionStore:
             ).fetchone()
             if existing is not None:
                 if bytes(existing["original_bytes"]) != exact_line_bytes:
-                    raise HandoffAdmissionError("hash_collision", "legacy digest collision changed bytes")
+                    raise HandoffAdmissionError(
+                        "hash_collision", "legacy digest collision changed bytes"
+                    )
                 connection.commit()
                 return self._stored_result(existing, created=False)
             connection.execute(
@@ -1542,13 +1836,16 @@ class HandoffAdmissionStore:
             )
             connection.commit()
             row = connection.execute(
-                "SELECT * FROM application_admissions WHERE application_id=?", (application_id,)
+                "SELECT * FROM application_admissions WHERE application_id=?",
+                (application_id,),
             ).fetchone()
             assert row is not None
             return self._stored_result(row, created=True)
         except sqlite3.IntegrityError as exc:
             connection.rollback()
-            raise HandoffAdmissionError("persistence_conflict", "legacy admission conflicts") from exc
+            raise HandoffAdmissionError(
+                "persistence_conflict", "legacy admission conflicts"
+            ) from exc
         finally:
             connection.close()
 
@@ -1559,13 +1856,21 @@ class HandoffAdmissionStore:
             admission_kind=str(row["admission_kind"]),
             environment=str(row["environment"]),
             authority_scope=str(row["authority_scope"]),
-            emission_profile=(None if row["emission_profile"] is None else str(row["emission_profile"])),
+            emission_profile=(
+                None
+                if row["emission_profile"] is None
+                else str(row["emission_profile"])
+            ),
             handoff_root_sha256=(
-                None if row["handoff_root_sha256"] is None else str(row["handoff_root_sha256"])
+                None
+                if row["handoff_root_sha256"] is None
+                else str(row["handoff_root_sha256"])
             ),
             job_key=str(row["job_key"]),
             profile_id=None if row["profile_id"] is None else str(row["profile_id"]),
-            profile_version=(None if row["profile_version"] is None else str(row["profile_version"])),
+            profile_version=(
+                None if row["profile_version"] is None else str(row["profile_version"])
+            ),
             vacancy_source_identity=str(row["vacancy_source_identity"]),
             verification_receipt_sha256=str(row["verification_receipt_sha256"]),
             created=created,
@@ -1574,10 +1879,13 @@ class HandoffAdmissionStore:
     def get(self, application_id: str) -> HandoffAdmission:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM application_admissions WHERE application_id=?", (application_id,)
+                "SELECT * FROM application_admissions WHERE application_id=?",
+                (application_id,),
             ).fetchone()
         if row is None:
-            raise HandoffAdmissionError("admission_missing", "application admission does not exist")
+            raise HandoffAdmissionError(
+                "admission_missing", "application admission does not exist"
+            )
         return self._stored_result(row, created=False)
 
     def reference_sha256(self, application_id: str, reference_key: str) -> str:
@@ -1607,22 +1915,36 @@ class HandoffAdmissionStore:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT * FROM application_admissions WHERE application_id=?", (application_id,)
+                "SELECT * FROM application_admissions WHERE application_id=?",
+                (application_id,),
             ).fetchone()
             if row is None:
-                raise HandoffAdmissionError("admission_missing", "application admission does not exist")
+                raise HandoffAdmissionError(
+                    "admission_missing", "application admission does not exist"
+                )
             receipt_bytes = bytes(row["verification_receipt_bytes"])
-            if hashlib.sha256(receipt_bytes).hexdigest() != row["verification_receipt_sha256"]:
-                raise HandoffAdmissionError("stored_verification_invalid", "receipt digest differs")
-            receipt = decode_canonical_json(receipt_bytes, label="stored verification receipt")
+            if (
+                hashlib.sha256(receipt_bytes).hexdigest()
+                != row["verification_receipt_sha256"]
+            ):
+                raise HandoffAdmissionError(
+                    "stored_verification_invalid", "receipt digest differs"
+                )
+            receipt = decode_canonical_json(
+                receipt_bytes, label="stored verification receipt"
+            )
             if row["admission_kind"] == ADMISSION_KIND_LEGACY:
                 if receipt.get("schema_version") != LEGACY_VERIFICATION_SCHEMA:
-                    raise HandoffAdmissionError("stored_verification_invalid", "legacy receipt version differs")
+                    raise HandoffAdmissionError(
+                        "stored_verification_invalid", "legacy receipt version differs"
+                    )
                 return self._stored_result(row, created=False)
             handoff = parse_handoff(bytes(row["original_bytes"]))
             expected = {
                 "application_id": handoff.application_id,
-                "logical_identity_json": canonical_json_bytes(handoff.logical_identity_document).decode("utf-8"),
+                "logical_identity_json": canonical_json_bytes(
+                    handoff.logical_identity_document
+                ).decode("utf-8"),
                 "logical_identity_sha256": handoff.logical_identity_sha256,
                 "handoff_root_sha256": handoff.root_sha256,
                 "payload_sha256": handoff.payload_sha256,
@@ -1630,11 +1952,16 @@ class HandoffAdmissionStore:
                 "sealed": 1,
             }
             if any(row[key] != value for key, value in expected.items()):
-                raise HandoffAdmissionError("stored_verification_invalid", "stored handoff binding differs")
-            if receipt.get("schema_version") != VERIFICATION_SCHEMA or receipt.get(
-                "handoff_root_sha256"
-            ) != handoff.root_sha256:
-                raise HandoffAdmissionError("stored_verification_invalid", "verification receipt root differs")
+                raise HandoffAdmissionError(
+                    "stored_verification_invalid", "stored handoff binding differs"
+                )
+            if (
+                receipt.get("schema_version") != VERIFICATION_SCHEMA
+                or receipt.get("handoff_root_sha256") != handoff.root_sha256
+            ):
+                raise HandoffAdmissionError(
+                    "stored_verification_invalid", "verification receipt root differs"
+                )
             reference_rows = connection.execute(
                 """SELECT reference_key,metadata_bytes,metadata_sha256
                    FROM application_admission_references
@@ -1642,10 +1969,14 @@ class HandoffAdmissionStore:
                 (application_id,),
             ).fetchall()
             if len(reference_rows) != row["reference_count"]:
-                raise HandoffAdmissionError("stored_verification_invalid", "reference set is incomplete")
+                raise HandoffAdmissionError(
+                    "stored_verification_invalid", "reference set is incomplete"
+                )
             receipt_references = receipt.get("references")
             if not isinstance(receipt_references, list):
-                raise HandoffAdmissionError("stored_verification_invalid", "receipt references are malformed")
+                raise HandoffAdmissionError(
+                    "stored_verification_invalid", "receipt references are malformed"
+                )
             receipt_metadata = {
                 str(item["reference_key"]): str(item["metadata_sha256"])
                 for item in receipt_references
@@ -1654,15 +1985,19 @@ class HandoffAdmissionStore:
             for reference in reference_rows:
                 metadata_bytes = bytes(reference["metadata_bytes"])
                 digest = hashlib.sha256(metadata_bytes).hexdigest()
-                if digest != reference["metadata_sha256"] or receipt_metadata.get(
-                    reference["reference_key"]
-                ) != digest:
+                if (
+                    digest != reference["metadata_sha256"]
+                    or receipt_metadata.get(reference["reference_key"]) != digest
+                ):
                     raise HandoffAdmissionError(
-                        "stored_verification_invalid", "reference metadata evidence differs"
+                        "stored_verification_invalid",
+                        "reference metadata evidence differs",
                     )
             return self._stored_result(row, created=False)
         except HandoffContractError as exc:
-            raise HandoffAdmissionError("stored_verification_invalid", exc.message) from exc
+            raise HandoffAdmissionError(
+                "stored_verification_invalid", exc.message
+            ) from exc
         finally:
             connection.close()
 
@@ -1690,7 +2025,8 @@ class HandoffAdmissionStore:
                 )
             if type(self.current_time_witness) is not AuthenticatedCurrentTimeWitness:
                 raise HandoffAdmissionError(
-                    "time_witness", "forward boundary requires configured current-time trust"
+                    "time_witness",
+                    "forward boundary requires configured current-time trust",
                 )
             subject_sha256 = self._time_subject(
                 {
@@ -1743,7 +2079,9 @@ class HandoffAdmissionStore:
         """Deterministic synthetic-only seam; never use for production currentness."""
 
         if not isinstance(evaluated_at, datetime):
-            raise HandoffAdmissionError("boundary_time", "test boundary time is invalid")
+            raise HandoffAdmissionError(
+                "boundary_time", "test boundary time is invalid"
+            )
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1758,7 +2096,8 @@ class HandoffAdmissionStore:
                 or not str(row["trust_root_id"]).startswith("synthetic-")
             ):
                 raise HandoffAdmissionError(
-                    "boundary_time", "explicit boundary time is restricted to synthetic tests"
+                    "boundary_time",
+                    "explicit boundary time is restricted to synthetic tests",
                 )
             result = self._for_boundary_tx(
                 connection,
@@ -1787,12 +2126,17 @@ class HandoffAdmissionStore:
     ) -> VerifiedApplicationInput:
         """Revalidate with evidence already authenticated by this store's witness."""
 
-        if not isinstance(connection, sqlite3.Connection) or not connection.in_transaction:
+        if (
+            not isinstance(connection, sqlite3.Connection)
+            or not connection.in_transaction
+        ):
             raise HandoffAdmissionError(
                 "boundary_transaction", "an active SQLite transaction is required"
             )
         database_rows = connection.execute("PRAGMA database_list").fetchall()
-        main_path = next((str(row[2]) for row in database_rows if str(row[1]) == "main"), "")
+        main_path = next(
+            (str(row[2]) for row in database_rows if str(row[1]) == "main"), ""
+        )
         if not main_path or Path(main_path).resolve() != self.database.resolve():
             raise HandoffAdmissionError(
                 "boundary_transaction", "boundary transaction uses a different database"
@@ -1870,12 +2214,17 @@ class HandoffAdmissionStore:
         consumer's authenticated instant so stale evidence fails closed.
         """
 
-        if not isinstance(connection, sqlite3.Connection) or not connection.in_transaction:
+        if (
+            not isinstance(connection, sqlite3.Connection)
+            or not connection.in_transaction
+        ):
             raise HandoffAdmissionError(
                 "boundary_transaction", "an active SQLite transaction is required"
             )
         database_rows = connection.execute("PRAGMA database_list").fetchall()
-        main_path = next((str(row[2]) for row in database_rows if str(row[1]) == "main"), "")
+        main_path = next(
+            (str(row[2]) for row in database_rows if str(row[1]) == "main"), ""
+        )
         if not main_path or Path(main_path).resolve() != self.database.resolve():
             raise HandoffAdmissionError(
                 "boundary_transaction", "boundary transaction uses a different database"
@@ -1884,7 +2233,8 @@ class HandoffAdmissionStore:
         _digest(expected_time_subject_sha256, "expected time subject")
         if expected_time_purpose != "phase_event":
             raise HandoffAdmissionError(
-                "time_purpose", "reused review validation requires a phase-event consumer"
+                "time_purpose",
+                "reused review validation requires a phase-event consumer",
             )
         if (
             time_evidence.purpose != expected_time_purpose
@@ -1902,7 +2252,9 @@ class HandoffAdmissionStore:
                 maximum_clock_skew_seconds=self.maximum_clock_skew_seconds,
             )
         except (AttributeError, CurrentTimeWitnessError) as exc:
-            raise HandoffAdmissionError("time_witness", "boundary consumer time is untrusted") from exc
+            raise HandoffAdmissionError(
+                "time_witness", "boundary consumer time is untrusted"
+            ) from exc
 
         validation = connection.execute(
             """SELECT application_id,boundary,evaluated_at,receipt_bytes,reference_count
@@ -1911,7 +2263,8 @@ class HandoffAdmissionStore:
         ).fetchone()
         if validation is None:
             raise HandoffAdmissionError(
-                "forward_validation_missing", "carried boundary validation does not exist"
+                "forward_validation_missing",
+                "carried boundary validation does not exist",
             )
         receipt_bytes = bytes(validation["receipt_bytes"])
         if hashlib.sha256(receipt_bytes).hexdigest() != validation_sha256:
@@ -1924,7 +2277,9 @@ class HandoffAdmissionStore:
                 label="carried forward-boundary validation",
             )
         except HandoffContractError as exc:
-            raise HandoffAdmissionError("forward_validation_corrupt", exc.message) from exc
+            raise HandoffAdmissionError(
+                "forward_validation_corrupt", exc.message
+            ) from exc
         expected_receipt_keys = {
             "admission_receipt_sha256",
             "application_id",
@@ -1961,7 +2316,8 @@ class HandoffAdmissionStore:
         )
         if validation_instant > consumer_instant:
             raise HandoffAdmissionError(
-                "forward_validation_future", "carried boundary validation is future-dated"
+                "forward_validation_future",
+                "carried boundary validation is future-dated",
             )
 
         admission = connection.execute(
@@ -1978,7 +2334,8 @@ class HandoffAdmissionStore:
             or str(admission["environment"]) != time_evidence.environment
         ):
             raise HandoffAdmissionError(
-                "forward_validation_substitution", "carried admission or environment differs"
+                "forward_validation_substitution",
+                "carried admission or environment differs",
             )
         original_time_sha256 = receipt["time_receipt_sha256"]
         _digest(original_time_sha256, "forward validation time receipt")
@@ -2008,11 +2365,13 @@ class HandoffAdmissionStore:
             != f"{application_id}:{boundary}:{original_time_sha256}"
         ):
             raise HandoffAdmissionError(
-                "forward_validation_time", "carried validation lacks exact time provenance"
+                "forward_validation_time",
+                "carried validation lacks exact time provenance",
             )
         if self.resolver is None:
             raise HandoffAdmissionError(
-                "trust_not_configured", "carried boundary validation requires resolver trust"
+                "trust_not_configured",
+                "carried boundary validation requires resolver trust",
             )
         try:
             handoff = parse_handoff(bytes(admission["original_bytes"]))
@@ -2077,10 +2436,13 @@ class HandoffAdmissionStore:
         evaluated_at_for_test: datetime | None,
     ) -> VerifiedApplicationInput:
         if boundary not in BOUNDARIES:
-            raise HandoffAdmissionError("boundary_unknown", "forward boundary is unsupported")
+            raise HandoffAdmissionError(
+                "boundary_unknown", "forward boundary is unsupported"
+            )
         if time_evidence is None and evaluated_at_for_test is None:
             raise HandoffAdmissionError(
-                "boundary_time", "atomic authority validation requires authenticated time"
+                "boundary_time",
+                "atomic authority validation requires authenticated time",
             )
         if time_evidence is not None and evaluated_at_for_test is not None:
             raise HandoffAdmissionError(
@@ -2093,20 +2455,28 @@ class HandoffAdmissionStore:
             evaluated_text, _ = _evaluation_time(evaluated_at_for_test)
             time_receipt_sha256 = None
         row = connection.execute(
-            "SELECT * FROM application_admissions WHERE application_id=?", (application_id,)
+            "SELECT * FROM application_admissions WHERE application_id=?",
+            (application_id,),
         ).fetchone()
         if row is None:
-            raise HandoffAdmissionError("admission_missing", "application admission does not exist")
+            raise HandoffAdmissionError(
+                "admission_missing", "application admission does not exist"
+            )
         kind = str(row["admission_kind"])
         if kind == ADMISSION_KIND_LEGACY:
-            raise HandoffAdmissionError("legacy_release_blocked", "legacy admission cannot progress")
+            raise HandoffAdmissionError(
+                "legacy_release_blocked", "legacy admission cannot progress"
+            )
         if self.resolver is None:
-            raise HandoffAdmissionError("trust_not_configured", "forward validation requires resolver")
+            raise HandoffAdmissionError(
+                "trust_not_configured", "forward validation requires resolver"
+            )
         if boundary in RELEASE_BOUNDARIES and (
             kind != ADMISSION_KIND_V1 or row["authority_scope"] == "none"
         ):
             raise HandoffAdmissionError(
-                "release_blocked_admission", "compatibility/direct admission cannot enter release"
+                "release_blocked_admission",
+                "compatibility/direct admission cannot enter release",
             )
         try:
             handoff = parse_handoff(bytes(row["original_bytes"]))
@@ -2115,7 +2485,9 @@ class HandoffAdmissionStore:
                 "stored_handoff_invalid", exc.message, pointer=exc.pointer
             ) from exc
         context_bytes = (
-            None if row["admission_context_bytes"] is None else bytes(row["admission_context_bytes"])
+            None
+            if row["admission_context_bytes"] is None
+            else bytes(row["admission_context_bytes"])
         )
         graph = _verify_graph(
             handoff,
@@ -2160,9 +2532,11 @@ class HandoffAdmissionStore:
                WHERE validation_sha256=?""",
             (receipt_sha256,),
         ).fetchone()
-        if existing is None or existing["validation_sha256"] != receipt_sha256 or bytes(
-            existing["receipt_bytes"]
-        ) != receipt:
+        if (
+            existing is None
+            or existing["validation_sha256"] != receipt_sha256
+            or bytes(existing["receipt_bytes"]) != receipt
+        ):
             raise HandoffAdmissionError(
                 "forward_validation_conflict", "stored exact boundary evidence differs"
             )
@@ -2211,7 +2585,9 @@ def validate_downstream_result(
         "vacancy_source_identity",
     }
     if type(result) is not dict or set(result) != expected_keys:
-        raise HandoffAdmissionError("downstream_schema", "factory/reviewer result keys differ")
+        raise HandoffAdmissionError(
+            "downstream_schema", "factory/reviewer result keys differ"
+        )
     exact = {
         "application_id": source.application_id,
         "job_key": source.job_key,
@@ -2220,7 +2596,9 @@ def validate_downstream_result(
     }
     for key, expected in exact.items():
         if result[key] != expected:
-            raise HandoffAdmissionError("downstream_substitution", f"downstream {key} differs")
+            raise HandoffAdmissionError(
+                "downstream_substitution", f"downstream {key} differs"
+            )
     digests = {
         key: _digest(result[key], f"downstream {key}")
         for key in (
@@ -2250,12 +2628,12 @@ __all__ = [
     "ADMISSION_KIND_COMPATIBILITY",
     "ADMISSION_KIND_LEGACY",
     "ADMISSION_KIND_V1",
+    "REFERENCE_REGISTRY",
     "AdmissionContextAuthenticator",
     "HandoffAdmission",
     "HandoffAdmissionError",
     "HandoffAdmissionStore",
     "ProtectedLocalOutbox",
-    "REFERENCE_REGISTRY",
     "ReferenceRequest",
     "ResolvedReference",
     "SelectionPolicyRules",

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import inspect
 import io
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,8 @@ def _deployment(tmp_path: Path) -> admission_runner._ProductionAdmissionDeployme
     data.mkdir(mode=0o700)
     receipts.mkdir(parents=True, mode=0o700)
     os.chmod(outbox, 0o700)
+    (outbox / "bundles" / SHA).mkdir(parents=True, mode=0o700)
+    os.chmod(outbox / "bundles", 0o700)
     repo.mkdir(mode=0o755)
     return admission_runner._ProductionAdmissionDeployment(
         data_home=data,
@@ -42,8 +45,6 @@ def _execution(deployment, **changes) -> Path:
     basis = {
         "application_id": "app_" + "1" * 64,
         "bundle_identity": f"bundles/{SHA}",
-        "canonical_vacancy_metadata_sha256": SHA,
-        "canonical_vacancy_object_sha256": SHA,
         "employer_dossier_sha256": SHA,
         "environment": "production",
         "handoff_job_key": "job_" + "2" * 64,
@@ -52,12 +53,7 @@ def _execution(deployment, **changes) -> Path:
         "processing_promotion_sha256": SHA,
         "producer_commit_sha": COMMIT,
         "release_token_issued": False,
-        "research_archive_root_identity": "state/public-employer-research-v2",
-        "research_receipt_file_sha256": SHA,
-        "research_semantic_receipt_sha256": SHA,
-        "research_vacancy_snapshot_sha256": SHA,
         "schema_version": admission_runner.EXECUTION_SCHEMA,
-        "source_content_sha256": SHA,
         "source_job_key": "workable:cogna:847CFBC5F4",
         "source_record_sha256": SHA,
         "submission_authority": False,
@@ -83,17 +79,43 @@ class _Outbox:
 
     def __init__(self, path, **kwargs):
         type(self).calls += 1
-        assert path.name == SHA
-        assert kwargs["expected_source_record_sha256"] == SHA
         assert kwargs["allowed_producer_commits"] == frozenset({COMMIT})
         self.handoff_bytes = b"handoff"
-        self.context_bytes = b"context"
+        self.context_bytes = canonical_json_bytes(
+            {
+                "environment": "production",
+                "handoff_root_sha256": SHA,
+                "producer_commit_sha": COMMIT,
+                "source_record_sha256": SHA,
+                "trust_root_id": admission_runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+            }
+        )
         self._manifest_bytes = b"manifest"
         self._manifest = {"handoff_root_sha256": SHA}
         self._source_record = {
             "source_job_key": "workable:cogna:847CFBC5F4",
             "trust_root_id": admission_runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
         }
+        self._entries = {
+            "employer_dossier": {"object_sha256": SHA},
+            "assessment.receipt": {"object_sha256": SHA},
+        }
+
+    def close(self):
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _parsed_handoff(monkeypatch):
+    monkeypatch.setattr(
+        admission_runner,
+        "parse_handoff",
+        lambda _: SimpleNamespace(
+            root_sha256=SHA,
+            application_id="app_" + "1" * 64,
+            payload={"job_key": "job_" + "2" * 64},
+        ),
+    )
 
 
 class _Store:
@@ -109,7 +131,8 @@ class _Store:
         )
 
     def admit_authenticated(self, handoff, context):
-        assert (handoff, context) == (b"handoff", b"context")
+        assert handoff == b"handoff"
+        assert json.loads(context)["environment"] == "production"
         return SimpleNamespace(
             application_id="app_" + "1" * 64,
             job_key="job_" + "2" * 64,
@@ -135,14 +158,14 @@ def test_admission_created_then_replay_are_explicit_and_non_release(
         execution_receipt_path=path,
         deployment=deployment,
         witness=_witness(),
-        commit_resolver=lambda _: COMMIT,
+        commit_resolver=lambda _, __: COMMIT,
     )
     _Store.created = False
     replay = admission_runner._run_production_handoff_admission(
         execution_receipt_path=path,
         deployment=deployment,
         witness=_witness(),
-        commit_resolver=lambda _: COMMIT,
+        commit_resolver=lambda _, __: COMMIT,
     )
     assert created.operation == "created"
     assert replay.operation == "replay"
@@ -167,6 +190,17 @@ def test_admission_created_then_replay_are_explicit_and_non_release(
         ({"trust_root_id": "other"}, "authority"),
         ({"bundle_identity": "bundles/" + "e" * 64}, "bundle identity"),
         ({"producer_commit_sha": "f" * 40}, "current clean HEAD"),
+        ({"application_id": "app_" + "9" * 64}, "bundle differ"),
+        ({"employer_dossier_sha256": "9" * 64}, "bundle differ"),
+        ({"handoff_job_key": "job_" + "9" * 64}, "bundle differ"),
+        ({"handoff_root_sha256": "9" * 64}, "bundle differ"),
+        ({"manifest_sha256": "9" * 64}, "bundle differ"),
+        ({"processing_promotion_sha256": "9" * 64}, "bundle differ"),
+        ({"source_job_key": "workable:other:1"}, "bundle differ"),
+        (
+            {"schema_version": "market-aligner.production-handoff-execution.v1"},
+            "authority",
+        ),
     ],
 )
 def test_receipt_authority_and_commit_substitutions_fail_before_outbox(
@@ -181,9 +215,9 @@ def test_receipt_authority_and_commit_substitutions_fail_before_outbox(
             execution_receipt_path=path,
             deployment=deployment,
             witness=_witness(),
-            commit_resolver=lambda _: COMMIT,
+            commit_resolver=lambda _, __: COMMIT,
         )
-    assert _Outbox.calls == 0
+    assert _Outbox.calls == (1 if message == "bundle differ" else 0)
 
 
 def test_receipt_path_mode_filename_and_canonical_substitutions_fail(
@@ -239,7 +273,7 @@ def test_root_time_and_symlink_substitution_fail_before_outbox(
             execution_receipt_path=path,
             deployment=bad,
             witness=_witness(),
-            commit_resolver=lambda _: COMMIT,
+            commit_resolver=lambda _, __: COMMIT,
         )
     with pytest.raises(
         admission_runner.ProductionHandoffAdmissionError, match="witness"
@@ -248,7 +282,7 @@ def test_root_time_and_symlink_substitution_fail_before_outbox(
             execution_receipt_path=path,
             deployment=deployment,
             witness=object(),
-            commit_resolver=lambda _: COMMIT,
+            commit_resolver=lambda _, __: COMMIT,
         )
     real = tmp_path / "real"
     real.mkdir(mode=0o700)
@@ -261,12 +295,15 @@ def test_root_time_and_symlink_substitution_fail_before_outbox(
         execution_receipt_root=deployment.execution_receipt_root,
         admission_root=link / "state/jaa-production-admissions",
     )
-    with pytest.raises(admission_runner.ProductionHandoffAdmissionError, match="link"):
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="unavailable|link",
+    ):
         admission_runner._run_production_handoff_admission(
             execution_receipt_path=path,
             deployment=linked,
             witness=_witness(),
-            commit_resolver=lambda _: COMMIT,
+            commit_resolver=lambda _, __: COMMIT,
         )
     assert _Outbox.calls == 0
 
@@ -291,7 +328,37 @@ def test_authenticated_bundle_identity_substitution_fails_before_database(
             execution_receipt_path=path,
             deployment=deployment,
             witness=_witness(),
-            commit_resolver=lambda _: COMMIT,
+            commit_resolver=lambda _, __: COMMIT,
+        )
+
+
+def test_self_rehashed_source_record_and_bundle_substitution_fails_before_database(
+    monkeypatch, tmp_path: Path
+) -> None:
+    deployment = _deployment(tmp_path)
+    substituted = "e" * 64
+    (deployment.outbox_root / "bundles" / substituted).mkdir(mode=0o700)
+    path = _execution(
+        deployment,
+        source_record_sha256=substituted,
+        bundle_identity=f"bundles/{substituted}",
+    )
+    monkeypatch.setattr(admission_runner, "ProtectedLocalOutbox", _Outbox)
+    monkeypatch.setattr(
+        admission_runner,
+        "HandoffAdmissionStore",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("database must not open")
+        ),
+    )
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError, match="bundle differ"
+    ):
+        admission_runner._run_production_handoff_admission(
+            execution_receipt_path=path,
+            deployment=deployment,
+            witness=_witness(),
+            commit_resolver=lambda _, __: COMMIT,
         )
 
 
@@ -320,24 +387,112 @@ def test_admission_database_must_be_private_exact_regular_file(
         os.close(descriptor)
 
 
+def test_operation_receipt_partial_write_cleans_up_and_retry_publishes_atomically(
+    monkeypatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "receipts"
+    root.mkdir(mode=0o700)
+    descriptor = admission_runner._open_private_directory(root)
+    value = b"x" * 2048
+    real_write = admission_runner.os.write
+    calls = 0
+
+    def interrupted(file_descriptor, remaining):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_write(file_descriptor, remaining[:512])
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(admission_runner.os, "write", interrupted)
+    try:
+        with pytest.raises(OSError, match="injected"):
+            admission_runner._create_or_exact(descriptor, "receipt.json", value)
+        assert not (root / "receipt.json").exists()
+        assert list(root.iterdir()) == []
+        monkeypatch.setattr(admission_runner.os, "write", real_write)
+        admission_runner._create_or_exact(descriptor, "receipt.json", value)
+        assert (root / "receipt.json").read_bytes() == value
+        admission_runner._create_or_exact(descriptor, "receipt.json", value)
+    finally:
+        os.close(descriptor)
+
+
 def test_derived_bundle_symlink_is_rejected_before_adapter(
     monkeypatch, tmp_path: Path
 ) -> None:
     deployment = _deployment(tmp_path)
     path = _execution(deployment)
     bundles = deployment.outbox_root / "bundles"
-    bundles.mkdir(mode=0o700)
+    (bundles / SHA).rmdir()
     real = tmp_path / "real-bundle"
     real.mkdir(mode=0o700)
     (bundles / SHA).symlink_to(real, target_is_directory=True)
     _Outbox.calls = 0
     monkeypatch.setattr(admission_runner, "ProtectedLocalOutbox", _Outbox)
-    with pytest.raises(admission_runner.ProductionHandoffAdmissionError, match="link"):
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="unavailable|link",
+    ):
         admission_runner._run_production_handoff_admission(
             execution_receipt_path=path,
             deployment=deployment,
             witness=_witness(),
-            commit_resolver=lambda _: COMMIT,
+            commit_resolver=lambda _, __: COMMIT,
+        )
+    assert _Outbox.calls == 0
+
+
+def test_mid_operation_compiled_ancestor_replacement_is_rejected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    deployment = _deployment(tmp_path)
+    path = _execution(deployment)
+    _Outbox.calls = 0
+    monkeypatch.setattr(admission_runner, "ProtectedLocalOutbox", _Outbox)
+
+    def replace_outbox(_repository, _descriptor):
+        moved = tmp_path / "moved-outbox"
+        deployment.outbox_root.rename(moved)
+        deployment.outbox_root.mkdir(mode=0o700)
+        return COMMIT
+
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="reference changed",
+    ):
+        admission_runner._run_production_handoff_admission(
+            execution_receipt_path=path,
+            deployment=deployment,
+            witness=_witness(),
+            commit_resolver=replace_outbox,
+        )
+    assert _Outbox.calls == 0
+
+
+def test_mid_operation_intermediate_parent_replacement_is_rejected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    deployment = _deployment(tmp_path)
+    path = _execution(deployment)
+    _Outbox.calls = 0
+    monkeypatch.setattr(admission_runner, "ProtectedLocalOutbox", _Outbox)
+
+    def replace_parent(_repository, _descriptor):
+        moved = tmp_path.with_name(f"{tmp_path.name}-moved")
+        tmp_path.rename(moved)
+        tmp_path.mkdir(mode=0o700)
+        return COMMIT
+
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="reference changed",
+    ):
+        admission_runner._run_production_handoff_admission(
+            execution_receipt_path=path,
+            deployment=deployment,
+            witness=_witness(),
+            commit_resolver=replace_parent,
         )
     assert _Outbox.calls == 0
 

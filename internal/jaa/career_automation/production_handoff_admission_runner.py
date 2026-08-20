@@ -7,9 +7,12 @@ that a caller must never supply.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
+import secrets
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +29,7 @@ from .current_time import (
     installed_production_current_time_witness,
 )
 from .handoff_admission import HandoffAdmissionStore, ProtectedLocalOutbox
+from .market_aligner_handoff import parse_handoff
 from .production_handoff_runner import (
     PRODUCTION_MARKET_DATA_HOME,
     PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT,
@@ -40,28 +44,20 @@ PRODUCTION_ADMISSION_ROOT = (
 )
 PRODUCTION_ADMISSION_DATABASE = PRODUCTION_ADMISSION_ROOT / "admissions.sqlite3"
 PRODUCTION_ADMISSION_RECEIPT_ROOT = PRODUCTION_ADMISSION_ROOT / "receipts"
-EXECUTION_SCHEMA = "market-aligner.production-handoff-execution.v1"
+EXECUTION_SCHEMA = "market-aligner.production-handoff-execution.v2"
 OPERATION_SCHEMA = "jaa.production-handoff-admission-operation.v1"
 _MAX_RECEIPT_BYTES = 65536
 _SHA_FIELDS = {
-    "canonical_vacancy_metadata_sha256",
-    "canonical_vacancy_object_sha256",
     "employer_dossier_sha256",
     "handoff_root_sha256",
     "manifest_sha256",
     "processing_promotion_sha256",
-    "research_receipt_file_sha256",
-    "research_semantic_receipt_sha256",
-    "research_vacancy_snapshot_sha256",
     "semantic_receipt_sha256",
-    "source_content_sha256",
     "source_record_sha256",
 }
 _EXECUTION_KEYS = {
     "application_id",
     "bundle_identity",
-    "canonical_vacancy_metadata_sha256",
-    "canonical_vacancy_object_sha256",
     "employer_dossier_sha256",
     "environment",
     "handoff_job_key",
@@ -70,13 +66,8 @@ _EXECUTION_KEYS = {
     "processing_promotion_sha256",
     "producer_commit_sha",
     "release_token_issued",
-    "research_archive_root_identity",
-    "research_receipt_file_sha256",
-    "research_semantic_receipt_sha256",
-    "research_vacancy_snapshot_sha256",
     "schema_version",
     "semantic_receipt_sha256",
-    "source_content_sha256",
     "source_job_key",
     "source_record_sha256",
     "submission_authority",
@@ -128,6 +119,154 @@ class ProductionHandoffAdmissionReceipt:
             "submission_authority": False,
             "verification_receipt_sha256": self.verification_receipt_sha256,
         }
+
+
+def _open_absolute_directory_chain(
+    path: Path, *, private_leaf: bool
+) -> tuple[int, ...]:
+    if not path.is_absolute() or ".." in path.parts:
+        raise ProductionHandoffAdmissionError(
+            "production path is not absolute and normalized"
+        )
+    descriptors = [os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)]
+    try:
+        for component in path.parts[1:]:
+            descriptors.append(
+                os.open(
+                    component,
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | os.O_CLOEXEC
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptors[-1],
+                )
+            )
+        metadata = os.fstat(descriptors[-1])
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & (0o077 if private_leaf else 0o022)
+        ):
+            raise ProductionHandoffAdmissionError(
+                "compiled directory identity or permissions differ"
+            )
+        return tuple(descriptors)
+    except OSError as exc:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise ProductionHandoffAdmissionError(
+            "compiled directory ancestry contains a link or is unavailable"
+        ) from exc
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+
+
+def _open_existing_private_child(parent_descriptor: int, name: str) -> int:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+    except OSError as exc:
+        raise ProductionHandoffAdmissionError(
+            "compiled protected child is unavailable"
+        ) from exc
+    metadata = os.fstat(descriptor)
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        os.close(descriptor)
+        raise ProductionHandoffAdmissionError(
+            "compiled protected child identity or mode differs"
+        )
+    return descriptor
+
+
+class _PinnedProductionPaths:
+    def __init__(self, deployment: _ProductionAdmissionDeployment) -> None:
+        self._descriptors: list[int] = []
+        self._adapters: list[ProtectedLocalOutbox] = []
+        self._pins: list[tuple[Path, int]] = []
+        self._outbox_path = deployment.outbox_root
+        try:
+            data = _open_absolute_directory_chain(
+                deployment.data_home, private_leaf=True
+            )
+            outbox = _open_absolute_directory_chain(
+                deployment.outbox_root, private_leaf=True
+            )
+            repository = _open_absolute_directory_chain(
+                deployment.repository_root, private_leaf=False
+            )
+            self._descriptors.extend((*data, *outbox, *repository))
+            self.data_descriptor = data[-1]
+            self.outbox_descriptor = outbox[-1]
+            self.repository_descriptor = repository[-1]
+            for path, chain in (
+                (deployment.data_home, data),
+                (deployment.outbox_root, outbox),
+                (deployment.repository_root, repository),
+            ):
+                current = Path(path.anchor)
+                for component, descriptor in zip(
+                    path.parts[1:], chain[1:], strict=True
+                ):
+                    current /= component
+                    self._pins.append((current, descriptor))
+            self.receipts_descriptor = _open_existing_private_child(
+                self.outbox_descriptor, "receipts"
+            )
+            self._descriptors.append(self.receipts_descriptor)
+            self._pins.append(
+                (deployment.execution_receipt_root, self.receipts_descriptor)
+            )
+        except BaseException:
+            self.close()
+            raise
+
+    def open_bundle(self, source_record_sha256: str) -> int:
+        bundles = _open_existing_private_child(self.outbox_descriptor, "bundles")
+        try:
+            bundle = _open_existing_private_child(bundles, source_record_sha256)
+        finally:
+            os.close(bundles)
+        self._descriptors.append(bundle)
+        self._pins.append(
+            (
+                self._outbox_path / "bundles" / source_record_sha256,
+                bundle,
+            )
+        )
+        return bundle
+
+    def register_adapter(self, adapter: ProtectedLocalOutbox) -> None:
+        self._adapters.append(adapter)
+
+    def verify_references(self) -> None:
+        for path, descriptor in self._pins:
+            pinned = os.fstat(descriptor)
+            try:
+                current = path.lstat()
+            except OSError as exc:
+                raise ProductionHandoffAdmissionError(
+                    "compiled path reference is unavailable"
+                ) from exc
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or not stat.S_ISDIR(current.st_mode)
+                or pinned.st_dev != current.st_dev
+                or pinned.st_ino != current.st_ino
+            ):
+                raise ProductionHandoffAdmissionError(
+                    "compiled path reference changed during operation"
+                )
+
+    def close(self) -> None:
+        while self._adapters:
+            self._adapters.pop().close()
+        while self._descriptors:
+            os.close(self._descriptors.pop())
 
 
 def _open_private_directory(path: Path) -> int:
@@ -194,7 +333,9 @@ def _open_private_child(parent_descriptor: int, name: str) -> int:
     return descriptor
 
 
-def _read_execution_receipt(path: Path, root: Path) -> tuple[dict[str, object], bytes]:
+def _read_execution_receipt(
+    path: Path, root: Path, *, root_descriptor: int | None = None
+) -> tuple[dict[str, object], bytes]:
     try:
         relative = path.relative_to(root)
     except ValueError as exc:
@@ -205,7 +346,9 @@ def _read_execution_receipt(path: Path, root: Path) -> tuple[dict[str, object], 
         raise ProductionHandoffAdmissionError(
             "execution receipt must be a direct compiled-root file"
         )
-    root_descriptor = _open_private_directory(root)
+    owned_root_descriptor = root_descriptor is None
+    if root_descriptor is None:
+        root_descriptor = _open_private_directory(root)
     try:
         try:
             descriptor = os.open(
@@ -232,7 +375,8 @@ def _read_execution_receipt(path: Path, root: Path) -> tuple[dict[str, object], 
         finally:
             os.close(descriptor)
     finally:
-        os.close(root_descriptor)
+        if owned_root_descriptor:
+            os.close(root_descriptor)
     if not raw or len(raw) > _MAX_RECEIPT_BYTES:
         raise ProductionHandoffAdmissionError("execution receipt size is invalid")
     try:
@@ -291,48 +435,86 @@ def _validate_execution_receipt(document: dict[str, object], path: Path) -> None
 
 
 def _create_or_exact(parent_descriptor: int, name: str, value: bytes) -> None:
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | os.O_CLOEXEC
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        descriptor = os.open(name, flags, 0o600, dir_fd=parent_descriptor)
-    except FileExistsError:
-        descriptor = os.open(
-            name,
-            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=parent_descriptor,
-        )
+    def existing_exact() -> bool:
         try:
-            metadata = os.fstat(descriptor)
-            existing = os.read(descriptor, len(value) + 1)
+            existing_descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            return False
+        try:
+            metadata = os.fstat(existing_descriptor)
+            chunks: list[bytes] = []
+            remaining = len(value) + 1
+            while remaining:
+                chunk = os.read(existing_descriptor, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_uid != os.geteuid()
                 or metadata.st_nlink != 1
                 or stat.S_IMODE(metadata.st_mode) != 0o600
-                or existing != value
+                or b"".join(chunks) != value
             ):
                 raise ProductionHandoffAdmissionError(
                     "operation receipt replay differs"
                 )
+            return True
+        finally:
+            os.close(existing_descriptor)
+
+    if existing_exact():
+        return
+    temporary_name = f".{name}.{os.getpid()}.{secrets.token_hex(12)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    try:
+        descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_descriptor)
+        try:
+            remaining = memoryview(value)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise OSError("short operation receipt write")
+                remaining = remaining[written:]
+            os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        return
-    try:
-        remaining = memoryview(value)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written <= 0:
-                raise OSError("short operation receipt write")
-            remaining = remaining[written:]
-        os.fsync(descriptor)
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            parent_descriptor,
+            os.fsencode(temporary_name),
+            parent_descriptor,
+            os.fsencode(name),
+            1,
+        )
+        if result != 0:
+            error = ctypes.get_errno()
+            if error != errno.EEXIST:
+                raise OSError(error, os.strerror(error))
+            if not existing_exact():
+                raise ProductionHandoffAdmissionError(
+                    "operation receipt publication raced"
+                )
         os.fsync(parent_descriptor)
     finally:
-        os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            pass
 
 
 def _prepare_database(parent_descriptor: int) -> None:
@@ -361,12 +543,13 @@ def _prepare_database(parent_descriptor: int) -> None:
         os.close(descriptor)
 
 
-def _run_production_handoff_admission(
+def _run_production_handoff_admission_pinned(
     *,
     execution_receipt_path: str | Path,
     deployment: _ProductionAdmissionDeployment,
     witness: AuthenticatedCurrentTimeWitness,
-    commit_resolver: Callable[[Path], str] = _git_commit,
+    paths: _PinnedProductionPaths,
+    commit_resolver: Callable[[Path, int], str],
 ) -> ProductionHandoffAdmissionReceipt:
     if (
         deployment.execution_receipt_root != deployment.outbox_root / "receipts"
@@ -387,23 +570,39 @@ def _run_production_handoff_admission(
         _reject_symlink_ancestry(protected_path)
     receipt_path = Path(execution_receipt_path)
     document, receipt_bytes = _read_execution_receipt(
-        receipt_path, deployment.execution_receipt_root
+        receipt_path,
+        deployment.execution_receipt_root,
+        root_descriptor=paths.receipts_descriptor,
     )
     _validate_execution_receipt(document, receipt_path)
-    current_commit = commit_resolver(deployment.repository_root)
+    current_commit = commit_resolver(
+        deployment.repository_root, paths.repository_descriptor
+    )
+    paths.verify_references()
     if document["producer_commit_sha"] != current_commit:
         raise ProductionHandoffAdmissionError(
             "producer commit differs from current clean HEAD"
         )
     source_record = str(document["source_record_sha256"])
     bundle_path = deployment.outbox_root / "bundles" / source_record
-    _reject_symlink_ancestry(bundle_path)
+    bundle_descriptor = paths.open_bundle(source_record)
     adapter = ProtectedLocalOutbox(
         bundle_path,
         repository_root=deployment.repository_root,
         expected_source_record_sha256=source_record,
         allowed_producer_commits=frozenset({current_commit}),
+        bundle_descriptor=bundle_descriptor,
     )
+    paths.register_adapter(adapter)
+    handoff = parse_handoff(adapter.handoff_bytes)
+    try:
+        context = json.loads(adapter.context_bytes)
+        dossier_entry = adapter._entries["employer_dossier"]
+        promotion_entry = adapter._entries["assessment.receipt"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ProductionHandoffAdmissionError(
+            "authenticated bundle graph is incomplete"
+        ) from exc
     if (
         hashlib.sha256(adapter._manifest_bytes).hexdigest()
         != document["manifest_sha256"]
@@ -411,11 +610,22 @@ def _run_production_handoff_admission(
         != document["handoff_root_sha256"]
         or adapter._source_record.get("source_job_key") != document["source_job_key"]
         or adapter._source_record.get("trust_root_id") != document["trust_root_id"]
+        or dossier_entry.get("object_sha256") != document["employer_dossier_sha256"]
+        or promotion_entry.get("object_sha256")
+        != document["processing_promotion_sha256"]
+        or handoff.root_sha256 != document["handoff_root_sha256"]
+        or handoff.application_id != document["application_id"]
+        or handoff.payload.get("job_key") != document["handoff_job_key"]
+        or context.get("environment") != document["environment"]
+        or context.get("source_record_sha256") != source_record
+        or context.get("producer_commit_sha") != current_commit
+        or context.get("trust_root_id") != document["trust_root_id"]
+        or context.get("handoff_root_sha256") != document["handoff_root_sha256"]
     ):
         raise ProductionHandoffAdmissionError(
             "execution receipt and authenticated bundle differ"
         )
-    data_descriptor = _open_private_directory(deployment.data_home)
+    data_descriptor = os.dup(paths.data_descriptor)
     try:
         state_descriptor = _open_private_child(data_descriptor, "state")
         try:
@@ -427,7 +637,9 @@ def _run_production_handoff_admission(
                     admission_descriptor, "receipts"
                 )
                 try:
-                    database = deployment.admission_root / "admissions.sqlite3"
+                    database = Path(
+                        f"/proc/self/fd/{admission_descriptor}/admissions.sqlite3"
+                    )
                     _prepare_database(admission_descriptor)
                     store = HandoffAdmissionStore(
                         database,
@@ -436,6 +648,7 @@ def _run_production_handoff_admission(
                         current_time_witness=witness,
                     )
                     _prepare_database(admission_descriptor)
+                    paths.verify_references()
                     admission = store.admit_authenticated(
                         adapter.handoff_bytes, adapter.context_bytes
                     )
@@ -477,6 +690,7 @@ def _run_production_handoff_admission(
                     operation_path = (
                         deployment.admission_root / "receipts" / f"{semantic}.json"
                     )
+                    paths.verify_references()
                     _create_or_exact(
                         receipts_descriptor, operation_path.name, operation_bytes
                     )
@@ -506,6 +720,30 @@ def _run_production_handoff_admission(
             os.close(state_descriptor)
     finally:
         os.close(data_descriptor)
+
+
+def _run_production_handoff_admission(
+    *,
+    execution_receipt_path: str | Path,
+    deployment: _ProductionAdmissionDeployment,
+    witness: AuthenticatedCurrentTimeWitness,
+    commit_resolver: Callable[[Path, int], str] = (
+        lambda repository, descriptor: _git_commit(
+            repository, repository_descriptor=descriptor
+        )
+    ),
+) -> ProductionHandoffAdmissionReceipt:
+    paths = _PinnedProductionPaths(deployment)
+    try:
+        return _run_production_handoff_admission_pinned(
+            execution_receipt_path=execution_receipt_path,
+            deployment=deployment,
+            witness=witness,
+            paths=paths,
+            commit_resolver=commit_resolver,
+        )
+    finally:
+        paths.close()
 
 
 def run_production_handoff_admission(

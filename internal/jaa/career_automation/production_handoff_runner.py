@@ -15,17 +15,16 @@ import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
-from market_aligner.applications.handoff import canonical_json_bytes
 from market_aligner.applications import production_handoff
+from market_aligner.applications.handoff import canonical_json_bytes
 from market_aligner.applications.production_handoff import (
     PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
     ProductionHandoffReceipt,
-    _ProductionHandoffDeployment,
     _build_production_handoff_from_authenticated_time,
+    _ProductionHandoffDeployment,
 )
 
 from .current_time import installed_production_current_time_witness, obtain_current_time
-
 
 PRODUCTION_HANDOFF_DEPLOYMENT_CONFIG_PATH = Path(
     "/etc/gigabyte/majaa-public/market-handoff-v1.json"
@@ -35,6 +34,15 @@ PRODUCTION_MARKET_DATA_HOME = Path(
 )
 PRODUCTION_MARKET_REPOSITORY_ROOT = Path(
     "/home/gutua/software-factory/projects/market-aligner-integration-20260820"
+)
+PRODUCTION_COLLECTION_CONFIG_PATH = (
+    PRODUCTION_MARKET_REPOSITORY_ROOT / "internal/jaa/skeleton/config.overnight.yaml"
+)
+PRODUCTION_COLLECTION_CONFIG_SHA256 = (
+    "8868d381087729776e6eb5b689520fc74bf2239b59ccc94854b8feff8b627698"
+)
+PRODUCTION_COLLECTION_CONFIG_FILE_SHA256 = (
+    "ad6c247fbbb48a6e22d8f18fff3a1aed37f2f1da6099973a29c90c08cced7bf4"
 )
 PRODUCTION_MARKET_OUTBOX_ROOT = Path(
     "/home/gutua/software-factory/protected/majaa-20260810/market-handoff"
@@ -51,8 +59,13 @@ class ProductionHandoffDeploymentError(ValueError):
 
 def _expected_deployment_document() -> dict[str, str]:
     return {
-        "candidate_authority_path": str(production_handoff.PRODUCTION_CANDIDATE_AUTHORITY_PATH),
+        "candidate_authority_path": str(
+            production_handoff.PRODUCTION_CANDIDATE_AUTHORITY_PATH
+        ),
         "candidate_authority_sha256": PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+        "collection_config_path": str(PRODUCTION_COLLECTION_CONFIG_PATH),
+        "collection_config_sha256": PRODUCTION_COLLECTION_CONFIG_SHA256,
+        "collection_config_file_sha256": PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
         "data_home": str(PRODUCTION_MARKET_DATA_HOME),
         "output_root": str(PRODUCTION_MARKET_OUTBOX_ROOT),
         "repository_root": str(PRODUCTION_MARKET_REPOSITORY_ROOT),
@@ -71,7 +84,9 @@ def _parse_deployment_configuration(raw: bytes) -> str:
     try:
         document = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ProductionHandoffDeploymentError("deployment configuration is invalid JSON") from exc
+        raise ProductionHandoffDeploymentError(
+            "deployment configuration is invalid JSON"
+        ) from exc
     expected = _expected_deployment_document()
     if (
         type(document) is not dict
@@ -86,13 +101,18 @@ def _parse_deployment_configuration(raw: bytes) -> str:
 
 def _read_root_owned_configuration(path: Path) -> bytes:
     if not path.is_absolute() or ".." in path.parts:
-        raise ProductionHandoffDeploymentError("deployment configuration path is invalid")
+        raise ProductionHandoffDeploymentError(
+            "deployment configuration path is invalid"
+        )
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for component in path.parent.parts[1:]:
             next_descriptor = os.open(
                 component,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | os.O_CLOEXEC
+                | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=descriptor,
             )
             metadata = os.fstat(next_descriptor)
@@ -149,6 +169,9 @@ def installed_production_handoff_deployment() -> _ProductionHandoffDeployment:
         data_home=PRODUCTION_MARKET_DATA_HOME,
         repository_root=PRODUCTION_MARKET_REPOSITORY_ROOT,
         output_root=PRODUCTION_MARKET_OUTBOX_ROOT,
+        collection_config_path=PRODUCTION_COLLECTION_CONFIG_PATH,
+        collection_config_sha256=PRODUCTION_COLLECTION_CONFIG_SHA256,
+        collection_config_file_sha256=PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
         deployment_configuration_sha256=configuration_sha256,
         research_archive_root_identity=PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY,
     )
@@ -165,7 +188,9 @@ def _validate_deployment_roots(deployment: _ProductionHandoffDeployment) -> None
             metadata = path.lstat()
             resolved = path.resolve(strict=True)
         except OSError as exc:
-            raise ProductionHandoffDeploymentError(f"production {label} is unavailable") from exc
+            raise ProductionHandoffDeploymentError(
+                f"production {label} is unavailable"
+            ) from exc
         if (
             path.is_symlink()
             or resolved != path
@@ -182,7 +207,9 @@ def _validate_deployment_roots(deployment: _ProductionHandoffDeployment) -> None
         parent_metadata = parent.lstat()
         parent_resolved = parent.resolve(strict=True)
     except OSError as exc:
-        raise ProductionHandoffDeploymentError("production outbox parent is unavailable") from exc
+        raise ProductionHandoffDeploymentError(
+            "production outbox parent is unavailable"
+        ) from exc
     if (
         parent.is_symlink()
         or parent_resolved != parent
@@ -220,6 +247,9 @@ def run_production_handoff(
     _validate_deployment_roots(deployment)
     subject = {
         "candidate_authority_sha256": PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+        "collection_config_path": str(deployment.collection_config_path),
+        "collection_config_sha256": deployment.collection_config_sha256,
+        "collection_config_file_sha256": deployment.collection_config_file_sha256,
         "data_home": str(deployment.data_home.absolute()),
         "deployment_configuration_sha256": deployment.deployment_configuration_sha256,
         "execution_receipt_root": str(PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT),
@@ -253,6 +283,9 @@ def run_production_handoff(
 
 
 __all__ = [
+    "PRODUCTION_COLLECTION_CONFIG_FILE_SHA256",
+    "PRODUCTION_COLLECTION_CONFIG_PATH",
+    "PRODUCTION_COLLECTION_CONFIG_SHA256",
     "PRODUCTION_HANDOFF_DEPLOYMENT_CONFIG_PATH",
     "PRODUCTION_MARKET_DATA_HOME",
     "PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT",

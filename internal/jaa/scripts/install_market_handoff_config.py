@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 from pathlib import Path
@@ -23,6 +24,21 @@ from career_automation.production_handoff_runner import (  # noqa: E402
 
 TARGET_MODE = 0o644
 _DIRECTORY_WRITE_MASK = 0o022
+_PRIOR_DEPLOYMENT_CONFIGURATION = (
+    b'{"candidate_authority_path":"/home/gutua/software-factory/protected/'
+    b'majaa-20260810/candidate/candidate_authority.json","candidate_authority_sha256":'
+    b'"85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9",'
+    b'"data_home":"/home/gutua/software-factory/.control/'
+    b'market-aligner-recovery-20260820/live-data","output_root":"/home/gutua/'
+    b'software-factory/protected/majaa-20260810/market-handoff","repository_root":'
+    b'"/home/gutua/software-factory/projects/market-aligner-integration-20260820",'
+    b'"research_archive_root_identity":"state/public-employer-research-v2",'
+    b'"schema_version":"jaa.production-market-handoff-deployment.v1","trust_root_id":'
+    b'"gigabyte-market-aligner-protected-outbox-v1"}'
+)
+_PRIOR_DEPLOYMENT_CONFIGURATION_SHA256 = (
+    "5696865a3292a70692d405679a2adb5cdee4ff41be4149bbcd0965052c7dd04a"
+)
 
 
 def _validate_directory(descriptor: int, *, expected_uid: int, label: str) -> None:
@@ -55,10 +71,7 @@ def _open_protected_parent(
 
     descriptor = os.open(
         trusted_root,
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_CLOEXEC
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
         _validate_directory(
@@ -123,20 +136,18 @@ def _create_or_exact_at(
         expected_uid=expected_uid,
     )
     flags = os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    temporary_name = f".{target.name}.{os.getpid()}.{secrets.token_hex(12)}.tmp"
     try:
+        existing: bytes | None = None
         try:
-            descriptor = os.open(
-                target.name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags,
-                TARGET_MODE,
-                dir_fd=parent_descriptor,
-            )
-        except FileExistsError:
             descriptor = os.open(
                 target.name,
                 os.O_RDONLY | flags,
                 dir_fd=parent_descriptor,
             )
+        except FileNotFoundError:
+            pass
+        else:
             try:
                 metadata = os.fstat(descriptor)
                 if (
@@ -144,15 +155,29 @@ def _create_or_exact_at(
                     or metadata.st_uid != expected_uid
                     or metadata.st_nlink != 1
                     or stat.S_IMODE(metadata.st_mode) != TARGET_MODE
-                    or _read_all(descriptor) != value
                 ):
                     raise FileExistsError(
                         f"refusing to overwrite differing root target: {target}"
                     )
+                existing = _read_all(descriptor)
             finally:
                 os.close(descriptor)
+        if existing == value:
             return "exact-replay"
-
+        if existing is not None and (
+            existing != _PRIOR_DEPLOYMENT_CONFIGURATION
+            or hashlib.sha256(existing).hexdigest()
+            != _PRIOR_DEPLOYMENT_CONFIGURATION_SHA256
+        ):
+            raise FileExistsError(
+                f"refusing to overwrite differing root target: {target}"
+            )
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags,
+            TARGET_MODE,
+            dir_fd=parent_descriptor,
+        )
         try:
             metadata = os.fstat(descriptor)
             if metadata.st_uid != expected_uid:
@@ -162,9 +187,74 @@ def _create_or_exact_at(
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        if existing is None:
+            try:
+                os.link(
+                    temporary_name,
+                    target.name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                replay = os.open(
+                    target.name, os.O_RDONLY | flags, dir_fd=parent_descriptor
+                )
+                try:
+                    metadata = os.fstat(replay)
+                    if (
+                        not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_uid != expected_uid
+                        or metadata.st_nlink != 1
+                        or stat.S_IMODE(metadata.st_mode) != TARGET_MODE
+                        or _read_all(replay) != value
+                    ):
+                        raise FileExistsError(
+                            f"refusing to overwrite differing root target: {target}"
+                        )
+                finally:
+                    os.close(replay)
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+                temporary_name = ""
+                outcome = "exact-replay"
+            else:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+                temporary_name = ""
+                outcome = "created"
+        else:
+            current = os.open(
+                target.name, os.O_RDONLY | flags, dir_fd=parent_descriptor
+            )
+            try:
+                metadata = os.fstat(current)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != expected_uid
+                    or metadata.st_nlink != 1
+                    or stat.S_IMODE(metadata.st_mode) != TARGET_MODE
+                    or _read_all(current) != _PRIOR_DEPLOYMENT_CONFIGURATION
+                ):
+                    raise FileExistsError(
+                        f"refusing to overwrite changed root target: {target}"
+                    )
+            finally:
+                os.close(current)
+            os.replace(
+                temporary_name,
+                target.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            temporary_name = ""
+            outcome = "upgraded-exact-prior"
         os.fsync(parent_descriptor)
-        return "created"
+        return outcome
     finally:
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
         os.close(parent_descriptor)
 
 
@@ -210,7 +300,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = install()
     except (OSError, ValueError) as exc:
-        print(f"market-handoff configuration installation refused: {exc}", file=sys.stderr)
+        print(
+            f"market-handoff configuration installation refused: {exc}", file=sys.stderr
+        )
         return 2
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
