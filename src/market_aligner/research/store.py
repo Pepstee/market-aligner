@@ -383,6 +383,9 @@ class AssessmentStore:
             }
             if any(score.get(key) != value for key, value in expected.items()):
                 raise ValueError("processing promotion score differs from assessment state")
+            research_priority = 1_000_000 + round(
+                float(current["opportunity"]) * 100_000
+            )
             existing = connection.execute(
                 "SELECT * FROM assessment_promotions WHERE profile_id=? AND job_key=?",
                 (profile_id, job_key),
@@ -395,6 +398,12 @@ class AssessmentStore:
                     or current["policy_hash"] != policy_hash
                 ):
                     raise ValueError("processing promotion conflicts with sealed prior promotion")
+                connection.execute(
+                    """INSERT INTO employer_research_queue(profile_id,job_key,priority)
+                       VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
+                       priority=excluded.priority,updated_at=CURRENT_TIMESTAMP""",
+                    (profile_id, job_key, research_priority),
+                )
                 return False
             connection.execute(
                 """INSERT INTO assessment_promotions(
@@ -428,6 +437,12 @@ class AssessmentStore:
                     profile_id,
                     job_key,
                 ),
+            )
+            connection.execute(
+                """INSERT INTO employer_research_queue(profile_id,job_key,priority)
+                   VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
+                   priority=excluded.priority,updated_at=CURRENT_TIMESTAMP""",
+                (profile_id, job_key, research_priority),
             )
             connection.execute(
                 """INSERT INTO assessment_events(

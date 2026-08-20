@@ -301,6 +301,17 @@ class ServiceTests(unittest.TestCase):
             assessment = service.assessments.assessment(profile_id, "fixture:1")
             self.assertEqual("pass", assessment["opportunity_decision"])
             self.assertEqual(first.policy_sha256, assessment["policy_hash"])
+            with service.assessments.connection() as connection:
+                research = connection.execute(
+                    """SELECT status,priority FROM employer_research_queue
+                       WHERE profile_id=? AND job_key=?""",
+                    (profile_id, "fixture:1"),
+                ).fetchone()
+            self.assertEqual("queued", research["status"])
+            self.assertEqual(
+                1_000_000 + round(float(assessment["opportunity"]) * 100_000),
+                research["priority"],
+            )
             self.assertEqual(first.receipt_path.read_bytes(), bytes(
                 service.assessments.processing_promotion(
                     profile_id, "fixture:1"
