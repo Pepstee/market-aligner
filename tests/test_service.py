@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus
+from market_aligner.assessment.geography import (
+    GeographicPreferencePolicy,
+    classify_geographic_preference,
+)
 from market_aligner.domain.contracts import JobUrl, RawPosting
 from market_aligner.llm.contracts import (
     EvidenceAlignment,
@@ -218,6 +222,9 @@ class ServiceTests(unittest.TestCase):
             self.assertFalse(first["application_authority"])
             self.assertTrue(first["job_specific_opportunity_axes"])
             self.assertEqual(64, len(str(first["opportunity_policy_sha256"])))
+            self.assertEqual(64, len(str(first["geographic_preference_policy_sha256"])))
+            self.assertEqual(64, len(str(first["scope_sha256"])))
+            self.assertEqual(1, first["scope_counts"]["scope_eligible"])
             self.assertEqual(64, len(str(first["evidence_authority_sha256"])))
             self.assertEqual(64, len(str(first["state_sha256"])))
             completed_rows = service.jobs.completed_processing(
@@ -229,6 +236,13 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(
                 first["opportunity_policy_sha256"],
                 completed_rows[0]["opportunity_axes"]["policy_sha256"],
+            )
+            self.assertEqual(
+                "uk_remote", completed_rows[0]["geographic_preference"]["category"]
+            )
+            self.assertEqual(
+                first["geographic_preference_policy_sha256"],
+                completed_rows[0]["geographic_preference"]["policy_sha256"],
             )
             reports = {name: Path(path) for name, path in dict(first["reports"]).items()}
             self.assertTrue(all(path.is_file() for path in reports.values()))
@@ -299,6 +313,138 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(1, len(first))
             self.assertEqual(1, len(second))
             self.assertTrue({row.key for row in first}.isdisjoint({row.key for row in second}))
+
+    def test_processing_scope_filters_before_calls_and_preserves_excluded_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, _ = _processing_fixture(root, jobs=3)
+            database = JobDatabase(root / "state" / "vacancies.sqlite3")
+            excluded = JobUrl("excluded", "1", "https://excluded.example.test/1")
+            database.upsert_discovered(excluded)
+            database.store_raw(
+                RawPosting(
+                    board=excluded.board,
+                    job_id=excluded.job_id,
+                    url=excluded.url,
+                    fetched_at="2026-08-20T00:00:00Z",
+                    raw_json={"title": "Other", "description": "Other", "location": "Remote"},
+                )
+            )
+            authority = "c" * 64
+            scope = {"include_boards": ("fixture",), "exclude_boards": (), "max_total": 2}
+            first = database.claim_fetched_for_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=authority,
+                worker_id="worker-a",
+                limit=1,
+                lease_seconds=60,
+                **scope,
+            )
+            second = database.claim_fetched_for_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=authority,
+                worker_id="worker-b",
+                limit=2,
+                lease_seconds=60,
+                **scope,
+            )
+            third = database.claim_fetched_for_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=authority,
+                worker_id="worker-c",
+                limit=2,
+                lease_seconds=60,
+                **scope,
+            )
+            self.assertEqual(["fixture:1"], [row.key for row in first])
+            self.assertEqual(["fixture:2"], [row.key for row in second])
+            self.assertEqual([], third)
+            counts = database.processing_scope_counts(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=authority,
+                **scope,
+            )
+            self.assertEqual(
+                {
+                    "available": 0,
+                    "board_eligible": 3,
+                    "completed": 0,
+                    "excluded_by_board": 1,
+                    "excluded_by_limit": 1,
+                    "failed": 0,
+                    "fetched_total": 4,
+                    "leased": 2,
+                    "scope_eligible": 2,
+                },
+                counts,
+            )
+            with database.connect() as connection:
+                queued_keys = {
+                    row[0] for row in connection.execute("SELECT job_key FROM processing_jobs")
+                }
+            self.assertEqual({"fixture:1", "fixture:2"}, queued_keys)
+
+            config = root / "scoped-config.yaml"
+            config.write_text(
+                "processing:\n"
+                "  shard_size: 2\n"
+                "  lease_seconds: 60\n"
+                "  include_boards: [fixture]\n"
+                "  max_total: 2\n",
+                encoding="utf-8",
+            )
+            semantic_worker = FixtureSemanticWorker()
+            receipt = ProcessingService(root, semantic_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="worker-scoped",
+            )
+            self.assertEqual((2, 2), (receipt["shard_claimed"], semantic_worker.extractions))
+            self.assertEqual(2, semantic_worker.alignments)
+            self.assertEqual(2, receipt["scope_counts"]["scope_eligible"])
+            self.assertEqual(1, receipt["scope_counts"]["excluded_by_board"])
+            self.assertEqual(1, receipt["scope_counts"]["excluded_by_limit"])
+            with database.connect() as connection:
+                scoped_keys = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT job_key FROM processing_jobs WHERE authority_sha256=?",
+                        (receipt["evidence_authority_sha256"],),
+                    )
+                }
+            self.assertEqual({"fixture:1", "fixture:2"}, scoped_keys)
+
+    def test_geographic_preference_is_deterministic_configurable_and_never_rejects_unknown(self) -> None:
+        default = GeographicPreferencePolicy()
+        examples = (
+            ("Remote UK", "remote", "uk_remote", 0),
+            ("London", "hybrid", "uk_hybrid", 1),
+            ("Birmingham", "on-site", "uk_onsite", 2),
+            ("Bucharest, Romania", "remote", "romania_remote", 3),
+            ("Remote Europe", "remote", "eu_remote", 4),
+            ("Seoul", None, "unknown_other", 5),
+        )
+        for location, remote_policy, category, rank in examples:
+            result = classify_geographic_preference(
+                location=location, remote_policy=remote_policy, policy=default
+            )
+            self.assertEqual((category, rank), (result.category, result.rank))
+            self.assertEqual(default.policy_hash, result.policy_sha256)
+            self.assertEqual(64, len(result.facts_sha256))
+
+        configured = GeographicPreferencePolicy.from_mapping(
+            {"order": ["eu_remote", "uk_remote", "uk_hybrid", "uk_onsite", "romania_remote"]}
+        )
+        reordered = classify_geographic_preference(
+            location="Remote Europe", remote_policy="remote", policy=configured
+        )
+        self.assertEqual(("eu_remote", 0), (reordered.category, reordered.rank))
+        self.assertNotEqual(default.policy_hash, configured.policy_hash)
 
 
 if __name__ == "__main__":

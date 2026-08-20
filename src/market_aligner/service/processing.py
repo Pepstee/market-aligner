@@ -16,6 +16,10 @@ from market_aligner.assessment.opportunity import (
 )
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, ScoreResult, score
 from market_aligner.assessment.viability import assess_viability
+from market_aligner.assessment.geography import (
+    GeographicPreferencePolicy,
+    classify_geographic_preference,
+)
 from market_aligner.config import ProductPaths
 from market_aligner.config_loader import load_config
 from market_aligner.domain.contracts import Vacancy
@@ -80,12 +84,38 @@ def _processing_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("processing config must be an object")
     shard_size = int(value.get("shard_size", 25))
     lease_seconds = int(value.get("lease_seconds", 900))
+    max_total_value = value.get("max_total")
+    max_total = None if max_total_value is None else int(max_total_value)
     if not 1 <= shard_size <= 1000 or not 1 <= lease_seconds <= 86400:
         raise ValueError("processing shard or lease is outside the safe bound")
+    if max_total is not None and max_total <= 0:
+        raise ValueError("processing max_total must be positive when set")
+    include_boards = _board_filter(value.get("include_boards"), "include_boards")
+    exclude_boards = _board_filter(value.get("exclude_boards"), "exclude_boards")
+    if set(include_boards) & set(exclude_boards):
+        raise ValueError("processing board include/exclude filters overlap")
+    geographic = value.get("geographic_preference")
+    if geographic is not None and not isinstance(geographic, dict):
+        raise ValueError("processing geographic_preference must be an object")
     return {
+        "exclude_boards": exclude_boards,
+        "geographic_preference": geographic,
+        "include_boards": include_boards,
         "lease_seconds": lease_seconds,
+        "max_total": max_total,
         "shard_size": shard_size,
     }
+
+
+def _board_filter(value: object, name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"processing {name} must be a list of board names")
+    normalized = tuple(sorted({item.strip() for item in value if item.strip()}))
+    if len(normalized) != len(value):
+        raise ValueError(f"processing {name} contains blanks or duplicates")
+    return normalized
 
 
 def _ranked(result_rows: list[dict[str, object]]) -> list[RankedVacancy]:
@@ -107,7 +137,15 @@ def _ranked(result_rows: list[dict[str, object]]) -> list[RankedVacancy]:
         score_value = dict(result["score"])  # type: ignore[arg-type]
         score_value["fit_status"] = FitStatus(score_value["fit_status"])
         score = ScoreResult(**score_value)
-        ranked.append(RankedVacancy(vacancy, score))
+        preference = dict(result.get("geographic_preference") or {})
+        ranked.append(
+            RankedVacancy(
+                vacancy,
+                score,
+                preference_classification=str(preference.get("category", "unknown_other")),
+                preference_rank=int(preference.get("rank", 999)),
+            )
+        )
     return ranked
 
 
@@ -120,10 +158,12 @@ class ProcessingService:
         semantic_worker: LLMGateway,
         *,
         opportunity_policy: OpportunityAxisPolicy | None = None,
+        geographic_policy: GeographicPreferencePolicy | None = None,
     ) -> None:
         self.paths = ProductPaths.resolve(data_home).ensure()
         self.worker = semantic_worker
         self.opportunity_policy = opportunity_policy or OpportunityAxisPolicy()
+        self.geographic_policy = geographic_policy or GeographicPreferencePolicy()
         self.profiles = ProfileStore(self.paths.root)
         self.jobs = JobDatabase(self.paths.state / "vacancies.sqlite3")
         self.assessments = AssessmentStore(self.paths.state / "assessments.sqlite3")
@@ -140,6 +180,16 @@ class ProcessingService:
             raise ValueError("processing worker ID is required")
         config = load_config(config_path)
         processing = _processing_config(config)
+        geographic_policy = GeographicPreferencePolicy.from_mapping(
+            processing["geographic_preference"],
+            default=self.geographic_policy,
+        )
+        scope = {
+            "exclude_boards": processing["exclude_boards"],
+            "include_boards": processing["include_boards"],
+            "max_total": processing["max_total"],
+        }
+        scope_sha256 = _sha256(scope)
         profile, evidence = self.profiles.load(profile_id)
         if track not in profile.tracks:
             raise ValueError(f"profile has no track named {track!r}")
@@ -150,7 +200,11 @@ class ProcessingService:
         profile_context = profile.llm_context(evidence)
         authority_sha256 = _sha256(authority_document)
         config_sha256 = _sha256(
-            {"opportunity_policy": asdict(self.opportunity_policy), "processing": processing}
+            {
+                "geographic_preference_policy": asdict(geographic_policy),
+                "opportunity_policy": asdict(self.opportunity_policy),
+                "processing": processing,
+            }
         )
         claimed = self.jobs.claim_fetched_for_processing(
             profile_id=profile_id,
@@ -159,6 +213,9 @@ class ProcessingService:
             worker_id=worker_id,
             limit=processing["shard_size"],
             lease_seconds=processing["lease_seconds"],
+            include_boards=processing["include_boards"],
+            exclude_boards=processing["exclude_boards"],
+            max_total=processing["max_total"],
         )
         completed = rejected = errors = 0
         for raw in claimed:
@@ -181,10 +238,16 @@ class ProcessingService:
                     inputs=raw_context,
                 )
                 vacancy = accept_extraction(raw, extraction, extraction_receipt)
+                geographic_preference = classify_geographic_preference(
+                    location=vacancy.location,
+                    remote_policy=vacancy.remote_policy,
+                    policy=geographic_policy,
+                )
                 viability = assess_viability(vacancy)
                 if viability.decision != "include":
                     result: dict[str, object] = {
                         "included": False,
+                        "geographic_preference": asdict(geographic_preference),
                         "viability": asdict(viability),
                         "vacancy": asdict(vacancy),
                     }
@@ -230,6 +293,7 @@ class ProcessingService:
                     result = {
                         "alignment_receipt": asdict(alignment_receipt),
                         "extraction_receipt": asdict(extraction_receipt),
+                        "geographic_preference": asdict(geographic_preference),
                         "included": True,
                         "opportunity_axes": asdict(opportunity),
                         "score": {**asdict(score_result), "fit_status": score_result.fit_status.value},
@@ -259,7 +323,12 @@ class ProcessingService:
                 )
 
         with self.jobs.processing_report_snapshot(
-            profile_id=profile_id, track=track, authority_sha256=authority_sha256
+            profile_id=profile_id,
+            track=track,
+            authority_sha256=authority_sha256,
+            include_boards=processing["include_boards"],
+            exclude_boards=processing["exclude_boards"],
+            max_total=processing["max_total"],
         ) as result_rows:
             ranked = _ranked(result_rows)
             report_paths = write_reports(profile_id, ranked, self.paths.outputs / "reports")
@@ -268,12 +337,21 @@ class ProcessingService:
                 for name, path in asdict(report_paths).items()
             }
             report_values = {name: str(path) for name, path in asdict(report_paths).items()}
+        scope_counts = self.jobs.processing_scope_counts(
+            profile_id=profile_id,
+            track=track,
+            authority_sha256=authority_sha256,
+            include_boards=processing["include_boards"],
+            exclude_boards=processing["exclude_boards"],
+            max_total=processing["max_total"],
+        )
         body: dict[str, object] = {
             "application_authority": False,
             "authority_scope": "processing_only",
             "config_sha256": config_sha256,
             "errors": errors,
             "evidence_authority_sha256": authority_sha256,
+            "geographic_preference_policy_sha256": geographic_policy.policy_hash,
             "included": completed,
             "job_specific_opportunity_axes": True,
             "opportunity_policy_sha256": self.opportunity_policy.policy_hash,
@@ -283,6 +361,9 @@ class ProcessingService:
             "report_hashes": report_hashes,
             "schema_version": "market-aligner.processing-run-receipt.v1",
             "shard_claimed": len(claimed),
+            "scope": scope,
+            "scope_counts": scope_counts,
+            "scope_sha256": scope_sha256,
             "track": track,
             "worker_id": worker_id,
         }

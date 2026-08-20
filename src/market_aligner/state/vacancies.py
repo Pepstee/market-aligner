@@ -238,6 +238,9 @@ class JobDatabase:
         worker_id: str,
         limit: int,
         lease_seconds: int = 900,
+        include_boards: Iterable[str] = (),
+        exclude_boards: Iterable[str] = (),
+        max_total: int | None = None,
     ) -> list[RawPosting]:
         """Atomically lease one shard of current fetched snapshots."""
 
@@ -245,13 +248,19 @@ class JobDatabase:
             raise ValueError("processing shard and lease must be positive")
         now = time.time()
         lease_until = now + lease_seconds
+        scope_sql, scope_params = _processing_scope_sql(
+            include_boards=include_boards,
+            exclude_boards=exclude_boards,
+            max_total=max_total,
+        )
         claimed: list[RawPosting] = []
         with closing(self.connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                """SELECT p.key,p.board,p.job_id,p.url,p.fetched_at,p.raw_text,
+                f"""WITH scoped AS ({scope_sql})
+                   SELECT p.key,p.board,p.job_id,p.url,p.fetched_at,p.raw_text,
                           p.raw_json,p.content_hash
-                   FROM postings p
+                   FROM scoped p
                    LEFT JOIN processing_jobs q
                      ON q.profile_id=? AND q.track=? AND q.job_key=p.key
                     AND q.authority_sha256=? AND q.source_content_sha256=p.content_hash
@@ -259,7 +268,7 @@ class JobDatabase:
                      AND (q.status IS NULL OR q.status='failed'
                           OR (q.status='leased' AND q.lease_until<?))
                    ORDER BY p.key LIMIT ?""",
-                (profile_id, track, authority_sha256, now, limit),
+                (*scope_params, profile_id, track, authority_sha256, now, limit),
             ).fetchall()
             for row in rows:
                 conn.execute(
@@ -356,40 +365,156 @@ class JobDatabase:
                 raise RuntimeError("processing failure requires the active shard lease")
 
     def completed_processing(
-        self, *, profile_id: str, track: str, authority_sha256: str
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        authority_sha256: str,
+        include_boards: Iterable[str] = (),
+        exclude_boards: Iterable[str] = (),
+        max_total: int | None = None,
     ) -> list[dict[str, object]]:
+        scope_sql, scope_params = _processing_scope_sql(
+            include_boards=include_boards,
+            exclude_boards=exclude_boards,
+            max_total=max_total,
+        )
         with closing(self.connect()) as conn:
             rows = conn.execute(
-                """SELECT q.result_json FROM processing_jobs q
-                   JOIN postings p ON p.key=q.job_key
+                f"""WITH scoped AS ({scope_sql})
+                   SELECT q.result_json FROM processing_jobs q
+                   JOIN scoped p ON p.key=q.job_key
                     AND p.content_hash=q.source_content_sha256
                    WHERE q.profile_id=? AND q.track=? AND q.authority_sha256=?
                      AND q.status='completed' AND q.result_json IS NOT NULL
                    ORDER BY q.job_key""",
-                (profile_id, track, authority_sha256),
+                (*scope_params, profile_id, track, authority_sha256),
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def processing_scope_counts(
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        authority_sha256: str,
+        include_boards: Iterable[str] = (),
+        exclude_boards: Iterable[str] = (),
+        max_total: int | None = None,
+    ) -> dict[str, int]:
+        """Return exact current-snapshot counts without changing excluded rows."""
+
+        includes = tuple(include_boards)
+        excludes = tuple(exclude_boards)
+        scope_sql, scope_params = _processing_scope_sql(
+            include_boards=includes,
+            exclude_boards=excludes,
+            max_total=max_total,
+        )
+        board_where, board_params = _processing_board_where(includes, excludes)
+        now = time.time()
+        with closing(self.connect()) as conn:
+            fetched_total = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM postings WHERE fetch_status='fetched' "
+                    "AND content_hash IS NOT NULL"
+                ).fetchone()[0]
+            )
+            board_eligible = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM postings p WHERE {board_where}", board_params
+                ).fetchone()[0]
+            )
+            row = conn.execute(
+                f"""WITH scoped AS ({scope_sql})
+                    SELECT COUNT(*),
+                      SUM(CASE WHEN q.status='completed' THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN q.status='leased' AND q.lease_until>=? THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN q.status='failed' THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN q.status IS NULL OR q.status='failed'
+                                OR (q.status='leased' AND q.lease_until<?) THEN 1 ELSE 0 END)
+                    FROM scoped p LEFT JOIN processing_jobs q
+                      ON q.profile_id=? AND q.track=? AND q.job_key=p.key
+                     AND q.authority_sha256=? AND q.source_content_sha256=p.content_hash""",
+                (*scope_params, now, now, profile_id, track, authority_sha256),
+            ).fetchone()
+        scoped = int(row[0] or 0)
+        return {
+            "available": int(row[4] or 0),
+            "board_eligible": board_eligible,
+            "completed": int(row[1] or 0),
+            "excluded_by_board": fetched_total - board_eligible,
+            "excluded_by_limit": board_eligible - scoped,
+            "failed": int(row[3] or 0),
+            "fetched_total": fetched_total,
+            "leased": int(row[2] or 0),
+            "scope_eligible": scoped,
+        }
+
     @contextmanager
     def processing_report_snapshot(
-        self, *, profile_id: str, track: str, authority_sha256: str
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        authority_sha256: str,
+        include_boards: Iterable[str] = (),
+        exclude_boards: Iterable[str] = (),
+        max_total: int | None = None,
     ) -> Iterator[list[dict[str, object]]]:
         """Serialize canonical report snapshots across concurrent processing shards."""
 
+        scope_sql, scope_params = _processing_scope_sql(
+            include_boards=include_boards,
+            exclude_boards=exclude_boards,
+            max_total=max_total,
+        )
         with closing(self.connect()) as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
-                    """SELECT q.result_json FROM processing_jobs q
-                       JOIN postings p ON p.key=q.job_key
+                    f"""WITH scoped AS ({scope_sql})
+                       SELECT q.result_json FROM processing_jobs q
+                       JOIN scoped p ON p.key=q.job_key
                         AND p.content_hash=q.source_content_sha256
                        WHERE q.profile_id=? AND q.track=? AND q.authority_sha256=?
                          AND q.status='completed' AND q.result_json IS NOT NULL
                        ORDER BY q.job_key""",
-                    (profile_id, track, authority_sha256),
+                    (*scope_params, profile_id, track, authority_sha256),
                 ).fetchall()
                 yield [json.loads(row[0]) for row in rows]
                 conn.commit()
             except BaseException:
                 conn.rollback()
                 raise
+
+
+def _processing_board_where(
+    include_boards: Iterable[str], exclude_boards: Iterable[str]
+) -> tuple[str, tuple[object, ...]]:
+    includes = tuple(sorted(set(include_boards)))
+    excludes = tuple(sorted(set(exclude_boards)))
+    conditions = ["p.fetch_status='fetched'", "p.content_hash IS NOT NULL"]
+    params: list[object] = []
+    if includes:
+        conditions.append(f"p.board IN ({','.join('?' for _ in includes)})")
+        params.extend(includes)
+    if excludes:
+        conditions.append(f"p.board NOT IN ({','.join('?' for _ in excludes)})")
+        params.extend(excludes)
+    return " AND ".join(conditions), tuple(params)
+
+
+def _processing_scope_sql(
+    *,
+    include_boards: Iterable[str],
+    exclude_boards: Iterable[str],
+    max_total: int | None,
+) -> tuple[str, tuple[object, ...]]:
+    if max_total is not None and max_total <= 0:
+        raise ValueError("processing max_total must be positive when set")
+    where, params = _processing_board_where(include_boards, exclude_boards)
+    return (
+        f"SELECT p.* FROM postings p WHERE {where} ORDER BY p.key LIMIT ?",
+        (*params, -1 if max_total is None else max_total),
+    )

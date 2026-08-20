@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import struct
 import tempfile
 import unittest
@@ -56,6 +57,14 @@ class ReportingTests(unittest.TestCase):
             original_png = png
             reversed_paths = write_reports(profile.profile_id, list(reversed(rows)), Path(temporary))
             self.assertEqual(original_png, reversed_paths.scatter_png.read_bytes())
+            preference_rows = [
+                RankedVacancy(rows[0].vacancy, rows[0].score, "eu_remote", 4),
+                RankedVacancy(rows[1].vacancy, rows[1].score, "uk_remote", 0),
+            ]
+            preferred_paths = write_reports(profile.profile_id, preference_rows, Path(temporary))
+            preferred = json.loads(preferred_paths.ranked_json.read_text(encoding="utf-8"))
+            self.assertEqual(["board:2", "board:1"], [job["job_key"] for job in preferred["jobs"]])
+            self.assertEqual("uk_remote", preferred["jobs"][0]["preference_classification"])
 
 
 def _decode_png(payload: bytes) -> tuple[int, int, bytes]:

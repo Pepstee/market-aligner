@@ -21,6 +21,8 @@ from market_aligner.profiler.schema import validate_profile_id
 class RankedVacancy:
     vacancy: Vacancy
     score: ScoreResult
+    preference_classification: str = "unknown_other"
+    preference_rank: int = 999
 
     def __post_init__(self) -> None:
         if self.vacancy.key != self.score.job_key:
@@ -94,7 +96,10 @@ def write_reports(
         scatter_html=root / "opportunity_fit.html",
         scatter_png=root / "opportunity_fit.png",
     )
-    ranked = sorted(rows, key=lambda item: (-item.score.final, item.vacancy.key))
+    ranked = sorted(
+        rows,
+        key=lambda item: (item.preference_rank, -item.score.final, item.vacancy.key),
+    )
     _write_jobs(ranked, paths.jobs_csv)
     _write_ranked_json(profile_id, ranked, paths.ranked_json)
     _write_requirements(ranked, paths.requirements_csv)
@@ -113,6 +118,8 @@ def _write_ranked_json(profile_id: str, rows: Sequence[RankedVacancy], path: Pat
                 "fit": item.score.fit,
                 "job_key": item.vacancy.key,
                 "opportunity": item.score.opportunity,
+                "preference_classification": item.preference_classification,
+                "preference_rank": item.preference_rank,
                 "title": item.vacancy.title,
                 "track": item.score.track,
                 "url": item.vacancy.url,
@@ -141,6 +148,8 @@ def _write_jobs(rows: Sequence[RankedVacancy], path: Path) -> None:
         "fit",
         "fit_status",
         "opportunity",
+        "preference_classification",
+        "preference_rank",
         "final",
         "required_skills",
         "preferred_skills",
@@ -164,6 +173,8 @@ def _write_jobs(rows: Sequence[RankedVacancy], path: Path) -> None:
                     "fit": round(item.score.fit, 6),
                     "fit_status": item.score.fit_status.value,
                     "opportunity": round(item.score.opportunity, 6),
+                    "preference_classification": item.preference_classification,
+                    "preference_rank": item.preference_rank,
                     "final": round(item.score.final, 4),
                     "required_skills": json.dumps(item.vacancy.required_skills, ensure_ascii=False),
                     "preferred_skills": json.dumps(item.vacancy.preferred_skills, ensure_ascii=False),
@@ -204,6 +215,8 @@ def _write_scatter(profile_id: str, rows: Sequence[RankedVacancy], path: Path) -
             "track": item.score.track,
             "fit": item.score.fit,
             "opportunity": item.score.opportunity,
+            "preference_classification": item.preference_classification,
+            "preference_rank": item.preference_rank,
             "final": item.score.final,
             "fit_status": item.score.fit_status.value,
         }
@@ -221,7 +234,7 @@ body{{font:14px system-ui;margin:0;background:#0b1020;color:#eef2ff}}main{{max-w
 <h1>Opportunity vs Fit</h1><p class="axis">Profile {html.escape(profile_id)} · fit is uncalibrated · select a point for details.</p>
 <div id="plot" role="img" aria-label="Opportunity versus uncalibrated fit scatter plot"></div><div id="detail">No job selected.</div>
 <script>const points={data};const plot=document.querySelector('#plot'),detail=document.querySelector('#detail');
-for(const p of points){{const b=document.createElement('button');b.className='point';b.style.left=`${{p.fit*100}}%`;b.style.bottom=`${{p.opportunity*100}}%`;b.title=`${{p.title}} — ${{p.company}}`;b.onclick=()=>{{detail.innerHTML='';const a=document.createElement('a');a.href=p.url;a.textContent=p.title+' — '+p.company;a.target='_blank';detail.append(a,document.createElement('br'),`Track: ${{p.track}} · Fit: ${{p.fit.toFixed(3)}} (${{p.fit_status}}) · Opportunity: ${{p.opportunity.toFixed(3)}} · Final: ${{p.final.toFixed(1)}}`);}};plot.appendChild(b);}}
+for(const p of points){{const b=document.createElement('button');b.className='point';b.style.left=`${{p.fit*100}}%`;b.style.bottom=`${{p.opportunity*100}}%`;b.title=`${{p.title}} — ${{p.company}}`;b.onclick=()=>{{detail.innerHTML='';const a=document.createElement('a');a.href=p.url;a.textContent=p.title+' — '+p.company;a.target='_blank';detail.append(a,document.createElement('br'),`Preference: ${{p.preference_classification}} · Track: ${{p.track}} · Fit: ${{p.fit.toFixed(3)}} (${{p.fit_status}}) · Opportunity: ${{p.opportunity.toFixed(3)}} · Final: ${{p.final.toFixed(1)}}`);}};plot.appendChild(b);}}
 </script></main></body></html>"""
     path.write_text(document, encoding="utf-8")
 
