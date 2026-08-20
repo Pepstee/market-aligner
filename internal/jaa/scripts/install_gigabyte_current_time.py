@@ -16,12 +16,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from career_automation.current_time import installed_production_current_time_witness, obtain_current_time  # noqa: E402
+from career_automation.current_time import (  # noqa: E402
+    PRODUCTION_TIME_WITNESS_IDENTITY_SHA256,
+    obtain_current_time,
+)
 
-CONFIG_TARGET = Path("/etc/gigabyte/majaa/jaa-current-time-v1.json")
+CONFIG_TARGET = Path("/etc/gigabyte/majaa-public/jaa-current-time-v1.json")
 SOCKET_TARGET = Path("/run/gigabyte/majaa/jaa-current-time-v1.sock")
+SIGNER_SOCKET_TARGET = Path("/run/gigabyte/majaa/jaa-current-time-signer-v1.sock")
 SERVICE_TARGET = Path("/usr/local/libexec/jaa-current-time-v1")
+BROKER_TARGET = Path("/usr/local/libexec/jaa-current-time-broker-v1")
 UNIT_TARGET = Path("/etc/systemd/system/jaa-current-time-v1.service")
+BROKER_UNIT_TARGET = Path("/etc/systemd/system/jaa-current-time-broker-v1.service")
 STAGED_CONFIG_SHA256 = "2ab67684897303a619283c94ecab166a840f4b9efbf1df90d7e67aab46ea31a7"
 LEGACY_CONFIG_SHA256 = "db98c0b1071fb7eb34681a9765a4c943deba7749597299a7de808e009f8a95bb"
 DEPLOYMENT_MAXIMUM_CLOCK_SKEW_SECONDS = 5
@@ -45,6 +51,8 @@ PINNED_CRYPTOGRAPHY_IDENTITY = {
     "ed25519_signature_bytes": 64,
     "sys_executable": str(PINNED_VENV_PYTHON),
 }
+AUTHORIZED_CLIENT_UID = 1000
+AUTHORIZED_CLIENT_GID = 1000
 
 
 def _exact_file(path: Path, value: bytes, mode: int) -> str:
@@ -72,7 +80,7 @@ def _upgrade_exact(
     path: Path,
     value: bytes,
     *,
-    previous: bytes,
+    previous: bytes | tuple[bytes, ...],
     mode: int,
     expected_uid: int = 0,
 ) -> str:
@@ -89,7 +97,8 @@ def _upgrade_exact(
     current = path.read_bytes()
     if current == value:
         return "exact-replay"
-    if current != previous:
+    prior_values = (previous,) if isinstance(previous, bytes) else previous
+    if not prior_values or current not in prior_values:
         raise FileExistsError(f"refusing to overwrite unrecognized root target: {path}")
     temporary = path.with_name(f".{path.name}.upgrade-{os.getpid()}")
     descriptor = os.open(
@@ -212,12 +221,47 @@ WantedBy=multi-user.target
     return value.encode("utf-8")
 
 
-def _unit(*, python: Path, key: Path) -> bytes:
+def _prior_runtime_unit(*, python: Path, key: Path) -> bytes:
     legacy = _legacy_unit(python=python, key=key).decode("utf-8")
     return legacy.replace(
         "PrivateTmp=true\n",
         "PrivateTmp=true\nRuntimeDirectory=gigabyte/majaa\nRuntimeDirectoryMode=0755\n",
     ).encode("utf-8")
+
+
+def _unit(*, python: Path, key: Path) -> bytes:
+    return _prior_runtime_unit(python=python, key=key).replace(
+        str(SOCKET_TARGET).encode("utf-8"),
+        str(SIGNER_SOCKET_TARGET).encode("utf-8"),
+    )
+
+
+def _broker_unit(*, python: Path) -> bytes:
+    value = f"""[Unit]
+Description=Gigabyte JAA non-root current-time broker
+After=jaa-current-time-v1.service
+Requires=jaa-current-time-v1.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart={python} {BROKER_TARGET} --socket {SOCKET_TARGET} --signer-socket {SIGNER_SOCKET_TARGET} --client-uid {AUTHORIZED_CLIENT_UID} --client-gid {AUTHORIZED_CLIENT_GID}
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=true
+PrivateTmp=true
+RuntimeDirectory=gigabyte/majaa
+RuntimeDirectoryMode=0755
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return value.encode("utf-8")
 
 
 def _obtain_deployment_verification(witness):
@@ -230,17 +274,73 @@ def _obtain_deployment_verification(witness):
     )
 
 
+def _nonroot_deployment_verification(python: Path) -> dict[str, object]:
+    probe = f"""import json,os,sys
+sys.path.insert(0,{str(ROOT)!r})
+from career_automation.current_time import installed_production_current_time_witness,obtain_current_time
+witness=installed_production_current_time_witness()
+evidence=obtain_current_time(witness,environment='production',purpose='deployment_verification',subject_sha256='{STAGED_CONFIG_SHA256}',maximum_clock_skew_seconds={DEPLOYMENT_MAXIMUM_CLOCK_SKEW_SECONDS})
+print(json.dumps({{'effective_gid':os.getegid(),'effective_uid':os.geteuid(),'receipt_sha256':evidence.receipt_sha256,'subject_sha256':evidence.subject_sha256,'witness_identity_sha256':evidence.witness_identity_sha256}},separators=(',',':'),sort_keys=True))"""
+    completed = subprocess.run(
+        [
+            "/usr/bin/setpriv",
+            f"--reuid={AUTHORIZED_CLIENT_UID}",
+            f"--regid={AUTHORIZED_CLIENT_GID}",
+            "--clear-groups",
+            "--",
+            str(python),
+            "-I",
+            "-c",
+            probe,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("non-root current-time verification output is malformed") from exc
+    expected_keys = {
+        "effective_gid",
+        "effective_uid",
+        "receipt_sha256",
+        "subject_sha256",
+        "witness_identity_sha256",
+    }
+    if (
+        completed.stderr
+        or not isinstance(result, dict)
+        or set(result) != expected_keys
+        or result["effective_uid"] != AUTHORIZED_CLIENT_UID
+        or result["effective_gid"] != AUTHORIZED_CLIENT_GID
+        or result["subject_sha256"] != STAGED_CONFIG_SHA256
+        or result["witness_identity_sha256"] != PRODUCTION_TIME_WITNESS_IDENTITY_SHA256
+        or not isinstance(result["receipt_sha256"], str)
+        or len(result["receipt_sha256"]) != 64
+    ):
+        raise ValueError("non-root current-time verification identity or receipt differs")
+    return result
+
+
 def install(
     *,
     staged_config: Path,
     service_source: Path,
+    broker_source: Path,
     device_key: Path,
     python: Path,
     activate: bool,
 ) -> dict[str, object]:
     if os.geteuid() != 0:
         raise PermissionError("installer must run as UID 0")
-    for source, label in ((staged_config, "staged config"), (service_source, "service source"), (device_key, "device key")):
+    for source, label in (
+        (staged_config, "staged config"),
+        (service_source, "service source"),
+        (broker_source, "broker source"),
+        (device_key, "device key"),
+    ):
         if not source.is_absolute() or source.is_symlink() or not source.resolve(strict=True).is_file():
             raise ValueError(f"{label} is not an exact regular file")
     verified_python = _verified_runtime_link(python)
@@ -256,7 +356,7 @@ def install(
     if stat.S_IMODE(device_key.stat().st_mode) != 0o600:
         raise ValueError("device key permissions differ")
     for directory, mode in (
-        (CONFIG_TARGET.parent, 0o700),
+        (CONFIG_TARGET.parent, 0o755),
         (SERVICE_TARGET.parent, 0o755),
     ):
         directory.mkdir(mode=mode, parents=True, exist_ok=True)
@@ -268,39 +368,59 @@ def install(
             CONFIG_TARGET,
             config_bytes,
             previous=legacy_config_bytes,
-            mode=0o600,
+            mode=0o644,
         ),
         "service": _exact_file(SERVICE_TARGET, service_source.read_bytes(), 0o755),
+        "broker": _exact_file(BROKER_TARGET, broker_source.read_bytes(), 0o755),
         "unit": _upgrade_exact(
             UNIT_TARGET,
             _unit(python=verified_python, key=device_key),
-            previous=_legacy_unit(python=verified_python, key=device_key),
+            previous=(
+                _prior_runtime_unit(python=verified_python, key=device_key),
+                _legacy_unit(python=verified_python, key=device_key),
+            ),
             mode=0o644,
+        ),
+        "broker_unit": _exact_file(
+            BROKER_UNIT_TARGET,
+            _broker_unit(python=verified_python),
+            0o644,
         ),
     }
     if not activate:
         return {"activated": False, "outcomes": outcomes}
     subprocess.run(["systemctl", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "enable", "--now", UNIT_TARGET.name], check=True)
+    subprocess.run(["systemctl", "enable", UNIT_TARGET.name, BROKER_UNIT_TARGET.name], check=True)
+    subprocess.run(["systemctl", "restart", UNIT_TARGET.name], check=True)
+    subprocess.run(["systemctl", "restart", BROKER_UNIT_TARGET.name], check=True)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and not SOCKET_TARGET.exists():
         time.sleep(0.1)
     subprocess.run(["systemctl", "is-active", "--quiet", UNIT_TARGET.name], check=True)
+    subprocess.run(["systemctl", "is-active", "--quiet", BROKER_UNIT_TARGET.name], check=True)
     socket_metadata = SOCKET_TARGET.lstat()
     if (
         not stat.S_ISSOCK(socket_metadata.st_mode)
         or socket_metadata.st_uid != 0
-        or stat.S_IMODE(socket_metadata.st_mode) != 0o600
+        or socket_metadata.st_gid != AUTHORIZED_CLIENT_GID
+        or stat.S_IMODE(socket_metadata.st_mode) != 0o620
     ):
-        raise ValueError("deployed current-time socket differs from the production pin")
-    witness = installed_production_current_time_witness()
-    evidence = _obtain_deployment_verification(witness)
+        raise ValueError("deployed current-time broker socket differs from the production pin")
+    signer_metadata = SIGNER_SOCKET_TARGET.lstat()
+    if (
+        not stat.S_ISSOCK(signer_metadata.st_mode)
+        or signer_metadata.st_uid != 0
+        or signer_metadata.st_gid != 0
+        or stat.S_IMODE(signer_metadata.st_mode) != 0o600
+    ):
+        raise ValueError("deployed current-time signer socket differs from the root-only pin")
+    verification = _nonroot_deployment_verification(verified_python)
     return {
         "activated": True,
         "configuration_sha256": STAGED_CONFIG_SHA256,
         "outcomes": outcomes,
-        "verification_receipt_sha256": evidence.receipt_sha256,
-        "witness_identity_sha256": evidence.witness_identity_sha256,
+        "verification_receipt_sha256": verification["receipt_sha256"],
+        "witness_identity_sha256": verification["witness_identity_sha256"],
     }
 
 
@@ -308,6 +428,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--staged-config", type=Path, required=True)
     parser.add_argument("--service-source", type=Path, required=True)
+    parser.add_argument("--broker-source", type=Path, required=True)
     parser.add_argument("--device-key", type=Path, required=True)
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--activate", action="store_true")
@@ -316,6 +437,7 @@ def main() -> int:
         result = install(
             staged_config=args.staged_config,
             service_source=args.service_source,
+            broker_source=args.broker_source,
             device_key=args.device_key,
             python=args.python,
             activate=args.activate,

@@ -14,7 +14,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from scripts import gigabyte_current_time_service as service
 from scripts import install_gigabyte_current_time as installer
-from scripts.install_gigabyte_current_time import CONFIG_TARGET, SERVICE_TARGET, SOCKET_TARGET, _unit
+from scripts.install_gigabyte_current_time import (
+    BROKER_TARGET,
+    CONFIG_TARGET,
+    SERVICE_TARGET,
+    SIGNER_SOCKET_TARGET,
+    SOCKET_TARGET,
+    _broker_unit,
+    _unit,
+)
 
 
 def _request() -> bytes:
@@ -97,16 +105,64 @@ def test_deployment_verification_executes_required_clock_skew_contract(monkeypat
     ]
 
 
+def test_deployment_probe_drops_to_exact_uid1000_and_preserves_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    receipt = "4" * 64
+    result = {
+        "effective_gid": 1000,
+        "effective_uid": 1000,
+        "receipt_sha256": receipt,
+        "subject_sha256": installer.STAGED_CONFIG_SHA256,
+        "witness_identity_sha256": installer.PRODUCTION_TIME_WITNESS_IDENTITY_SHA256,
+    }
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            stdout=json.dumps(result, separators=(",", ":"), sort_keys=True) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(installer.subprocess, "run", run)
+    python = tmp_path / "venv" / "bin" / "python"
+    assert installer._nonroot_deployment_verification(python) == result
+    args, kwargs = calls[0]
+    assert args[:5] == [
+        "/usr/bin/setpriv",
+        "--reuid=1000",
+        "--regid=1000",
+        "--clear-groups",
+        "--",
+    ]
+    assert args[5:8] == [str(python), "-I", "-c"]
+    assert "maximum_clock_skew_seconds=5" in args[8]
+    assert kwargs == {
+        "check": True,
+        "capture_output": True,
+        "text": True,
+        "env": {"PATH": "/usr/bin:/bin"},
+    }
+
+
 def test_unit_preserves_root_service_and_exact_socket_contract(tmp_path) -> None:
     unit = _unit(python=tmp_path / "python", key=tmp_path / "device-key.pem").decode()
     assert "User=root" in unit
     assert "Group=root" in unit
-    assert f"--socket {SOCKET_TARGET}" in unit
+    assert f"--socket {SIGNER_SOCKET_TARGET}" in unit
     assert f"ExecStart={tmp_path / 'python'} {SERVICE_TARGET}" in unit
-    assert str(CONFIG_TARGET) == "/etc/gigabyte/majaa/jaa-current-time-v1.json"
+    assert str(CONFIG_TARGET) == "/etc/gigabyte/majaa-public/jaa-current-time-v1.json"
     assert "UMask=0077" in unit
     assert "RuntimeDirectory=gigabyte/majaa" in unit
     assert "RuntimeDirectoryMode=0755" in unit
+    broker = _broker_unit(python=tmp_path / "python").decode()
+    assert f"ExecStart={tmp_path / 'python'} {BROKER_TARGET}" in broker
+    assert f"--socket {SOCKET_TARGET}" in broker
+    assert f"--signer-socket {SIGNER_SOCKET_TARGET}" in broker
+    assert "--client-uid 1000 --client-gid 1000" in broker
+    assert "User=root" in broker and "Group=root" in broker
 
 
 def test_unit_upgrade_accepts_only_exact_prior_bytes(tmp_path: Path) -> None:

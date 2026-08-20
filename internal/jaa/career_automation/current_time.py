@@ -44,7 +44,7 @@ PRODUCTION_TIME_WITNESS_IDENTITY_SHA256 = hashlib.sha256(
     b"gigabyte-jaa-external-current-time-witness-v1"
 ).hexdigest()
 _COMPILED_PRODUCTION_TIME_CONFIGURATION_PATH = Path(
-    "/etc/gigabyte/majaa/jaa-current-time-v1.json"
+    "/etc/gigabyte/majaa-public/jaa-current-time-v1.json"
 )
 _COMPILED_PRODUCTION_TIME_SERVICE_SOCKET = Path(
     "/run/gigabyte/majaa/jaa-current-time-v1.sock"
@@ -52,6 +52,7 @@ _COMPILED_PRODUCTION_TIME_SERVICE_SOCKET = Path(
 PRODUCTION_TIME_CONFIGURATION_PATH = _COMPILED_PRODUCTION_TIME_CONFIGURATION_PATH
 PRODUCTION_TIME_SERVICE_SOCKET = _COMPILED_PRODUCTION_TIME_SERVICE_SOCKET
 PRODUCTION_TIME_SERVICE_PEER_UID = 0
+PRODUCTION_TIME_BROKER_GID = 1000
 # Public verifier for the reviewed Gigabyte device-local signer.  The matching
 # private key remains outside the repository and behind the UID-0 Unix service.
 _COMPILED_PRODUCTION_TIME_VERIFIER_PUBLIC_KEY_B64 = (
@@ -143,10 +144,10 @@ def _installed_configuration_bytes(path: Path) -> tuple[bytes, os.stat_result]:
                 "time_configuration_owner",
                 "installed current-time configuration must be owned by root",
             )
-        if stat.S_IMODE(metadata.st_mode) & 0o077:
+        if stat.S_IMODE(metadata.st_mode) != 0o644:
             raise CurrentTimeWitnessError(
                 "time_configuration_permissions",
-                "installed current-time configuration must not be accessible by group or other",
+                "installed public current-time configuration must have exact mode 0644",
             )
         chunks: list[bytes] = []
         remaining = _MAX_CONFIGURATION_BYTES + 1
@@ -530,11 +531,12 @@ def _validate_service_socket(path: Path) -> None:
     if (
         not stat.S_ISSOCK(metadata.st_mode)
         or metadata.st_uid != 0
-        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or metadata.st_gid != PRODUCTION_TIME_BROKER_GID
+        or stat.S_IMODE(metadata.st_mode) != 0o620
     ):
         raise CurrentTimeWitnessError(
             "time_service_permissions",
-            "external current-time service socket is not root-owned and protected",
+            "external current-time broker socket identity or mode differs",
         )
 
 
