@@ -13,8 +13,16 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+import career_automation.application_compiler as compiler_module
 import career_automation.workable_live_adapter as workable_module
 import test_jaa06_independent_acceptance as jaa06_module
+import test_jaa08_independent_acceptance as jaa08_module
+from career_automation.application_compiler import (
+    DocumentSection,
+    FactAuthority,
+    compile_application_source,
+)
+from career_automation.application_strategy import ApplicationStrategyStore
 from career_automation.ashby_live_adapter import JAA08ReleaseAuthority
 from career_automation.candidate_graph import CandidateGraph
 from career_automation.current_time import configured_hmac_current_time_witness
@@ -266,6 +274,142 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
         "scored_job_from_payload",
         market_aligner_scored_job,
     )
+    original_fit_database = jaa08_module._fit_database
+
+    def complete_cv_fit_database(path: Path, *, matched: bool):
+        return original_fit_database(
+            path,
+            matched=matched,
+            claims=(
+                (
+                    "summary-delivery",
+                    "Deliver reliable product engineering.",
+                    "achievement",
+                ),
+                (
+                    "automation-capability",
+                    "Design controlled automation systems.",
+                    "capability",
+                ),
+                (
+                    "verified-project",
+                    "Build deterministic software projects.",
+                    "project",
+                ),
+                (
+                    "education-foundation",
+                    "Apply software engineering education.",
+                    "education",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(jaa08_module, "_fit_database", complete_cv_fit_database)
+    original_add_claim = CandidateGraph.add_claim
+    claim_text = {
+        "achievement": (
+            "Built and tested a deterministic automation service with "
+            "content-addressed release receipts."
+        ),
+        "capability": (
+            "Designed evidence-bound workflow automation with deterministic "
+            "validation and recovery controls."
+        ),
+        "project": (
+            "Delivered a resumable software project with automated tests and "
+            "auditable state transitions."
+        ),
+        "education": (
+            "Completed applied software engineering study focused on reliable "
+            "systems design."
+        ),
+    }
+
+    def add_realistic_claim(
+        self,
+        claim_id: str,
+        *,
+        statement: str,
+        claim_type: str,
+        **kwargs: object,
+    ) -> None:
+        original_add_claim(
+            self,
+            claim_id,
+            statement=claim_text[claim_type],
+            claim_type=claim_type,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(CandidateGraph, "add_claim", add_realistic_claim)
+    original_compile = compiler_module.ProductionApplicationCompiler.compile
+
+    def compile_complete_cv(self, strategy_id: str, **kwargs: object):
+        source = original_compile(self, strategy_id, **kwargs)
+        strategy = ApplicationStrategyStore(self.path).load(
+            strategy_id,
+            as_of=kwargs["as_of"],
+        )
+        with self._connect() as connection:
+            claim_types = {
+                str(row["claim_id"]): str(row["claim_type"])
+                for row in connection.execute(
+                    "SELECT claim_id,claim_type FROM candidate_claims"
+                ).fetchall()
+            }
+        cv_facts = tuple(row for row in source.facts if row.document_kind == "cv")
+        typed = {
+            row.sentence_id: claim_types[row.authority.candidate_claim_id]
+            for row in cv_facts
+            if isinstance(row.authority, FactAuthority)
+        }
+        summary = next(
+            row for row in cv_facts if typed[row.sentence_id] == "achievement"
+        )
+        capabilities = tuple(
+            row.sentence_id
+            for row in cv_facts
+            if typed[row.sentence_id] == "capability"
+        )
+        projects = tuple(
+            row.sentence_id
+            for row in cv_facts
+            if typed[row.sentence_id] in {"achievement", "project"}
+        )
+        education = tuple(
+            row.sentence_id
+            for row in cv_facts
+            if typed[row.sentence_id] == "education"
+        )
+        return compile_application_source(
+            strategy=strategy,
+            job_key=source.job_key,
+            role_title=source.role_title,
+            company_name=source.company_name,
+            vacancy_source_identity=source.vacancy_source_identity,
+            vacancy_sha256=source.vacancy_sha256,
+            contact=source.contact,
+            facts=source.facts,
+            style_slots=source.style_slots,
+            cv_sections=(
+                DocumentSection(
+                    "Professional Summary",
+                    (summary.sentence_id,),
+                    source.cv_sections[0].style_slot_ids,
+                ),
+                DocumentSection("Core Capabilities", capabilities),
+                DocumentSection("Projects", projects),
+                DocumentSection("Education", education),
+            ),
+            letter_sections=source.letter_sections,
+            answers=source.answers,
+        )
+
+    monkeypatch.setattr(
+        compiler_module.ProductionApplicationCompiler,
+        "compile",
+        compile_complete_cv,
+    )
     (
         database,
         strategy,
@@ -318,6 +462,12 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
             for section in source.cv_sections
         },
         rendered_pages=artifacts.cv_pdf.rendered_lines,
+    )
+    assert tuple(section.heading for section in source.cv_sections) == (
+        "Professional Summary",
+        "Core Capabilities",
+        "Projects",
+        "Education",
     )
     cv_path = tmp_path / "approved-cv.pdf"
     cv_path.write_bytes(artifacts.cv_pdf.pdf_bytes)
@@ -381,18 +531,33 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
             True,
         ),
     )
-    issued = gate.evaluate_and_issue(
-        compilation_id=compilation.compilation_id,
-        source=source,
-        artifacts=artifacts,
-        contact=contact,
-        questions=questions,
-        artifact_root=artifact_root,
-        repository_root=ROOT,
-        jurisdiction="GB",
-        contract_type="employee",
-        evaluated_at=today,
-    )
+    def issue_after_cv_constraint(receipt):
+        if (
+            receipt is None
+            or receipt.source_id != source.source_id
+            or receipt.cv_sha256 != artifacts.editable.cv_sha256
+            or receipt.passed is not True
+            or receipt.release_authority is not False
+        ):
+            raise ValueError("exact CV constraint receipt is required before release")
+        return gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=today,
+        )
+
+    with pytest.raises(ValueError, match="constraint receipt"):
+        issue_after_cv_constraint(None)
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM release_tokens").fetchone()[0] == 0
+    issued = issue_after_cv_constraint(constraint)
     consumed_at = datetime(today.year, today.month, today.day, 12, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="release token"):
         gate.consume_release_token(
@@ -426,6 +591,7 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
         "admission_receipt_sha256": admission.verification_receipt_sha256,
         "application_source_sha256": source.content_sha256,
         "application_url": policy.application_url,
+        "cv_constraint_receipt_sha256": constraint.receipt_sha256,
         "cv_quality_receipt_sha256": quality.receipt_sha256,
         "cv_sha256": quality.cv_pdf_sha256,
         "form_answers_sha256": provisional.answers_sha256,
