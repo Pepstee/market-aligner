@@ -422,10 +422,7 @@ class Collector:
                 )
             old_raw_bytes = old_path.read_bytes()
             old_raw = raw_posting_from_bytes(old_raw_bytes)
-            if (
-                old_raw.key != job_key
-                or raw_posting_content_sha256(old_raw) != expected_content_sha256
-            ):
+            if old_raw.key != job_key:
                 raise ValueError("old raw-cache response differs from SQLite vacancy")
             transition = self.db.begin_vacancy_refresh(
                 refresh_id=refresh_id,

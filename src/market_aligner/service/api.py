@@ -237,7 +237,7 @@ class CollectionService:
             "official_fetch_count": 1,
             "operation_id": operation_id,
             "refresh_id": refresh_id,
-            "schema_version": "market-aligner.vacancy-refresh-receipt.v2",
+            "schema_version": "market-aligner.vacancy-refresh-receipt.v3",
             "source_sha256": source_sha256,
             "started_at": started_at,
         }
