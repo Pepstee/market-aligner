@@ -43,6 +43,13 @@ from .editorial_composition import (
     humanizer_request_sha256,
     validate_editorial_draft,
 )
+from .service import (
+    CVCompositionOrchestrationResult,
+    CVCompositionServiceError,
+    ImprovementBinder,
+    RecruiterAssessor,
+    run_cv_composition_orchestration,
+)
 
 __all__ = [
     "ARTIOM_GUTU_CV_POLICY",
@@ -52,6 +59,8 @@ __all__ = [
     "BASE_CV_POLICY",
     "CVConstraintError",
     "CVConstraintReceipt",
+    "CVCompositionOrchestrationResult",
+    "CVCompositionServiceError",
     "CVEditorialDraft",
     "CVEditorialRequest",
     "CVPolicy",
@@ -64,8 +73,10 @@ __all__ = [
     "EditorialStageReceipt",
     "EvidenceSafeRebuildResult",
     "FinalizedRebuiltCV",
+    "ImprovementBinder",
     "RebuildRoadmapItem",
     "RecruiterImprovementBinding",
+    "RecruiterAssessor",
     "admit_editorial_composition",
     "build_editorial_draft",
     "build_editorial_request",
@@ -75,6 +86,7 @@ __all__ = [
     "policy_for_candidate",
     "rebuild_from_recruiter_assessment",
     "render_editorial_cv_text",
+    "run_cv_composition_orchestration",
     "validate_editorial_draft",
     "validate_generated_cv",
 ]

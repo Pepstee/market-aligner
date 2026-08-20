@@ -354,6 +354,7 @@ def rebuild_from_recruiter_assessment(
     recruiter_receipt: RecruiterAssessmentReceipt,
     recruiter_package: RecruiterAssessmentPackage,
     bindings: Sequence[RecruiterImprovementBinding],
+    assessed_cv_text_sha256: str | None = None,
 ) -> EvidenceSafeRebuildResult:
     """Apply evidence-bound CV recommendations and route every gap to roadmap."""
 
@@ -364,11 +365,13 @@ def rebuild_from_recruiter_assessment(
     ):
         raise AdversarialRebuildError("editorial draft lacks its admission receipt")
     verify_recruiter_assessment_receipt(recruiter_receipt, recruiter_package)
-    assessed_cv_text_sha256 = recruiter_receipt.package_hashes.get("cv_text_sha256")
-    expected_cv_text_sha256 = hashlib.sha256(
-        _recruiter_extracted_cv_text(admitted_draft).encode()
-    ).hexdigest()
-    if assessed_cv_text_sha256 != expected_cv_text_sha256:
+    receipt_cv_text_sha256 = recruiter_receipt.package_hashes.get("cv_text_sha256")
+    expected_cv_text_sha256 = (
+        hashlib.sha256(_recruiter_extracted_cv_text(admitted_draft).encode()).hexdigest()
+        if assessed_cv_text_sha256 is None
+        else _digest(assessed_cv_text_sha256, "assessed CV text hash")
+    )
+    if receipt_cv_text_sha256 != expected_cv_text_sha256:
         raise AdversarialRebuildError(
             "recruiter assessment did not inspect the admitted editorial CV"
         )
