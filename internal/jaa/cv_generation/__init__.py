@@ -43,13 +43,6 @@ from .editorial_composition import (
     humanizer_request_sha256,
     validate_editorial_draft,
 )
-from .service import (
-    CVCompositionOrchestrationResult,
-    CVCompositionServiceError,
-    ImprovementBinder,
-    RecruiterAssessor,
-    run_cv_composition_orchestration,
-)
 from .document_quality import (
     DocumentQualityError,
     DocumentQualityReceipt,
@@ -59,6 +52,39 @@ from .document_quality import (
     resolve_poppler_runtime,
     verify_document_quality,
 )
+
+
+_SERVICE_EXPORTS = frozenset(
+    {
+        "CVCompositionOrchestrationResult",
+        "CVCompositionServiceError",
+        "ImprovementBinder",
+        "RecruiterAssessor",
+        "run_cv_composition_orchestration",
+    }
+)
+
+
+def __getattr__(name: str) -> object:
+    """Load the orchestration facade only when a caller asks for it.
+
+    ``candidate_application_factory`` depends on the constraints submodule.
+    Eagerly importing the service facade from this package initializer would
+    re-enter that partially initialized factory.  The facade remains part of
+    the public API, but its compatibility dependency is now loaded lazily.
+    """
+
+    if name not in _SERVICE_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from . import service
+
+    for export in _SERVICE_EXPORTS:
+        globals()[export] = getattr(service, export)
+    return globals()[name]
+
+
+def __dir__() -> list[str]:
+    return sorted((*globals(), *_SERVICE_EXPORTS))
 
 __all__ = [
     "ARTIOM_GUTU_CV_POLICY",
