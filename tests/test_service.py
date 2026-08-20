@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus
+from market_aligner.applications.assessment_promotion import AssessmentPromotionError
 from market_aligner.assessment.geography import (
     GeographicPreferencePolicy,
     classify_geographic_preference,
@@ -167,6 +168,81 @@ def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_current_processing_result_promotes_atomically_and_rejects_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            run = ProcessingService(root, FixtureSemanticWorker()).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="promotion-worker",
+            )
+            service = MarketAlignerService(root)
+            legacy = json.loads(Path(run["receipt_path"]).read_bytes())
+            legacy.pop("receipt_sha256")
+            legacy["config_sha256"] = "0" * 64
+            legacy_sha = hashlib.sha256(
+                json.dumps(
+                    legacy, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            legacy["receipt_sha256"] = legacy_sha
+            legacy_path = Path(run["receipt_path"]).parent / f"{legacy_sha}.json"
+            legacy_path.write_text(
+                json.dumps(legacy, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssessmentPromotionError, "legacy"):
+                service.promote_processing(
+                    profile_id=profile_id,
+                    track="automation",
+                    job_key="fixture:1",
+                    processing_receipt_path=legacy_path,
+                )
+            first = service.promote_processing(
+                profile_id=profile_id,
+                track="automation",
+                job_key="fixture:1",
+                processing_receipt_path=Path(run["receipt_path"]),
+            )
+            replay = service.promote_processing(
+                profile_id=profile_id,
+                track="automation",
+                job_key="fixture:1",
+                processing_receipt_path=Path(run["receipt_path"]),
+            )
+            self.assertTrue(first.created)
+            self.assertFalse(replay.created)
+            self.assertEqual(first.receipt_sha256, replay.receipt_sha256)
+            assessment = service.assessments.assessment(profile_id, "fixture:1")
+            self.assertEqual("pass", assessment["opportunity_decision"])
+            self.assertEqual(first.policy_sha256, assessment["policy_hash"])
+            self.assertEqual(first.receipt_path.read_bytes(), bytes(
+                service.assessments.processing_promotion(
+                    profile_id, "fixture:1"
+                )["receipt_bytes"]
+            ))
+
+            with JobDatabase(root / "state" / "vacancies.sqlite3").connect() as connection:
+                row = connection.execute(
+                    "SELECT result_json FROM processing_jobs WHERE job_key='fixture:1'"
+                ).fetchone()
+                changed = json.loads(row[0])
+                changed["included"] = False
+                connection.execute(
+                    "UPDATE processing_jobs SET result_json=? WHERE job_key='fixture:1'",
+                    (json.dumps(changed, sort_keys=True, separators=(",", ":")),),
+                )
+                connection.commit()
+            with self.assertRaisesRegex(AssessmentPromotionError, "stale"):
+                service.promote_processing(
+                    profile_id=profile_id,
+                    track="automation",
+                    job_key="fixture:1",
+                    processing_receipt_path=Path(run["receipt_path"]),
+                )
+
     def test_processing_schema_migrates_legacy_rows_as_non_current_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "vacancies.sqlite3"
@@ -677,6 +753,15 @@ class ServiceTests(unittest.TestCase):
                 == receipt["first_job_scope_policy_sha256"]
                 for result in results
             ))
+            with self.assertRaisesRegex(
+                AssessmentPromotionError, "rejected, parked or malformed"
+            ):
+                MarketAlignerService(root).promote_processing(
+                    profile_id=profile_id,
+                    track="automation",
+                    job_key="workable:1",
+                    processing_receipt_path=Path(receipt["receipt_path"]),
+                )
 
     def test_policy_change_reprocesses_stale_completed_row_from_semantic_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

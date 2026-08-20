@@ -326,9 +326,69 @@ def test_persisted_gated_assessment_emits_exact_handoff_and_enters_jaa(
         profile_id=expected["profile_id"],
         job_key=expected["job_key"],
         passed=True,
-        reason="opportunity_warrants_employer_reconnaissance",
+        reason="legacy_manual_gate_is_insufficient",
         policy_hash=expected["selection"]["selection_policy_sha256"],
-        priority=2_083_367,
+        priority=1,
+    )
+    with pytest.raises(HandoffProducerError, match="canonical processing"):
+        service.handoff(expected["profile_id"], expected["job_key"], manifest)
+
+    selection_entry = next(
+        row
+        for row in document["reference_bundle"]["value"]["entries"]
+        if row["metadata"]["reference_key"] == "selection.policy"
+    )
+    selection_policy = json.loads(
+        base64.b64decode(selection_entry["object_base64"], validate=True)
+    )
+    promotion_binding = {
+        "evidence_authority_sha256": "1" * 64,
+        "processing_config_sha256": "2" * 64,
+        "processing_receipt_sha256": "3" * 64,
+        "processing_result_sha256": "4" * 64,
+        "source_content_sha256": "5" * 64,
+        "track": "synthetic_track",
+    }
+    promotion_body = {
+        "binding": promotion_binding,
+        "binding_sha256": hashlib.sha256(
+            canonical_json_bytes(promotion_binding)
+        ).hexdigest(),
+        "decision": "pass",
+        "evidence_authority_sha256": "1" * 64,
+        "job_key": expected["job_key"],
+        "policy": selection_policy,
+        "policy_sha256": expected["selection"]["selection_policy_sha256"],
+        "processing_receipt_bytes_sha256": "6" * 64,
+        "profile_id": expected["profile_id"],
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        "score_payload_hash": service.assessments.assessment(
+            expected["profile_id"], expected["job_key"]
+        )["score_payload_hash"],
+    }
+    promotion_sha = hashlib.sha256(
+        canonical_json_bytes(promotion_body)
+    ).hexdigest()
+    service.assessments.promote_processing_gate(
+        profile_id=expected["profile_id"],
+        job_key=expected["job_key"],
+        score={
+            "fit": assessment["fit"],
+            "opportunity": assessment["opportunity"],
+            "final": assessment["final"] * 100.0,
+            "fit_status": assessment["fit_status"],
+        },
+        policy_hash=expected["selection"]["selection_policy_sha256"],
+        processing_receipt_sha256="3" * 64,
+        processing_result_sha256="4" * 64,
+        source_content_sha256="5" * 64,
+        authority_sha256="1" * 64,
+        processing_config_sha256="2" * 64,
+        track="synthetic_track",
+        receipt_bytes=canonical_json_bytes(
+            {**promotion_body, "receipt_sha256": promotion_sha}
+        ),
+        receipt_sha256=promotion_sha,
     )
     substituted_manifest = json.loads(json.dumps(manifest))
     substituted_manifest["selection"]["selection_policy_sha256"] = "f" * 64

@@ -13,6 +13,10 @@ from typing import Any, Callable, Mapping
 
 from market_aligner.applications.handoff import HandoffEnvelope
 from market_aligner.applications.producer import produce_handoff
+from market_aligner.applications.assessment_promotion import (
+    AssessmentPromotion,
+    promote_current_processing_assessment,
+)
 from market_aligner.assessment.opportunity import OpportunityDecision, apply_gate
 from market_aligner.assessment.scoring import AssessmentAxes, ScoreResult, ScoringParams, score
 from market_aligner.collectors.engine import Collector
@@ -20,6 +24,7 @@ from market_aligner.config import ProductPaths
 from market_aligner.config_loader import load_config
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.research.store import AssessmentStore
+from market_aligner.state.vacancies import JobDatabase
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,7 @@ class MarketAlignerService:
     def __init__(self, data_home: str | Path | None = None) -> None:
         self.profiles = ProfileStore(data_home)
         self.assessments = AssessmentStore(self.profiles.paths.state / "assessments.sqlite3")
+        self.jobs = JobDatabase(self.profiles.paths.state / "vacancies.sqlite3")
 
     def assess(
         self,
@@ -186,6 +192,26 @@ class MarketAlignerService:
 
     def gate(self, profile_id: str, job_key: str) -> OpportunityDecision:
         return apply_gate(self.assessments, profile_id, job_key)
+
+    def promote_processing(
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        job_key: str,
+        processing_receipt_path: Path,
+    ) -> AssessmentPromotion:
+        return promote_current_processing_assessment(
+            jobs=self.jobs,
+            assessments=self.assessments,
+            processing_receipt_path=processing_receipt_path,
+            profile_id=profile_id,
+            track=track,
+            job_key=job_key,
+            receipt_root=(
+                self.profiles.paths.state / "assessment-promotion-receipts"
+            ),
+        )
 
     def handoff(
         self,

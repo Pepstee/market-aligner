@@ -158,6 +158,31 @@ def _handoff_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _promote_assessment_command(args: argparse.Namespace) -> int:
+    service = MarketAlignerService(args.data_home)
+    promotion = service.promote_processing(
+        profile_id=args.profile_id,
+        track=args.track,
+        job_key=args.job_key,
+        processing_receipt_path=args.processing_receipt,
+    )
+    print(
+        json.dumps(
+            {
+                "created": promotion.created,
+                "job_key": promotion.job_key,
+                "policy_sha256": promotion.policy_sha256,
+                "profile_id": promotion.profile_id,
+                "receipt_path": str(promotion.receipt_path),
+                "receipt_sha256": promotion.receipt_sha256,
+                "schema_version": "market-aligner.assessment-promotion.v1",
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _collect_command(args: argparse.Namespace) -> int:
     service = CollectionService(args.data_home)
     receipt = service.collect(
@@ -271,6 +296,17 @@ def build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--output", type=Path, required=True)
     _add_data_home(handoff)
     handoff.set_defaults(handler=_handoff_command)
+
+    promote = commands.add_parser(
+        "promote-assessment",
+        help="Promote one current processing result into handoff-gated assessment state.",
+    )
+    promote.add_argument("--profile-id", required=True)
+    promote.add_argument("--track", required=True)
+    promote.add_argument("--job-key", required=True)
+    promote.add_argument("--processing-receipt", type=Path, required=True)
+    _add_data_home(promote)
+    promote.set_defaults(handler=_promote_assessment_command)
 
     collect = commands.add_parser(
         "collect", help="Run the resumable raw-vacancy collector without application authority."

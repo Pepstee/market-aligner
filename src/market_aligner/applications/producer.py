@@ -256,6 +256,28 @@ def produce_handoff(
         raise HandoffProducerError("persisted opportunity policy is not SHA-256-bound")
     if row["extraction_confidence"] is None:
         raise HandoffProducerError("handoff requires persisted extraction confidence")
+    try:
+        promotion = store.processing_promotion(profile_id, job_key)
+    except KeyError as exc:
+        raise HandoffProducerError(
+            "handoff requires a canonical processing assessment promotion"
+        ) from exc
+    try:
+        promotion_document = json.loads(bytes(promotion["receipt_bytes"]))
+        promotion_body = dict(promotion_document)
+        promotion_body.pop("receipt_sha256", None)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise HandoffProducerError("canonical processing promotion is malformed") from exc
+    if (
+        promotion["score_payload_hash"] != row["score_payload_hash"]
+        or promotion["policy_hash"] != row["policy_hash"]
+        or row["opportunity_reason"]
+        != f"processing-promotion:{promotion['receipt_sha256']}"
+        or hashlib.sha256(canonical_json_bytes(promotion_body)).hexdigest()
+        != promotion["receipt_sha256"]
+        or promotion_document.get("receipt_sha256") != promotion["receipt_sha256"]
+    ):
+        raise HandoffProducerError("canonical processing promotion differs from assessment")
 
     try:
         score = json.loads(row["score_payload_json"])

@@ -85,6 +85,24 @@ CREATE TABLE IF NOT EXISTS employer_dossiers (
   FOREIGN KEY(profile_id,job_key) REFERENCES assessments(profile_id,job_key) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS assessment_promotions (
+  profile_id TEXT NOT NULL,
+  job_key TEXT NOT NULL,
+  track TEXT NOT NULL,
+  authority_sha256 TEXT NOT NULL,
+  source_content_sha256 TEXT NOT NULL,
+  processing_config_sha256 TEXT NOT NULL,
+  processing_receipt_sha256 TEXT NOT NULL,
+  processing_result_sha256 TEXT NOT NULL,
+  score_payload_hash TEXT NOT NULL,
+  policy_hash TEXT NOT NULL,
+  receipt_bytes BLOB NOT NULL,
+  receipt_sha256 TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(profile_id,job_key),
+  FOREIGN KEY(profile_id,job_key) REFERENCES assessments(profile_id,job_key) ON DELETE CASCADE
+);
+
 CREATE TRIGGER IF NOT EXISTS research_requires_opportunity_pass
 BEFORE INSERT ON employer_research_queue
 WHEN COALESCE((SELECT opportunity_decision FROM assessments
@@ -263,6 +281,186 @@ class AssessmentStore:
                        WHERE profile_id=? AND job_key=? AND status='queued'""",
                     (profile_id, job_key),
                 )
+
+    def promote_processing_gate(
+        self,
+        *,
+        profile_id: str,
+        job_key: str,
+        score: dict[str, object],
+        policy_hash: str,
+        processing_receipt_sha256: str,
+        processing_result_sha256: str,
+        source_content_sha256: str,
+        authority_sha256: str,
+        processing_config_sha256: str,
+        track: str,
+        receipt_bytes: bytes,
+        receipt_sha256: str,
+    ) -> bool:
+        """Atomically bind one current processing result to the handoff gate."""
+
+        try:
+            receipt = json.loads(receipt_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("processing promotion receipt is invalid JSON") from exc
+        canonical = json.dumps(
+            receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+        body = dict(receipt) if isinstance(receipt, dict) else {}
+        body.pop("receipt_sha256", None)
+        expected_receipt_sha = hashlib.sha256(
+            json.dumps(
+                body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+        policy = receipt.get("policy") if isinstance(receipt, dict) else None
+        binding = receipt.get("binding") if isinstance(receipt, dict) else None
+        if (
+            receipt_bytes != canonical
+            or receipt.get("schema_version")
+            != "market-aligner.assessment-promotion-receipt.v1"
+            or receipt.get("decision") != "pass"
+            or receipt.get("profile_id") != profile_id
+            or receipt.get("job_key") != job_key
+            or receipt.get("policy_sha256") != policy_hash
+            or receipt.get("receipt_sha256") != receipt_sha256
+            or receipt_sha256 != expected_receipt_sha
+            or not isinstance(policy, dict)
+            or hashlib.sha256(
+                json.dumps(
+                    policy,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            ).hexdigest()
+            != policy_hash
+            or not isinstance(binding, dict)
+            or hashlib.sha256(
+                json.dumps(
+                    binding,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            ).hexdigest()
+            != receipt.get("binding_sha256")
+            or binding.get("processing_receipt_sha256")
+            != processing_receipt_sha256
+            or binding.get("processing_result_sha256") != processing_result_sha256
+            or binding.get("source_content_sha256") != source_content_sha256
+            or binding.get("evidence_authority_sha256") != authority_sha256
+            or binding.get("processing_config_sha256")
+            != processing_config_sha256
+            or binding.get("track") != track
+        ):
+            raise ValueError("processing promotion receipt bindings differ")
+        with self.transaction() as connection:
+            current = connection.execute(
+                "SELECT * FROM assessments WHERE profile_id=? AND job_key=?",
+                (profile_id, job_key),
+            ).fetchone()
+            if current is None:
+                raise KeyError((profile_id, job_key))
+            if receipt.get("score_payload_hash") != current["score_payload_hash"]:
+                raise ValueError("processing promotion score receipt differs")
+            expected = {
+                "fit": current["fit"],
+                "opportunity": current["opportunity"],
+                "final": current["final_score"],
+                "fit_status": current["fit_status"],
+            }
+            if any(score.get(key) != value for key, value in expected.items()):
+                raise ValueError("processing promotion score differs from assessment state")
+            existing = connection.execute(
+                "SELECT * FROM assessment_promotions WHERE profile_id=? AND job_key=?",
+                (profile_id, job_key),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["receipt_sha256"] != receipt_sha256
+                    or bytes(existing["receipt_bytes"]) != receipt_bytes
+                    or current["opportunity_decision"] != "pass"
+                    or current["policy_hash"] != policy_hash
+                ):
+                    raise ValueError("processing promotion conflicts with sealed prior promotion")
+                return False
+            connection.execute(
+                """INSERT INTO assessment_promotions(
+                     profile_id,job_key,track,authority_sha256,source_content_sha256,
+                     processing_config_sha256,processing_receipt_sha256,
+                     processing_result_sha256,score_payload_hash,policy_hash,
+                     receipt_bytes,receipt_sha256
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    profile_id,
+                    job_key,
+                    track,
+                    authority_sha256,
+                    source_content_sha256,
+                    processing_config_sha256,
+                    processing_receipt_sha256,
+                    processing_result_sha256,
+                    current["score_payload_hash"],
+                    policy_hash,
+                    sqlite3.Binary(receipt_bytes),
+                    receipt_sha256,
+                ),
+            )
+            connection.execute(
+                """UPDATE assessments SET state='opportunity_promoted',
+                     opportunity_decision='pass',opportunity_reason=?,policy_hash=?,
+                     updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND job_key=?""",
+                (
+                    f"processing-promotion:{receipt_sha256}",
+                    policy_hash,
+                    profile_id,
+                    job_key,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO assessment_events(
+                     profile_id,job_key,event_type,actor_kind,payload_json,idempotency_key
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    profile_id,
+                    job_key,
+                    "processing_assessment_promoted",
+                    "deterministic",
+                    json.dumps(
+                        {
+                            "policy_hash": policy_hash,
+                            "processing_receipt_sha256": processing_receipt_sha256,
+                            "processing_result_sha256": processing_result_sha256,
+                            "receipt_sha256": receipt_sha256,
+                        },
+                        sort_keys=True,
+                    ),
+                    f"processing-promotion:{profile_id}:{job_key}:{receipt_sha256}",
+                ),
+            )
+            return True
+
+    def processing_promotion(self, profile_id: str, job_key: str) -> sqlite3.Row:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM assessment_promotions WHERE profile_id=? AND job_key=?",
+                (profile_id, job_key),
+            ).fetchone()
+        if row is None:
+            raise KeyError((profile_id, job_key))
+        return row
 
     def enqueue_research(self, profile_id: str, job_key: str, priority: int) -> None:
         with self.connection() as connection:
