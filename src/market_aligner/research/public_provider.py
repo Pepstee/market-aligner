@@ -1134,27 +1134,27 @@ class RefreshDerivedResearchProvider:
                     != " ".join(excerpt.split())
                 ):
                     raise PublicResearchError("prior claim support differs from dossier")
-                needle = support.excerpt.encode("utf-8")
-                current_start = current.body.find(needle)
-                if (
-                    current_start < 0
-                    or current.body.find(needle, current_start + 1) >= 0
-                ):
+                current_selected = current.body[start:end]
+                try:
+                    current_excerpt = current_selected.decode("utf-8")
+                except UnicodeDecodeError as exc:
                     raise PublicResearchError(
-                        "prior claim is absent or ambiguous in current vacancy bytes"
-                    )
-                current_end = current_start + len(needle)
-                current_excerpt = current.body[current_start:current_end].decode("utf-8")
+                        "current support at prior selector is not UTF-8"
+                    ) from exc
                 if (
-                    current_excerpt != support.excerpt
+                    end > len(current.body)
+                    or current_excerpt != support.excerpt
+                    or _sha256(current_selected) != support.excerpt_sha256
                     or " ".join(claim.claim.split())
                     != " ".join(current_excerpt.split())
                 ):
-                    raise PublicResearchError("current claim text differs from prior claim")
+                    raise PublicResearchError(
+                        "current claim differs at the exact prior selector"
+                    )
                 planned_supports.append(
                     PlannedSupport(
                         citation.citation_id,
-                        f"bytes:{current_start}-{current_end}",
+                        support.selector,
                         support.excerpt,
                     )
                 )

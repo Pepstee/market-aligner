@@ -255,7 +255,9 @@ def _research_run_one_command(args: argparse.Namespace) -> int:
         ),
     )
     run = ResearchWorker(assessments, provider, args.worker_id).run_one(
-        profile_id=args.profile_id, job_key=args.job_key
+        profile_id=args.profile_id,
+        job_key=args.job_key,
+        require_refresh_bridge=True,
     )
     derivation = provider.last_derivation
     output = {

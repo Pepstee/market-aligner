@@ -39,10 +39,17 @@ class ResearchWorker:
         self.worker_id = worker_id
 
     def run_one(
-        self, *, profile_id: str | None = None, job_key: str | None = None
+        self,
+        *,
+        profile_id: str | None = None,
+        job_key: str | None = None,
+        require_refresh_bridge: bool = False,
     ) -> ResearchRun:
         task = self.store.claim_research(
-            self.worker_id, profile_id=profile_id, job_key=job_key
+            self.worker_id,
+            profile_id=profile_id,
+            job_key=job_key,
+            require_refresh_bridge=require_refresh_bridge,
         )
         if task is None:
             return ResearchRun("idle")

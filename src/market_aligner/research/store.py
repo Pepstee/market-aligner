@@ -608,6 +608,7 @@ class AssessmentStore:
         *,
         profile_id: str | None = None,
         job_key: str | None = None,
+        require_refresh_bridge: bool = False,
     ) -> ResearchTask | None:
         if (profile_id is None) != (job_key is None):
             raise ValueError("research claim scope requires both profile_id and job_key")
@@ -619,6 +620,13 @@ class AssessmentStore:
             if profile_id is not None and job_key is not None:
                 scope = " AND q.profile_id=? AND q.job_key=?"
                 parameters = (profile_id, job_key)
+            if require_refresh_bridge:
+                scope += (
+                    " AND q.refresh_event_id IS NOT NULL"
+                    " AND q.refresh_bridge_sha256 IS NOT NULL"
+                    " AND e.id=q.refresh_event_id"
+                    " AND e.event_type='employer_research_collection_refresh_queued'"
+                )
             row = connection.execute(
                 """SELECT q.profile_id,q.job_key,a.title,a.company,a.url,a.opportunity,
                           q.priority,q.attempts,p.source_content_sha256,
