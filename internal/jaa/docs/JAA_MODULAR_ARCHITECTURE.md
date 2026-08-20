@@ -39,6 +39,21 @@ consent state, pre-submit verification, and the final certified executor. It
 may consume immutable approved application artifacts; it may not rewrite CV
 content.
 
+The forensic recorder is a separate diagnostic capability. It publishes a
+create-only, content-addressed manifest of redacted network, console,
+checkpoint, and masked-screenshot evidence. Its receipt is offline-verifiable
+and is structurally unable to grant release or submission authority. Workable
+and Ashby provider diagnostics inspect route, blocker, success, and exact
+submit-control semantics using Playwright trial clicks only. They never perform
+the consequential click.
+
+The existing Greenhouse certified executor and Ashby one-use circuit remain the
+only consequential provider implementations. The recovered Mac generic live
+executor was intentionally not copied: its Ashby path duplicated and weakened
+the one-use circuit, while Workable does not yet have a certified release-token
+and final-click implementation. Adding Workable submission is a later bounded
+increment, after that authority contract exists.
+
 ## Migration state
 
 The internal distribution is `job-application-automation`, requires CPython
