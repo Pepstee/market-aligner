@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 import tempfile
 import unittest
@@ -231,6 +232,10 @@ class ServiceTests(unittest.TestCase):
             )
             reports = {name: Path(path) for name, path in dict(first["reports"]).items()}
             self.assertTrue(all(path.is_file() for path in reports.values()))
+            self.assertEqual(
+                hashlib.sha256(reports["scatter_png"].read_bytes()).hexdigest(),
+                first["report_hashes"]["scatter_png"],
+            )
             ranked = json.loads(reports["ranked_json"].read_text(encoding="utf-8"))
             self.assertEqual("market-aligner.fit-opportunity-ranked.v1", ranked["schema_version"])
             self.assertEqual(["fixture:1"], [row["job_key"] for row in ranked["jobs"]])

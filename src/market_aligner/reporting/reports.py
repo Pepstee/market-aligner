@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import html
 import json
+import struct
+import zlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,7 @@ class ReportPaths:
     ranked_json: Path
     requirements_csv: Path
     scatter_html: Path
+    scatter_png: Path
 
 
 def skill_frequency(ranked: Sequence[RankedVacancy]) -> list[dict[str, Any]]:
@@ -89,12 +92,14 @@ def write_reports(
         ranked_json=root / "fit_opportunity_ranked.json",
         requirements_csv=root / "requirements_ranked.csv",
         scatter_html=root / "opportunity_fit.html",
+        scatter_png=root / "opportunity_fit.png",
     )
-    ranked = sorted(rows, key=lambda item: item.score.final, reverse=True)
+    ranked = sorted(rows, key=lambda item: (-item.score.final, item.vacancy.key))
     _write_jobs(ranked, paths.jobs_csv)
     _write_ranked_json(profile_id, ranked, paths.ranked_json)
     _write_requirements(ranked, paths.requirements_csv)
     _write_scatter(profile_id, ranked, paths.scatter_html)
+    _write_scatter_png(profile_id, ranked, paths.scatter_png)
     return paths
 
 
@@ -219,3 +224,171 @@ body{{font:14px system-ui;margin:0;background:#0b1020;color:#eef2ff}}main{{max-w
 for(const p of points){{const b=document.createElement('button');b.className='point';b.style.left=`${{p.fit*100}}%`;b.style.bottom=`${{p.opportunity*100}}%`;b.title=`${{p.title}} — ${{p.company}}`;b.onclick=()=>{{detail.innerHTML='';const a=document.createElement('a');a.href=p.url;a.textContent=p.title+' — '+p.company;a.target='_blank';detail.append(a,document.createElement('br'),`Track: ${{p.track}} · Fit: ${{p.fit.toFixed(3)}} (${{p.fit_status}}) · Opportunity: ${{p.opportunity.toFixed(3)}} · Final: ${{p.final.toFixed(1)}}`);}};plot.appendChild(b);}}
 </script></main></body></html>"""
     path.write_text(document, encoding="utf-8")
+
+
+_FONT = {
+    " ": ("000",) * 7,
+    "%": ("10001", "00010", "00100", "01000", "10001", "00000", "00000"),
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
+    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+    "C": ("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+    "I": ("11111", "00100", "00100", "00100", "00100", "00100", "11111"),
+    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+    "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+}
+
+
+def _write_scatter_png(
+    profile_id: str,
+    rows: Sequence[RankedVacancy],
+    path: Path,
+) -> None:
+    """Write a deterministic, headless RGB PNG without an optional plotting runtime."""
+    width, height = 1200, 800
+    pixels = bytearray((248, 250, 252) * width * height)
+    left, top, right, bottom = 130, 120, 1120, 680
+    ink = (30, 41, 59)
+    muted = (100, 116, 139)
+    grid = (203, 213, 225)
+    blue = (2, 132, 199)
+    gold = (245, 158, 11)
+
+    for step in range(5):
+        x = left + (right - left) * step // 4
+        y = bottom - (bottom - top) * step // 4
+        _line(pixels, width, height, x, top, x, bottom, grid)
+        _line(pixels, width, height, left, y, right, y, grid)
+        label = f"{step * 25}%"
+        _text(pixels, width, height, x - len(label) * 9, bottom + 18, label, muted, 3)
+        _text(pixels, width, height, 50, y - 10, label, muted, 3)
+    _line(pixels, width, height, left, top, left, bottom, ink, 3)
+    _line(pixels, width, height, left, bottom, right, bottom, ink, 3)
+
+    _text(pixels, width, height, 130, 35, "FIT VS OPPORTUNITY", ink, 5)
+    _text(pixels, width, height, 565, 738, "FIT", ink, 4)
+    _text(pixels, width, height, 20, 75, "OPPORTUNITY", ink, 3)
+    _text(pixels, width, height, 840, 55, "FIT UNCALIBRATED", muted, 2)
+
+    # Draw highest-ranked points last so coincident points retain the rank-one marker.
+    for index, item in reversed(list(enumerate(rows))):
+        fit = min(1.0, max(0.0, item.score.fit))
+        opportunity = min(1.0, max(0.0, item.score.opportunity))
+        x = left + round(fit * (right - left))
+        y = bottom - round(opportunity * (bottom - top))
+        _circle(pixels, width, height, x, y, 10, gold if index == 0 else blue)
+        _circle(pixels, width, height, x, y, 3, (255, 255, 255))
+
+    raw = b"".join(
+        b"\x00" + bytes(pixels[y * width * 3 : (y + 1) * width * 3])
+        for y in range(height)
+    )
+    metadata = (
+        ("Title", "Fit vs Opportunity"),
+        ("Profile", profile_id),
+        ("Fit status", "uncalibrated"),
+    )
+    png = bytearray(b"\x89PNG\r\n\x1a\n")
+    png.extend(_png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+    for key, value in metadata:
+        png.extend(_png_chunk(b"tEXt", f"{key}\0{value}".encode("latin-1")))
+    png.extend(_png_chunk(b"IDAT", zlib.compress(raw, level=9)))
+    png.extend(_png_chunk(b"IEND", b""))
+    path.write_bytes(png)
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    body = kind + payload
+    return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+def _pixel(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    color: tuple[int, int, int],
+) -> None:
+    if 0 <= x < width and 0 <= y < height:
+        offset = (y * width + x) * 3
+        pixels[offset : offset + 3] = bytes(color)
+
+
+def _line(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    color: tuple[int, int, int],
+    thickness: int = 1,
+) -> None:
+    steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+    for step in range(steps + 1):
+        x = x1 + (x2 - x1) * step // steps
+        y = y1 + (y2 - y1) * step // steps
+        for dx in range(-(thickness // 2), thickness - thickness // 2):
+            for dy in range(-(thickness // 2), thickness - thickness // 2):
+                _pixel(pixels, width, height, x + dx, y + dy, color)
+
+
+def _circle(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    cx: int,
+    cy: int,
+    radius: int,
+    color: tuple[int, int, int],
+) -> None:
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx * dx + dy * dy <= radius * radius:
+                _pixel(pixels, width, height, cx + dx, cy + dy, color)
+
+
+def _text(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    value: str,
+    color: tuple[int, int, int],
+    scale: int,
+) -> None:
+    cursor = x
+    for character in value.upper():
+        glyph = _FONT.get(character, _FONT[" "])
+        for row, bits in enumerate(glyph):
+            for column, bit in enumerate(bits):
+                if bit == "1":
+                    for dy in range(scale):
+                        for dx in range(scale):
+                            _pixel(
+                                pixels,
+                                width,
+                                height,
+                                cursor + column * scale + dx,
+                                y + row * scale + dy,
+                                color,
+                            )
+        cursor += 6 * scale
