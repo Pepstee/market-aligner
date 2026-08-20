@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import secrets
+import stat
 import tempfile
 import time
 from collections import deque
@@ -44,25 +46,178 @@ def _save_raw(base: Path, row: RawPosting) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def _write_durable_bytes(path: Path, value: bytes) -> None:
-    """Atomically materialize exact bytes and fsync file plus parent directory."""
+def _open_absolute_directory_no_symlinks(path: Path) -> int:
+    """Open every absolute path component with O_NOFOLLOW."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.read_bytes() != value:
-            raise VacancyRefreshConflict(f"content-addressed object differs at {path}")
-        return
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary_path = Path(temporary)
+    absolute = path.absolute()
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        _fsync_directory_chain(path.parent)
+        for component in absolute.parts[1:]:
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_private_directory(parent: int, name: str, *, create: bool) -> int:
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+        )
+    except FileNotFoundError:
+        if not create:
+            raise VacancyRefreshConflict(f"refresh object directory is unavailable: {name}")
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+            os.fsync(parent)
+        except FileExistsError:
+            pass
+        try:
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+            )
+        except OSError as exc:
+            raise VacancyRefreshConflict(
+                f"refresh object directory is unsafe: {name}"
+            ) from exc
+    except OSError as exc:
+        raise VacancyRefreshConflict(
+            f"refresh object directory is unsafe: {name}"
+        ) from exc
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        os.close(descriptor)
+        raise VacancyRefreshConflict(f"refresh object directory ownership differs: {name}")
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        try:
+            os.fchmod(descriptor, 0o700)
+            os.fsync(descriptor)
+        except OSError as exc:
+            os.close(descriptor)
+            raise VacancyRefreshConflict(
+                f"refresh object directory cannot be made private: {name}"
+            ) from exc
+    return descriptor
+
+
+def _open_refresh_object_bucket(root: Path, digest: str, *, create: bool) -> int:
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise VacancyRefreshConflict("refresh object filename is not a SHA-256")
+    try:
+        root_descriptor = _open_absolute_directory_no_symlinks(root)
+    except OSError as exc:
+        raise VacancyRefreshConflict("external data root contains a symlink or is unavailable") from exc
+    descriptors = [root_descriptor]
+    try:
+        state = os.open(
+            "state", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=root_descriptor,
+        )
+        descriptors.append(state)
+        objects = _open_private_directory(state, "collection-refresh-objects", create=create)
+        descriptors.append(objects)
+        bucket = _open_private_directory(objects, digest[:2], create=create)
+        descriptors.append(bucket)
+        return os.dup(bucket)
+    except VacancyRefreshConflict:
+        raise
+    except OSError as exc:
+        raise VacancyRefreshConflict("refresh object ancestor is unsafe") from exc
     finally:
-        temporary_path.unlink(missing_ok=True)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _read_checked_object(descriptor: int, digest: str) -> bytes:
+    try:
+        handle = os.open(
+            digest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor
+        )
+    except OSError as exc:
+        raise VacancyRefreshConflict("refresh response object is unavailable or unsafe") from exc
+    try:
+        metadata = os.fstat(handle)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise VacancyRefreshConflict("refresh response object metadata is unsafe")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(handle, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        value = b"".join(chunks)
+    finally:
+        os.close(handle)
+    if hashlib.sha256(value).hexdigest() != digest:
+        raise VacancyRefreshConflict("refresh response object hash differs from filename")
+    return value
+
+
+def _write_refresh_object(root: Path, digest: str, value: bytes) -> None:
+    """Write an owner-private CAS object through descriptor-relative operations."""
+
+    if hashlib.sha256(value).hexdigest() != digest:
+        raise VacancyRefreshConflict("refresh response bytes differ from object filename")
+    bucket = _open_refresh_object_bucket(root, digest, create=True)
+    temporary = f".{digest}.{secrets.token_hex(12)}.tmp"
+    try:
+        try:
+            existing = _read_checked_object(bucket, digest)
+        except VacancyRefreshConflict as exc:
+            try:
+                os.stat(digest, dir_fd=bucket, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise exc
+        else:
+            if existing != value:
+                raise VacancyRefreshConflict("content-addressed refresh object differs")
+            return
+        handle = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=bucket,
+        )
+        try:
+            view = memoryview(value)
+            while view:
+                written = os.write(handle, view)
+                view = view[written:]
+            os.fsync(handle)
+        finally:
+            os.close(handle)
+        os.replace(temporary, digest, src_dir_fd=bucket, dst_dir_fd=bucket)
+        os.fsync(bucket)
+        if _read_checked_object(bucket, digest) != value:
+            raise VacancyRefreshConflict("materialized refresh object differs")
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=bucket)
+        except FileNotFoundError:
+            pass
+        os.close(bucket)
+
+
+def _read_refresh_object(root: Path, digest: str) -> bytes:
+    bucket = _open_refresh_object_bucket(root, digest, create=False)
+    try:
+        return _read_checked_object(bucket, digest)
+    finally:
+        os.close(bucket)
 
 
 def _replace_durable_bytes(path: Path, value: bytes) -> None:
@@ -100,19 +255,14 @@ def _verify_refresh_objects(root: Path, transition: Mapping[str, object]) -> Non
     """Verify journal bytes, content-address filenames, and sealed path claims."""
 
     old_sha = str(transition["old_object_sha256"])
-    old_path = root / "state" / "collection-refresh-objects" / old_sha[:2] / old_sha
-    if old_path.name != old_sha or not old_path.is_file():
-        raise VacancyRefreshConflict("journalled old response object is unavailable")
-    old_bytes = old_path.read_bytes()
+    old_path = Path("state") / "collection-refresh-objects" / old_sha[:2] / old_sha
+    old_bytes = _read_refresh_object(root, old_sha)
     if old_bytes != transition["old_raw_bytes"] or hashlib.sha256(old_bytes).hexdigest() != old_sha:
         raise VacancyRefreshConflict("journalled old response object bytes differ")
 
     if transition["status"] in ("object_ready", "committed"):
         new_sha = str(transition["new_object_sha256"])
-        new_path = root / "state" / "collection-refresh-objects" / new_sha[:2] / new_sha
-        if new_path.name != new_sha or not new_path.is_file():
-            raise VacancyRefreshConflict("journalled new response object is unavailable")
-        new_bytes = new_path.read_bytes()
+        new_bytes = _read_refresh_object(root, new_sha)
         if (
             new_bytes != transition["new_raw_bytes"]
             or hashlib.sha256(new_bytes).hexdigest() != new_sha
@@ -122,7 +272,7 @@ def _verify_refresh_objects(root: Path, transition: Mapping[str, object]) -> Non
         receipt = transition["receipt_basis"]
         if not isinstance(receipt, dict):
             raise VacancyRefreshConflict("committed refresh lacks a receipt basis")
-        if receipt.get("old_raw_object_path") != str(old_path.relative_to(root)):
+        if receipt.get("old_raw_object_path") != str(old_path):
             raise VacancyRefreshConflict("sealed old response object path differs")
         new_sha = str(transition["new_object_sha256"])
         expected_new = str(
@@ -289,11 +439,9 @@ class Collector:
             )
 
         old_object_sha256 = str(transition["old_object_sha256"])
-        old_object_path = (
-            self.root / "state" / "collection-refresh-objects"
-            / old_object_sha256[:2] / old_object_sha256
+        _write_refresh_object(
+            self.root, old_object_sha256, bytes(transition["old_raw_bytes"])
         )
-        _write_durable_bytes(old_object_path, bytes(transition["old_raw_bytes"]))
         _verify_refresh_objects(self.root, transition)
 
         fetch_claimed = False
@@ -356,11 +504,7 @@ class Collector:
             self.crash_injector("before_object")
             new_raw_bytes = bytes(transition["new_raw_bytes"])
             new_object_sha256 = str(transition["new_object_sha256"])
-            new_object_path = (
-                self.root / "state" / "collection-refresh-objects"
-                / new_object_sha256[:2] / new_object_sha256
-            )
-            _write_durable_bytes(new_object_path, new_raw_bytes)
+            _write_refresh_object(self.root, new_object_sha256, new_raw_bytes)
             self.db.mark_vacancy_refresh_object_ready(
                 refresh_id,
                 object_sha256=new_object_sha256,

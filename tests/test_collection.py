@@ -23,6 +23,8 @@ from market_aligner.state.vacancies import (
     JobDatabase,
     VacancyRefreshConflict,
     VacancyRefreshIndeterminate,
+    raw_posting_bytes,
+    raw_posting_content_sha256,
 )
 
 
@@ -30,6 +32,37 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class CollectionTests(unittest.TestCase):
+    _LEGACY_REFRESH_SCHEMA = """
+    CREATE TABLE vacancy_refreshes (
+      refresh_id TEXT PRIMARY KEY,
+      operation_id TEXT NOT NULL UNIQUE,
+      context_sha256 TEXT NOT NULL,
+      job_key TEXT NOT NULL,
+      expected_content_sha256 TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('intent','fetched','object_ready','committed')),
+      started_at TEXT NOT NULL,
+      old_content_sha256 TEXT NOT NULL,
+      old_fetched_at TEXT NOT NULL,
+      old_raw_bytes BLOB NOT NULL,
+      old_object_sha256 TEXT NOT NULL,
+      new_content_sha256 TEXT,
+      new_fetched_at TEXT,
+      new_raw_bytes BLOB,
+      new_object_sha256 TEXT,
+      receipt_basis_json TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE RESTRICT
+    )
+    """
+
+    @staticmethod
+    def _canonical_hash(value: object) -> str:
+        return hashlib.sha256(json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+
     def _refresh_fixture(
         self,
         root: Path,
@@ -84,6 +117,139 @@ class CollectionTests(unittest.TestCase):
         adapter.database = database
         return config, database, old_hash, calls, collector_factory
 
+    def _install_legacy_refresh(
+        self,
+        root: Path,
+        config: Path,
+        database: JobDatabase,
+        old_hash: str,
+        *,
+        status: str | None,
+    ) -> dict[str, object]:
+        with sqlite3.connect(database.path) as conn:
+            conn.execute("DROP TABLE vacancy_refreshes")
+            conn.execute("DROP TABLE vacancy_refresh_migration_quarantine")
+            conn.execute(self._LEGACY_REFRESH_SCHEMA)
+            if status is None:
+                conn.commit()
+                return {}
+        old_path = root / "raw" / "vacancies" / "injected" / "tenant_1.json"
+        old_bytes = old_path.read_bytes()
+        old_raw = RawPosting(
+            "injected", "tenant:1", "https://example.test/jobs/1",
+            "2026-08-20T00:00:00Z", raw_text="old official bytes",
+        )
+        self.assertEqual(old_bytes, raw_posting_bytes(old_raw))
+        new_raw = RawPosting(
+            "injected", "tenant:1", "https://example.test/jobs/1",
+            "2026-08-20T05:00:00Z", raw_text="legacy fetched official bytes",
+        )
+        new_bytes = raw_posting_bytes(new_raw)
+        new_content = raw_posting_content_sha256(new_raw)
+        old_object = hashlib.sha256(old_bytes).hexdigest()
+        new_object = hashlib.sha256(new_bytes).hexdigest()
+        operation_id = f"legacy-{status}"
+        loaded_config = yaml.safe_load(config.read_text(encoding="utf-8"))
+        config_sha = self._canonical_hash(loaded_config)
+        source_sha = self._canonical_hash({
+            "adapter": "injected",
+            "adapter_config": loaded_config["injected"],
+            "job_key": "injected:tenant:1",
+        })
+        context = {
+            "config_sha256": config_sha,
+            "expected_content_sha256": old_hash,
+            "job_key": "injected:tenant:1",
+            "operation_id": operation_id,
+            "schema_version": "market-aligner.vacancy-refresh-context.v1",
+            "source_sha256": source_sha,
+        }
+        context_sha = self._canonical_hash(context)
+        refresh_id = self._canonical_hash({
+            "context_sha256": context_sha,
+            "schema_version": "market-aligner.vacancy-refresh-id.v1",
+        })
+        receipt = None
+        if status == "committed":
+            basis = {
+                "adapter": "injected",
+                "application_authority": False,
+                "authority_scope": "collection_only",
+                "changed": True,
+                "config_sha256": config_sha,
+                "context_sha256": context_sha,
+                "expected_old_content_sha256": old_hash,
+                "fallback_engine": None,
+                "finished_at": "2026-08-20T05:01:00Z",
+                "job_key": "injected:tenant:1",
+                "new_content_sha256": new_content,
+                "new_fetched_at": new_raw.fetched_at,
+                "new_raw_object_path": str(
+                    Path("state") / "collection-refresh-objects"
+                    / new_object[:2] / new_object
+                ),
+                "new_raw_object_sha256": new_object,
+                "official_fetch_count": 1,
+                "old_content_sha256": old_hash,
+                "old_fetched_at": old_raw.fetched_at,
+                "old_raw_object_path": str(
+                    Path("state") / "collection-refresh-objects"
+                    / old_object[:2] / old_object
+                ),
+                "old_raw_object_sha256": old_object,
+                "operation_id": operation_id,
+                "raw_cache_file_sha256": new_object,
+                "raw_cache_path": "raw/vacancies/injected/tenant_1.json",
+                "refresh_id": refresh_id,
+                "schema_version": "market-aligner.vacancy-refresh-receipt.v2",
+                "source_sha256": source_sha,
+                "started_at": "2026-08-20T04:59:00Z",
+                "state_sha256": "9" * 64,
+            }
+            receipt = {**basis, "transition_sha256": self._canonical_hash(basis)}
+            database.store_raw(new_raw)
+        new_fields = (
+            (new_content, new_raw.fetched_at, new_bytes, new_object)
+            if status in ("fetched", "object_ready", "committed")
+            else (None, None, None, None)
+        )
+        with sqlite3.connect(database.path) as conn:
+            conn.execute(
+                """INSERT INTO vacancy_refreshes(
+                     refresh_id,operation_id,context_sha256,job_key,
+                     expected_content_sha256,status,started_at,old_content_sha256,
+                     old_fetched_at,old_raw_bytes,old_object_sha256,
+                     new_content_sha256,new_fetched_at,new_raw_bytes,new_object_sha256,
+                     receipt_basis_json,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    refresh_id, operation_id, context_sha, "injected:tenant:1",
+                    old_hash, status, "2026-08-20T04:59:00Z", old_hash,
+                    old_raw.fetched_at, old_bytes, old_object, *new_fields,
+                    None if receipt is None else json.dumps(
+                        receipt, sort_keys=True, separators=(",", ":")
+                    ),
+                    "2026-08-20 04:59:00", "2026-08-20 05:01:00",
+                ),
+            )
+            conn.commit()
+        for digest, value in ((old_object, old_bytes), (new_object, new_bytes)):
+            if digest == new_object and status not in ("object_ready", "committed"):
+                continue
+            object_path = (
+                root / "state" / "collection-refresh-objects" / digest[:2] / digest
+            )
+            object_path.parent.mkdir(parents=True, exist_ok=True)
+            object_path.write_bytes(value)
+            object_path.chmod(0o600)
+        return {
+            "context_sha256": context_sha,
+            "new_bytes": new_bytes,
+            "old_bytes": old_bytes,
+            "operation_id": operation_id,
+            "refresh_id": refresh_id,
+        }
+
     def test_audited_fixture_adapters_retain_contract(self) -> None:
         for board in ("wanted", "saramin", "jobkorea", "notefolio"):
             adapter = load_adapter(board, fixture_dir=FIXTURES)
@@ -111,6 +277,209 @@ class CollectionTests(unittest.TestCase):
             imported = JobDatabase(root / "state" / "imported.sqlite3")
             added, fetched = imported.import_existing(urls, root / "missing-cache")
             self.assertEqual((1, 0), (added, fetched))
+
+    def test_empty_036d_refresh_schema_migrates_explicitly(self) -> None:
+        class Adapter:
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, database, old_hash, _calls, _factory = self._refresh_fixture(
+                root, Adapter()
+            )
+            self._install_legacy_refresh(
+                root, config, database, old_hash, status=None
+            )
+            JobDatabase(database.path)
+            with sqlite3.connect(database.path) as conn:
+                columns = tuple(
+                    row[1] for row in conn.execute("PRAGMA table_info(vacancy_refreshes)")
+                )
+                archived = conn.execute(
+                    "SELECT COUNT(*) FROM vacancy_refreshes_legacy_036d"
+                ).fetchone()[0]
+            self.assertIn("context_json", columns)
+            self.assertIn("receipt_basis_sha256", columns)
+            self.assertEqual(0, archived)
+
+    def test_036d_inflight_refreshes_are_preserved_and_fail_closed(self) -> None:
+        class ForbiddenAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, _job, live=False):
+                self.calls["fetch"] += 1
+                raise AssertionError("quarantined legacy transition must never refetch")
+
+        for legacy_status in ("intent", "fetched", "object_ready"):
+            with self.subTest(status=legacy_status), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                adapter = ForbiddenAdapter()
+                config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                legacy = self._install_legacy_refresh(
+                    root, config, database, old_hash, status=legacy_status
+                )
+                reopened = JobDatabase(database.path)
+                with sqlite3.connect(database.path) as conn:
+                    current_count = conn.execute(
+                        "SELECT COUNT(*) FROM vacancy_refreshes"
+                    ).fetchone()[0]
+                    archived = conn.execute(
+                        """SELECT status,old_raw_bytes,new_raw_bytes
+                           FROM vacancy_refreshes_legacy_036d WHERE operation_id=?""",
+                        (legacy["operation_id"],),
+                    ).fetchone()
+                    quarantine = conn.execute(
+                        """SELECT legacy_status,legacy_row_sha256,reason
+                           FROM vacancy_refresh_migration_quarantine WHERE operation_id=?""",
+                        (legacy["operation_id"],),
+                    ).fetchone()
+                self.assertEqual(0, current_count)
+                self.assertEqual(legacy_status, archived[0])
+                self.assertEqual(legacy["old_bytes"], archived[1])
+                if legacy_status != "intent":
+                    self.assertEqual(legacy["new_bytes"], archived[2])
+                self.assertEqual(legacy_status, quarantine[0])
+                self.assertEqual(64, len(quarantine[1]))
+                self.assertIn("explicit reconciliation", quarantine[2])
+                with self.assertRaises(VacancyRefreshIndeterminate):
+                    reopened.refresh_transition(
+                        str(legacy["operation_id"]),
+                        context_sha256=str(legacy["context_sha256"]),
+                    )
+                with self.assertRaises(VacancyRefreshIndeterminate):
+                    CollectionService(root, collector_factory=factory).refresh_vacancy(
+                        config,
+                        job_key="injected:tenant:1",
+                        expected_content_sha256=old_hash,
+                        operation_id=f"replacement-{legacy_status}",
+                        log=lambda _message: None,
+                    )
+                self.assertEqual(0, calls["fetch"])
+
+    def test_036d_completed_refresh_is_verified_projected_and_replayable(self) -> None:
+        class ForbiddenAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, _job, live=False):
+                self.calls["fetch"] += 1
+                raise AssertionError("completed legacy transition must never refetch")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            adapter = ForbiddenAdapter()
+            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            legacy = self._install_legacy_refresh(
+                root, config, database, old_hash, status="committed"
+            )
+            reopened = JobDatabase(database.path)
+            transition = reopened.refresh_transition(
+                str(legacy["operation_id"]),
+                context_sha256=str(legacy["context_sha256"]),
+            )
+            self.assertIsNotNone(transition)
+            self.assertEqual("committed", transition["status"])
+            self.assertEqual(
+                "market-aligner.vacancy-refresh-036d-to-current.v1",
+                transition["receipt_basis"]["journal_migration"],
+            )
+            with sqlite3.connect(database.path) as conn:
+                archived = conn.execute(
+                    """SELECT old_raw_bytes,new_raw_bytes,receipt_basis_json
+                       FROM vacancy_refreshes_legacy_036d WHERE operation_id=?""",
+                    (legacy["operation_id"],),
+                ).fetchone()
+                quarantined = conn.execute(
+                    "SELECT COUNT(*) FROM vacancy_refresh_migration_quarantine"
+                ).fetchone()[0]
+            self.assertEqual(legacy["old_bytes"], archived[0])
+            self.assertEqual(legacy["new_bytes"], archived[1])
+            self.assertIsNotNone(archived[2])
+            self.assertEqual(0, quarantined)
+            receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                operation_id=str(legacy["operation_id"]),
+                log=lambda _message: None,
+            )
+            self.assertEqual(0, calls["fetch"])
+            self.assertEqual(
+                transition["transition_sha256"], receipt["transition_sha256"]
+            )
+
+    def test_quarantined_036d_archive_tampering_is_rejected_on_reopen(self) -> None:
+        class Adapter:
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, database, old_hash, _calls, _factory = self._refresh_fixture(
+                root, Adapter()
+            )
+            self._install_legacy_refresh(
+                root, config, database, old_hash, status="fetched"
+            )
+            JobDatabase(database.path)
+            with sqlite3.connect(database.path) as conn:
+                conn.execute(
+                    """UPDATE vacancy_refreshes_legacy_036d SET old_raw_bytes=?
+                       WHERE operation_id='legacy-fetched'""",
+                    (b"substituted archived bytes",),
+                )
+                conn.commit()
+            with self.assertRaisesRegex(
+                VacancyRefreshConflict, "legacy refresh row identity differs"
+            ):
+                JobDatabase(database.path)
+
+    def test_refresh_objects_reject_symlinked_directory_and_object(self) -> None:
+        class Adapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, _job, live=False):
+                self.calls["fetch"] += 1
+                raise AssertionError("unsafe object path must fail before network")
+
+        for attack in ("directory", "object", "hardlink"):
+            with self.subTest(attack=attack), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                adapter = Adapter()
+                config, _database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                old_cache = root / "raw" / "vacancies" / "injected" / "tenant_1.json"
+                old_object = hashlib.sha256(old_cache.read_bytes()).hexdigest()
+                objects = root / "state" / "collection-refresh-objects"
+                outside = root / "outside"
+                outside.mkdir()
+                if attack == "directory":
+                    objects.symlink_to(outside, target_is_directory=True)
+                else:
+                    bucket = objects / old_object[:2]
+                    bucket.mkdir(parents=True)
+                    target = outside / "target"
+                    target.write_bytes(old_cache.read_bytes())
+                    target.chmod(0o600)
+                    if attack == "object":
+                        (bucket / old_object).symlink_to(target)
+                    else:
+                        (bucket / old_object).hardlink_to(target)
+                with self.assertRaises(VacancyRefreshConflict):
+                    CollectionService(root, collector_factory=factory).refresh_vacancy(
+                        config,
+                        job_key="injected:tenant:1",
+                        expected_content_sha256=old_hash,
+                        operation_id=f"unsafe-{attack}",
+                        log=lambda _message: None,
+                    )
+                self.assertEqual(0, calls["fetch"])
 
     def test_collector_has_no_result_cap_and_persists_all_discoveries(self) -> None:
         class BulkAdapter:
@@ -274,6 +643,15 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(
                 receipt["raw_cache_file_sha256"],
                 hashlib.sha256(raw_cache.read_bytes()).hexdigest(),
+            )
+            for object_key in ("old_raw_object_path", "new_raw_object_path"):
+                object_path = root / receipt[object_key]
+                self.assertEqual(0o600, object_path.stat().st_mode & 0o777)
+                self.assertEqual(1, object_path.stat().st_nlink)
+                self.assertEqual(0o700, object_path.parent.stat().st_mode & 0o777)
+            self.assertEqual(
+                0o700,
+                (root / "state" / "collection-refresh-objects").stat().st_mode & 0o777,
             )
             with self.assertRaisesRegex(ValueError, "already bound"):
                 service.refresh_vacancy(

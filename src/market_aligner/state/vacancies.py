@@ -96,7 +96,30 @@ CREATE TABLE IF NOT EXISTS collection_runs (
   finished_at TEXT, discovered INTEGER NOT NULL DEFAULT 0, fetched INTEGER NOT NULL DEFAULT 0,
   errors INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS vacancy_refreshes (
+CREATE TABLE IF NOT EXISTS processing_jobs (
+  profile_id TEXT NOT NULL,
+  track TEXT NOT NULL,
+  job_key TEXT NOT NULL,
+  authority_sha256 TEXT NOT NULL,
+  source_content_sha256 TEXT NOT NULL,
+  processing_config_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('leased','completed','failed')),
+  lease_owner TEXT,
+  lease_until REAL,
+  result_json TEXT,
+  error TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(
+    profile_id,track,job_key,authority_sha256,source_content_sha256,
+    processing_config_sha256
+  ),
+  FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE CASCADE
+);
+"""
+
+
+VACANCY_REFRESH_SCHEMA = """
+CREATE TABLE vacancy_refreshes (
   refresh_id TEXT PRIMARY KEY,
   operation_id TEXT NOT NULL UNIQUE,
   context_sha256 TEXT NOT NULL,
@@ -122,26 +145,40 @@ CREATE TABLE IF NOT EXISTS vacancy_refreshes (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE RESTRICT
 );
-CREATE TABLE IF NOT EXISTS processing_jobs (
-  profile_id TEXT NOT NULL,
-  track TEXT NOT NULL,
+"""
+
+
+VACANCY_REFRESH_QUARANTINE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS vacancy_refresh_migration_quarantine (
+  operation_id TEXT PRIMARY KEY,
+  refresh_id TEXT NOT NULL,
   job_key TEXT NOT NULL,
-  authority_sha256 TEXT NOT NULL,
-  source_content_sha256 TEXT NOT NULL,
-  processing_config_sha256 TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('leased','completed','failed')),
-  lease_owner TEXT,
-  lease_until REAL,
-  result_json TEXT,
-  error TEXT,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY(
-    profile_id,track,job_key,authority_sha256,source_content_sha256,
-    processing_config_sha256
-  ),
-  FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE CASCADE
+  expected_content_sha256 TEXT NOT NULL,
+  legacy_status TEXT NOT NULL,
+  legacy_table TEXT NOT NULL,
+  legacy_row_sha256 TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
+
+
+LEGACY_VACANCY_REFRESH_COLUMNS = (
+    "refresh_id", "operation_id", "context_sha256", "job_key",
+    "expected_content_sha256", "status", "started_at", "old_content_sha256",
+    "old_fetched_at", "old_raw_bytes", "old_object_sha256",
+    "new_content_sha256", "new_fetched_at", "new_raw_bytes",
+    "new_object_sha256", "receipt_basis_json", "created_at", "updated_at",
+)
+
+CURRENT_VACANCY_REFRESH_COLUMNS = (
+    "refresh_id", "operation_id", "context_sha256", "context_json", "job_key",
+    "expected_content_sha256", "status", "started_at", "old_content_sha256",
+    "old_fetched_at", "old_raw_bytes", "old_object_sha256",
+    "new_content_sha256", "new_fetched_at", "new_raw_bytes",
+    "new_object_sha256", "receipt_basis_json", "receipt_basis_sha256",
+    "transition_sha256", "created_at", "updated_at",
+)
 
 
 def _canonical_hash(value: object) -> str:
@@ -324,9 +361,19 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
             "job_key": value["job_key"],
             "new_content_sha256": value["new_content_sha256"],
             "new_fetched_at": value["new_fetched_at"],
+            "new_raw_object_path": str(
+                Path("state") / "collection-refresh-objects"
+                / str(value["new_object_sha256"])[:2]
+                / str(value["new_object_sha256"])
+            ),
             "new_raw_object_sha256": value["new_object_sha256"],
             "old_content_sha256": value["old_content_sha256"],
             "old_fetched_at": value["old_fetched_at"],
+            "old_raw_object_path": str(
+                Path("state") / "collection-refresh-objects"
+                / str(value["old_object_sha256"])[:2]
+                / str(value["old_object_sha256"])
+            ),
             "old_raw_object_sha256": value["old_object_sha256"],
             "operation_id": value["operation_id"],
             "official_fetch_count": 1,
@@ -340,13 +387,260 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
             raise VacancyRefreshConflict("sealed receipt basis differs from journal authorities")
 
 
+def _legacy_row_identity(value: Mapping[str, object]) -> str:
+    material: dict[str, object] = {}
+    for key in LEGACY_VACANCY_REFRESH_COLUMNS:
+        item = value[key]
+        if isinstance(item, bytes):
+            material[key] = {
+                "sha256": hashlib.sha256(item).hexdigest(),
+                "size": len(item),
+            }
+        else:
+            material[key] = item
+    return _canonical_hash(material)
+
+
+def _convert_legacy_committed_refresh(value: Mapping[str, object]) -> dict[str, object]:
+    """Validate and project one exact 036d committed row into the current schema."""
+
+    if value["status"] != "committed" or value["receipt_basis_json"] is None:
+        raise VacancyRefreshConflict("legacy refresh is not a completed transition")
+    try:
+        legacy_receipt = json.loads(str(value["receipt_basis_json"]))
+    except json.JSONDecodeError as exc:
+        raise VacancyRefreshConflict("legacy receipt basis is invalid JSON") from exc
+    if not isinstance(legacy_receipt, dict):
+        raise VacancyRefreshConflict("legacy receipt basis is not an object")
+    legacy_basis = dict(legacy_receipt)
+    legacy_transition_sha256 = legacy_basis.pop("transition_sha256", None)
+    if (
+        not isinstance(legacy_transition_sha256, str)
+        or _canonical_hash(legacy_basis) != legacy_transition_sha256
+    ):
+        raise VacancyRefreshConflict("legacy transition identity differs")
+    context = {
+        "config_sha256": legacy_basis.get("config_sha256"),
+        "expected_content_sha256": value["expected_content_sha256"],
+        "job_key": value["job_key"],
+        "operation_id": value["operation_id"],
+        "schema_version": "market-aligner.vacancy-refresh-context.v1",
+        "source_sha256": legacy_basis.get("source_sha256"),
+    }
+    if _canonical_hash(context) != value["context_sha256"]:
+        raise VacancyRefreshConflict("legacy operation context cannot be reconstructed")
+    old_bytes = bytes(value["old_raw_bytes"])
+    new_bytes = bytes(value["new_raw_bytes"])
+    old_raw = raw_posting_from_bytes(old_bytes)
+    new_raw = raw_posting_from_bytes(new_bytes)
+    exact = {
+        "context_sha256": value["context_sha256"],
+        "expected_old_content_sha256": value["expected_content_sha256"],
+        "job_key": value["job_key"],
+        "new_content_sha256": value["new_content_sha256"],
+        "new_fetched_at": value["new_fetched_at"],
+        "new_raw_object_sha256": value["new_object_sha256"],
+        "old_content_sha256": value["old_content_sha256"],
+        "old_fetched_at": value["old_fetched_at"],
+        "old_raw_object_sha256": value["old_object_sha256"],
+        "operation_id": value["operation_id"],
+        "refresh_id": value["refresh_id"],
+    }
+    if any(legacy_basis.get(key) != expected for key, expected in exact.items()):
+        raise VacancyRefreshConflict("legacy receipt differs from journal authorities")
+    if (
+        old_raw.key != value["job_key"]
+        or new_raw.key != value["job_key"]
+        or hashlib.sha256(old_bytes).hexdigest() != value["old_object_sha256"]
+        or hashlib.sha256(new_bytes).hexdigest() != value["new_object_sha256"]
+        or raw_posting_content_sha256(old_raw) != value["old_content_sha256"]
+        or raw_posting_content_sha256(new_raw) != value["new_content_sha256"]
+        or old_raw.fetched_at != value["old_fetched_at"]
+        or new_raw.fetched_at != value["new_fetched_at"]
+    ):
+        raise VacancyRefreshConflict("legacy raw response authorities differ")
+    basis = {
+        **legacy_basis,
+        "journal_migration": "market-aligner.vacancy-refresh-036d-to-current.v1",
+        "legacy_transition_sha256": legacy_transition_sha256,
+    }
+    receipt_basis_sha256 = _canonical_hash(basis)
+    transition: dict[str, object] = {
+        "refresh_id": value["refresh_id"],
+        "operation_id": value["operation_id"],
+        "context_sha256": value["context_sha256"],
+        "context": context,
+        "job_key": value["job_key"],
+        "expected_content_sha256": value["expected_content_sha256"],
+        "status": "committed",
+        "started_at": value["started_at"],
+        "old_content_sha256": value["old_content_sha256"],
+        "old_fetched_at": value["old_fetched_at"],
+        "old_raw_bytes": old_bytes,
+        "old_object_sha256": value["old_object_sha256"],
+        "new_content_sha256": value["new_content_sha256"],
+        "new_fetched_at": value["new_fetched_at"],
+        "new_raw_bytes": new_bytes,
+        "new_object_sha256": value["new_object_sha256"],
+        "receipt_basis_sha256": receipt_basis_sha256,
+    }
+    transition_sha256 = _canonical_hash(_refresh_transition_document(transition))
+    receipt = {
+        **basis,
+        "receipt_basis_sha256": receipt_basis_sha256,
+        "transition_sha256": transition_sha256,
+    }
+    transition.update({
+        "receipt_basis": receipt,
+        "transition_sha256": transition_sha256,
+    })
+    _validate_refresh_transition(transition)
+    return transition
+
+
+def _verify_quarantined_legacy_row(
+    conn: sqlite3.Connection,
+    quarantine: tuple[object, ...],
+) -> dict[str, object]:
+    operation_id, refresh_id, job_key, expected, legacy_status, row_sha256 = map(
+        str, quarantine
+    )
+    archive = conn.execute(
+        f"SELECT {','.join(LEGACY_VACANCY_REFRESH_COLUMNS)} "
+        "FROM vacancy_refreshes_legacy_036d WHERE operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    if archive is None:
+        raise VacancyRefreshConflict("quarantined legacy refresh archive row is unavailable")
+    legacy = dict(zip(LEGACY_VACANCY_REFRESH_COLUMNS, archive, strict=True))
+    exact = {
+        "refresh_id": refresh_id,
+        "job_key": job_key,
+        "expected_content_sha256": expected,
+        "status": legacy_status,
+    }
+    if any(str(legacy[key]) != value for key, value in exact.items()):
+        raise VacancyRefreshConflict("quarantined legacy refresh metadata differs")
+    if _legacy_row_identity(legacy) != row_sha256:
+        raise VacancyRefreshConflict("quarantined legacy refresh row identity differs")
+    return legacy
+
+
 class JobDatabase:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as conn, conn:
             conn.executescript(SCHEMA)
+            self._migrate_vacancy_refresh_schema(conn)
+            self._validate_vacancy_refresh_rows(conn)
             self._migrate_processing_identity(conn)
+
+    @staticmethod
+    def _validate_vacancy_refresh_rows(conn: sqlite3.Connection) -> None:
+        for row in conn.execute(f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes"):
+            _refresh_transition_from_row(row)
+        quarantined = conn.execute(
+            """SELECT operation_id,refresh_id,job_key,expected_content_sha256,
+                      legacy_status,legacy_row_sha256
+               FROM vacancy_refresh_migration_quarantine ORDER BY operation_id"""
+        ).fetchall()
+        if quarantined:
+            archive = conn.execute(
+                """SELECT 1 FROM sqlite_master WHERE type='table'
+                   AND name='vacancy_refreshes_legacy_036d'"""
+            ).fetchone()
+            if archive is None:
+                raise VacancyRefreshConflict("legacy quarantine archive is unavailable")
+        for row in quarantined:
+            _verify_quarantined_legacy_row(conn, row)
+
+    @staticmethod
+    def _migrate_vacancy_refresh_schema(conn: sqlite3.Connection) -> None:
+        """Detect 036d journals explicitly; preserve, project, or quarantine each row."""
+
+        table = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vacancy_refreshes'"
+        ).fetchone()
+        conn.execute(VACANCY_REFRESH_QUARANTINE_SCHEMA)
+        if table is None:
+            conn.execute(VACANCY_REFRESH_SCHEMA)
+            return
+        columns = tuple(
+            str(row[1]) for row in conn.execute("PRAGMA table_info(vacancy_refreshes)")
+        )
+        if columns == CURRENT_VACANCY_REFRESH_COLUMNS:
+            sql = str(table[0] or "")
+            if "fetch_started" not in sql or "indeterminate" not in sql:
+                raise VacancyRefreshConflict("vacancy refresh schema has an unknown status contract")
+            return
+        if columns != LEGACY_VACANCY_REFRESH_COLUMNS:
+            raise VacancyRefreshConflict("vacancy refresh schema version is unsupported")
+        archive = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            ("vacancy_refreshes_legacy_036d",),
+        ).fetchone()
+        if archive is not None:
+            raise VacancyRefreshConflict("legacy vacancy refresh archive already exists")
+        conn.execute("ALTER TABLE vacancy_refreshes RENAME TO vacancy_refreshes_legacy_036d")
+        conn.execute(VACANCY_REFRESH_SCHEMA)
+        selected = ",".join(LEGACY_VACANCY_REFRESH_COLUMNS)
+        rows = conn.execute(
+            f"SELECT {selected} FROM vacancy_refreshes_legacy_036d ORDER BY operation_id"
+        ).fetchall()
+        for row in rows:
+            legacy = dict(zip(LEGACY_VACANCY_REFRESH_COLUMNS, row, strict=True))
+            reason = f"legacy in-flight status requires explicit reconciliation: {legacy['status']}"
+            if legacy["status"] == "committed":
+                try:
+                    current = _convert_legacy_committed_refresh(legacy)
+                except (TypeError, ValueError, VacancyRefreshConflict) as exc:
+                    reason = f"legacy completed row is not exactly representable: {exc}"
+                else:
+                    context_json = json.dumps(
+                        current["context"], ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"), allow_nan=False,
+                    )
+                    receipt_json = json.dumps(
+                        current["receipt_basis"], ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"), allow_nan=False,
+                    )
+                    conn.execute(
+                        """INSERT INTO vacancy_refreshes(
+                             refresh_id,operation_id,context_sha256,context_json,
+                             job_key,expected_content_sha256,status,started_at,
+                             old_content_sha256,old_fetched_at,old_raw_bytes,
+                             old_object_sha256,new_content_sha256,new_fetched_at,
+                             new_raw_bytes,new_object_sha256,receipt_basis_json,
+                             receipt_basis_sha256,transition_sha256,created_at,updated_at
+                           ) VALUES(
+                             ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                           )""",
+                        (
+                            current["refresh_id"], current["operation_id"],
+                            current["context_sha256"], context_json, current["job_key"],
+                            current["expected_content_sha256"], current["status"],
+                            current["started_at"], current["old_content_sha256"],
+                            current["old_fetched_at"], current["old_raw_bytes"],
+                            current["old_object_sha256"], current["new_content_sha256"],
+                            current["new_fetched_at"], current["new_raw_bytes"],
+                            current["new_object_sha256"], receipt_json,
+                            current["receipt_basis_sha256"], current["transition_sha256"],
+                            legacy["created_at"], legacy["updated_at"],
+                        ),
+                    )
+                    continue
+            conn.execute(
+                """INSERT INTO vacancy_refresh_migration_quarantine(
+                     operation_id,refresh_id,job_key,expected_content_sha256,
+                     legacy_status,legacy_table,legacy_row_sha256,reason
+                   ) VALUES(?,?,?,?,?,'vacancy_refreshes_legacy_036d',?,?)""",
+                (
+                    legacy["operation_id"], legacy["refresh_id"], legacy["job_key"],
+                    legacy["expected_content_sha256"], legacy["status"],
+                    _legacy_row_identity(legacy), reason,
+                ),
+            )
 
     @staticmethod
     def _migrate_processing_identity(conn: sqlite3.Connection) -> None:
@@ -475,7 +769,23 @@ class JobDatabase:
                 f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE operation_id=?",
                 (operation_id,),
             ).fetchone()
+            quarantined = conn.execute(
+                """SELECT operation_id,refresh_id,job_key,expected_content_sha256,
+                          legacy_status,legacy_row_sha256,reason
+                   FROM vacancy_refresh_migration_quarantine
+                   WHERE operation_id=?""",
+                (operation_id,),
+            ).fetchone()
+            if row is None and quarantined is not None:
+                legacy = _verify_quarantined_legacy_row(conn, quarantined[:6])
+                if legacy["context_sha256"] != context_sha256:
+                    raise ValueError("refresh operation ID is already bound to another context")
         if row is None:
+            if quarantined is not None:
+                raise VacancyRefreshIndeterminate(
+                    f"legacy vacancy refresh is quarantined ({quarantined[4]}): "
+                    f"{quarantined[6]}"
+                )
             return None
         if row[2] != context_sha256:
             raise ValueError("refresh operation ID is already bound to another context")
@@ -532,13 +842,28 @@ class JobDatabase:
                 return loaded
             blocked = conn.execute(
                 """SELECT operation_id,status FROM vacancy_refreshes
-                   WHERE job_key=? AND expected_content_sha256=?
+                   WHERE job_key=?
                      AND status IN (
                        'intent','fetch_started','indeterminate','fetched','object_ready'
                      )
                    ORDER BY created_at,operation_id LIMIT 1""",
-                (job_key, expected_content_sha256),
+                (job_key,),
             ).fetchone()
+            quarantined = conn.execute(
+                """SELECT operation_id,refresh_id,job_key,expected_content_sha256,
+                          legacy_status,legacy_row_sha256
+                   FROM vacancy_refresh_migration_quarantine
+                   WHERE job_key=?
+                   ORDER BY quarantined_at,operation_id LIMIT 1""",
+                (job_key,),
+            ).fetchone()
+            if quarantined is not None:
+                _verify_quarantined_legacy_row(conn, quarantined)
+                conn.rollback()
+                raise VacancyRefreshIndeterminate(
+                    "a legacy vacancy refresh is quarantined and requires explicit "
+                    f"reconciliation: {quarantined[0]} ({quarantined[4]})"
+                )
             if blocked is not None:
                 conn.rollback()
                 if blocked[1] in ("fetch_started", "indeterminate"):
