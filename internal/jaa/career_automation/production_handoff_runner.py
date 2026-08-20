@@ -62,6 +62,11 @@ def _expected_deployment_document() -> dict[str, str]:
     }
 
 
+def production_handoff_deployment_configuration_bytes() -> bytes:
+    """Return the only deployable production handoff configuration bytes."""
+    return canonical_json_bytes(_expected_deployment_document())
+
+
 def _parse_deployment_configuration(raw: bytes) -> str:
     try:
         document = json.loads(raw)
@@ -71,7 +76,7 @@ def _parse_deployment_configuration(raw: bytes) -> str:
     if (
         type(document) is not dict
         or document != expected
-        or canonical_json_bytes(document) != raw
+        or production_handoff_deployment_configuration_bytes() != raw
     ):
         raise ProductionHandoffDeploymentError(
             "deployment configuration differs from the compiled canonical roots"
@@ -256,5 +261,6 @@ __all__ = [
     "PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY",
     "ProductionHandoffDeploymentError",
     "installed_production_handoff_deployment",
+    "production_handoff_deployment_configuration_bytes",
     "run_production_handoff",
 ]
