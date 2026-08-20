@@ -26,9 +26,12 @@ class FakeCodexRunner:
         self.responses = list(responses)
         self.tool_item = tool_item
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
+        self.schemas: list[dict[str, Any]] = []
 
     def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((command, kwargs))
+        schema = Path(command[command.index("--output-schema") + 1])
+        self.schemas.append(json.loads(schema.read_text(encoding="utf-8")))
         response = self.responses.pop(0)
         output = Path(command[command.index("--output-last-message") + 1])
         output.write_text(json.dumps(response), encoding="utf-8")
@@ -65,6 +68,24 @@ def _extraction_payload(digest: str) -> dict[str, Any]:
         "remote_policy": "remote",
         "extraction_confidence": 0.9,
         "unknown_fields": [],
+    }
+
+
+def _alignment_payload() -> dict[str, Any]:
+    return {
+        "matches": [
+            {
+                "requirement": "Python",
+                "evidence_ids": ["ev-1"],
+                "strength": 0.9,
+                "rationale": "The supplied evidence explicitly names Python.",
+            }
+        ],
+        "missing_requirements": [],
+        "technical_alignment": 0.8,
+        "evidence_match": 0.9,
+        "confidence": 0.9,
+        "unknowns": [],
     }
 
 
@@ -118,24 +139,8 @@ class LLMPipelineTests(unittest.TestCase):
             binary.write_bytes(b"synthetic codex binary")
             digest = hashlib.sha256(b"synthetic vacancy").hexdigest()
             extraction_response = _extraction_payload(digest)
-            alignment_response = {
-                "profile_id": "prf_" + "a" * 32,
-                "profile_version": "synthetic-v1",
-                "job_key": "synthetic:1",
-                "matches": [
-                    {
-                        "requirement": "Python",
-                        "evidence_ids": ["ev-1"],
-                        "strength": 0.9,
-                        "rationale": "The supplied evidence explicitly names Python.",
-                    }
-                ],
-                "missing_requirements": [],
-                "technical_alignment": 0.8,
-                "evidence_match": 0.9,
-                "confidence": 0.9,
-                "unknowns": [],
-            }
+            profile_id = "prf_" + "a" * 32
+            alignment_response = _alignment_payload()
             runner = FakeCodexRunner([extraction_response, alignment_response])
             gateway = CodexSemanticGateway(
                 model="gpt-test-explicit",
@@ -157,7 +162,7 @@ class LLMPipelineTests(unittest.TestCase):
             extraction, extraction_receipt = gateway.extract_vacancy(raw_context)
             alignment_context = {
                 "profile": {
-                    "profile_id": alignment_response["profile_id"],
+                    "profile_id": profile_id,
                     "profile_version": "synthetic-v1",
                     "evidence_ledger": [{"evidence_id": "ev-1", "claim": "Python"}],
                 },
@@ -172,6 +177,22 @@ class LLMPipelineTests(unittest.TestCase):
 
             self.assertEqual("Junior Automation Engineer", extraction.title)
             self.assertEqual("synthetic:1", alignment.job_key)
+            self.assertEqual(profile_id, alignment.profile_id)
+            self.assertEqual("synthetic-v1", alignment.profile_version)
+            self.assertEqual(
+                hashlib.sha256(json.dumps(alignment_response).encode()).hexdigest(),
+                alignment_receipt.transport.response_sha256,
+            )
+            self.assertEqual(
+                hashlib.sha256(
+                    json.dumps(asdict(alignment), sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                alignment_receipt.output_sha256,
+            )
+            self.assertNotIn("profile_id", runner.schemas[1]["properties"])
+            self.assertNotIn("profile_version", runner.schemas[1]["properties"])
+            self.assertNotIn("job_key", runner.schemas[1]["properties"])
+            self.assertFalse(runner.schemas[1]["additionalProperties"])
             for receipt in (extraction_receipt, alignment_receipt):
                 self.assertEqual("gpt-test-explicit", receipt.model)
                 self.assertIsNotNone(receipt.transport)
@@ -191,6 +212,36 @@ class LLMPipelineTests(unittest.TestCase):
                 self.assertEqual("gpt-test-explicit", command[command.index("--model") + 1])
                 self.assertNotIn("SECRET_TEST_VALUE", call["env"])
                 self.assertTrue(Path(call["cwd"]).name.startswith("market-aligner-codex-request-"))
+
+    def test_alignment_rejects_realistic_model_authority_echo_after_one_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            response = {
+                **_alignment_payload(),
+                "profile_id": "candidate-profile",
+                "profile_version": "wrong-version",
+                "job_key": "workable:wrong-job",
+            }
+            runner = FakeCodexRunner([response])
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            context = {
+                "profile": {
+                    "profile_id": "prf_" + "b" * 32,
+                    "profile_version": "canonical-v1",
+                    "evidence_ledger": [{"evidence_id": "ev-1", "claim": "Python"}],
+                },
+                "track": "automation",
+                "vacancy": {"board": "workable", "job_id": "real-job"},
+            }
+            with self.assertRaisesRegex(CodexGatewayError, "forbidden authority fields"):
+                gateway.align_evidence(context)
+            self.assertEqual(1, len(runner.calls))
 
     def test_detached_codex_gateway_fails_closed_on_tool_event(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
