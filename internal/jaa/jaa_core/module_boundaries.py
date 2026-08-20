@@ -60,6 +60,7 @@ LEGACY_OWNERSHIP: Mapping[str, str] = {
     "career_automation/provider_observation_capture.py": "form_filling",
     "career_automation/recruitee_live_adapter.py": "form_filling",
     "career_automation/release_gate.py": "form_filling",
+    "career_automation/workable_live_adapter.py": "form_filling",
 }
 
 

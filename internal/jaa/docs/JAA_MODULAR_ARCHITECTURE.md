@@ -47,12 +47,15 @@ and Ashby provider diagnostics inspect route, blocker, success, and exact
 submit-control semantics using Playwright trial clicks only. They never perform
 the consequential click.
 
-The existing Greenhouse certified executor and Ashby one-use circuit remain the
-only consequential provider implementations. The recovered Mac generic live
-executor was intentionally not copied: its Ashby path duplicated and weakened
-the one-use circuit, while Workable does not yet have a certified release-token
-and final-click implementation. Adding Workable submission is a later bounded
-increment, after that authority contract exists.
+The existing Greenhouse certified executor and Ashby one-use circuit remain
+provider-specific consequential implementations. Workable now has its own
+certified release-token/final-click boundary: inventory and prefill produce a
+non-authoritative review, while the one-use click binds the exact vacancy URL,
+application-package and answer hashes, form inventory and DOM, provider policy,
+release identity, and clean committed source HEAD in a durable hash-chained
+journal. An indeterminate post-click state forbids retry. The weaker generic Mac
+executor remains intentionally excluded because its Ashby path duplicated and
+weakened the existing circuit.
 
 ## Migration state
 

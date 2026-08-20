@@ -332,7 +332,7 @@ def _prepared_authority(
             if success_observation_override is None
             else success_observation_override
         ),
-        finalized_at=datetime.now(timezone.utc),
+        finalized_at=_fixture_now(database),
     )
     authority = ReleaseExecutionAuthority(
         gate=gate,
