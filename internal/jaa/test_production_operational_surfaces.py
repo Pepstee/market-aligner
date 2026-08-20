@@ -19,6 +19,41 @@ from market_aligner.service import api as service_api
 
 COMMIT = "a" * 40
 SHA = "b" * 64
+SOURCE_JOB_KEY = "workable:cogna:847CFBC5F4"
+_PROMOTION_BINDING = {
+    "evidence_authority_sha256": "1" * 64,
+    "processing_config_sha256": "2" * 64,
+    "processing_receipt_sha256": "3" * 64,
+    "processing_result_sha256": "4" * 64,
+    "source_content_sha256": "5" * 64,
+    "track": "AI_Automation_Engineer",
+}
+_PROMOTION_POLICY = {
+    "processing_config_sha256": "2" * 64,
+    "schema_version": "market-aligner.selection-policy.v1",
+}
+_PROMOTION_BODY = {
+    "binding": _PROMOTION_BINDING,
+    "binding_sha256": hashlib.sha256(
+        canonical_json_bytes(_PROMOTION_BINDING)
+    ).hexdigest(),
+    "decision": "pass",
+    "job_key": SOURCE_JOB_KEY,
+    "policy": _PROMOTION_POLICY,
+    "policy_sha256": hashlib.sha256(
+        canonical_json_bytes(_PROMOTION_POLICY)
+    ).hexdigest(),
+    "profile_id": "prf_" + "6" * 32,
+    "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+    "score_payload_hash": "7" * 64,
+}
+PROMOTION_SEMANTIC_SHA = hashlib.sha256(
+    canonical_json_bytes(_PROMOTION_BODY)
+).hexdigest()
+PROMOTION_BYTES = canonical_json_bytes(
+    {**_PROMOTION_BODY, "receipt_sha256": PROMOTION_SEMANTIC_SHA}
+)
+PROMOTION_OBJECT_SHA = hashlib.sha256(PROMOTION_BYTES).hexdigest()
 
 
 def _deployment(tmp_path: Path) -> admission_runner._ProductionAdmissionDeployment:
@@ -50,11 +85,11 @@ def _execution(deployment, **changes) -> Path:
         "handoff_job_key": "job_" + "2" * 64,
         "handoff_root_sha256": SHA,
         "manifest_sha256": SHA,
-        "processing_promotion_sha256": SHA,
+        "processing_promotion_sha256": PROMOTION_SEMANTIC_SHA,
         "producer_commit_sha": COMMIT,
         "release_token_issued": False,
         "schema_version": admission_runner.EXECUTION_SCHEMA,
-        "source_job_key": "workable:cogna:847CFBC5F4",
+        "source_job_key": SOURCE_JOB_KEY,
         "source_record_sha256": SHA,
         "submission_authority": False,
         "trust_root_id": admission_runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
@@ -93,13 +128,18 @@ class _Outbox:
         self._manifest_bytes = b"manifest"
         self._manifest = {"handoff_root_sha256": SHA}
         self._source_record = {
-            "source_job_key": "workable:cogna:847CFBC5F4",
+            "source_job_key": SOURCE_JOB_KEY,
             "trust_root_id": admission_runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
         }
         self._entries = {
             "employer_dossier": {"object_sha256": SHA},
-            "assessment.receipt": {"object_sha256": SHA},
+            "assessment.receipt": {"object_sha256": PROMOTION_OBJECT_SHA},
         }
+
+    def _read(self, relative):
+        if relative == f"objects/{PROMOTION_OBJECT_SHA}":
+            return PROMOTION_BYTES
+        raise AssertionError(f"unexpected fake outbox read: {relative}")
 
     def close(self):
         return None
@@ -113,7 +153,12 @@ def _parsed_handoff(monkeypatch):
         lambda _: SimpleNamespace(
             root_sha256=SHA,
             application_id="app_" + "1" * 64,
-            payload={"job_key": "job_" + "2" * 64},
+            payload={
+                "assessment": {
+                    "assessment_receipt_sha256": PROMOTION_OBJECT_SHA,
+                },
+                "job_key": "job_" + "2" * 64,
+            },
         ),
     )
 
@@ -141,6 +186,63 @@ class _Store:
             authority_scope="production",
             verification_receipt_sha256="d" * 64,
             created=type(self).created,
+        )
+
+
+def test_real_shape_promotion_binds_distinct_semantic_and_exact_object_domains() -> (
+    None
+):
+    assert PROMOTION_SEMANTIC_SHA != PROMOTION_OBJECT_SHA
+    outbox = _Outbox(
+        Path("/unused"),
+        allowed_producer_commits=frozenset({COMMIT}),
+    )
+    handoff = SimpleNamespace(
+        payload={
+            "assessment": {
+                "assessment_receipt_sha256": PROMOTION_OBJECT_SHA,
+            }
+        }
+    )
+    assert (
+        admission_runner._promotion_receipt_semantic_identity(
+            outbox,
+            handoff,
+            outbox._entries["assessment.receipt"],
+            source_job_key=SOURCE_JOB_KEY,
+        )
+        == PROMOTION_SEMANTIC_SHA
+    )
+
+
+@pytest.mark.parametrize("mutation", ["handoff_object", "source_job", "semantic"])
+def test_promotion_domain_substitutions_fail_closed(mutation: str) -> None:
+    promotion = json.loads(PROMOTION_BYTES)
+    handoff_object = PROMOTION_OBJECT_SHA
+    source_job_key = SOURCE_JOB_KEY
+    if mutation == "handoff_object":
+        handoff_object = "9" * 64
+    elif mutation == "source_job":
+        source_job_key = "workable:other:1"
+    else:
+        promotion["receipt_sha256"] = "9" * 64
+    exact = canonical_json_bytes(promotion)
+    exact_sha256 = hashlib.sha256(exact).hexdigest()
+    if mutation == "semantic":
+        handoff_object = exact_sha256
+    adapter = SimpleNamespace(_read=lambda _: exact)
+    handoff = SimpleNamespace(
+        payload={"assessment": {"assessment_receipt_sha256": handoff_object}}
+    )
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="promotion",
+    ):
+        admission_runner._promotion_receipt_semantic_identity(
+            adapter,
+            handoff,
+            {"object_sha256": exact_sha256},
+            source_job_key=source_job_key,
         )
 
 
@@ -196,7 +298,7 @@ def test_admission_created_then_replay_are_explicit_and_non_release(
         ({"handoff_root_sha256": "9" * 64}, "bundle differ"),
         ({"manifest_sha256": "9" * 64}, "bundle differ"),
         ({"processing_promotion_sha256": "9" * 64}, "bundle differ"),
-        ({"source_job_key": "workable:other:1"}, "bundle differ"),
+        ({"source_job_key": "workable:other:1"}, "promotion object"),
         (
             {"schema_version": "market-aligner.production-handoff-execution.v1"},
             "authority",
@@ -217,7 +319,9 @@ def test_receipt_authority_and_commit_substitutions_fail_before_outbox(
             witness=_witness(),
             commit_resolver=lambda _, __: COMMIT,
         )
-    assert _Outbox.calls == (1 if message == "bundle differ" else 0)
+    assert _Outbox.calls == (
+        1 if message in {"bundle differ", "promotion object"} else 0
+    )
 
 
 def test_receipt_path_mode_filename_and_canonical_substitutions_fail(

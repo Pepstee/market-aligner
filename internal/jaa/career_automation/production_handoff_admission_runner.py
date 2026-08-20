@@ -434,6 +434,58 @@ def _validate_execution_receipt(document: dict[str, object], path: Path) -> None
         )
 
 
+def _promotion_receipt_semantic_identity(
+    adapter: ProtectedLocalOutbox,
+    handoff: object,
+    promotion_entry: dict[str, object],
+    *,
+    source_job_key: object,
+) -> str:
+    """Bind the promotion's semantic identity to its exact bundle object."""
+
+    exact_sha256 = promotion_entry.get("object_sha256")
+    if (
+        type(exact_sha256) is not str
+        or len(exact_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in exact_sha256)
+    ):
+        raise ProductionHandoffAdmissionError(
+            "assessment promotion object identity is invalid"
+        )
+    try:
+        exact = adapter._read(f"objects/{exact_sha256}")
+        promotion = json.loads(exact)
+        assessment = handoff.payload.get("assessment")
+        promotion_canonical = canonical_json_bytes(promotion)
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ProductionHandoffAdmissionError(
+            "assessment promotion object is invalid"
+        ) from exc
+    if (
+        type(promotion) is not dict
+        or promotion_canonical != exact
+        or hashlib.sha256(exact).hexdigest() != exact_sha256
+        or type(assessment) is not dict
+        or assessment.get("assessment_receipt_sha256") != exact_sha256
+        or promotion.get("schema_version")
+        != "market-aligner.assessment-promotion-receipt.v1"
+        or promotion.get("job_key") != source_job_key
+    ):
+        raise ProductionHandoffAdmissionError(
+            "assessment promotion object differs from authenticated bundle"
+        )
+    basis = dict(promotion)
+    semantic_sha256 = basis.pop("receipt_sha256", None)
+    if (
+        type(semantic_sha256) is not str
+        or hashlib.sha256(canonical_json_bytes(basis)).hexdigest() != semantic_sha256
+    ):
+        raise ProductionHandoffAdmissionError(
+            "assessment promotion semantic identity differs"
+        )
+    return semantic_sha256
+
+
 def _create_or_exact(parent_descriptor: int, name: str, value: bytes) -> None:
     def existing_exact() -> bool:
         try:
@@ -603,6 +655,12 @@ def _run_production_handoff_admission_pinned(
         raise ProductionHandoffAdmissionError(
             "authenticated bundle graph is incomplete"
         ) from exc
+    promotion_semantic_sha256 = _promotion_receipt_semantic_identity(
+        adapter,
+        handoff,
+        promotion_entry,
+        source_job_key=document["source_job_key"],
+    )
     if (
         hashlib.sha256(adapter._manifest_bytes).hexdigest()
         != document["manifest_sha256"]
@@ -611,8 +669,7 @@ def _run_production_handoff_admission_pinned(
         or adapter._source_record.get("source_job_key") != document["source_job_key"]
         or adapter._source_record.get("trust_root_id") != document["trust_root_id"]
         or dossier_entry.get("object_sha256") != document["employer_dossier_sha256"]
-        or promotion_entry.get("object_sha256")
-        != document["processing_promotion_sha256"]
+        or promotion_semantic_sha256 != document["processing_promotion_sha256"]
         or handoff.root_sha256 != document["handoff_root_sha256"]
         or handoff.application_id != document["application_id"]
         or handoff.payload.get("job_key") != document["handoff_job_key"]
