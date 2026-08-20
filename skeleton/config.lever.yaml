@@ -1,0 +1,42 @@
+extends: config.yaml
+
+io:
+  job_urls: scraper/data_lever/job_urls.jsonl
+  raw_cache: scraper/data_lever/raw_cache
+  jobs: scraper/data_lever/jobs.jsonl
+  jobs_scored: skeleton/data_lever/jobs_scored.jsonl
+  outputs_dir: outputs/lever
+
+boards:
+  enabled: [lever]
+  mode: live
+  rate_limit_seconds: 0.25
+  max_jobs_total: 0
+
+lever:
+  timeout_seconds: 30
+  limit_per_company: 200
+  companies:
+    palantir: Palantir Technologies
+    electric-twin: Electric Twin
+    moneyboxapp: Moneybox
+    octoenergy: Octopus Energy Group
+    spotify: Spotify
+  uk_location_markers:
+    - united kingdom
+    - london
+    - bristol
+    - cambridge
+    - manchester
+    - birmingham
+    - edinburgh
+    - glasgow
+    - remote (uk)
+    - remote - uk
+    - (gb)
+  exclude_title_terms:
+    - director
+    - head of
+    - product design
+    - account executive
+    - sales manager

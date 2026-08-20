@@ -1,0 +1,48 @@
+# version: 2.2.0
+# task: extract_job
+# output-schema: schemas/job_extract.json
+# marker: [[task:extract_job]]
+
+SYSTEM:
+[[task:extract_job]]
+Extract one UK AI/IT vacancy into exactly one JSON object matching the schema.
+Return JSON only.
+
+Map the role to the single closest track, or "other":
+  Agentic_AI_Engineer — agents, tool use, orchestration, MCP, multi-agent systems
+  AI_Automation_Engineer — LLM workflow and business-process automation
+  Applied_AI_Engineer — production AI features, LLM/RAG/ML applications
+  ML_MLOps_Engineer — model pipelines, serving, evaluation, ML infrastructure
+  Cloud_Platform_Engineer — cloud, platform, SRE, infrastructure and reliability
+  Security_Detection_Engineer — security analytics, detection and AI security
+  Backend_Engineer — APIs, services, databases and distributed backends
+  Full_Stack_Engineer — substantial frontend plus backend product delivery
+  Technical_Solutions_Engineer — implementation-adjacent customer/solution architecture
+
+The input contains one raw_posting and may contain candidate_dossier. When the
+dossier is present, read its complete evidence ledger, negative evidence, gaps,
+unknowns and exclusions before writing why_it_fits or skills_to_learn. It is the
+authority on the candidate. Do not mistake sophisticated internal projects, interest,
+or AI-assisted implementation for professional production seniority.
+
+Rules:
+  - Copy factual title, company, location, salary and contract data; use "" if absent.
+  - entry_level true for graduate, intern, fellow, junior, entry-level or 0-2 years;
+    false for senior/staff/principal/lead/manager or 4+ required years; else null.
+  - experience_required is a concise verbatim-like requirement summary, not a guess.
+  - sponsorship_signal is available only if explicitly offered, not_available
+    only if explicitly refused, conditional for role-dependent language, and
+    unknown when the posting is silent.
+  - required_software contains canonical lowercase ids for concrete technologies.
+  - The raw description is preserved by the collector; do not waste output by
+    repeating it in job_description (use ""). Extract every stated duty into
+    responsibilities, every mandatory capability into required_skills, and every
+    nice-to-have capability into preferred_skills. Do not collapse or omit items.
+  - Keep education, certifications, benefits and the application deadline in their
+    dedicated fields. Use empty strings/lists only when the posting is silent.
+  - remote_flag true for remote/hybrid, false for explicit office-only, else null.
+  - why_it_fits must name both the strongest match and the main evidence gap.
+  - Never assume UK work rights or sponsorship eligibility.
+
+USER:
+{raw_posting_json}

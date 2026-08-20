@@ -1,0 +1,416 @@
+extends: config.additional.yaml
+
+io:
+  job_urls: scraper/data_overnight/job_urls.jsonl
+  raw_cache: scraper/data_overnight/raw_cache
+  viability_manifest: scraper/data_overnight/viability.jsonl
+  processing_job_urls: scraper/data_overnight/viable_job_urls.jsonl
+  jobs: scraper/data_overnight/jobs.jsonl
+  database: scraper/data_overnight/jobs.sqlite3
+  jobs_scored: skeleton/data_overnight/jobs_scored.jsonl
+  outputs_dir: outputs/overnight
+
+boards:
+  enabled: [greenhouse, lever, smartrecruiters, ashby, workable, recruitee, personio, workday, guardianjobs, nhsjobs, jobsacuk, techjobsie, jobsireland, publicjobsie, iamexpatnl, uprotterdam, academictransfer, werkenvoornederland, magnetme, undutchables, graduatenl, itjobsch, itboardch, swissaijob, developerjobsch, swissfederal, arbeitnow, jobicy, remotive, himalayas, muse, weworkremotely, remoteok, remotefirst, adzuna, reed, jooble]
+  mode: live
+  rate_limit_seconds: 0.25
+  max_jobs_total: 0
+
+llm:
+  backend: codex_cli
+  model: gpt-5.6-sol
+  codex_model: gpt-5.6-sol
+  cli_timeout_seconds: 300
+  temperature: 0.0
+  cache: true
+  max_retries: 2
+
+collection:
+  source_workers: 22
+  fetch_workers: 24
+  poll_minutes: 15
+
+# Full upstream Scrapling is a failure-recovery layer for detail pages that a
+# board adapter cannot retrieve. Every stage receives its kwargs unchanged;
+# custom Python values can use the worker's $ref/$proxy_rotator JSON forms.
+# Successful and failed attempts retain full headers, cookies, redirects,
+# binary body, decoded text and captured XHR responses in the raw cache.
+scrapling:
+  enabled: true
+  runtime_python: .venv-scrapling/bin/python
+  worker_module: scraper.scrapling_worker
+  command_timeout_seconds: 240
+  minimum_body_bytes: 128
+  fallback_chain:
+    - engine: static
+      method: get
+      timeout_seconds: 60
+      kwargs:
+        timeout: 45
+        retries: 3
+        retry_delay: 1
+        impersonate: chrome
+        stealthy_headers: true
+        follow_redirects: safe
+        selector_config:
+          adaptive: true
+          storage_args:
+            storage_file: scraper/data_overnight/scrapling_elements.sqlite3
+    - engine: dynamic
+      timeout_seconds: 150
+      kwargs:
+        headless: true
+        timeout: 90000
+        retries: 2
+        retry_delay: 1
+        load_dom: true
+        network_idle: false
+        disable_resources: false
+        capture_xhr: ".*"
+        locale: en-GB
+        timezone_id: Europe/London
+        selector_config:
+          adaptive: true
+          storage_args:
+            storage_file: scraper/data_overnight/scrapling_elements.sqlite3
+    - engine: stealth
+      timeout_seconds: 240
+      kwargs:
+        headless: true
+        timeout: 120000
+        retries: 2
+        retry_delay: 1
+        load_dom: true
+        network_idle: false
+        disable_resources: false
+        capture_xhr: ".*"
+        locale: en-GB
+        timezone_id: Europe/London
+        solve_cloudflare: true
+        allow_webgl: true
+        hide_canvas: true
+        block_webrtc: true
+        dns_over_https: false
+        selector_config:
+          adaptive: true
+          storage_args:
+            storage_file: scraper/data_overnight/scrapling_elements.sqlite3
+
+arbeitnow:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+
+jobicy:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  geos: [uk, europe]
+
+remotive:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+
+ashby:
+  timeout_seconds: 30
+  minimum_poll_minutes: 15
+  companies:
+    seamflow: Seamflow
+    distyl: Distyl AI
+    eloquentai: Eloquent AI
+    lendable: Lendable
+    healf: Healf
+    tesslcareers: Tessl
+    edra: Edra
+    TRADINGHUB: TradingHub
+    fundingcircle: Funding Circle
+    latentlabs: Latent Labs
+    algo1: Algo1
+
+workable:
+  timeout_seconds: 30
+  minimum_poll_minutes: 15
+  companies:
+    webuild-ai: WeBuild-AI
+    longshot-systems-ltd: Longshot Systems
+    unitary: Unitary
+    runware: Runware
+    weekday-1: Weekday AI
+    suade: Suade
+    appvia: Appvia
+    cogna: Cogna
+    triptease: Triptease
+    hamiltonian-dynamics: Hamiltonian Dynamics
+    timescapes-co: Timescapes
+
+recruitee:
+  timeout_seconds: 30
+  minimum_poll_minutes: 15
+  companies:
+    careersdeltacapita: Delta Capita
+    cfpenergy: CFP Energy
+
+personio:
+  timeout_seconds: 30
+  minimum_poll_minutes: 15
+  companies:
+    terralayr.jobs.personio.com: terralayr
+    ommax.jobs.personio.de: OMMAX
+    jedox.jobs.personio.com: Jedox
+    wire-1.jobs.personio.com: Wire
+
+himalayas:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  queries: [agentic ai, ai automation, applied ai, ai engineer, llm, machine learning, mlops, python engineer, platform engineer, cloud engineer, security engineer, solutions engineer]
+
+muse:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  category: Computer and IT
+
+weworkremotely:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+
+remoteok:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+
+remotefirst:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  feeds: [ai, python, data-science, devops, cybersecurity, software-development, entry-level]
+
+jooble:
+  api_key_env: JOOBLE_API_KEY
+  timeout_seconds: 30
+  minimum_poll_minutes: 30
+  queries: [agentic ai, ai automation, applied ai, ai engineer, llm engineer, machine learning engineer, mlops engineer, python engineer, platform engineer, cloud engineer, security engineer, solutions engineer]
+
+adzuna:
+  app_id_env: ADZUNA_APP_ID
+  app_key_env: ADZUNA_APP_KEY
+  results_per_page: 100
+  minimum_poll_minutes: 30
+  queries: [ai engineer, machine learning, llm, automation engineer, software engineer, platform engineer, cloud engineer, security engineer, solutions engineer]
+
+reed:
+  api_key_env: REED_API_KEY
+  results_per_page: 100
+  minimum_poll_minutes: 30
+  queries: [ai engineer, machine learning, llm, automation engineer, software engineer, platform engineer, cloud engineer, security engineer, solutions engineer]
+
+# Public UK boards. Query lists are intentionally broad enough to catch
+# non-software employers while avoiding one HTTP crawl per full vocabulary item.
+guardianjobs:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  queries: [artificial intelligence, automation, machine learning, software engineer, data engineer, technology]
+
+nhsjobs:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  max_pages_per_query: 5
+  queries: [artificial intelligence, automation, machine learning, software developer, data engineer, cloud, cyber security, digital transformation]
+
+jobsacuk:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  page_size: 100
+  max_pages_per_query: 4
+  queries: [artificial intelligence, machine learning, software engineer, research software engineer, data engineer, cyber security, cloud computing, automation]
+
+# Retained for manual/high-friction Swiss passes. Disabled from continuous
+# polling because UK residence is fixed and their local roles are ineligible.
+jobsch:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  max_pages_per_query: 8
+  request_delay_seconds: 0.4
+  detail_request_interval_seconds: 0.3
+  queries: [artificial intelligence, machine learning, AI engineer, automation engineer, Python engineer, software engineer, data engineer, cloud engineer, cyber security, solutions engineer]
+
+jobscout24:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  max_pages_per_query: 8
+  request_delay_seconds: 0.4
+  detail_request_interval_seconds: 0.3
+  queries: [artificial intelligence, machine learning, AI engineer, automation engineer, Python engineer, software engineer, data engineer, cloud engineer, cyber security, solutions engineer]
+
+# Ireland is the first no-relocation expansion. TechJobs.ie is a current,
+# crawlable specialist board with full requirements and employer application links.
+techjobsie:
+  timeout_seconds: 30
+  minimum_poll_minutes: 30
+  detail_request_interval_seconds: 0.2
+  categories: [ai, data-engineering, devops, platform-infrastructure, security, back-end-development, full-stack]
+
+# Ireland's state employment service is scanned across every industry so AI,
+# automation and technical roles inside ordinary employers are not missed.
+jobsireland:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  page_size: 250
+  discovery_workers: 4
+  detail_request_interval_seconds: 1.0
+
+# Public-service requirements frequently live in candidate-booklet PDFs.  The
+# adapter preserves the vacancy page, attachment URLs and extracted PDF text.
+publicjobsie:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.5
+  extract_pdf_attachments: true
+
+# Netherlands no-relocation expansion. Both sources publish crawlable
+# sitemaps and complete English-language requirements.
+iamexpatnl:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 1.0
+
+uprotterdam:
+  timeout_seconds: 30
+  minimum_poll_minutes: 30
+  detail_request_interval_seconds: 0.2
+
+academictransfer:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  # Advertised crawl-delay in the site's robots policy.
+  detail_request_interval_seconds: 10.0
+
+werkenvoornederland:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.2
+
+magnetme:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  # Advertised crawl-delay in the site's robots policy.
+  detail_request_interval_seconds: 1.0
+
+undutchables:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.5
+
+graduatenl:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.5
+
+# Crawlable Swiss specialist boards. Local-only roles remain in the raw DB;
+# the residence/remote-work gate decides which ones proceed to the LLM judge.
+itjobsch:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 1.0
+
+itboardch:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.5
+
+swissaijob:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.5
+
+developerjobsch:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.5
+
+swissfederal:
+  timeout_seconds: 45
+  minimum_poll_minutes: 60
+  detail_request_interval_seconds: 0.5
+
+# Workday has no global public search endpoint. These are real public employer
+# career tenants selected for UK AI, platform, security and solutions coverage.
+workday:
+  timeout_seconds: 30
+  minimum_poll_minutes: 60
+  page_size: 20
+  employer_workers: 6
+  employers:
+    Autodesk: {tenant: autodesk, cluster: wd1, site: Ext}
+    ERM: {tenant: erm, cluster: wd3, site: erm_careers}
+    London Stock Exchange Group: {tenant: lseg, cluster: wd3, site: Careers}
+    Capital One: {tenant: capitalone, cluster: wd12, site: Capital_One}
+    Thomson Reuters: {tenant: thomsonreuters, cluster: wd5, site: External_Career_Site}
+    Worldpay: {tenant: worldpay, cluster: wd5, site: Worldpay_External_Careers_Site}
+    Brown & Brown: {tenant: bbinsurance, cluster: wd1, site: Careers_Europe}
+    PATH: {tenant: path, cluster: wd1, site: External}
+    G-Research: {tenant: gresearch, cluster: wd103, site: G-Research}
+    Amex GBT: {tenant: travelhrportal, cluster: wd1, site: Jobs}
+    CrowdStrike: {tenant: crowdstrike, cluster: wd5, site: crowdstrikecareers}
+    Dyson: {tenant: dyson, cluster: wd3, site: dyson_careers}
+
+greenhouse:
+  companies:
+    monzo: Monzo Bank
+    # Smaller firms and non-software businesses are deliberately represented.
+    # Public ATS discovery is employer-led, so leaving these out creates a
+    # large-company bias no matter how long the scraper runs.
+    oliver: OLIVER Agency
+    materiom: Materiom
+    physicsx: PhysicsX
+    bluefishai: Bluefish AI
+    pallet: Pallet
+    cresta: Cresta
+    taskrabbit: Taskrabbit
+    tripadvisor: Tripadvisor
+
+smartrecruiters:
+  companies:
+    LegalAndGeneral: Legal & General
+    EDF-UK: EDF UK
+    Experian: Experian
+    FrasersGroup: Frasers Group
+    TurnerTownsend: Turner & Townsend
+    AECOM2: AECOM
+    InformaGroupPlc: Informa Group
+    Wavestone1: Wavestone
+    PAConsulting: PA Consulting
+
+# The overnight crawl should catch generalist AI implementation work in
+# agencies and ordinary businesses, not only roles titled "AI Engineer".
+# Lists replace (rather than extend) parent values, so this includes the full
+# base vocabulary as well as the small-firm/non-software additions.
+search_terms:
+  - agentic ai
+  - ai automation
+  - applied ai
+  - ai engineer
+  - artificial intelligence
+  - generative ai
+  - llm
+  - machine learning
+  - mlops
+  - python engineer
+  - software engineer
+  - platform engineer
+  - cloud engineer
+  - security engineer
+  - solutions engineer
+  - solutions architect
+  - technical product
+  - graduate software
+  - workflow automation
+  - marketing automation
+  - business automation
+  - ai operations
+  - ai enablement
+  - ai adoption
+  - implementation engineer
+  - implementation consultant
+  - technical consultant
+  - digital transformation
+  - innovation engineer
+  - internal tools
+  - forward deployed
+  - growth engineer
+  - data automation

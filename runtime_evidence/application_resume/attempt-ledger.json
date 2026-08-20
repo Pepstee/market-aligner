@@ -1,0 +1,37 @@
+{
+  "schema_version": "jaa.application-resume-ledger.v1",
+  "recorded_at": "2026-08-05T11:59:24+01:00",
+  "entries": [
+    {
+      "job_id": "himalayas:rvr-infra-tech:cloud-engineer-intern",
+      "action": "admission_check",
+      "result": "expired",
+      "submitted": false,
+      "evidence": "Published deadline 2026-06-27; current employer careers page omits role"
+    },
+    {
+      "job_id": "himalayas:chainlink-labs:software-engineer-i-ccip",
+      "action": "admission_check",
+      "result": "ineligible_location",
+      "submitted": false,
+      "evidence": "Current official-route mirror identifies Poland-only eligibility, contradicting stale UK aggregator scope"
+    },
+    {
+      "job_id": "greenhouse:correlationone:5802065004",
+      "action": "admission_check",
+      "result": "ineligible_missing_mandatory_credentials",
+      "submitted": false,
+      "evidence": "Requires German fluency, active AWS AI Practitioner certification and 1-2 years professional annotation/QA"
+    },
+    {
+      "job_id": "himalayas:axiomdata:data-scientist",
+      "action": "document_canary",
+      "result": "pass_submit_route_unresolved",
+      "submitted": false,
+      "evidence": "Exact vacancy-bound CV and cover-letter receipts retained; no first-party application endpoint established"
+    }
+  ],
+  "actual_submit_attempts": 0,
+  "confirmed_submissions": 0,
+  "indeterminate_submissions": 0
+}

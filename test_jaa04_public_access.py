@@ -1,0 +1,1164 @@
+"""Offline adversarial tests for JAA-04 public-access authority."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import career_automation.employer_research as research
+from career_automation.employer_research import (
+    PublicRetrievalExhausted,
+    RawResponseCache,
+    ScraplingPublicRetriever,
+)
+from career_automation.public_access import (
+    DEFAULT_DELAY_SECONDS,
+    DenyAllPublicAccess,
+    JOBICY_API_PATH,
+    JOBICY_MINIMUM_INTERVAL_SECONDS,
+    PublicAccessController,
+    PublicAccessDenied,
+    PublicAccessPolicy,
+    RobotsReceipt,
+    USER_AGENT,
+    replay_access_receipt,
+)
+
+
+NOW = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+HOST = "jobs.example.test"
+URL = f"https://{HOST}/jobs/engineer"
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _policy(path: Path, *, hosts: tuple[str, ...] = (HOST,),
+            reviewer_type: str = "human_operator",
+            age_days: int = 1,
+            terms_url: str | None = None) -> PublicAccessPolicy:
+    records = [{
+        "host": host,
+        "terms_url": terms_url or f"https://{host}/terms",
+        "determination": "public_read_only_research_permitted",
+        "reviewed_at": (NOW - timedelta(days=age_days)).isoformat(),
+        "reviewed_by": "Test Operator",
+        "reviewer_type": reviewer_type,
+        "notes": "Public vacancy research reviewed for this offline test.",
+    } for host in hosts]
+    payload = {
+        "schema_version": "jaa04.public-access-policy.v1",
+        "hosts": records,
+        "records_hash": hashlib.sha256(_canonical(records)).hexdigest(),
+    }
+    path.write_bytes(_canonical(payload) + b"\n")
+    return PublicAccessPolicy.load(path, now=NOW)
+
+
+def _response(status: int, body: bytes, *, url: str, history=()) -> dict[str, Any]:
+    return {
+        "status": status,
+        "url": url,
+        "body_base64": base64.b64encode(body).decode(),
+        "body_bytes": len(body),
+        "history": list(history),
+        "text": body.decode("utf-8", "replace"),
+    }
+
+
+class _Client:
+    def __init__(self, robots: dict[str, Any], page: dict[str, Any] | None = None) -> None:
+        self.robots, self.page = robots, page
+        self.calls: list[tuple[str, str]] = []
+
+    def fetch(self, engine: str, url: str, **_: Any) -> dict[str, Any]:
+        self.calls.append((engine, url))
+        return self.robots if url.endswith("/robots.txt") else dict(self.page or {})
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.value = 100.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.value += seconds
+
+
+def _controller(
+    tmp_path: Path,
+    robots: dict[str, Any],
+    *,
+    page: dict[str, Any] | None = None,
+) -> tuple[PublicAccessController, _Client, RawResponseCache, _Clock]:
+    cache = RawResponseCache(tmp_path / "raw")
+    client = _Client(robots, page)
+    clock = _Clock()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    return controller, client, cache, clock
+
+
+def test_missing_or_nonhuman_terms_attestation_denies_before_network(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="human_operator"):
+        _policy(tmp_path / "machine.json", reviewer_type="automation")
+    policy = _policy(tmp_path / "other.json", hosts=("other.example.test",))
+    client = _Client(_response(404, b"", url=f"https://{HOST}/robots.txt"))
+    controller = PublicAccessController(policy, client, RawResponseCache(tmp_path / "raw"))
+    with pytest.raises(PublicAccessDenied, match="POLICY_DENIED"):
+        controller.before_request(URL)
+    assert client.calls == []
+    with pytest.raises(PublicAccessDenied, match="external access policy"):
+        DenyAllPublicAccess().before_request(URL)
+    with pytest.raises(ValueError, match="stale"):
+        _policy(tmp_path / "stale.json", age_days=91)
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://jobicy.com/jobs/147647-ai-engineer-5",
+        "https://jobicy.com/",
+        "https://jobicy.com/jobs-rss-feed",
+        "https://jobicy.com/api/v1/remote-jobs",
+        "https://jobicy.com/api/v2/remote-jobs?unknown=value",
+        "https://jobicy.com/api/v2/remote-jobs?geo=uk&geo=europe",
+    ),
+)
+def test_jobicy_nonimplemented_or_listing_routes_are_denied_before_network(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    policy = _policy(tmp_path / "jobicy-policy.json", hosts=("jobicy.com",))
+    client = _Client(_response(
+        200,
+        b"User-agent: *\nAllow: /\n",
+        url="https://jobicy.com/robots.txt",
+    ))
+    controller = PublicAccessController(
+        policy,
+        client,
+        RawResponseCache(tmp_path / "raw"),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROUTE_DENIED"):
+        controller.before_request(url)
+    assert client.calls == []
+
+
+def test_jobicy_official_api_is_hourly_and_persists_across_controller_resume(
+    tmp_path: Path,
+) -> None:
+    policy_path = tmp_path / "jobicy-policy.json"
+    policy = _policy(policy_path, hosts=("jobicy.com",))
+    robots_url = "https://jobicy.com/robots.txt"
+    robots = _response(200, b"User-agent: *\nAllow: /\n", url=robots_url)
+    cache = RawResponseCache(tmp_path / "raw")
+    clock = _Clock()
+    api_url = (
+        f"https://jobicy.com{JOBICY_API_PATH}"
+        "?count=100&geo=uk&industry=engineering"
+    )
+    first_client = _Client(robots)
+    first = PublicAccessController(
+        policy,
+        first_client,
+        cache,
+        clock=clock.monotonic,
+        wall_clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    receipt = first.before_request(api_url)
+    assert receipt.crawl_delay_seconds == JOBICY_MINIMUM_INTERVAL_SECONDS
+    assert clock.sleeps == []
+    assert first_client.calls == [("static", robots_url)]
+
+    second_client = _Client(robots)
+    resumed = PublicAccessController(
+        PublicAccessPolicy.load(policy_path, now=NOW),
+        second_client,
+        cache,
+        clock=clock.monotonic,
+        wall_clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    resumed.before_request(api_url)
+    assert clock.sleeps == [JOBICY_MINIMUM_INTERVAL_SECONDS]
+    assert second_client.calls == [("static", robots_url)]
+    ledger = json.loads(next(tmp_path.glob(".jaa04-public-rate-*.json")).read_text())
+    assert ledger == {
+        "schema_version": "jaa04.public-rate-ledger.v1",
+        "routes": {
+            f"jobicy.com:{JOBICY_API_PATH}": clock.monotonic(),
+        },
+    }
+
+
+def test_jobicy_listing_capture_cannot_replay_as_certified_access(
+    tmp_path: Path,
+) -> None:
+    policy = _policy(tmp_path / "jobicy-policy.json", hosts=("jobicy.com",))
+    robots_url = "https://jobicy.com/robots.txt"
+    cache = RawResponseCache(tmp_path / "raw")
+    clock = _Clock()
+    controller = PublicAccessController(
+        policy,
+        _Client(_response(200, b"User-agent: *\nAllow: /\n", url=robots_url)),
+        cache,
+        clock=clock.monotonic,
+        wall_clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    api_url = f"https://jobicy.com{JOBICY_API_PATH}?count=100&geo=uk"
+    receipt = asdict(controller.before_request(api_url))
+    with pytest.raises(ValueError, match="non-public URL"):
+        replay_access_receipt(
+            receipt,
+            cache,
+            content_urls=("https://jobicy.com/jobs/147647-ai-engineer-5",),
+            content_retrieved_at=NOW.isoformat(),
+            policies={policy.policy_sha256: policy},
+        )
+
+
+@pytest.mark.parametrize("host", ("localhost", "api.localhost", "127.0.0.1", "169.254.1.1"))
+def test_private_policy_hosts_are_rejected_before_network(
+    tmp_path: Path,
+    host: str,
+) -> None:
+    with pytest.raises(ValueError, match="public hosts"):
+        _policy(tmp_path / "private.json", hosts=(host,))
+
+
+@pytest.mark.parametrize(
+    "terms_url",
+    (
+        f"https://operator:secret@{HOST}/terms",
+        "https://localhost/terms",
+        "https://127.0.0.1/terms",
+    ),
+)
+def test_nonpublic_terms_url_is_rejected(
+    tmp_path: Path,
+    terms_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="anonymous public HTTPS"):
+        _policy(
+            tmp_path / "nonpublic-terms.json",
+            terms_url=terms_url,
+        )
+
+
+@pytest.mark.parametrize("status", (401, 403, 429, 500, 503))
+def test_robots_denial_or_unavailability_is_terminal(
+    tmp_path: Path,
+    status: int,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, client, _, _ = _controller(
+        tmp_path,
+        _response(status, b"denied", url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_"):
+        controller.before_request(URL)
+    assert client.calls == [("static", robots_url)]
+
+
+def test_robots_transport_failure_is_terminal(tmp_path: Path) -> None:
+    class BrokenClient:
+        def fetch(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise TimeoutError("offline")
+
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        BrokenClient(),
+        RawResponseCache(tmp_path / "raw"),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_UNAVAILABLE"):
+        controller.before_request(URL)
+
+
+def test_robots_disallow_and_longest_allow_are_enforced_from_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        "Disallow: /jobs\n"
+        "Allow: /jobs/public\n"
+        "Crawl-delay: 12\n"
+    ).encode()
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(URL)
+    public = f"https://{HOST}/jobs/public/engineer"
+    receipt = controller.before_request(public)
+    assert receipt.allowed
+    assert receipt.crawl_delay_seconds == 12
+    assert cache.resolve(receipt.raw_response_ref, receipt.content_sha256) == body
+    assert receipt.content_sha256 == hashlib.sha256(body).hexdigest()
+
+
+@pytest.mark.parametrize("delay", ("nan", "inf", "-inf"))
+def test_non_finite_robots_crawl_delay_cannot_override_the_floor(
+    tmp_path: Path,
+    delay: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        "Allow: /\n"
+        f"Crawl-delay: {delay}\n"
+    ).encode()
+    controller, _, _, clock = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    receipt = controller.before_request(URL)
+    assert receipt.crawl_delay_seconds == DEFAULT_DELAY_SECONDS
+    assert clock.sleeps == [DEFAULT_DELAY_SECONDS]
+
+
+def test_multiple_robots_crawl_delays_use_the_conservative_maximum(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        "Allow: /\n"
+        "Crawl-delay: 25\n"
+        "Crawl-delay: 1\n"
+    ).encode()
+    controller, _, _, clock = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    receipt = controller.before_request(URL)
+    assert receipt.crawl_delay_seconds == 25
+    assert clock.sleeps == [25]
+
+
+@pytest.mark.parametrize("delay", (float("nan"), float("inf"), float("-inf")))
+def test_non_finite_configured_delay_is_rejected(
+    tmp_path: Path,
+    delay: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        PublicAccessController(
+            _policy(tmp_path / "access.json"),
+            _Client(_response(404, b"", url=f"https://{HOST}/robots.txt")),
+            RawResponseCache(tmp_path / "raw"),
+            default_delay_seconds=delay,
+        )
+
+
+def test_robots_product_token_matching_is_exact_and_wildcard_is_fallback(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    misleading = (
+        "User-agent: public\n"
+        "Allow: /jobs\n"
+        "User-agent: *\n"
+        "Disallow: /jobs\n"
+    ).encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, misleading, url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(URL)
+
+    exact = (
+        "User-agent: *\n"
+        "Disallow: /jobs\n"
+        f"User-agent: {USER_AGENT.upper()}\n"
+        "Allow: /jobs\n"
+        f"User-agent: {USER_AGENT.lower()}\n"
+        "Crawl-delay: 14\n"
+    ).encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, exact, url=robots_url),
+    )
+    receipt = controller.before_request(URL)
+    assert receipt.allowed
+    assert receipt.crawl_delay_seconds == 14
+
+
+@pytest.mark.parametrize(
+    "other_record",
+    (
+        "Sitemap: https://jobs.example.test/sitemap.xml",
+        "Crawl-delay: 12",
+    ),
+)
+def test_robots_other_records_do_not_split_consecutive_user_agents(
+    tmp_path: Path,
+    other_record: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        f"{other_record}\n"
+        "User-agent: OtherBot\n"
+        "Disallow: /jobs\n"
+    ).encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(URL)
+
+
+@pytest.mark.parametrize(
+    ("rule", "path"),
+    (
+        ("/jobs/%70rivate", "/jobs/private/engineer"),
+        ("/jobs/ツ", "/jobs/%E3%83%84"),
+        ("/jobs/a%2Fb", "/jobs/a%2fb"),
+    ),
+)
+def test_robots_rules_compare_canonical_octets(
+    tmp_path: Path,
+    rule: str,
+    path: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = f"User-agent: {USER_AGENT}\nDisallow: {rule}\n".encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(f"https://{HOST}{path}")
+
+
+def test_robots_encoded_reserved_separator_remains_distinct(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = f"User-agent: {USER_AGENT}\nDisallow: /jobs/a%2Fb\n".encode()
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, body, url=robots_url),
+    )
+    assert controller.before_request(f"https://{HOST}/jobs/a/b").allowed
+
+
+def test_cached_non_200_success_replays_rules_for_each_url(tmp_path: Path) -> None:
+    body = (
+        f"User-agent: {USER_AGENT}\n"
+        "Disallow: /jobs\n"
+        "Allow: /jobs/public\n"
+    ).encode()
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, client, _, _ = _controller(
+        tmp_path,
+        _response(204, body, url=robots_url),
+    )
+    public = f"https://{HOST}/jobs/public/engineer"
+    assert controller.before_request(public).allowed
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(URL)
+    assert client.calls == [("static", robots_url)]
+
+
+def test_absent_robots_is_receipted_and_ten_second_floor_is_enforced(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, client, cache, clock = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+    )
+    receipt = controller.before_request(URL)
+    controller.before_request(URL)
+    assert receipt.allowed and receipt.status_code == 404
+    assert receipt.crawl_delay_seconds == DEFAULT_DELAY_SECONDS
+    assert cache.resolve(receipt.raw_response_ref, receipt.content_sha256) == b"not found"
+    assert clock.sleeps == [10.0, 10.0]
+    assert client.calls == [("static", robots_url)]
+
+
+def test_robots_receipts_are_scoped_to_exact_origin(tmp_path: Path) -> None:
+    https_url = URL
+    http_url = URL.replace("https://", "http://")
+
+    class OriginClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def fetch(self, engine: str, url: str, **_: Any) -> dict[str, Any]:
+            self.calls.append((engine, url))
+            body = (
+                b"User-agent: *\nAllow: /\n"
+                if url.startswith("https://")
+                else b"User-agent: *\nDisallow: /jobs\n"
+            )
+            return _response(200, body, url=url)
+
+    client = OriginClient()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        RawResponseCache(tmp_path / "raw"),
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    assert controller.before_request(https_url).allowed
+    with pytest.raises(PublicAccessDenied, match="ROBOTS_DISALLOWED"):
+        controller.before_request(http_url)
+    assert client.calls == [
+        ("static", f"https://{HOST}/robots.txt"),
+        ("static", f"http://{HOST}/robots.txt"),
+    ]
+
+
+def test_global_ipv6_origin_uses_bracketed_robots_authority(tmp_path: Path) -> None:
+    host = "2001:4860:4860::8888"
+    url = f"https://[{host}]/jobs/engineer"
+    robots_url = f"https://[{host}]/robots.txt"
+    policy = _policy(
+        tmp_path / "ipv6-access.json",
+        hosts=(host,),
+        terms_url=f"https://[{host}]/terms",
+    )
+    client = _Client(
+        _response(200, b"User-agent: *\nAllow: /\n", url=robots_url)
+    )
+    clock = _Clock()
+    controller = PublicAccessController(
+        policy,
+        client,
+        RawResponseCache(tmp_path / "raw"),
+        clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    receipt = controller.before_request(url)
+    assert receipt.robots_url == robots_url
+    assert client.calls == [("static", robots_url)]
+    assert clock.sleeps == [10.0]
+
+
+def test_cross_host_robots_redirect_is_rejected(tmp_path: Path) -> None:
+    controller, _, _, _ = _controller(
+        tmp_path,
+        _response(200, b"User-agent: *\nAllow: /\n",
+                  url="https://other.example.test/robots.txt"),
+    )
+    with pytest.raises(PublicAccessDenied, match="crossed"):
+        controller.before_request(URL)
+
+
+def test_same_host_robots_scheme_redirect_replays_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    requested_url = URL.replace("https://", "http://")
+    initial_robots = f"http://{HOST}/robots.txt"
+    final_robots = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(
+            200,
+            b"User-agent: *\nAllow: /\n",
+            url=final_robots,
+            history=({"url": initial_robots, "status": 301},),
+        ),
+    )
+    value = asdict(controller.before_request(requested_url))
+    replayed = replay_access_receipt(
+        value,
+        cache,
+        content_urls=(requested_url,),
+        content_retrieved_at=NOW.isoformat(),
+        policies={controller.policy.policy_sha256: controller.policy},
+    )
+    assert replayed.final_url == final_robots
+    assert replayed.redirect_history == [
+        {"url": initial_robots, "status_code": 301},
+    ]
+
+
+def test_retriever_never_uses_stealth_and_challenge_is_terminal(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    page = _response(403, b"Please complete CAPTCHA", url=URL)
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=page,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicAccessDenied, match="ACCESS_DENIED"):
+        retriever._fetch(URL)
+    assert [engine for engine, _ in client.calls] == ["static", "static"]
+    assert "dynamic" not in [engine for engine, _ in client.calls]
+    assert "stealth" not in [engine for engine, _ in client.calls]
+
+
+def test_static_to_dynamic_fallback_throttles_every_stage_without_stealth(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    rendered = b"<html><p>Rendered public vacancy evidence.</p></html>" * 4
+
+    class FallbackClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            if engine == "static":
+                return _response(200, b"short", url=url)
+            return _response(200, rendered, url=url)
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = FallbackClient(_response(404, b"not found", url=robots_url))
+    clock = _Clock()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    result, _ = retriever._fetch(URL)
+    assert result.engine == "dynamic"
+    assert [engine for engine, _ in client.calls] == ["static", "static", "dynamic"]
+    assert clock.sleeps == [10.0, 10.0]
+
+
+@pytest.mark.parametrize(
+    ("timeout_seconds", "dynamic_timeout_ms"),
+    ((45, 60_000), (75, 75_000)),
+)
+def test_retriever_binds_exact_single_send_nonstealth_engine_kwargs(
+    tmp_path: Path,
+    timeout_seconds: int,
+    dynamic_timeout_ms: int,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<html><noscript>You need to enable JavaScript to run this app."
+        b"</noscript><div id=\"root\"></div></html>"
+    )
+    rendered = b"<html><main>Rendered public vacancy evidence.</main></html>" * 4
+
+    class CapturingClient(_Client):
+        def __init__(self) -> None:
+            super().__init__(_response(404, b"not found", url=robots_url))
+            self.page_calls: list[tuple[str, dict[str, Any]]] = []
+
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            self.page_calls.append((engine, dict(kwargs)))
+            return _response(
+                200,
+                shell if engine == "static" else rendered,
+                url=url,
+            )
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = CapturingClient()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(
+        cache,
+        timeout_seconds=timeout_seconds,
+        access_controller=controller,
+    )
+    retriever.client = client
+    result, _ = retriever._fetch(URL)
+    assert result.engine == "dynamic"
+    assert client.page_calls == [
+        (
+            "static",
+            {
+                "timeout": timeout_seconds,
+                "retries": 1,
+                "stealthy_headers": False,
+                "headers": {"User-Agent": USER_AGENT},
+            },
+        ),
+        (
+            "dynamic",
+            {
+                "network_idle": True,
+                "timeout": dynamic_timeout_ms,
+                "retries": 1,
+                "google_search": False,
+                "useragent": USER_AGENT,
+            },
+        ),
+    ]
+
+
+def test_content_bearing_static_response_never_invokes_dynamic(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    static = (
+        b"<html><body><noscript>Please enable JavaScript.</noscript>"
+        b"<main>Example Ltd is hiring a Software Engineer to build public "
+        b"platform services for customers.</main></body></html>"
+    )
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=_response(200, static, url=URL),
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    result, receipt = retriever._fetch(URL)
+    assert result.engine == "static"
+    assert [engine for engine, _ in client.calls] == ["static", "static"]
+    assert len(result.attempts) == 1
+    assert result.attempts[0]["access_receipt"] == asdict(receipt)
+
+
+def test_renderer_shell_falls_through_to_policy_gated_dynamic(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<!doctype html><html><head><title>Jobs</title></head><body>"
+        b"<noscript>You need to enable JavaScript to run this app.</noscript>"
+        b'<div id="root"></div><script src="/app.js"></script></body></html>'
+    )
+    rendered = (
+        b"<html><main>Example Ltd is recruiting a Software Engineer for its "
+        b"public platform engineering team. The role builds reliable customer "
+        b"services with Python and cloud infrastructure.</main></html>"
+    )
+
+    class ShellClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            return _response(
+                200,
+                shell if engine == "static" else rendered,
+                url=url,
+            )
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = ShellClient(_response(404, b"not found", url=robots_url))
+    clock = _Clock()
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=clock.monotonic,
+        sleeper=clock.sleep,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    result, receipt = retriever._fetch(URL)
+    assert result.engine == "dynamic"
+    assert [engine for engine, _ in client.calls] == [
+        "static", "static", "dynamic",
+    ]
+    assert [row["engine"] for row in result.attempts] == ["static", "dynamic"]
+    assert all(row["ok"] is True for row in result.attempts)
+    assert base64.b64decode(
+        result.attempts[0]["response"]["body_base64"],
+        validate=True,
+    ) == shell
+    assert base64.b64decode(
+        result.attempts[1]["response"]["body_base64"],
+        validate=True,
+    ) == rendered
+    assert all(row["access_receipt"] == asdict(receipt) for row in result.attempts)
+    assert clock.sleeps == [10.0, 10.0]
+
+
+def test_renderer_shell_on_both_stages_exhausts_without_stealth(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<html><body><noscript>Please enable JavaScript to use this site."
+        b"</noscript><main id=\"app\"></main><script src=\"/app.js\"></script>"
+        b"</body></html>"
+    )
+
+    class ShellClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            return _response(200, shell, url=url)
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = ShellClient(_response(404, b"not found", url=robots_url))
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(
+        PublicRetrievalExhausted,
+        match="static and dynamic",
+    ) as raised:
+        retriever._fetch(URL)
+    assert [engine for engine, _ in client.calls] == [
+        "static", "static", "dynamic",
+    ]
+    attempts = [row.as_dict() for row in raised.value.attempts]
+    assert [row["engine"] for row in attempts] == ["static", "dynamic"]
+    assert all(row["renderer_shell"] is True for row in attempts)
+    assert all(row["error_type"] is None for row in attempts)
+    for row in attempts:
+        assert cache.resolve(
+            row["raw_response_ref"],
+            row["content_sha256"],
+        ) == shell
+        assert row["body_bytes"] == len(shell)
+        replay_access_receipt(
+            row["access_receipt"],
+            cache,
+            content_urls=(URL,),
+            content_retrieved_at=NOW.isoformat(),
+            policies={controller.policy.policy_sha256: controller.policy},
+        )
+
+
+def test_response_less_stage_exceptions_are_carried_by_typed_exhaustion(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+
+    class FailingClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            raise RuntimeError(f"{engine} offline failure")
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = FailingClient(_response(404, b"not found", url=robots_url))
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicRetrievalExhausted) as raised:
+        retriever._fetch(URL)
+    attempts = [row.as_dict() for row in raised.value.attempts]
+    assert [row["engine"] for row in attempts] == ["static", "dynamic"]
+    assert [row["error_message"] for row in attempts] == [
+        "static offline failure",
+        "dynamic offline failure",
+    ]
+    assert all(row["error_type"] == "RuntimeError" for row in attempts)
+    assert all(row["content_sha256"] is None for row in attempts)
+    assert all(row["raw_response_ref"] is None for row in attempts)
+    assert all(row["access_receipt"]["requested_url"] == URL for row in attempts)
+
+
+@pytest.mark.parametrize("attack", ("invalid-base64", "wrong-byte-count"))
+def test_malformed_response_evidence_fails_closed_with_attempt_record(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = b"<html><main>public vacancy evidence</main></html>" * 4
+    page = _response(200, body, url=URL)
+    if attack == "invalid-base64":
+        page["body_base64"] = "*not-base64*"
+    else:
+        page["body_bytes"] = len(body) + 1
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=page,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(
+        PublicRetrievalExhausted,
+        match="response evidence is malformed",
+    ) as raised:
+        retriever._fetch(URL)
+    assert len(raised.value.attempts) == 1
+    attempt = raised.value.attempts[0].as_dict()
+    assert attempt["engine"] == "static"
+    assert attempt["renderer_shell"] is None
+    assert attempt["error_type"] in {"Error", "ValueError"}
+    if attack == "invalid-base64":
+        assert attempt["content_sha256"] is None
+        assert attempt["raw_response_ref"] is None
+    else:
+        assert attempt["status_code"] == 200
+        assert cache.resolve(
+            attempt["raw_response_ref"],
+            attempt["content_sha256"],
+        ) == body
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    (
+        (401, b"authentication required"),
+        (403, b"access denied"),
+        (429, b"rate limited"),
+        (200, b"<html><title>Verify you are human</title>captcha challenge</html>" * 3),
+    ),
+)
+def test_static_terminal_denial_never_reaches_dynamic(
+    tmp_path: Path,
+    status: int,
+    body: bytes,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=_response(status, body, url=URL),
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicAccessDenied, match="ACCESS_DENIED"):
+        retriever._fetch(URL)
+    assert [engine for engine, _ in client.calls] == ["static", "static"]
+
+
+def test_dynamic_challenge_is_terminal_after_static_shell(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    shell = (
+        b"<html><body><noscript>You need to enable JavaScript to run this app."
+        b"</noscript><div id=\"root\"></div></body></html>"
+    )
+    challenge = (
+        b"<html><title>Verify you are human</title>"
+        b"<p>captcha challenge</p></html>" * 3
+    )
+
+    class ChallengeClient(_Client):
+        def fetch(self, engine: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            if url.endswith("/robots.txt"):
+                return super().fetch(engine, url, **kwargs)
+            self.calls.append((engine, url))
+            return _response(
+                200,
+                shell if engine == "static" else challenge,
+                url=url,
+            )
+
+    cache = RawResponseCache(tmp_path / "raw")
+    client = ChallengeClient(_response(404, b"not found", url=robots_url))
+    controller = PublicAccessController(
+        _policy(tmp_path / "access.json"),
+        client,
+        cache,
+        clock=_Clock().monotonic,
+        sleeper=lambda _: None,
+        now=lambda: NOW,
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicAccessDenied, match="ACCESS_DENIED"):
+        retriever._fetch(URL)
+    assert [engine for engine, _ in client.calls] == [
+        "static", "static", "dynamic",
+    ]
+    for body in (shell, challenge):
+        digest = hashlib.sha256(body).hexdigest()
+        assert cache.resolve(
+            f"sha256/{digest[:2]}/{digest}",
+            digest,
+        ) == body
+
+
+def test_page_redirect_to_unattested_host_is_rejected(tmp_path: Path) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(404, b"not found", url=robots_url),
+        page=_response(
+            200,
+            b"public vacancy evidence " * 20,
+            url="https://unattested.example.test/jobs/engineer",
+        ),
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    with pytest.raises(PublicAccessDenied, match="cross-host"):
+        retriever._fetch(URL)
+
+
+def test_successful_citation_contains_byte_resolvable_access_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    body = json.dumps({
+        "title": "Software Engineer",
+        "updated_at": "2026-07-25T00:00:00+00:00",
+        "description": "Public vacancy evidence " * 20,
+    }, separators=(",", ":")).encode()
+    controller, client, cache, _ = _controller(
+        tmp_path,
+        _response(200, b"User-agent: *\nAllow: /\n", url=robots_url),
+        page=_response(200, body, url=URL),
+    )
+    retriever = ScraplingPublicRetriever(cache, access_controller=controller)
+    retriever.client = client
+    monkeypatch.setattr(research, "_public_url", lambda _: None)
+    citation = retriever.retrieve("source", URL, source_kind="official_vacancy")
+    assert citation.retrieval_engine == "scrapling-static"
+    assert citation.access_receipt is not None
+    receipt = RobotsReceipt(**citation.access_receipt)
+    assert receipt.terms_attestation["reviewer_type"] == "human_operator"
+    assert cache.resolve(receipt.raw_response_ref, receipt.content_sha256).startswith(
+        b"User-agent"
+    )
+    assert asdict(receipt) == citation.access_receipt
+
+
+@pytest.mark.parametrize(
+    "attack",
+    (
+        "missing-field", "policy-substitution", "terminal-status",
+        "delay-understatement", "delay-nan", "delay-infinity", "robots-query",
+    ),
+)
+def test_access_receipt_replay_requires_operator_policy_and_exact_robots_bytes(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(
+            200,
+            f"User-agent: {USER_AGENT}\nAllow: /\nCrawl-delay: 10\n".encode(),
+            url=robots_url,
+        ),
+    )
+    value = asdict(controller.before_request(URL))
+    if attack == "missing-field":
+        value.pop("allowed")
+    elif attack == "policy-substitution":
+        value["terms_policy_sha256"] = "0" * 64
+    elif attack == "terminal-status":
+        value["status_code"] = 429
+    elif attack == "delay-understatement":
+        value["crawl_delay_seconds"] = 9.0
+    elif attack == "delay-nan":
+        value["crawl_delay_seconds"] = float("nan")
+    elif attack == "delay-infinity":
+        value["crawl_delay_seconds"] = float("inf")
+    else:
+        value["final_url"] += "?attacker-state=1"
+    with pytest.raises(ValueError):
+        replay_access_receipt(
+            value,
+            cache,
+            content_urls=(URL,),
+            content_retrieved_at=NOW.isoformat(),
+            policies={controller.policy.policy_sha256: controller.policy},
+        )
+
+
+def test_access_receipt_replay_accepts_exact_operator_policy_and_robots_bytes(
+    tmp_path: Path,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(200, b"User-agent: *\nAllow: /\n", url=robots_url),
+    )
+    value = asdict(controller.before_request(URL))
+    replayed = replay_access_receipt(
+        value,
+        cache,
+        content_urls=(URL,),
+        content_retrieved_at=NOW.isoformat(),
+        policies={controller.policy.policy_sha256: controller.policy},
+    )
+    assert replayed == RobotsReceipt(**value)
+
+
+@pytest.mark.parametrize(
+    "terms_url",
+    (
+        f"https://operator:secret@{HOST}/terms",
+        "https://localhost/terms",
+        "https://127.0.0.1/terms",
+    ),
+)
+def test_access_receipt_replay_rejects_nonpublic_embedded_terms_without_policy(
+    tmp_path: Path,
+    terms_url: str,
+) -> None:
+    robots_url = f"https://{HOST}/robots.txt"
+    controller, _, cache, _ = _controller(
+        tmp_path,
+        _response(200, b"User-agent: *\nAllow: /\n", url=robots_url),
+    )
+    value = asdict(controller.before_request(URL))
+    value["terms_attestation"]["terms_url"] = terms_url
+    with pytest.raises(ValueError, match="anonymous public HTTPS"):
+        replay_access_receipt(
+            value,
+            cache,
+            content_urls=(URL,),
+            content_retrieved_at=NOW.isoformat(),
+            policies=None,
+        )

@@ -1,0 +1,488 @@
+"""Adversarial controls for the bounded local JAA-15 contract."""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import replace
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+
+from career_automation.models import PipelineState
+from career_automation.outcome_feedback import (
+    FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+    record_pre_outcome_prediction,
+)
+from career_automation.source_expansion import (
+    AdapterExpansionEvaluation,
+    AdapterMeasurement,
+    AdapterValueObservation,
+    ExpansionPortfolio,
+    FROZEN_SOURCE_EXPANSION_CONTRACT,
+    REQUIRED_EVIDENCE_KINDS,
+    RankedAdapter,
+    SourceExpansionContract,
+    _content_hash,
+    compile_adapter_measurement,
+    evaluate_adapter_candidate,
+    rank_expansion_candidates,
+    record_adapter_evidence_reference,
+    record_adapter_quality_snapshot,
+    record_adapter_value_observation,
+)
+from test_jaa15_independent_acceptance import (
+    EVIDENCE_AT,
+    PREDICTOR_POLICY,
+    WINDOW_END,
+    WINDOW_START,
+    _candidate,
+    _evidence,
+    _evaluation,
+    _hash,
+    _measurement,
+    _observation,
+    _qualities,
+)
+
+
+def test_noncanonical_contract_cannot_claim_activation() -> None:
+    contract = FROZEN_SOURCE_EXPANSION_CONTRACT
+    with pytest.raises(ValueError, match="differs from accepted"):
+        SourceExpansionContract(
+            **{
+                **vars(contract),
+                "scrapling_requirements_sha256": "0" * 64,
+            }
+        )
+    with pytest.raises(ValueError, match="cannot activate or certify"):
+        replace(contract, adapter_activation_authority="granted")
+
+
+def test_candidate_requires_distinct_rollback_and_canonical_scopes() -> None:
+    candidate = _candidate("adapter:rollback")
+    with pytest.raises(ValueError, match="different version"):
+        replace(candidate, rollback_adapter_version=candidate.adapter_version)
+    with pytest.raises(ValueError, match="unique and sorted"):
+        replace(candidate, country_scopes=("GB", "GB"))
+
+
+def test_candidate_policy_or_identity_tampering_fails() -> None:
+    candidate = _candidate("adapter:tamper")
+    with pytest.raises(ValueError, match="identity is invalid"):
+        replace(
+            candidate,
+            selector_policy_sha256=hashlib.sha256(
+                b"foreign-selector-policy"
+            ).hexdigest(),
+        )
+    with pytest.raises(ValueError, match="cannot crawl or activate"):
+        replace(candidate, activation_authority="granted")
+
+
+def test_value_observation_rejects_post_window_prediction() -> None:
+    candidate = _candidate("adapter:post-window")
+    prediction = record_pre_outcome_prediction(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        application_id="application:post-window",
+        job_key="job:post-window",
+        predictor_kind="configured_model",
+        predictor_id="predictor:jaa15-fixture",
+        predictor_version="1",
+        predictor_policy_sha256=PREDICTOR_POLICY,
+        input_snapshot_sha256=_hash("post-window-input"),
+        strategy_id=_hash("post-window-strategy"),
+        cohort_id="cohort:jaa15-locked",
+        cohort_kind="locked",
+        target_state=PipelineState.INTERVIEW,
+        probability_bp=6_000,
+        predicted_at=WINDOW_END + timedelta(seconds=1),
+        horizon_at=WINDOW_END + timedelta(days=30),
+    )
+    with pytest.raises(ValueError, match="inside the measurement window"):
+        record_adapter_value_observation(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            candidate,
+            prediction,
+            source_snapshot_sha256=_hash("post-window-source"),
+            viability_receipt_sha256=_hash("post-window-viability"),
+            worthwhile_vacancy=True,
+            measurement_window_start=WINDOW_START,
+            measurement_window_end=WINDOW_END,
+        )
+
+
+def test_value_observation_cannot_rehash_a_different_prediction_value() -> None:
+    accepted = _observation(_candidate("adapter:prediction-rehash"), 0)
+    fields = {
+        **vars(accepted),
+        "expected_interview_bp": accepted.expected_interview_bp + 1,
+    }
+    shell = object.__new__(AdapterValueObservation)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["observation_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its prediction receipt"):
+        AdapterValueObservation(**fields)
+
+
+def test_expected_interviews_require_an_interview_target_prediction() -> None:
+    candidate = _candidate("adapter:wrong-target")
+    prediction = record_pre_outcome_prediction(
+        FROZEN_OUTCOME_FEEDBACK_CONTRACT,
+        application_id="application:wrong-target",
+        job_key="job:wrong-target",
+        predictor_kind="configured_model",
+        predictor_id="predictor:jaa15-fixture",
+        predictor_version="1",
+        predictor_policy_sha256=PREDICTOR_POLICY,
+        input_snapshot_sha256=_hash("wrong-target-input"),
+        strategy_id=_hash("wrong-target-strategy"),
+        cohort_id="cohort:jaa15-locked",
+        cohort_kind="locked",
+        target_state=PipelineState.OFFER,
+        probability_bp=6_000,
+        predicted_at=WINDOW_START + timedelta(days=1),
+        horizon_at=WINDOW_END + timedelta(days=30),
+    )
+    with pytest.raises(ValueError, match="interview-target prediction"):
+        record_adapter_value_observation(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            candidate,
+            prediction,
+            source_snapshot_sha256=_hash("wrong-target-source"),
+            viability_receipt_sha256=_hash("wrong-target-viability"),
+            worthwhile_vacancy=True,
+            measurement_window_start=WINDOW_START,
+            measurement_window_end=WINDOW_END,
+        )
+
+
+def test_measurement_rejects_duplicate_and_mixed_adapter_evidence() -> None:
+    one = _candidate("adapter:one")
+    two = _candidate("adapter:two")
+    observation = _observation(one, 0)
+    with pytest.raises(ValueError, match="duplicate jobs"):
+        compile_adapter_measurement(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            one,
+            (observation, observation),
+            cohort_id="cohort:jaa15-locked",
+            implementation_cost_points=1,
+            operational_friction_points=1,
+        )
+    with pytest.raises(ValueError, match="mixes adapter candidates"):
+        compile_adapter_measurement(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            one,
+            (observation, _observation(two, 1)),
+            cohort_id="cohort:jaa15-locked",
+            implementation_cost_points=1,
+            operational_friction_points=1,
+        )
+
+
+def test_measurement_score_cannot_be_rehashed_to_another_formula() -> None:
+    measurement = _measurement(_candidate("adapter:score"))
+    with pytest.raises(ValueError, match="differs from ranking policy"):
+        replace(
+            measurement,
+            value_score=measurement.value_score + 1,
+            measurement_id=hashlib.sha256(b"forged-measurement").hexdigest(),
+        )
+
+
+def test_measurement_rehash_cannot_inflate_derived_aggregates() -> None:
+    accepted = _measurement(_candidate("adapter:aggregate-rehash"))
+    fields = {
+        **vars(accepted),
+        "worthwhile_vacancies": accepted.sample_count,
+        "expected_interviews_bp": accepted.sample_count * 10_000,
+    }
+    fields["value_score"] = (
+        fields["worthwhile_vacancies"] * 10_000
+        + fields["expected_interviews_bp"]
+        - fields["implementation_cost_points"] * 100
+        - fields["operational_friction_points"] * 100
+    )
+    shell = object.__new__(AdapterMeasurement)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["measurement_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="measurement aggregate is invalid"):
+        AdapterMeasurement(**fields)
+
+
+def test_adapter_cannot_inherit_another_policy_or_evidence() -> None:
+    one = _candidate("adapter:one-policy")
+    two = _candidate("adapter:two-policy")
+    baseline, current = _qualities(one)
+    foreign = record_adapter_evidence_reference(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        two,
+        evidence_kind="real_runtime",
+        evidence_sha256=_hash("foreign-real-runtime"),
+        observed_at=EVIDENCE_AT,
+    )
+    with pytest.raises(
+        ValueError,
+        match="another adapter or policy",
+    ):
+        evaluate_adapter_candidate(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            one,
+            _measurement(one),
+            (*_evidence(one, include_real=False), foreign),
+            baseline_quality=baseline,
+            candidate_quality=current,
+        )
+
+
+def test_adapter_evidence_must_follow_the_measurement_window() -> None:
+    candidate = _candidate("adapter:stale-runtime-evidence")
+    baseline, current = _qualities(candidate)
+    evidence = (
+        *_evidence(candidate, include_real=False),
+        record_adapter_evidence_reference(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            candidate,
+            evidence_kind="real_runtime",
+            evidence_sha256=_hash("stale-real-runtime"),
+            observed_at=WINDOW_START,
+        ),
+    )
+    with pytest.raises(ValueError, match="follow the measurement window"):
+        evaluate_adapter_candidate(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            candidate,
+            _measurement(candidate),
+            evidence,
+            baseline_quality=baseline,
+            candidate_quality=current,
+        )
+
+
+def test_caller_asserted_evidence_cannot_claim_authentication() -> None:
+    candidate = _candidate("adapter:caller-asserted-evidence")
+    evidence = _evidence(candidate)[0]
+    assert evidence.authentication_status == "caller_asserted_digest_only"
+    with pytest.raises(ValueError, match="cannot activate or certify"):
+        replace(evidence, authentication_status="independently_verified")
+
+
+def test_missing_runtime_evidence_blocks_but_remains_visible() -> None:
+    candidate = _candidate("adapter:no-runtime")
+    evaluation = _evaluation(candidate, include_real=False)
+    assert evaluation.eligible_for_review is False
+    assert evaluation.visible is True
+    assert evaluation.reason_codes == (
+        "missing_real_runtime_evidence",
+        "unauthenticated_evidence_references",
+    )
+    portfolio = rank_expansion_candidates(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        (evaluation,),
+    )
+    assert len(portfolio.entries) == 1
+    assert portfolio.entries[0].status == "blocked"
+    assert portfolio.entries[0].candidate_id == candidate.candidate_id
+
+
+def test_freshness_regression_blocks_review() -> None:
+    candidate = _candidate("adapter:stale")
+    evaluation = _evaluation(
+        candidate,
+        baseline_freshness=9_900,
+        candidate_freshness=9_800,
+    )
+    assert evaluation.eligible_for_review is False
+    assert evaluation.reason_codes == (
+        "unauthenticated_evidence_references",
+        "source_freshness_regression",
+    )
+
+
+def test_receipt_or_hard_quality_regression_blocks_review() -> None:
+    candidate = _candidate("adapter:receipt-regression")
+    evaluation = _evaluation(
+        candidate,
+        candidate_receipt_violations=1,
+    )
+    assert evaluation.eligible_for_review is False
+    assert evaluation.reason_codes == (
+        "unauthenticated_evidence_references",
+        "candidate_hard_quality_regression",
+    )
+
+
+def test_non_positive_value_is_visible_but_blocked() -> None:
+    candidate = _candidate("adapter:negative-value")
+    evaluation = _evaluation(candidate, cost=500, friction=500)
+    assert evaluation.value_score < 0
+    assert evaluation.eligible_for_review is False
+    assert evaluation.reason_codes == (
+        "non_positive_incremental_value",
+        "unauthenticated_evidence_references",
+    )
+
+
+def test_evaluation_cannot_rehash_away_missing_runtime_evidence() -> None:
+    accepted = _evaluation(
+        _candidate("adapter:evaluation-lineage"),
+        include_real=False,
+    )
+    fields = {
+        **vars(accepted),
+        "evidence_ids": tuple(
+            _hash(f"forged-{kind}")
+            for kind in sorted(REQUIRED_EVIDENCE_KINDS)
+        ),
+        "evidence_kinds": tuple(sorted(REQUIRED_EVIDENCE_KINDS)),
+        "reason_codes": (),
+        "eligible_for_review": True,
+    }
+    shell = object.__new__(AdapterExpansionEvaluation)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["evaluation_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its typed lineage"):
+        AdapterExpansionEvaluation(**fields)
+
+
+def test_ranked_entry_cannot_rehash_a_detached_evaluation_summary() -> None:
+    evaluation = _evaluation(_candidate("adapter:ranked-lineage"))
+    entry = rank_expansion_candidates(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        (evaluation,),
+    ).entries[0]
+    fields = {
+        **vars(entry),
+        "candidate_id": _hash("detached-ranked-candidate"),
+    }
+    shell = object.__new__(RankedAdapter)
+    for field_name, value in fields.items():
+        object.__setattr__(shell, field_name, value)
+    fields["entry_id"] = _content_hash(
+        shell.document(include_identity=False)
+    )
+    with pytest.raises(ValueError, match="differs from its evaluation"):
+        RankedAdapter(**fields)
+
+
+def test_portfolio_cannot_rehash_a_reversed_value_order() -> None:
+    lower_value = _evaluation(
+        _candidate("adapter:forged-lower-value"),
+        cost=100,
+        friction=100,
+    )
+    higher_value = _evaluation(
+        _candidate("adapter:forged-higher-value"),
+        cost=1,
+        friction=1,
+    )
+    accepted = rank_expansion_candidates(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        (lower_value, higher_value),
+    )
+    reversed_entries = []
+    for rank, entry in enumerate(reversed(accepted.entries), start=1):
+        entry_fields = {**vars(entry), "rank": rank}
+        entry_shell = object.__new__(RankedAdapter)
+        for field_name, value in entry_fields.items():
+            object.__setattr__(entry_shell, field_name, value)
+        entry_fields["entry_id"] = _content_hash(
+            entry_shell.document(include_identity=False)
+        )
+        reversed_entries.append(RankedAdapter(**entry_fields))
+    portfolio_fields = {
+        **vars(accepted),
+        "entries": tuple(reversed_entries),
+    }
+    portfolio_shell = object.__new__(ExpansionPortfolio)
+    for field_name, value in portfolio_fields.items():
+        object.__setattr__(portfolio_shell, field_name, value)
+    portfolio_fields["portfolio_id"] = _content_hash(
+        portfolio_shell.document(include_identity=False)
+    )
+
+    with pytest.raises(ValueError, match="not in canonical order"):
+        ExpansionPortfolio(**portfolio_fields)
+
+
+def test_quality_snapshot_cannot_change_policy_or_phase() -> None:
+    candidate = _candidate("adapter:quality")
+    baseline, _ = _qualities(candidate)
+    with pytest.raises(ValueError, match="identity is invalid"):
+        replace(
+            baseline,
+            eligibility_policy_sha256=hashlib.sha256(
+                b"foreign-eligibility"
+            ).hexdigest(),
+        )
+    with pytest.raises(ValueError, match="phase is unsupported"):
+        replace(baseline, phase="production")
+
+
+def test_quality_nonregression_requires_identical_sample_membership() -> None:
+    candidate = _candidate("adapter:quality-membership")
+    baseline, _ = _qualities(candidate)
+    current = record_adapter_quality_snapshot(
+        FROZEN_SOURCE_EXPANSION_CONTRACT,
+        candidate,
+        phase="candidate",
+        sample_ids=(_hash("different-quality-member"),),
+        freshness_pass_rate_bp=10_000,
+    )
+    with pytest.raises(ValueError, match="identical membership"):
+        evaluate_adapter_candidate(
+            FROZEN_SOURCE_EXPANSION_CONTRACT,
+            candidate,
+            _measurement(candidate),
+            _evidence(candidate),
+            baseline_quality=baseline,
+            candidate_quality=current,
+        )
+
+
+def test_even_eligible_result_cannot_activate_or_certify() -> None:
+    evaluation = _evaluation(_candidate("adapter:no-activation"))
+    for changes in (
+        {"activation_authority": "granted"},
+        {"crawl_authority": "granted"},
+        {"production_certification": "granted"},
+        {"dependency_satisfied": True},
+        {"certifies_slice": True},
+        {"visible": False},
+    ):
+        with pytest.raises(ValueError):
+            replace(evaluation, **changes)
+
+
+def test_product_module_has_no_fetch_crawl_or_external_action_capability() -> None:
+    source = (
+        Path(__file__).parent
+        / "career_automation"
+        / "source_expansion.py"
+    ).read_text(encoding="utf-8")
+    forbidden = (
+        "requests.",
+        "urllib.request",
+        "httpx",
+        "aiohttp",
+        "socket",
+        "playwright",
+        "subprocess",
+        "Fetcher.",
+        "Spider(",
+        "Collector(",
+        "send_message",
+        "load_adapter(",
+    )
+    for token in forbidden:
+        assert token not in source

@@ -1,0 +1,318 @@
+schema_version: "1.0"
+programme: autonomous-job-application-system
+plan_date: "2026-07-20"
+status: authorised_active
+canonical_plan: BUILD_PLAN.md
+canonical_repository_marker: canonical-repository.json
+brownfield_source_root: operator_supplied
+rules:
+  single_executable_slice_source: true
+  implement_in_order: true
+  walking_skeleton_before_breadth: true
+  probabilistic_output_cannot_advance_consequential_state: true
+  acceptance_requires_real_runtime_evidence: true
+  certification_contract:
+    - tests
+    - executable_acceptance
+    - negative_controls
+    - authenticity_no_stub_path
+    - independent_review
+    - content_hashed_receipt
+
+slices:
+  - id: JAA-00
+    name: Canonical baseline and repository adoption
+    depends_on: []
+    objective: Establish one neutral, version-controlled source of truth without losing the live data or working control-plane code.
+    work:
+      - Inventory and hash the active project, databases, artefacts, environments and relevant stale copies.
+      - Create a non-destructive backup and rollback manifest.
+      - Move or copy through a verified migration into a neutral canonical repository; preserve the original until certification.
+      - Record dependency locks, Python runtimes, host prerequisites and secret references without copying secrets.
+      - Re-run the collector/profile/control-plane test baselines and measure database state.
+    acceptance:
+      - A clean checkout reproduces the complete current suite; the 65 passing career-control tests remain a labelled pre-adoption observation.
+      - The canonical raw and control databases match the pre-migration schema, counts and content hashes or carry an explained migration receipt.
+      - The old project remains recoverable and is marked non-canonical rather than silently deleted.
+      - No similarly named historical Market Aligner copy can be mistaken for the canonical repository.
+      - No credential appears in version control, logs or the migration manifest.
+    negative_controls:
+      - An altered database copy fails the hash reconciliation.
+      - A missing runtime dependency fails baseline certification loudly.
+
+  - id: JAA-01
+    name: State machine, migrations and invariants
+    depends_on: [JAA-00]
+    objective: Extend the current five-state control plane to the full application lifecycle while preserving replay and idempotency.
+    work:
+      - Introduce checksummed forward migrations for the canonical domain tables.
+      - Define legal transitions and reducer logic separately from probabilistic assessments.
+      - Add transition receipts with policy/model/input/output identity.
+      - Rebuild materialised state from the event ledger and compare it with live state.
+    acceptance:
+      - Existing 462 jobs and 924 events migrate without loss or silent reinterpretation.
+      - Every illegal transition is rejected by code or database enforcement.
+      - Event replay exactly reproduces every materialised job state.
+      - Retrying any completed deterministic transition is idempotent.
+    negative_controls:
+      - Out-of-order research, release and submit transitions fail.
+      - A modified applied migration fails checksum validation.
+
+  - id: JAA-02
+    name: Candidate fact, evidence and claim graph
+    depends_on: [JAA-01]
+    objective: Convert the current YAML profile and evidence ledger into canonical, versioned application facts and approved claims.
+    work:
+      - Import candidate facts, constraints, work rights, preferences, evidence and negative evidence with provenance.
+      - Separate fact, evidence, inference, unknown and expired status.
+      - Build typed relational edges from claims to evidence and artefacts.
+      - Add automatic corpus/project evidence candidates that require deterministic or configured verification before approval.
+      - Generate a privacy-bounded projection for model workers.
+    acceptance:
+      - Every approved claim resolves to at least one approved evidence item.
+      - Expired, disputed, inferred or unverified facts cannot satisfy a release gate.
+      - The model projection excludes secrets and unrelated private conversations.
+      - Work-right answers are jurisdiction/contract aware and abstain when a rule is not verified.
+    negative_controls:
+      - A fabricated metric, unsupported title and stale right-to-work assertion are rejected.
+      - An evidence record containing a secret pattern is quarantined.
+
+  - id: JAA-03
+    name: Vacancy and Opportunity-0 calibration
+    depends_on: [JAA-02]
+    objective: Certify the existing discovery-to-research admission path against frozen evidence rather than assumed score quality.
+    work:
+      - Freeze a stratified 100-vacancy evaluation set from historical data.
+      - Label viability, eligibility, requirement extraction and Opportunity-0 decisions with source spans.
+      - Separate market opportunity from candidate fit in schemas, prompts and arithmetic.
+      - Calibrate confidence/abstention thresholds and queue policy.
+    acceptance:
+      - Locked-set metrics and error slices are recorded by source, role family and geography.
+      - No Fit or candidate-interest feature affects Opportunity-0 admission.
+      - Low-confidence extraction cannot consume employer-research resources.
+      - Re-running unchanged inputs produces identical deterministic decisions.
+    negative_controls:
+      - Expired, inaccessible, ineligible and implausibly senior fixtures are rejected for the intended reasons.
+      - An attractive personal fit cannot rescue a failed Opportunity decision.
+
+  - id: JAA-04
+    name: Employer reconnaissance and Opportunity-1
+    depends_on: [JAA-03]
+    objective: Turn the existing research queue into cited, freshness-aware employer dossiers and reassess opportunity.
+    work:
+      - Implement source-controlled public retrieval, cache and citation contracts.
+      - Produce company, role, product, hiring and operational-health claims classified as fact, inference or hypothesis.
+      - Add typed employer-intelligence nodes and edges.
+      - Compute Opportunity-1 while retaining the original score and reasons for change.
+    acceptance:
+      - At least 30 frozen dossiers contain only source-resolvable claims with capture dates and freshness policy.
+      - Research can demote or reject an initially strong vacancy and preserve why.
+      - Public-person research remains job-relevant and excludes protected/private information.
+      - Interrupted workers resume through leases without duplicate dossier completion.
+    negative_controls:
+      - Uncited, stale-as-current and hallucinated company claims fail dossier validation.
+      - A rejected Opportunity-0 job cannot enter research through any path.
+
+  - id: JAA-05
+    name: Evidence matching and gap optimiser
+    depends_on: [JAA-04]
+    objective: Determine what the candidate can truthfully demonstrate and automatically create high-value improvement work where useful.
+    work:
+      - Match atomic requirements to evidence IDs with confidence and abstention.
+      - Classify presentation, retrieval, knowledge, execution, evidence, experience, credential and structural gaps.
+      - Rank improvement tasks by reusable opportunity-weighted value and cost.
+      - Require tests, artefacts or external outcomes before newly learned capability becomes approved evidence.
+    acceptance:
+      - Locked labels measure evidence-match precision, recall and abstention quality.
+      - Generated learning text cannot become evidence.
+      - Each improvement task has a verification method and resulting-evidence contract.
+      - Fatal/structural gaps block candidacy; bridgeable gaps follow explicit policy.
+    negative_controls:
+      - Semantic similarity alone cannot turn interest or project complexity into professional experience.
+      - A self-authored unverifiable assertion cannot close a gap.
+
+  - id: JAA-06
+    name: Application strategy compiler
+    depends_on: [JAA-05]
+    objective: Produce a machine-checkable positioning plan before any prose is drafted.
+    work:
+      - Select target requirements, approved claims, evidence, likely objections and employer-specific hooks.
+      - Decide whether to apply now, close a gap first or reject the candidacy.
+      - Define CV emphasis, cover-letter argument, structured answers and interview seeds.
+    acceptance:
+      - Every strategy element points to requirement, research-claim and candidate-evidence IDs.
+      - Mandatory requirements are covered, explicitly absent or release-blocking.
+      - Company-specific hooks are source-backed and not generic filler.
+      - Strategy output is schema-valid and reproducible from its versioned inputs.
+    negative_controls:
+      - A strategy citing an unapproved candidate claim or employer hypothesis as fact fails.
+
+  - id: JAA-07
+    name: ATS-safe application compiler
+    depends_on: [JAA-06]
+    objective: Generate truthful UK CVs, cover letters and application answers without manual writing.
+    work:
+      - Render a two-page single-column ATS-safe CV from the approved claim plan.
+      - Render a role/company-specific cover letter under one page when required.
+      - Generate structured portal answers from ratified facts and evidence.
+      - Store editable source, PDF, extracted text and content hashes.
+      - Apply a bounded style critic whose edits are atomic proposals, not authority.
+    acceptance:
+      - Twenty frozen packs satisfy page, parse, section, requirement-coverage and provenance checks.
+      - Every factual sentence is traceable to approved claim/evidence IDs.
+      - Rendered PDF and extracted text preserve dates, metrics and contact details consistently.
+      - The operator writes none of the routine application prose.
+    negative_controls:
+      - Tables, graphics, hidden text, unsupported metrics and generic wrong-company letters fail.
+      - A critic edit that changes factual meaning is rejected.
+
+  - id: JAA-08
+    name: Deterministic release gate
+    depends_on: [JAA-07]
+    objective: Make truth, eligibility, consistency, freshness, ATS integrity and duplication non-bypassable before submission.
+    work:
+      - Validate claim lineage, requirements, dates, titles, metrics, work rights and vacancy freshness.
+      - Validate PDFs through independent parsers/render checks.
+      - Build a content-addressed release manifest and one-use release token.
+      - Add duplicate-application and official-route checks.
+    acceptance:
+      - Every passing release binds exact vacancy, dossier, profile, evidence, prompt/model, document and validation hashes.
+      - Changing any bound input invalidates the release token.
+      - No probabilistic worker can mint or bypass a release token.
+      - Independent validators inspect the same artifact hash.
+    negative_controls:
+      - Unsupported claim, stale vacancy, conflicting date, ineligible contract, duplicate and missing official route each block release.
+
+  - id: JAA-09
+    name: Simulated ATS browser and receipt walking skeleton
+    depends_on: [JAA-08]
+    objective: Prove the full external-action boundary against a local realistic application portal.
+    work:
+      - Build a local ATS fixture with common fields, uploads, conditional questions and receipt page.
+      - Connect a real browser executor to existing workflow leases, selectors and checkpoints.
+      - Materialise approved values only at execution time through the credential/evidence boundary.
+      - Capture screenshots, field map, submit event and receipt by hash.
+    acceptance:
+      - One fixed real vacancy completes discovery-to-receipt through an actual browser.
+      - Injected interruption resumes from the first missing checkpoint without repeated submission.
+      - Selector drift either recovers through declared candidates or stops explicitly.
+      - A confirmed submission always carries the fixture's official receipt.
+    negative_controls:
+      - Missing approval, invalid release token, ambiguous selector and duplicate submit all prevent receipt creation.
+
+  - id: JAA-10
+    name: Walking-skeleton certification and shadow cohort
+    depends_on: [JAA-09]
+    objective: Establish honest product evidence before any real portal breadth.
+    work:
+      - Run the frozen end-to-end suite and time-separated live shadow cohort.
+      - Run negative controls, mutation tests, interruption/replay drills and independent review.
+      - Record cost, latency and model/prompt version metrics.
+      - Issue or withhold a content-hashed certification receipt.
+    acceptance:
+      - All hard quality metrics in BUILD_PLAN.md are met.
+      - The negative twin stops at each intended gate and never produces a receipt.
+      - No placeholder, mock or fixture-only branch can satisfy production certification.
+      - Shadow results are retained without contaminating the locked evaluation set.
+    negative_controls:
+      - A deliberately stubbed submission executor and fabricated receipt both fail authenticity checks.
+
+  - id: JAA-11
+    name: First official ATS adapter and real canary
+    depends_on: [JAA-10]
+    objective: Submit through one selected official application route and prove receipt/status integrity on the actual machine.
+    work:
+      - Select the ATS from current worthwhile vacancies using stability, legality, value and testability evidence.
+      - Implement its specific form discovery, field mapping, uploads, conditional answers and official receipt capture.
+      - Run bounded canary applications under a dedicated circuit breaker.
+    acceptance:
+      - The selected ATS passes fixture, sandbox where available and real-runtime drills.
+      - Each real canary was eligible, released exactly once and has an official receipt.
+      - Any unknown legal attestation, CAPTCHA, MFA or prohibited automation parks/skips safely.
+      - One invariant breach halts further canaries without weakening checks.
+    negative_controls:
+      - A changed form schema, missing receipt and second submit attempt all fail closed.
+
+  - id: JAA-12
+    name: Status, response and follow-up ingestion
+    depends_on: [JAA-11]
+    objective: Track the application after submission without manual bookkeeping.
+    work:
+      - Ingest official portal and message-derived status evidence through read-only connectors or local exports.
+      - Classify response stages with confidence while retaining raw source references.
+      - Schedule truthful follow-ups under per-employer policy.
+    acceptance:
+      - Status events are deduplicated, source-backed and ordered.
+      - Silence remains censored data, not an automatic rejection.
+      - Follow-up is never sent twice and never contradicts the application record.
+    negative_controls:
+      - An untrusted message cannot issue system instructions or alter candidate facts.
+
+  - id: JAA-13
+    name: Interview and communication loop
+    depends_on: [JAA-12]
+    objective: Convert the same evidence and employer intelligence into interview preparation and post-interview continuity.
+    work:
+      - Refresh relevant employer/team sources.
+      - Generate likely objections, evidence-backed stories, technical drills and candidate questions.
+      - Ingest debriefs and draft truthful follow-ups.
+    acceptance:
+      - Every interview story matches released claims and approved evidence.
+      - Employer/person-specific guidance cites fresh public professional sources.
+      - Debrief-derived facts remain unverified until corroborated.
+    negative_controls:
+      - Private/protected-person inference and invented interview experience are rejected.
+
+  - id: JAA-14
+    name: Outcome calibration and strategy learning
+    depends_on: [JAA-13]
+    objective: Improve selection and application strategy automatically from observed funnel outcomes.
+    work:
+      - Record pre-outcome predictions for stage progression automatically.
+      - Score predictions when evidence arrives and measure calibration by cohort.
+      - Run controlled strategy experiments and update only through evaluated policy versions.
+      - Feed recurrent verified gaps into the improvement optimiser.
+    acceptance:
+      - Every scored prediction predates the evidence that resolves it.
+      - Outcome attribution distinguishes no-response censoring from explicit rejection.
+      - Policy promotion requires non-regression on locked data and improvement on a holdout/live cohort.
+      - No routine manual prediction is required.
+    negative_controls:
+      - Post-hoc predictions and multi-variable unidentifiable experiments are excluded from promotion evidence.
+
+  - id: JAA-15
+    name: Portal and market expansion
+    depends_on: [JAA-14]
+    objective: Add only the sources and ATS routes with measured incremental career value.
+    work:
+      - Rank candidate adapters by worthwhile vacancies, expected interviews, implementation cost and operational friction.
+      - Certify each new adapter independently through the existing fixture/canary gate.
+      - Retain country/employer-specific eligibility and payroll checks.
+    acceptance:
+      - Each adapter has independent tests, real-runtime evidence, versioned workflow and rollback.
+      - Expansion does not degrade existing source freshness, receipt integrity or hard quality metrics.
+      - Unsupported routes remain visible as blocked opportunities rather than disappearing.
+    negative_controls:
+      - A new adapter cannot inherit another ATS's selectors or policy without explicit versioned evidence.
+
+  - id: JAA-16
+    name: Unattended operations and product release
+    depends_on: [JAA-15]
+    objective: Operate continuously with bounded failures, model fallback, recovery and honest reporting.
+    work:
+      - Add schedules, supervisor health, queue backpressure, budgets, pause/resume and rollback.
+      - Benchmark provider/model routes and configure tested fallbacks by capability.
+      - Produce daily operational and weekly outcome reports from the event ledger.
+      - Run crash, quota, network, stale-source, model-failure and restart drills.
+      - Ship the local-first web product with first-run onboarding, accessibility, privacy controls, backup/restore, upgrade and uninstall paths.
+      - Produce versioned installable release artefacts, commercial documentation and a real entitlement seam with an operator-activation runbook.
+    acceptance:
+      - The system survives injected interruption without data loss or duplicate consequential action.
+      - Provider fallback preserves schemas and every verification rung.
+      - Alerts distinguish weather, blocked work and product defects accurately.
+      - Version 0.1 release criteria in BUILD_PLAN.md are all evidenced by a certification receipt.
+      - A clean supported Mac can install, onboard, run the local walking skeleton, back up, restore and upgrade using the shipped artefacts and instructions.
+      - The product contains no person-specific defaults, test data, claims, credentials or paths in its distributable package.
+      - Commercial claims, privacy behaviour, support boundary, licensing state and external activation dependencies are documented truthfully.
+    negative_controls:
+      - Exhausted providers, broken portals and unavailable receipts pause affected work without fabricated progress.

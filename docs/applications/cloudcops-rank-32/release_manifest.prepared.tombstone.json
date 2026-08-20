@@ -1,0 +1,26 @@
+{
+  "schema_version": "jaa11.prepared-release-manifest-tombstone.v1",
+  "disposition": "superseded_withheld_never_arm",
+  "superseded_manifest_relative_path": "docs/applications/cloudcops-rank-32/release_manifest.prepared.json",
+  "superseded_manifest_sha256": "74f5f2ca99135689a50a1a699475c17546f4fde89e25c283eb3921e71e74e1f9",
+  "independent_review_relative_path": "docs/applications/JAA11_PERSONIO_INDEPENDENT_RELEASE_REVIEW_2026-08-04.md",
+  "independent_review_sha256": "6347710fa427c5e9e0833ed88d4e98c9614801db25e145ec21f6bd24bb3f3ff3",
+  "reason_codes": [
+    "not_a_real_jaa07_application_compilation",
+    "not_a_real_jaa08_release_manifest",
+    "no_issued_release_or_token",
+    "prepared_schema_hash_differs_from_executable_schema",
+    "personio_payload_not_bound_to_jaa08_objects",
+    "browser_and_transition_evidence_not_append_only",
+    "cv_claims_not_deterministically_derived_from_evidence",
+    "cloudcops_role_requirements_not_fully_supported_by_approved_evidence"
+  ],
+  "external_actions": {
+    "fields_populated": false,
+    "files_uploaded": false,
+    "release_token_issued": false,
+    "release_token_consumed": false,
+    "submit_clicked": false
+  },
+  "replacement_requirement": "A different candidate or corrected package must pass the real JAA-05-through-JAA-08 chain and a new independent release review."
+}

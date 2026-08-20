@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "axis_ratings",
+  "description": "Posting-specific 0-10 UK candidate-fit ratings. Deterministic combination happens in skeleton/scoring.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "technical_alignment", "evidence_match", "growth_potential",
+    "market_demand", "barrier_to_entry"
+  ],
+  "properties": {
+    "technical_alignment": {"type": "number", "minimum": 0, "maximum": 10},
+    "evidence_match": {"type": "number", "minimum": 0, "maximum": 10},
+    "growth_potential": {"type": "number", "minimum": 0, "maximum": 10},
+    "market_demand": {"type": "number", "minimum": 0, "maximum": 10},
+    "barrier_to_entry": {"type": "number", "minimum": 0, "maximum": 10}
+  }
+}

@@ -1,0 +1,406 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import career_automation.candidate_release_gate as gate_module
+from career_automation.candidate_release_gate import (
+    CandidateAuthorityFiles,
+    CandidateAuthorityReleaseGate,
+)
+from career_automation.rendering import render_pdf_artifacts
+from test_jaa08_independent_acceptance import _compilation_inputs
+
+
+ROOT = Path(__file__).resolve().parent
+NOW = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+
+
+def _gate_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    values = _compilation_inputs(tmp_path)
+    _, _, contact, questions, source, artifacts, artifact_root, _ = values
+    application_id = "1234567"
+    application_url = (
+        f"https://job-boards.greenhouse.io/example/jobs/{application_id}"
+    )
+    source = source.__class__(
+        source.source_id,
+        source.strategy_id,
+        f"greenhouse:example:{application_id}",
+        source.role_title,
+        source.company_name,
+        source.vacancy_source_identity,
+        source.vacancy_sha256,
+        source.contact,
+        source.facts,
+        source.style_slots,
+        source.cv_sections,
+        source.letter_sections,
+        source.answers,
+        source.content_sha256,
+    )
+    # Recompute the identity after replacing only the vacancy job key.
+    body = source.document(include_identity=False)
+    content_sha256 = hashlib.sha256(
+        gate_module.canonical_json(body).encode()
+    ).hexdigest()
+    source = source.__class__(
+        gate_module.content_hash(
+            {
+                "contract": "jaa07.application-source.v1",
+                "strategy_id": source.strategy_id,
+                "content_sha256": content_sha256,
+            }
+        ),
+        source.strategy_id,
+        source.job_key,
+        source.role_title,
+        source.company_name,
+        source.vacancy_source_identity,
+        source.vacancy_sha256,
+        source.contact,
+        source.facts,
+        source.style_slots,
+        source.cv_sections,
+        source.letter_sections,
+        source.answers,
+        content_sha256,
+    )
+    artifacts = render_pdf_artifacts(source)
+    artifact_root = tmp_path / "candidate-published"
+    directory = artifact_root / artifacts.artifact_set_sha256
+    directory.mkdir(parents=True)
+    (directory / "cv.pdf").write_bytes(artifacts.cv_pdf.pdf_bytes)
+    (directory / "cover-letter.pdf").write_bytes(
+        artifacts.cover_letter_pdf.pdf_bytes
+    )
+    monkeypatch.setattr(gate_module, "exact_clean_head", lambda _root: "a" * 40)
+    authority = {
+        "job_key": source.job_key,
+        "role_title": source.role_title,
+        "company_name": source.company_name,
+        "vacancy_sha256": source.vacancy_sha256,
+        "source_url": application_url,
+        "candidate_authority_sha256": "a" * 64,
+        "candidate_decision_receipt_sha256": "b" * 64,
+        "candidate_projection_sha256": "c" * 64,
+        "duplicate_snapshot_sha256": "d" * 64,
+        "contact_authority_sha256": contact.provenance_sha256,
+        "contact_registry_sha256": "e" * 64,
+    }
+    authority_files = CandidateAuthorityFiles(
+        archive_root=tmp_path,
+        discovery_path=tmp_path / "discovery.json",
+        candidate_authority_path=tmp_path / "authority.json",
+        contact_authority_path=tmp_path / "contact.json",
+        job_key=source.job_key,
+        decision_receipt_sha256="b" * 64,
+    )
+    monkeypatch.setattr(
+        gate_module,
+        "_verify_durable_candidate_authority",
+        lambda *_args, **_kwargs: dict(authority),
+    )
+    gate = CandidateAuthorityReleaseGate(
+        tmp_path / "release.sqlite3",
+        repository_root=ROOT,
+        authority_files=authority_files,
+        vacancy_requirements=("essential: approved requirement",),
+        clock=lambda: NOW,
+    )
+    arguments = {
+        "source": source,
+        "artifacts": artifacts,
+        "contact": contact,
+        "questions": questions,
+        "artifact_root": artifact_root,
+        "repository_root": ROOT,
+        "jurisdiction": "GB",
+        "contract_type": "employee",
+    }
+    return gate, arguments, application_url
+
+
+def test_candidate_gate_rejects_caller_minted_hash_mapping(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TypeError, match="durable authority files"):
+        CandidateAuthorityReleaseGate(
+            tmp_path / "release.sqlite3",
+            repository_root=ROOT,
+            authority_files={  # type: ignore[arg-type]
+                "candidate_decision_receipt_sha256": "b" * 64,
+                "duplicate_snapshot_sha256": "d" * 64,
+            },
+            vacancy_requirements=("essential: approved requirement",),
+        )
+
+
+def test_durable_authority_rehashes_exact_decision_projection_and_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_root = tmp_path / "archive"
+    authority_root = archive_root / "candidate-authorities"
+    object_root = archive_root / "objects"
+    authority_root.mkdir(parents=True)
+    duplicate_bytes = b"[]\n"
+    duplicate_sha256 = hashlib.sha256(duplicate_bytes).hexdigest()
+    duplicate_path = object_root / duplicate_sha256[:2] / duplicate_sha256
+    duplicate_path.parent.mkdir(parents=True)
+    duplicate_path.write_bytes(duplicate_bytes)
+    projection_payload = {"schema_version": "jaa.candidate-authority-projection.v1"}
+    projection_sha256 = hashlib.sha256(
+        gate_module._json_bytes(projection_payload)
+    ).hexdigest()
+    projection = {**projection_payload, "projection_sha256": projection_sha256}
+    receipt = {
+        "decision": "eligible",
+        "job_key": "greenhouse:example:1234567",
+        "role_title": "Engineer",
+        "company_name": "Example",
+        "vacancy_sha256": "a" * 64,
+        "source_url": "https://job-boards.greenhouse.io/example/jobs/1234567",
+        "candidate_projection_sha256": projection_sha256,
+        "duplicate_snapshot_sha256": duplicate_sha256,
+        "evidence_matrix": [
+            {
+                "requirement_id": "R-001",
+                "requirement_text": "approved requirement",
+            }
+        ],
+    }
+    receipt_sha256 = hashlib.sha256(gate_module._json_bytes(receipt)).hexdigest()
+    document = {
+        "schema_version": "jaa.production-candidate-authority.v2",
+        "duplicate_snapshot_sha256": duplicate_sha256,
+        "candidate_projection": projection,
+        "decisions": [
+            {
+                "job_key": receipt["job_key"],
+                "receipt": receipt,
+                "receipt_sha256": receipt_sha256,
+            }
+        ],
+    }
+    authority_bytes = gate_module._json_bytes(document)
+    authority_sha256 = hashlib.sha256(authority_bytes).hexdigest()
+    authority_path = authority_root / f"{authority_sha256}.json"
+    authority_path.write_bytes(authority_bytes)
+    discovery_path = tmp_path / "discovery.json"
+    discovery_path.write_text("{}\n", encoding="utf-8")
+    contact_path = tmp_path / "contact.json"
+    contact_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        gate_module,
+        "build_candidate_authority_document",
+        lambda **_kwargs: json.loads(authority_bytes),
+    )
+    monkeypatch.setattr(
+        gate_module,
+        "load_candidate_contact_authority",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            authority_sha256="e" * 64,
+            registry_sha256="f" * 64,
+        ),
+    )
+    files = CandidateAuthorityFiles(
+        archive_root=archive_root,
+        discovery_path=discovery_path,
+        candidate_authority_path=authority_path,
+        contact_authority_path=contact_path,
+        job_key=str(receipt["job_key"]),
+        decision_receipt_sha256=receipt_sha256,
+    )
+    binding = gate_module._verify_durable_candidate_authority(
+        files,
+        repository_root=ROOT,
+        vacancy_requirements=("R-001: approved requirement",),
+    )
+    assert binding["candidate_authority_sha256"] == authority_sha256
+    assert binding["candidate_decision_receipt_sha256"] == receipt_sha256
+    assert binding["contact_registry_sha256"] == "f" * 64
+    forged = CandidateAuthorityFiles(
+        **{
+            **files.__dict__,
+            "decision_receipt_sha256": "f" * 64,
+        }
+    )
+    with pytest.raises(ValueError, match="durable authority binding differs"):
+        gate_module._verify_durable_candidate_authority(
+            forged,
+            repository_root=ROOT,
+            vacancy_requirements=("R-001: approved requirement",),
+        )
+
+
+def test_candidate_gate_issues_consumes_and_reverifies_exact_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
+    issued = gate.issue(**arguments, application_url=application_url)
+    _row, manifest = gate._stored(issued.release_token)
+    assert manifest["vacancy_requirements"] == [
+        "essential: approved requirement"
+    ]
+    gate.verify_token_official_route(
+        release_token=issued.release_token,
+        adapter_id="greenhouse.production",
+        adapter_version="v1",
+        source_identity=application_url,
+    )
+    gate.verify_current_release_token(
+        release_token=issued.release_token,
+        **arguments,
+    )
+    consumed = gate.consume_release_token(
+        release_token=issued.release_token,
+        consumed_at=NOW,
+        **arguments,
+    )
+    verified = gate.verify_consumed_release_token(
+        release_token=issued.release_token,
+        consumed_at=NOW,
+        **arguments,
+    )
+    assert verified == consumed
+    with pytest.raises(ValueError, match="already consumed"):
+        gate.consume_release_token(
+            release_token=issued.release_token,
+            consumed_at=NOW,
+            **arguments,
+        )
+
+
+def test_unconsumed_preclick_release_is_superseded_with_append_only_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
+    first = gate.issue(**arguments, application_url=application_url)
+    gate._clock = lambda: NOW + timedelta(days=1)
+    second = gate.issue(**arguments, application_url=application_url)
+    assert second.release_token != first.release_token
+
+    with sqlite3.connect(gate.path) as connection:
+        superseded = connection.execute(
+            """SELECT manifest_sha256,replacement_manifest_sha256
+               FROM candidate_authority_release_token_supersessions"""
+        ).fetchone()
+        active = connection.execute(
+            "SELECT manifest_sha256,consumed_at FROM candidate_authority_release_tokens"
+        ).fetchone()
+    assert superseded == (first.manifest_sha256, second.manifest_sha256)
+    assert active == (second.manifest_sha256, None)
+    with pytest.raises(ValueError, match="unknown"):
+        gate._stored(first.release_token)
+    gate._stored(second.release_token)
+
+
+def test_consumed_release_cannot_be_superseded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
+    issued = gate.issue(**arguments, application_url=application_url)
+    gate.consume_release_token(
+        release_token=issued.release_token,
+        consumed_at=NOW,
+        **arguments,
+    )
+    gate._clock = lambda: NOW + timedelta(days=1)
+    with pytest.raises(ValueError, match="duplicate authority differs"):
+        gate.issue(**arguments, application_url=application_url)
+
+
+def test_candidate_gate_rejects_pdf_or_repository_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
+    issued = gate.issue(**arguments, application_url=application_url)
+    artifacts = arguments["artifacts"]
+    directory = arguments["artifact_root"] / artifacts.artifact_set_sha256
+    (directory / "cv.pdf").write_bytes(b"different")
+    with pytest.raises(ValueError, match="upload file differs"):
+        gate.consume_release_token(
+            release_token=issued.release_token,
+            consumed_at=NOW,
+            **arguments,
+        )
+
+    (directory / "cv.pdf").write_bytes(artifacts.cv_pdf.pdf_bytes)
+    monkeypatch.setattr(gate_module, "exact_clean_head", lambda _root: "f" * 40)
+    with pytest.raises(ValueError, match="authority drift"):
+        gate.consume_release_token(
+            release_token=issued.release_token,
+            consumed_at=NOW,
+            **arguments,
+        )
+
+
+def test_candidate_gate_rejects_route_or_candidate_binding_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
+    issued = gate.issue(**arguments, application_url=application_url)
+    with pytest.raises(ValueError, match="different official route"):
+        gate.verify_token_official_route(
+            release_token=issued.release_token,
+            adapter_id="greenhouse.production",
+            adapter_version="v1",
+            source_identity=application_url.replace("1234567", "7654321"),
+        )
+    changed = dict(arguments)
+    changed["jurisdiction"] = "US"
+    with pytest.raises(ValueError, match="work-right scope"):
+        gate.consume_release_token(
+            release_token=issued.release_token,
+            consumed_at=NOW,
+            **changed,
+        )
+
+
+def test_candidate_gate_rejects_vacancy_requirement_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
+    issued = gate.issue(**arguments, application_url=application_url)
+    gate.vacancy_requirements = ("essential: substituted requirement",)
+    with pytest.raises(ValueError, match="authority drift"):
+        gate.consume_release_token(
+            release_token=issued.release_token,
+            consumed_at=NOW,
+            **arguments,
+        )
+
+
+def test_candidate_gate_reauthenticates_durable_sources_before_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
+    issued = gate.issue(**arguments, application_url=application_url)
+    monkeypatch.setattr(
+        gate_module,
+        "_verify_durable_candidate_authority",
+        lambda *_args, **_kwargs: {
+            **gate.authority_binding,
+            "candidate_decision_receipt_sha256": "f" * 64,
+        },
+    )
+    with pytest.raises(ValueError, match="durable authority drifted"):
+        gate.consume_release_token(
+            release_token=issued.release_token,
+            consumed_at=NOW,
+            **arguments,
+        )

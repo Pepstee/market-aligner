@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "job_extract",
+  "description": "Structured UK AI/IT vacancy extraction for a configurable candidate-fit pipeline.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job_title", "company", "location", "salary_text", "contract_type",
+    "experience_required", "sponsorship_signal", "mapped_career", "entry_level", "required_software",
+    "responsibilities", "required_skills", "preferred_skills",
+    "education_required", "certifications_required", "benefits", "application_deadline",
+    "remote_flag", "why_it_fits", "skills_to_learn", "extraction_confidence"
+  ],
+  "properties": {
+    "job_title": {"type": "string"},
+    "company": {"type": "string"},
+    "location": {"type": "string"},
+    "salary_text": {"type": "string"},
+    "contract_type": {"type": "string"},
+    "experience_required": {"type": "string"},
+    "sponsorship_signal": {"type": "string", "enum": ["available", "not_available", "conditional", "unknown"]},
+    "mapped_career": {
+      "type": "string",
+      "enum": [
+        "Agentic_AI_Engineer", "AI_Automation_Engineer", "Applied_AI_Engineer",
+        "ML_MLOps_Engineer", "Cloud_Platform_Engineer",
+        "Security_Detection_Engineer", "Backend_Engineer", "Full_Stack_Engineer",
+        "Technical_Solutions_Engineer", "other"
+      ]
+    },
+    "entry_level": {"type": ["boolean", "null"]},
+    "required_software": {"type": "array", "items": {"type": "string"}},
+    "job_description": {"type": "string"},
+    "responsibilities": {"type": "array", "items": {"type": "string"}},
+    "required_skills": {"type": "array", "items": {"type": "string"}},
+    "preferred_skills": {"type": "array", "items": {"type": "string"}},
+    "education_required": {"type": "string"},
+    "certifications_required": {"type": "array", "items": {"type": "string"}},
+    "benefits": {"type": "array", "items": {"type": "string"}},
+    "application_deadline": {"type": "string"},
+    "remote_flag": {"type": ["boolean", "null"]},
+    "why_it_fits": {"type": "string"},
+    "skills_to_learn": {"type": "array", "items": {"type": "string"}},
+    "extraction_confidence": {"type": "number", "minimum": 0, "maximum": 1}
+  }
+}

@@ -1,0 +1,366 @@
+{
+  "as_of": "2030-01-01",
+  "configuration": {
+    "abstain_confidence_bp": 5000,
+    "match_confidence_bp": 8000,
+    "policy_identity": "jaa05.evidence-match-policy.v1",
+    "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031"
+  },
+  "examples": [
+    {
+      "evidence": [
+        {
+          "approval_state": "approved",
+          "content_sha256": "6b5a2561ead1cd3cad473ad2c0e296c7e183d0a292707c6511de4b4f8fe73897",
+          "demonstrates": ["achievement-wording"],
+          "epistemic_state": "evidence",
+          "evidence_id": "evidence-presentation-match",
+          "negative": false,
+          "proof_class": "verified_claim",
+          "statement": "Synthetic reviewed artefact for presentation-match.",
+          "valid_until": "2035-01-01",
+          "verification_decision": "approved",
+          "verification_method": "synthetic-independent-review",
+          "version": 1
+        }
+      ],
+      "example_id": "presentation-match",
+      "label": "matched",
+      "proposal": {
+        "basis": "direct",
+        "confidence_bp": 9200,
+        "evidence_ids": ["evidence-presentation-match"],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "e170e42e751a3b2201cbc95075bfec49af857a62959302a0b7dba8803d30a786",
+          "input_sha256": "a153d1bc4b55ace4f0f24a0302b54e31f3ad969aad73379ab637247e822d2a2f",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "presentation-match"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["verified_claim"],
+        "bridge_policy": "present",
+        "criterion": "achievement-wording",
+        "essential": false,
+        "gap_kind": "presentation",
+        "opportunity_weight_bp": 9000,
+        "requirement_id": "presentation-match",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [0, 40],
+        "text": "Synthetic atomic presentation requirement 1."
+      }
+    },
+    {
+      "evidence": [
+        {
+          "approval_state": "approved",
+          "content_sha256": "16866659a42e133fbb94e379adc58ecad31451f26c9c336da59270100440381a",
+          "demonstrates": ["archived-delivery-receipt"],
+          "epistemic_state": "evidence",
+          "evidence_id": "evidence-retrieval-abstain",
+          "negative": false,
+          "proof_class": "work_artifact",
+          "statement": "Synthetic reviewed artefact for retrieval-abstain.",
+          "valid_until": "2035-01-01",
+          "verification_decision": "approved",
+          "verification_method": "synthetic-independent-review",
+          "version": 1
+        }
+      ],
+      "example_id": "retrieval-abstain",
+      "label": "abstain",
+      "proposal": {
+        "basis": "direct",
+        "confidence_bp": 7000,
+        "evidence_ids": ["evidence-retrieval-abstain"],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "6aaffcc22aa6b918c8a9fcd50aad7f46c108c73ea95e91ebfecd280c3d030d55",
+          "input_sha256": "ac28a5ab49b00b8b726785f71844d299412670b66311ee87be066197c8ed3598",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "retrieval-abstain"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["work_artifact"],
+        "bridge_policy": "retrieve",
+        "criterion": "archived-delivery-receipt",
+        "essential": false,
+        "gap_kind": "retrieval",
+        "opportunity_weight_bp": 8700,
+        "requirement_id": "retrieval-abstain",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [50, 90],
+        "text": "Synthetic atomic retrieval requirement 2."
+      }
+    },
+    {
+      "evidence": [],
+      "example_id": "knowledge-absent",
+      "label": "no_match",
+      "proposal": {
+        "basis": "none",
+        "confidence_bp": 9400,
+        "evidence_ids": [],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "input_sha256": "91d10fdab6a51007298085686b3571735ed3da8f9c2eab0672a64356e47aacdd",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "knowledge-absent"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["test_result"],
+        "bridge_policy": "learn_and_test",
+        "criterion": "distributed-systems-test",
+        "essential": false,
+        "gap_kind": "knowledge",
+        "opportunity_weight_bp": 8400,
+        "requirement_id": "knowledge-absent",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [100, 140],
+        "text": "Synthetic atomic knowledge requirement 3."
+      }
+    },
+    {
+      "evidence": [
+        {
+          "approval_state": "approved",
+          "content_sha256": "f45506c4310d5a2e0f700ce17cb3c603df67dee1e71bf4dbf266ee321dc452af",
+          "demonstrates": ["production-deployment"],
+          "epistemic_state": "evidence",
+          "evidence_id": "evidence-execution-match",
+          "negative": false,
+          "proof_class": "work_artifact",
+          "statement": "Synthetic reviewed artefact for execution-match.",
+          "valid_until": "2035-01-01",
+          "verification_decision": "approved",
+          "verification_method": "synthetic-independent-review",
+          "version": 1
+        }
+      ],
+      "example_id": "execution-match",
+      "label": "matched",
+      "proposal": {
+        "basis": "direct",
+        "confidence_bp": 9100,
+        "evidence_ids": ["evidence-execution-match"],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "a82fe933622f2cd37696a15291852c94d82972b93a966dbfb7c556a42ae105ce",
+          "input_sha256": "83aa738d20ff35a104c39be5acec3c35c624cbfd6fbf16e21e7e9fe87025cfe4",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "execution-match"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["work_artifact"],
+        "bridge_policy": "execute_and_verify",
+        "criterion": "production-deployment",
+        "essential": false,
+        "gap_kind": "execution",
+        "opportunity_weight_bp": 8100,
+        "requirement_id": "execution-match",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [150, 190],
+        "text": "Synthetic atomic execution requirement 4."
+      }
+    },
+    {
+      "evidence": [
+        {
+          "approval_state": "approved",
+          "content_sha256": "1169b8eba0c5ed071a38ef07ba146405e2090caa7b4042640563dae04f6e068a",
+          "demonstrates": ["public-api-artifact"],
+          "epistemic_state": "evidence",
+          "evidence_id": "evidence-evidence-wrong-proof",
+          "negative": false,
+          "proof_class": "verified_claim",
+          "statement": "Synthetic reviewed artefact for evidence-wrong-proof.",
+          "valid_until": "2035-01-01",
+          "verification_decision": "approved",
+          "verification_method": "synthetic-independent-review",
+          "version": 1
+        }
+      ],
+      "example_id": "evidence-wrong-proof",
+      "label": "no_match",
+      "proposal": {
+        "basis": "direct",
+        "confidence_bp": 9600,
+        "evidence_ids": ["evidence-evidence-wrong-proof"],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "cd06be69055e8768dcd00398a74f007fc48457aeff1086cf9ee67f75ea6aeea1",
+          "input_sha256": "d8412f91b22e6763d78e8d5917c6c5c0dea7802442f1c9685a3f6e59431f2c60",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "evidence-wrong-proof"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["portfolio_artifact"],
+        "bridge_policy": "build_evidence",
+        "criterion": "public-api-artifact",
+        "essential": false,
+        "gap_kind": "evidence",
+        "opportunity_weight_bp": 7800,
+        "requirement_id": "evidence-wrong-proof",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [200, 240],
+        "text": "Synthetic atomic evidence requirement 5."
+      }
+    },
+    {
+      "evidence": [
+        {
+          "approval_state": "approved",
+          "content_sha256": "b5878cde7114800d375ba696e68479ece418b79d0d7750406af10ea13cf7a072",
+          "demonstrates": ["professional-python"],
+          "epistemic_state": "evidence",
+          "evidence_id": "evidence-experience-similarity",
+          "negative": false,
+          "proof_class": "portfolio_artifact",
+          "statement": "Synthetic reviewed artefact for experience-similarity.",
+          "valid_until": "2035-01-01",
+          "verification_decision": "approved",
+          "verification_method": "synthetic-independent-review",
+          "version": 1
+        }
+      ],
+      "example_id": "experience-similarity",
+      "label": "no_match",
+      "proposal": {
+        "basis": "direct",
+        "confidence_bp": 9900,
+        "evidence_ids": ["evidence-experience-similarity"],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "eb27338e77e10296fa1f95a2a207a39c74c74dc4fbf09144fab8c0c88df36c6c",
+          "input_sha256": "fc650396ec503357667ae0d380eed2b9bdfa02afefc20bc5a4f7e6c88f7b4c9f",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "experience-similarity"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["employment_record", "external_outcome"],
+        "bridge_policy": "gain_experience",
+        "criterion": "professional-python",
+        "essential": true,
+        "gap_kind": "experience",
+        "opportunity_weight_bp": 7500,
+        "requirement_id": "experience-similarity",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [250, 290],
+        "text": "Synthetic atomic experience requirement 6."
+      }
+    },
+    {
+      "evidence": [
+        {
+          "approval_state": "approved",
+          "content_sha256": "a60c7bf7f4e3d7e15a3709f0a559cae265b9dd38b1c39108b02633dff34cd8e8",
+          "demonstrates": ["cloud-certification"],
+          "epistemic_state": "evidence",
+          "evidence_id": "evidence-credential-match",
+          "negative": false,
+          "proof_class": "credential",
+          "statement": "Synthetic reviewed artefact for credential-match.",
+          "valid_until": "2035-01-01",
+          "verification_decision": "approved",
+          "verification_method": "synthetic-independent-review",
+          "version": 1
+        }
+      ],
+      "example_id": "credential-match",
+      "label": "matched",
+      "proposal": {
+        "basis": "direct",
+        "confidence_bp": 9300,
+        "evidence_ids": ["evidence-credential-match"],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "94bdbaa7888ce1c45db51947429596ea6e9f23544d6b32d197671aaf5f42bfc8",
+          "input_sha256": "b697dd8f0a3c2a379c6f496d72a98b5a2e5a0a2a159a9aa6dabcf00e77d0cfb5",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "credential-match"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["credential"],
+        "bridge_policy": "earn_credential",
+        "criterion": "cloud-certification",
+        "essential": false,
+        "gap_kind": "credential",
+        "opportunity_weight_bp": 7200,
+        "requirement_id": "credential-match",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [300, 340],
+        "text": "Synthetic atomic credential requirement 7."
+      }
+    },
+    {
+      "evidence": [],
+      "example_id": "structural-block",
+      "label": "no_match",
+      "proposal": {
+        "basis": "none",
+        "confidence_bp": 9800,
+        "evidence_ids": [],
+        "rationale": "Synthetic locked reviewer decision.",
+        "receipt": {
+          "candidate_profile_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "input_sha256": "c3b4e797ac3007d8b804614dcfeee3e3227c3bec26c7b65174c3a915dfcdd2d9",
+          "model": "reviewed-labels-v1",
+          "policy_sha256": "1237234c89abebbb3b7e82378329a1264afb80cb260ac6e47842cd6504865031",
+          "prompt_sha256": "c94d8d27981f042d98b2f7da90b1311c543c0e3e2fc31862b7bb5a33ba605639",
+          "provider": "locked-synthetic-review"
+        },
+        "requirement_id": "structural-block"
+      },
+      "requirement": {
+        "accepted_proof_classes": ["verified_claim"],
+        "bridge_policy": "fatal",
+        "criterion": "existing-work-authorisation",
+        "essential": true,
+        "gap_kind": "structural",
+        "opportunity_weight_bp": 6900,
+        "requirement_id": "structural-block",
+        "source_identity": "synthetic:jaa05:locked",
+        "source_span": [350, 390],
+        "text": "Synthetic atomic structural requirement 8."
+      }
+    }
+  ],
+  "examples_hash": "8c4c0ee903580422227d58d564e5272e423018f7326b4d78cf3da2d30c78ea6b",
+  "limitations": [
+    "not production calibration",
+    "does not certify JAA-05 while JAA-04 is incomplete",
+    "synthetic labels exercise software semantics only"
+  ],
+  "locked_set_id": "JAA-05-synthetic-offline-contract-2026-07-26",
+  "locked_set_kind": "synthetic_offline_contract",
+  "schema_version": "jaa05.locked-labels.v1"
+}

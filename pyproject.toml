@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-aligner"
+version = "1.0.0"
+description = "Evidence-led, configurable UK AI/IT vacancy matcher."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "cryptography==49.0.0",
+    "pyyaml==6.0.3",
+    "requests==2.32.5",
+    "openpyxl==3.1.5",
+    "pypdf==6.6.0",
+]
+
+[project.optional-dependencies]
+# Playwright boards (jobkorea, notefolio) + the Fit/Opportunity scatter.
+full = ["playwright>=1.40", "matplotlib>=3.8", "jsonschema>=4.20"]
+
+[project.scripts]
+market-aligner = "skeleton.run:main"
+uk-job-matcher = "skeleton.run:main"
+jaa-baseline = "baseline_adoption.cli:main"
+jaa-lifecycle = "career_automation.cli:main"
+jaa-official-cohort = "career_automation.official_cohort:main"
+jaa-document-assurance = "career_automation.external_document_assurance:main"
+
+[tool.setuptools]
+packages = [
+    "baseline_adoption",
+    "career_automation",
+    "cv_generation",
+    "form_filling",
+    "jaa_core",
+    "skeleton",
+    "scraper",
+    "scraper.adapters",
+    "llm",
+    "profiler",
+    "profiler.instrument",
+]
+
+[tool.setuptools.package-data]
+skeleton = ["config.yaml"]
+llm = ["prompts/*.txt", "schemas/*.json"]
+career_automation = ["fixtures/*.json", "fixtures/provider-observation-capture-objects/*.json"]
