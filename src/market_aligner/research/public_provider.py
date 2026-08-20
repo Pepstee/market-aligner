@@ -389,6 +389,7 @@ class CanonicalCollectorVacancyLoader:
             row = connection.execute(
                 """SELECT q.refresh_event_id,q.status,e.event_type,e.actor_kind,
                           e.payload_json,e.idempotency_key,d.dossier_hash,
+                          d.dossier_json,
                           p.source_content_sha256,
                           p.receipt_sha256 AS promotion_receipt_sha256
                    FROM employer_research_queue q
@@ -424,6 +425,10 @@ class CanonicalCollectorVacancyLoader:
                 )
                 or payload != expected
                 or row["dossier_hash"] != task.refresh_prior_dossier_sha256
+                or hashlib.sha256(
+                    str(row["dossier_json"] or "").encode("utf-8")
+                ).hexdigest()
+                != row["dossier_hash"]
                 or row["source_content_sha256"] != task.source_content_sha256
                 or row["promotion_receipt_sha256"]
                 != task.promotion_receipt_sha256

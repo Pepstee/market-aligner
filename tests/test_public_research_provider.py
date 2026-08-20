@@ -605,8 +605,8 @@ def test_refresh_worker_bridge_rejects_canonical_event_substitution(
                 (refreshed_task.refresh_event_id,),
             )
         connection.execute(
-            "UPDATE employer_dossiers SET dossier_hash=? WHERE profile_id=? AND job_key=?",
-            ("0" * 64, profile_id, JOB_KEY),
+            "UPDATE employer_dossiers SET dossier_json=? WHERE profile_id=? AND job_key=?",
+            ("{}", profile_id, JOB_KEY),
         )
     bridge = CanonicalCollectorVacancyLoader(
         data_home=tmp_path, collection_config_path=config

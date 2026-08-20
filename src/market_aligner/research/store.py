@@ -591,7 +591,8 @@ class AssessmentStore:
                           e.actor_kind AS refresh_actor_kind,
                           e.payload_json AS refresh_payload_json,
                           e.idempotency_key AS refresh_event_idempotency_key,
-                          d.dossier_hash AS refresh_current_dossier_hash
+                          d.dossier_hash AS refresh_current_dossier_hash,
+                          d.dossier_json AS refresh_current_dossier_json
                    FROM employer_research_queue q JOIN assessments a
                      ON a.profile_id=q.profile_id AND a.job_key=q.job_key
                    LEFT JOIN assessment_promotions p
@@ -623,6 +624,9 @@ class AssessmentStore:
             )
             refresh_current_dossier_hash = values.pop(
                 "refresh_current_dossier_hash"
+            )
+            refresh_current_dossier_json = values.pop(
+                "refresh_current_dossier_json"
             )
             refresh_values = {
                 "refresh_event_id": refresh_event_id,
@@ -679,6 +683,11 @@ class AssessmentStore:
                         f"{payload['collection_transition_sha256']}"
                     )
                     or payload["prior_dossier_hash"]
+                    != refresh_current_dossier_hash
+                    or not isinstance(refresh_current_dossier_json, str)
+                    or hashlib.sha256(
+                        refresh_current_dossier_json.encode("utf-8")
+                    ).hexdigest()
                     != refresh_current_dossier_hash
                 ):
                     raise ValueError("research refresh event differs from promotion")
@@ -1215,6 +1224,7 @@ class AssessmentStore:
                 """SELECT q.lease_owner,q.status,q.refresh_event_id,
                           e.event_type,e.actor_kind,e.payload_json,e.idempotency_key,
                           d.dossier_hash AS current_dossier_hash,
+                          d.dossier_json AS current_dossier_json,
                           p.source_content_sha256,
                           p.receipt_sha256 AS current_promotion_receipt_sha256
                    FROM employer_research_queue q
@@ -1249,6 +1259,11 @@ class AssessmentStore:
                         f"{refresh_payload.get('collection_transition_sha256')}"
                     )
                     or refresh_payload.get("prior_dossier_hash")
+                    != lease["current_dossier_hash"]
+                    or not isinstance(lease["current_dossier_json"], str)
+                    or hashlib.sha256(
+                        lease["current_dossier_json"].encode("utf-8")
+                    ).hexdigest()
                     != lease["current_dossier_hash"]
                     or refresh_payload.get("source_content_sha256")
                     != dossier.source_content_sha256
