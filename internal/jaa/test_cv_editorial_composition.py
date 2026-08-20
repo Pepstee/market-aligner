@@ -1,0 +1,431 @@
+from __future__ import annotations
+
+import hashlib
+from dataclasses import replace
+
+import pytest
+
+from cv_generation.editorial_composition import (
+    ApprovedCVClaim,
+    CVSection,
+    CandidateEditorialAuthority,
+    EditorialAtom,
+    EditorialCompositionError,
+    EditorialStageEvidence,
+    admit_editorial_composition,
+    build_editorial_draft,
+    build_editorial_request,
+    humanizer_request_sha256,
+    validate_editorial_draft,
+)
+
+
+TITLE = (
+    "SCAFAD: A Seven-Layer, Privacy-Preserving, Explainable "
+    "Anomaly-Detection Pipeline for Serverless Workloads"
+)
+
+
+def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
+    return ApprovedCVClaim(
+        claim_id=claim_id,
+        text=text,
+        text_sha256=hashlib.sha256(text.encode()).hexdigest(),
+        evidence_ids=(f"evidence:{claim_id}",),
+        category=category,
+    )
+
+
+def _fixture():
+    authority = CandidateEditorialAuthority(
+        candidate_name="Artiom Gutu",
+        candidate_city="Birmingham, United Kingdom",
+        graduation_month_year="July 2026",
+        dissertation_title=TITLE,
+        source_sha256="a" * 64,
+        require_dissertation=True,
+    )
+    claims = (
+        _claim(
+            "summary",
+            "AI systems engineer focused on reliable automation.",
+            "summary",
+        ),
+        _claim(
+            "capability",
+            "AI orchestration, systems design, workflow automation and assurance.",
+            "capability_domain",
+        ),
+        _claim(
+            "project",
+            "Built an evidence-bound multi-agent orchestration system.",
+            "project",
+        ),
+        _claim(
+            "education",
+            f"First-Class BSc (Hons) Computer Science, July 2026. Dissertation: {TITLE}.",
+            "education",
+        ),
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title="AI Automation Engineer",
+        company_name="Example Systems",
+        vacancy_sha256="b" * 64,
+        approved_claims=claims,
+    )
+    sections = (
+        CVSection(
+            "Professional Summary",
+            (
+                EditorialAtom("connective", "Relevant background:", None),
+                EditorialAtom("approved_claim", claims[0].text, "summary"),
+            ),
+        ),
+        CVSection(
+            "Core Capabilities",
+            (EditorialAtom("approved_claim", claims[1].text, "capability"),),
+        ),
+        CVSection(
+            "Projects",
+            (EditorialAtom("approved_claim", claims[2].text, "project"),),
+        ),
+        CVSection(
+            "Education",
+            (EditorialAtom("approved_claim", claims[3].text, "education"),),
+        ),
+    )
+    writer = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=sections,
+    )
+    final_sections = (
+        replace(
+            sections[0],
+            atoms=(
+                EditorialAtom("connective", "Background relevant to the role:", None),
+                sections[0].atoms[1],
+            ),
+        ),
+        *sections[1:],
+    )
+    final = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=final_sections,
+    )
+    return request, writer, final
+
+
+def _stage_evidence(request, writer, final):
+    return (
+        EditorialStageEvidence(
+            stage="resume_writer",
+            environment="synthetic",
+            provider="fixture-writer",
+            model="fixture-v1",
+            invocation_id="writer-session-1",
+            request_sha256=request.request_sha256,
+            response_sha256=writer.draft_sha256,
+        ),
+        EditorialStageEvidence(
+            stage="humanizer",
+            environment="synthetic",
+            provider="fixture-humanizer",
+            model="fixture-v1",
+            invocation_id="humanizer-session-1",
+            request_sha256=humanizer_request_sha256(request, writer),
+            response_sha256=final.draft_sha256,
+        ),
+    )
+
+
+def test_admits_evidence_bound_writer_and_distinct_humanizer_sessions() -> None:
+    request, writer, final = _fixture()
+    writer_evidence, humanizer_evidence = _stage_evidence(request, writer, final)
+
+    writer_receipt, humanizer_receipt, composition = admit_editorial_composition(
+        request=request,
+        writer_draft=writer,
+        final_draft=final,
+        writer_evidence=writer_evidence,
+        humanizer_evidence=humanizer_evidence,
+    )
+
+    assert writer_receipt.stage == "resume_writer"
+    assert humanizer_receipt.stage == "humanizer"
+    assert writer_receipt.invocation_id_sha256 != humanizer_receipt.invocation_id_sha256
+    assert composition.request_sha256 == request.request_sha256
+    assert composition.final_draft_sha256 == final.draft_sha256
+    assert composition.release_authority is False
+
+
+def test_good_unchanged_humanizer_output_is_not_rejected() -> None:
+    request, writer, _ = _fixture()
+    writer_evidence, humanizer_evidence = _stage_evidence(request, writer, writer)
+    humanizer_evidence = replace(
+        humanizer_evidence,
+        response_sha256=writer.draft_sha256,
+    )
+
+    _, _, receipt = admit_editorial_composition(
+        request=request,
+        writer_draft=writer,
+        final_draft=writer,
+        writer_evidence=writer_evidence,
+        humanizer_evidence=humanizer_evidence,
+    )
+
+    assert receipt.final_draft_sha256 == writer.draft_sha256
+
+
+def test_unknown_or_rewritten_claim_is_rejected() -> None:
+    request, writer, _ = _fixture()
+    summary = writer.sections[0]
+    unknown = replace(
+        summary,
+        atoms=(
+            summary.atoms[0],
+            EditorialAtom("approved_claim", "Invented a result.", "not-approved"),
+        ),
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(unknown, *writer.sections[1:]),
+    )
+    with pytest.raises(EditorialCompositionError, match="unknown claim"):
+        validate_editorial_draft(request, draft)
+
+    rewritten = replace(
+        summary,
+        atoms=(
+            summary.atoms[0],
+            EditorialAtom("approved_claim", "Improved the approved claim.", "summary"),
+        ),
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(rewritten, *writer.sections[1:]),
+    )
+    with pytest.raises(EditorialCompositionError, match="changed an approved claim"):
+        validate_editorial_draft(request, draft)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    (
+        ("Right to work in the UK.", "work-rights"),
+        ("Curriculum Vitae", "document labels"),
+    ),
+)
+def test_candidate_prohibited_content_is_rejected(text: str, message: str) -> None:
+    request, writer, _ = _fixture()
+    malicious = _claim("malicious", text, "project")
+    request = build_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(*request.approved_claims, malicious),
+    )
+    projects = writer.sections[2]
+    projects = replace(
+        projects,
+        atoms=(*projects.atoms, EditorialAtom("approved_claim", text, "malicious")),
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(*writer.sections[:2], projects, *writer.sections[3:]),
+    )
+    with pytest.raises(EditorialCompositionError, match=message):
+        validate_editorial_draft(request, draft)
+
+
+def test_location_is_bound_to_candidate_authority() -> None:
+    request, writer, _ = _fixture()
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city="Wolverhampton, United Kingdom",
+        sections=writer.sections,
+    )
+    with pytest.raises(EditorialCompositionError, match="location differs"):
+        validate_editorial_draft(request, draft)
+
+
+def test_graduation_day_and_wrong_dissertation_are_rejected() -> None:
+    request, writer, _ = _fixture()
+    wrong = _claim(
+        "wrong-education",
+        "BSc Computer Science, 2 July 2026. Dissertation: SCAFAD.",
+        "education",
+    )
+    request = build_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(*request.approved_claims, wrong),
+    )
+    education = replace(
+        writer.sections[-1],
+        atoms=(EditorialAtom("approved_claim", wrong.text, wrong.claim_id),),
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(*writer.sections[:-1], education),
+    )
+    with pytest.raises(EditorialCompositionError, match="month and year"):
+        validate_editorial_draft(request, draft)
+
+
+def test_dissertation_cannot_appear_without_candidate_authority() -> None:
+    request, writer, _ = _fixture()
+    authority = replace(
+        request.authority,
+        dissertation_title=None,
+        require_dissertation=False,
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=request.approved_claims,
+    )
+    with pytest.raises(EditorialCompositionError, match="lacks candidate authority"):
+        validate_editorial_draft(request, writer)
+
+
+def test_formats_and_datastores_are_not_capability_domains() -> None:
+    request, writer, _ = _fixture()
+    bad = _claim("bad-capability", "Python, JSON and SQLite.", "capability_domain")
+    request = build_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(*request.approved_claims, bad),
+    )
+    capabilities = replace(
+        writer.sections[1],
+        atoms=(EditorialAtom("approved_claim", bad.text, bad.claim_id),),
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(writer.sections[0], capabilities, *writer.sections[2:]),
+    )
+    with pytest.raises(EditorialCompositionError, match="masquerade"):
+        validate_editorial_draft(request, draft)
+
+
+@pytest.mark.parametrize(
+    "connective",
+    (
+        "I built 12 production systems.",
+        "A pivotal contribution — with measurable value.",
+    ),
+)
+def test_connectives_cannot_smuggle_claims_or_ai_prose(connective: str) -> None:
+    request, writer, _ = _fixture()
+    summary = replace(
+        writer.sections[0],
+        atoms=(EditorialAtom("connective", connective), writer.sections[0].atoms[1]),
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(summary, *writer.sections[1:]),
+    )
+    with pytest.raises(EditorialCompositionError, match="connective"):
+        validate_editorial_draft(request, draft)
+
+
+def test_humanizer_cannot_change_claims_or_share_writer_session() -> None:
+    request, writer, final = _fixture()
+    summary = final.sections[0]
+    altered = replace(
+        summary,
+        atoms=(
+            summary.atoms[0],
+            EditorialAtom("approved_claim", "Humanizer invented this.", "summary"),
+        ),
+    )
+    final = build_editorial_draft(
+        candidate_name=final.candidate_name,
+        candidate_city=final.candidate_city,
+        sections=(altered, *final.sections[1:]),
+    )
+    writer_evidence, humanizer_evidence = _stage_evidence(request, writer, final)
+    with pytest.raises(EditorialCompositionError, match="changed an approved claim"):
+        admit_editorial_composition(
+            request=request,
+            writer_draft=writer,
+            final_draft=final,
+            writer_evidence=writer_evidence,
+            humanizer_evidence=humanizer_evidence,
+        )
+
+    request, writer, final = _fixture()
+    writer_evidence, humanizer_evidence = _stage_evidence(request, writer, final)
+    humanizer_evidence = replace(
+        humanizer_evidence,
+        invocation_id=writer_evidence.invocation_id,
+    )
+    with pytest.raises(EditorialCompositionError, match="distinct sessions"):
+        admit_editorial_composition(
+            request=request,
+            writer_draft=writer,
+            final_draft=final,
+            writer_evidence=writer_evidence,
+            humanizer_evidence=humanizer_evidence,
+        )
+
+
+def test_stage_hash_mismatch_fails_closed() -> None:
+    request, writer, final = _fixture()
+    writer_evidence, humanizer_evidence = _stage_evidence(request, writer, final)
+    with pytest.raises(EditorialCompositionError, match="not bound"):
+        admit_editorial_composition(
+            request=request,
+            writer_draft=writer,
+            final_draft=final,
+            writer_evidence=replace(writer_evidence, response_sha256="f" * 64),
+            humanizer_evidence=humanizer_evidence,
+        )
+
+
+def test_connective_only_section_is_not_admitted() -> None:
+    request, writer, _ = _fixture()
+    summary = replace(
+        writer.sections[0],
+        atoms=(EditorialAtom("connective", "Relevant background:"),),
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(summary, *writer.sections[1:]),
+    )
+    with pytest.raises(EditorialCompositionError, match="approved factual claims"):
+        validate_editorial_draft(request, draft)
+
+
+def test_receipts_are_self_validating_and_never_release_authority() -> None:
+    request, writer, final = _fixture()
+    writer_evidence, humanizer_evidence = _stage_evidence(request, writer, final)
+    writer_receipt, _, composition = admit_editorial_composition(
+        request=request,
+        writer_draft=writer,
+        final_draft=final,
+        writer_evidence=writer_evidence,
+        humanizer_evidence=humanizer_evidence,
+    )
+    with pytest.raises(EditorialCompositionError, match="cannot grant"):
+        replace(writer_receipt, release_authority=True)
+    with pytest.raises(EditorialCompositionError, match="identity is invalid"):
+        replace(composition, final_draft_sha256="f" * 64)
