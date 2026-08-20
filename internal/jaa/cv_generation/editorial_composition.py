@@ -30,11 +30,11 @@ from career_automation.evidence_matching import canonical_json, content_hash
 
 REQUEST_SCHEMA = "jaa.cv-editorial-request.v1"
 DRAFT_SCHEMA = "jaa.cv-editorial-draft.v1"
-COVER_LETTER_REQUEST_SCHEMA = "jaa.cover-letter-editorial-request.v2"
-COVER_LETTER_DRAFT_SCHEMA = "jaa.cover-letter-editorial-draft.v2"
+COVER_LETTER_REQUEST_SCHEMA = "jaa.cover-letter-editorial-request.v3"
+COVER_LETTER_DRAFT_SCHEMA = "jaa.cover-letter-editorial-draft.v3"
 STAGE_RECEIPT_SCHEMA = "jaa.cv-editorial-stage-receipt.v3"
 COMPOSITION_RECEIPT_SCHEMA = "jaa.cv-editorial-composition-receipt.v1"
-COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA = "jaa.cover-letter-editorial-composition-receipt.v2"
+COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA = "jaa.cover-letter-editorial-composition-receipt.v3"
 EDITORIAL_PROVIDER_IDENTITY = "openai-codex-cli"
 _EDITORIAL_STAGES = frozenset({"resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"})
 
@@ -102,56 +102,12 @@ _DAY_MONTH_YEAR = re.compile(
     r"October|November|December)\s+20\d{2}\b",
     re.IGNORECASE,
 )
-_CONNECTIVE_WORDS = frozenset(
+_CV_RHETORICAL_CONNECTIVES = frozenset(
     {
-        "a",
-        "an",
-        "and",
-        "are",
-        "as",
-        "at",
-        "be",
-        "been",
-        "being",
-        "but",
-        "by",
-        "for",
-        "from",
-        "has",
-        "have",
-        "if",
-        "in",
-        "into",
-        "is",
-        "it",
-        "its",
-        "of",
-        "on",
-        "or",
-        "our",
-        "that",
-        "the",
-        "their",
-        "there",
-        "these",
-        "they",
-        "this",
-        "those",
-        "through",
-        "to",
-        "was",
-        "were",
-        "which",
-        "who",
-        "with",
-        "within",
-        "without",
-        "you",
-        "your",
+        "For this:",
+        "In this context:",
     }
 )
-_CONNECTIVE_CHARACTERS = re.compile(r"^[A-Za-z\s.,:;!?()'\"/&]+$")
-_CONNECTIVE_TOKEN = re.compile(r"[A-Za-z]+")
 _FORMAT_OR_DATASTORE = re.compile(
     r"\b(?:jsonl?|ya?ml|xml|csv|sqlite|sql)\b", re.IGNORECASE
 )
@@ -168,14 +124,56 @@ _WORK_RIGHTS = (
     "pre-settled status",
 )
 _WORK_RIGHTS_WORDS = re.compile(r"\b(?:visa|sponsorship)\b", re.IGNORECASE)
-_AUTHORSHIP_DISCLOSURE = re.compile(
-    r"(?:\bas an ai(?: assistant| language model)?\s*[,;:]|"
-    r"\b(?:cv|resume|cover letter|application|document)\b.{0,60}"
-    r"\b(?:wrote|written|authored|generated|drafted|produced|created)\b.{0,60}"
-    r"\b(?:ai|chatgpt|llm|language model)\b|"
-    r"\b(?:ai|chatgpt|llm|language model)\b.{0,60}"
-    r"\b(?:wrote|written|authored|generated|drafted|produced|created)\b.{0,60}"
-    r"\b(?:cv|resume|cover letter|application|document)\b)",
+_DOCUMENT_AUTHORSHIP_SUBJECT = (
+    r"\b(?:this|my|the|our|your)\s+"
+    r"(?:cv|resume|cover letter|job application|application document|application|document)\b"
+)
+_DIRECT_DOCUMENT_AUTHORSHIP_SUBJECT = re.compile(
+    r"\b(?:this|my|our|your)\s+"
+    r"(?:cv|resume|cover letter|job application|application document|application|document)\b",
+    re.IGNORECASE,
+)
+_AI_AUTHOR = r"\b(?:ai|chatgpt|an?\s+llm|language model)\b"
+_AUTHORSHIP_ACTION = (
+    r"\b(?:wrote|write|writing|written|author|authoring|authored|generate|"
+    r"generating|generated|draft|drafting|drafted|prepare|preparing|prepared|"
+    r"produce|producing|produced|create|creating|created|edit|editing|edited|"
+    r"revise|revising|revised|helped(?:\s+(?:me|us))?(?:\s+to)?\s+"
+    r"(?:write|draft|prepare)|assisted(?:\s+(?:with|in)(?:\s+preparing)?)?)\b"
+)
+_AUTHORSHIP_DISCLOSURES = (
+    re.compile(
+        rf"{_DOCUMENT_AUTHORSHIP_SUBJECT}.{{0,60}}{_AUTHORSHIP_ACTION}.{{0,60}}{_AI_AUTHOR}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_AI_AUTHOR}.{{0,60}}{_AUTHORSHIP_ACTION}.{{0,60}}{_DOCUMENT_AUTHORSHIP_SUBJECT}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_AUTHORSHIP_ACTION}.{{0,40}}{_DOCUMENT_AUTHORSHIP_SUBJECT}.{{0,40}}{_AI_AUTHOR}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_DOCUMENT_AUTHORSHIP_SUBJECT}.{{0,30}}\b(?:with|using|through)\b.{{0,30}}{_AI_AUTHOR}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_DOCUMENT_AUTHORSHIP_SUBJECT}.{{0,40}}{_AI_AUTHOR}.{{0,20}}{_AUTHORSHIP_ACTION}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_DIRECT_DOCUMENT_AUTHORSHIP_SUBJECT.pattern}.{{0,60}}{_AI_AUTHOR}",
+        re.IGNORECASE,
+    ),
+)
+_AS_AI_DISCLOSURE = re.compile(
+    r"\bas an ai(?: assistant| language model)?\s*[,;:]", re.IGNORECASE
+)
+_AUTHORITY_SYSTEM_FACT = re.compile(
+    r"^\s*(?:built|created|designed|developed|engineered|implemented|automated|"
+    r"trained)\b.*\b(?:application|pipeline|platform|system|tool|workflow|"
+    r"software|service|model)\b",
     re.IGNORECASE,
 )
 COVER_LETTER_MAX_WORDS = 500
@@ -551,16 +549,43 @@ def build_editorial_draft(
 
 
 def _validate_connective(text: str) -> None:
-    if (
-        len(text) > 80
-        or not _CONNECTIVE_CHARACTERS.fullmatch(text)
-        or not (tokens := _CONNECTIVE_TOKEN.findall(text))
-        or len(tokens) > 8
-        or any(token.casefold() not in _CONNECTIVE_WORDS for token in tokens)
-    ):
+    if text not in _CV_RHETORICAL_CONNECTIVES:
         raise EditorialCompositionError(
-            "editorial connective is outside the closed function-word allowlist"
+            "editorial connective is outside the finite CV rhetorical catalog"
         )
+
+
+def _cover_letter_rhetorical_catalog(
+    request: CoverLetterEditorialRequest,
+) -> Mapping[str, tuple[str, ...]]:
+    return {
+        "Opening": (
+            COVER_LETTER_SALUTATION,
+            (
+                f"The {request.role_title} role at {request.company_name} caught my "
+                "attention because of the work described in the vacancy."
+            ),
+            (
+                f"I was drawn to the {request.role_title} role at "
+                f"{request.company_name} by the work described in the vacancy."
+            ),
+        ),
+        "Evidence Match": (
+            "My strongest relevant evidence is set out below.",
+            "The strongest relevant evidence is set out below.",
+        ),
+        "Company Fit": (
+            f"My interest in {request.company_name} comes from the work described in the vacancy.",
+        ),
+        "Close": (
+            (
+                "I would welcome the opportunity to discuss how this evidence could "
+                f"support {request.company_name} in this {request.role_title} position."
+            ),
+            COVER_LETTER_SIGN_OFF,
+            request.authority.candidate_name,
+        ),
+    }
 
 
 def _validate_global_outward_policy(text: str, *, document_kind: str) -> None:
@@ -573,10 +598,39 @@ def _validate_global_outward_policy(text: str, *, document_kind: str) -> None:
         raise EditorialCompositionError(
             f"work-rights declarations are forbidden in {document_kind}s"
         )
-    if _AUTHORSHIP_DISCLOSURE.search(text):
+
+
+def _validate_document_authorship(
+    text: str,
+    *,
+    document_kind: str,
+    authority_context: str | None,
+) -> None:
+    semantic_text = " ".join(text.split())
+    if _AS_AI_DISCLOSURE.search(semantic_text):
         raise EditorialCompositionError(
             f"{document_kind} contains forbidden AI-authorship disclosure"
         )
+    matched = any(
+        pattern.search(semantic_text) for pattern in _AUTHORSHIP_DISCLOSURES
+    )
+    if not matched:
+        return
+    if (
+        authority_context
+        in {
+            "project",
+            "candidate:Evidence Match",
+            "employer:Opening",
+            "employer:Company Fit",
+        }
+        and _AUTHORITY_SYSTEM_FACT.search(semantic_text)
+        and not _DIRECT_DOCUMENT_AUTHORSHIP_SUBJECT.search(semantic_text)
+    ):
+        return
+    raise EditorialCompositionError(
+        f"{document_kind} contains forbidden AI-authorship disclosure"
+    )
 
 
 def _outward_text(draft: CVEditorialDraft) -> str:
@@ -613,12 +667,22 @@ def validate_editorial_draft(
         for atom in section.atoms:
             if atom.source_kind == "connective":
                 _validate_connective(atom.text)
+                _validate_document_authorship(
+                    atom.text,
+                    document_kind="CV",
+                    authority_context=None,
+                )
                 continue
             claim = approved.get(atom.claim_id or "")
             if claim is None:
                 raise EditorialCompositionError("editorial draft cites an unknown claim")
             if atom.text != claim.text:
                 raise EditorialCompositionError("editorial draft changed an approved claim")
+            _validate_document_authorship(
+                atom.text,
+                document_kind="CV",
+                authority_context=claim.category,
+            )
             if claim.category not in _CATEGORY_BY_HEADING[section.heading]:
                 raise EditorialCompositionError("approved claim is in the wrong CV section")
             if section.heading == "Core Capabilities" and _FORMAT_OR_DATASTORE.search(
@@ -888,22 +952,43 @@ def validate_cover_letter_editorial_draft(
             "cover letter exceeds the deterministic UK one-page proxy"
         )
 
+    rhetorical_catalog = _cover_letter_rhetorical_catalog(request)
     opening = draft.sections[0]
     required_salutation = EditorialAtom(
         "connective", COVER_LETTER_SALUTATION, None
     )
-    if opening.atoms[0] != required_salutation:
+    if (
+        len(opening.atoms) < 3
+        or opening.atoms[0] != required_salutation
+        or opening.atoms[1].source_kind != "connective"
+        or opening.atoms[1].text not in rhetorical_catalog["Opening"][1:]
+        or any(atom.source_kind != "approved_claim" for atom in opening.atoms[2:])
+    ):
         raise EditorialCompositionError(
-            "cover letter lacks the exact authorised salutation"
+            "cover letter lacks the exact salutation and typed opening rhetoric"
         )
+    for section_heading in ("Evidence Match", "Company Fit"):
+        section = next(
+            value for value in draft.sections if value.heading == section_heading
+        )
+        if (
+            len(section.atoms) < 2
+            or section.atoms[0].source_kind != "connective"
+            or section.atoms[0].text not in rhetorical_catalog[section_heading]
+            or any(atom.source_kind != "approved_claim" for atom in section.atoms[1:])
+        ):
+            raise EditorialCompositionError(
+                f"cover letter lacks typed rhetoric in {section_heading}"
+            )
     close = draft.sections[-1]
     required_close = (
+        EditorialAtom("connective", rhetorical_catalog["Close"][0], None),
         EditorialAtom("connective", COVER_LETTER_SIGN_OFF, None),
         EditorialAtom("connective", request.authority.candidate_name, None),
     )
     if close.atoms != required_close:
         raise EditorialCompositionError(
-            "cover letter lacks the exact sign-off and candidate signature"
+            "cover letter lacks the substantive CTA, sign-off, or candidate signature"
         )
 
     approved = {claim.claim_id: claim for claim in request.approved_claims}
@@ -912,22 +997,28 @@ def validate_cover_letter_editorial_draft(
         factual_span_seen = False
         for atom_index, atom in enumerate(section.atoms):
             if atom.source_kind == "connective":
-                is_salutation = section.heading == "Opening" and atom_index == 0
-                is_close_structure = section.heading == "Close"
+                _validate_document_authorship(
+                    atom.text,
+                    document_kind="cover letter",
+                    authority_context=None,
+                )
                 if factual_span_seen:
                     raise EditorialCompositionError(
                         "cover-letter connective cannot follow a factual span"
                     )
-                if not is_salutation and not is_close_structure:
-                    _validate_connective(atom.text)
-                if section.heading == "Opening" and not is_salutation:
+                if atom.text not in rhetorical_catalog[section.heading]:
                     raise EditorialCompositionError(
-                        "cover-letter opening content must be an approved employer fact"
+                        "cover-letter connective is outside the typed rhetorical catalog"
                     )
                 continue
             claim = approved.get(atom.claim_id or "")
             if claim is None or atom.text != claim.text:
                 raise EditorialCompositionError("cover-letter draft changed or invented a claim")
+            _validate_document_authorship(
+                atom.text,
+                document_kind="cover letter",
+                authority_context=f"{claim.fact_kind}:{claim.section_heading}",
+            )
             if claim.section_heading != section.heading:
                 raise EditorialCompositionError("cover-letter claim is in the wrong section")
             used.append(claim.claim_id)
@@ -1206,7 +1297,7 @@ def humanizer_request_sha256(
     return content_hash(
         {
             "request_sha256": request.request_sha256,
-            "schema_version": "jaa.cv-humanizer-request.v1",
+            "schema_version": "jaa.cv-humanizer-request.v2",
             "writer_draft_sha256": writer_draft.draft_sha256,
         }
     )
@@ -1267,7 +1358,7 @@ def cover_letter_humanizer_request_sha256(
     return content_hash(
         {
             "request_sha256": request.request_sha256,
-            "schema_version": "jaa.cover-letter-humanizer-request.v2",
+            "schema_version": "jaa.cover-letter-humanizer-request.v3",
             "writer_draft_sha256": writer_draft.draft_sha256,
         }
     )
@@ -1997,12 +2088,13 @@ def run_editorial_composition_runtime(
             "instructions": [
                 "Return only one canonical JSON object matching the supplied response schema.",
                 "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
-                "Omit connective atoms unless they contain only allowlisted function words and punctuation.",
+                "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
                 "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
                 "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
                 "Keep formats and datastores out of Core Capabilities.",
             ],
-            "schema_version": "jaa.cv-writer-runtime-request.v1",
+            "rhetorical_catalog": sorted(_CV_RHETORICAL_CONNECTIVES),
+            "schema_version": "jaa.cv-writer-runtime-request.v2",
             "stage": "resume_writer",
         }
     ).encode()
@@ -2034,10 +2126,11 @@ def run_editorial_composition_runtime(
             "instructions": [
                 "Return only one canonical JSON object matching the supplied response schema.",
                 "Preserve every approved_claim atom and all section structure exactly.",
-                "Edit only connective atoms to remove formulaic or AI-like phrasing.",
+                "Edit connective atoms only by selecting another supplied finite rhetorical atom.",
                 "Do not add facts, disclosures, labels, caveats, or work-rights text.",
             ],
-            "schema_version": "jaa.cv-humanizer-runtime-request.v1",
+            "rhetorical_catalog": sorted(_CV_RHETORICAL_CONNECTIVES),
+            "schema_version": "jaa.cv-humanizer-runtime-request.v2",
             "stage": "humanizer",
             "writer_draft": writer_draft.document(),
         }
@@ -2141,6 +2234,7 @@ def run_cover_letter_composition_runtime(
             ) from exc
     if runtime.writer.available() is not True or runtime.humanizer.available() is not True:
         raise EditorialCompositionError("cover-letter runtime adapter is unavailable")
+    rhetorical_catalog = _cover_letter_rhetorical_catalog(request)
     writer_request = canonical_json(
         {
             "editorial_request": request.document(),
@@ -2150,11 +2244,15 @@ def run_cover_letter_composition_runtime(
                 "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
                 "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
                 "After the salutation, Opening must contain an approved employer claim naming the company and role.",
-                "Use the strongest supported candidate evidence and omit unrestricted connective prose.",
+                "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
                 "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
                 "Use at most 500 words and 3500 characters; add no em or en dash.",
             ],
-            "schema_version": "jaa.cover-letter-writer-runtime-request.v2",
+            "rhetorical_catalog": {
+                heading: list(values)
+                for heading, values in rhetorical_catalog.items()
+            },
+            "schema_version": "jaa.cover-letter-writer-runtime-request.v3",
             "stage": "cover_letter_writer",
         }
     ).encode()
@@ -2188,12 +2286,16 @@ def run_cover_letter_composition_runtime(
             "instructions": [
                 "Return only one canonical JSON object matching the response schema.",
                 "Preserve every approved_claim atom and all four sections exactly.",
-                "Edit only non-structural connective atoms within the closed function-word allowlist.",
+                "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
                 "Preserve the exact salutation, sign-off, signature and opening employer hook.",
                 "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
             ],
-            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v2",
+            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v3",
             "stage": "cover_letter_humanizer",
+            "rhetorical_catalog": {
+                heading: list(values)
+                for heading, values in rhetorical_catalog.items()
+            },
             "writer_draft": writer_draft.document(),
         }
     ).encode()

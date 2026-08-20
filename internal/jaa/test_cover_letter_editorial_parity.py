@@ -105,11 +105,33 @@ def _fixture():
         vacancy_sha256=hashlib.sha256(listing.encode()).hexdigest(),
         approved_claims=claims,
     )
+    opening_rhetoric = (
+        "The AI Automation Engineer role at Example Systems caught my attention "
+        "because of the work described in the vacancy."
+    )
+    humanized_opening_rhetoric = (
+        "I was drawn to the AI Automation Engineer role at Example Systems by "
+        "the work described in the vacancy."
+    )
+    evidence_rhetoric = (
+        "The strongest relevant evidence is set out below."
+    )
+    humanized_evidence_rhetoric = (
+        "My strongest relevant evidence is set out below."
+    )
+    company_rhetoric = (
+        "My interest in Example Systems comes from the work described in the vacancy."
+    )
+    close_cta = (
+        "I would welcome the opportunity to discuss how this evidence could support "
+        "Example Systems in this AI Automation Engineer position."
+    )
     sections = (
         CoverLetterSection(
             "Opening",
             (
                 EditorialAtom("connective", "Dear Hiring Manager,", None),
+                EditorialAtom("connective", opening_rhetoric, None),
                 EditorialAtom(
                     "approved_claim", claims[2].text, claims[2].claim_id
                 ),
@@ -118,6 +140,7 @@ def _fixture():
         CoverLetterSection(
             "Evidence Match",
             (
+                EditorialAtom("connective", evidence_rhetoric, None),
                 EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),
                 EditorialAtom("approved_claim", claims[1].text, claims[1].claim_id),
             ),
@@ -125,6 +148,7 @@ def _fixture():
         CoverLetterSection(
             "Company Fit",
             (
+                EditorialAtom("connective", company_rhetoric, None),
                 EditorialAtom("approved_claim", claims[3].text, claims[3].claim_id),
                 EditorialAtom("approved_claim", claims[4].text, claims[4].claim_id),
             ),
@@ -132,6 +156,7 @@ def _fixture():
         CoverLetterSection(
             "Close",
             (
+                EditorialAtom("connective", close_cta, None),
                 EditorialAtom("connective", "Kind regards", None),
                 EditorialAtom("connective", authority.candidate_name, None),
             ),
@@ -143,7 +168,24 @@ def _fixture():
     )
     final = build_cover_letter_editorial_draft(
         candidate_name=authority.candidate_name,
-        sections=sections,
+        sections=(
+            replace(
+                sections[0],
+                atoms=(
+                    sections[0].atoms[0],
+                    EditorialAtom("connective", humanized_opening_rhetoric, None),
+                    *sections[0].atoms[2:],
+                ),
+            ),
+            replace(
+                sections[1],
+                atoms=(
+                    EditorialAtom("connective", humanized_evidence_rhetoric, None),
+                    *sections[1].atoms[1:],
+                ),
+            ),
+            *sections[2:],
+        ),
     )
     return listing, request, claims, writer, final
 
@@ -294,7 +336,11 @@ def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None
             final.sections[0],
             replace(
                 final.sections[1],
-                atoms=(final.sections[1].atoms[0], changed_claim),
+                atoms=(
+                    final.sections[1].atoms[0],
+                    changed_claim,
+                    final.sections[1].atoms[2],
+                ),
             ),
             *final.sections[2:],
         ),
@@ -321,6 +367,8 @@ def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None
         "As a leader, I built the function.",
         "Written with ChatGPT.",
         "Visa sponsorship is not required.",
+        "They have it.",
+        "This is it.",
     ),
 )
 def test_cover_letter_rejects_unsupported_content_smuggled_as_connective(
@@ -341,7 +389,7 @@ def test_cover_letter_rejects_unsupported_content_smuggled_as_connective(
     )
     with pytest.raises(
         EditorialCompositionError,
-        match="closed function-word allowlist|work-rights|AI-authorship",
+        match="typed rhetoric|work-rights|AI-authorship",
     ):
         validate_cover_letter_editorial_draft(request, changed)
 
@@ -363,7 +411,7 @@ def test_cover_letter_rejects_connective_after_exact_factual_span() -> None:
             *final.sections[2:],
         ),
     )
-    with pytest.raises(EditorialCompositionError, match="cannot follow"):
+    with pytest.raises(EditorialCompositionError, match="typed rhetoric"):
         validate_cover_letter_editorial_draft(request, changed)
 
 
@@ -376,7 +424,7 @@ def test_cover_letter_requires_exact_salutation_before_approved_hook() -> None:
             *final.sections[1:],
         ),
     )
-    with pytest.raises(EditorialCompositionError, match="exact authorised salutation"):
+    with pytest.raises(EditorialCompositionError, match="exact salutation"):
         validate_cover_letter_editorial_draft(request, changed)
 
 
@@ -403,10 +451,11 @@ def test_cover_letter_rejects_616_word_authorised_fact() -> None:
             replace(
                 evidence_match,
                 atoms=(
+                    evidence_match.atoms[0],
                     EditorialAtom(
                         "approved_claim", oversized.text, oversized.claim_id
                     ),
-                    evidence_match.atoms[1],
+                    evidence_match.atoms[2],
                 ),
             ),
             *final.sections[2:],
@@ -422,6 +471,13 @@ def test_cover_letter_rejects_616_word_authorised_fact() -> None:
         "Built an evidence-bound system — with deterministic checks.",
         "Visa sponsorship is not required.",
         "This cover letter was written with ChatGPT.",
+        "My CV was prepared with AI assistance.",
+        "An LLM generated this application.",
+        "Built this cover letter with ChatGPT.",
+        "This CV was AI-assisted.",
+        "This cover letter had AI assistance.",
+        "I used ChatGPT to write this CV.",
+        "ChatGPT helped me write this cover letter.",
     ),
 )
 def test_global_bans_apply_to_approved_cover_letter_facts(
@@ -449,10 +505,11 @@ def test_global_bans_apply_to_approved_cover_letter_facts(
             replace(
                 evidence_match,
                 atoms=(
+                    evidence_match.atoms[0],
                     EditorialAtom(
                         "approved_claim", forbidden.text, forbidden.claim_id
                     ),
-                    evidence_match.atoms[1],
+                    evidence_match.atoms[2],
                 ),
             ),
             *final.sections[2:],
@@ -489,6 +546,7 @@ def test_opening_hook_must_name_exact_company_and_role_from_approved_fact() -> N
                 opening,
                 atoms=(
                     opening.atoms[0],
+                    opening.atoms[1],
                     EditorialAtom(
                         "approved_claim", generic_hook.text, generic_hook.claim_id
                     ),
@@ -499,6 +557,85 @@ def test_opening_hook_must_name_exact_company_and_role_from_approved_fact() -> N
     )
     with pytest.raises(EditorialCompositionError, match="company and role hook"):
         validate_cover_letter_editorial_draft(changed_request, changed)
+
+
+@pytest.mark.parametrize(
+    "legitimate_text",
+    (
+        "Built an AI-generated application document pipeline.",
+        "Built a ChatGPT application that generated CV drafts.",
+        "Built an AI tool that drafted the CV output.",
+    ),
+)
+def test_authorship_control_allows_authority_bound_project_facts(
+    legitimate_text: str,
+) -> None:
+    _, request, claims, _, final = _fixture()
+    legitimate = _claim(
+        claims[0].claim_id,
+        legitimate_text,
+        "candidate",
+        "Evidence Match",
+    )
+    changed_request = build_cover_letter_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(legitimate, *claims[1:]),
+    )
+    evidence_match = final.sections[1]
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            final.sections[0],
+            replace(
+                evidence_match,
+                atoms=(
+                    evidence_match.atoms[0],
+                    EditorialAtom(
+                        "approved_claim", legitimate.text, legitimate.claim_id
+                    ),
+                    evidence_match.atoms[2],
+                ),
+            ),
+            *final.sections[2:],
+        ),
+    )
+
+    validate_cover_letter_editorial_draft(changed_request, changed)
+
+
+def test_cover_letter_requires_substantive_typed_cta_before_signoff() -> None:
+    _, request, _, _, final = _fixture()
+    close = final.sections[-1]
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            *final.sections[:-1],
+            replace(close, atoms=close.atoms[1:]),
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="substantive CTA"):
+        validate_cover_letter_editorial_draft(request, changed)
+
+
+def test_natural_full_letter_uses_only_typed_rhetoric_and_exact_evidence() -> None:
+    _, request, _, _, final = _fixture()
+
+    validate_cover_letter_editorial_draft(request, final)
+    paragraphs = tuple(
+        " ".join(atom.text for atom in section.atoms)
+        for section in final.sections
+    )
+
+    assert len(paragraphs) == 4
+    assert paragraphs[0].startswith("Dear Hiring Manager,")
+    assert "AI Automation Engineer role at Example Systems" in paragraphs[0]
+    assert "evidence-bound multi-agent orchestration system" in paragraphs[1]
+    assert "Example Systems requires evidence-led" in paragraphs[2]
+    assert paragraphs[3].startswith("I would welcome the opportunity")
+    assert paragraphs[3].endswith("Kind regards Artiom Gutu")
 
 
 def _result() -> dict[str, object]:

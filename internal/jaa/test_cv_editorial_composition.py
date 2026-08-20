@@ -748,6 +748,8 @@ def test_formats_and_datastores_are_not_capability_domains() -> None:
         "As a leader, I owned the delivery.",
         "Written with ChatGPT.",
         "Visa sponsorship is not required.",
+        "They have it.",
+        "This is it.",
     ),
 )
 def test_connectives_cannot_smuggle_claims_or_ai_prose(connective: str) -> None:
@@ -771,6 +773,13 @@ def test_connectives_cannot_smuggle_claims_or_ai_prose(connective: str) -> None:
         "AI systems engineer — focused on reliable automation.",
         "Visa sponsorship is not required.",
         "This CV was written with ChatGPT.",
+        "My CV was prepared with AI assistance.",
+        "An LLM generated this application.",
+        "Built this CV with ChatGPT.",
+        "This CV was AI-assisted.",
+        "This cover letter had AI assistance.",
+        "I used ChatGPT to write this CV.",
+        "ChatGPT helped me write this cover letter.",
     ),
 )
 def test_global_bans_apply_to_approved_cv_claims(forbidden_text: str) -> None:
@@ -799,12 +808,23 @@ def test_global_bans_apply_to_approved_cv_claims(forbidden_text: str) -> None:
         validate_editorial_draft(changed_request, changed)
 
 
-def test_global_authorship_ban_does_not_reject_legitimate_ai_application_work() -> None:
+@pytest.mark.parametrize(
+    "legitimate_text",
+    (
+        "Built AI application automation for employer workflows.",
+        "Built an AI-generated application document pipeline.",
+        "Built a ChatGPT application that generated CV drafts.",
+        "Built an AI tool that drafted the CV output.",
+    ),
+)
+def test_global_authorship_ban_does_not_reject_legitimate_ai_application_work(
+    legitimate_text: str,
+) -> None:
     request, writer, _ = _fixture()
     legitimate = _claim(
         "summary",
-        "Built AI application automation for employer workflows.",
-        "summary",
+        legitimate_text,
+        "project",
     )
     changed_request = build_editorial_request(
         authority=request.authority,
