@@ -5,11 +5,21 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Protocol, Sequence
 
 from career_automation.adversarial_recruiter import (
     RecruiterAssessmentPackage,
     RecruiterAssessmentReceipt,
+    verify_recruiter_assessment_receipt,
+)
+from career_automation.adversarial_recruiter_archive import (
+    RecruiterDiagnosticArchiveReceipt,
+)
+from career_automation.adversarial_recruiter_runtime import DetachedTransportReceipt
+from career_automation.production_recruiter_assessor import (
+    ProductionDetachedRecruiterAssessor,
+    ProductionRecruiterAssessment,
 )
 from career_automation.application_compiler import (
     ApplicationSource,
@@ -60,7 +70,7 @@ from .editorial_composition import (
 )
 
 
-ORCHESTRATION_SCHEMA = "jaa.cv-composition-orchestration.v1"
+ORCHESTRATION_SCHEMA = "jaa.cv-composition-orchestration.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -277,6 +287,12 @@ class CVCompositionOrchestrationResult:
     final_artifacts: ApplicationArtifacts
     final_quality_receipt: DocumentQualityReceipt
     final_benchmark_receipt: CVBenchmarkDiagnosticReceipt | None
+    environment: str
+    recruiter_transport_receipt: DetachedTransportReceipt | None
+    recruiter_archive_receipt: RecruiterDiagnosticArchiveReceipt | None
+    recruiter_assessor_configuration_sha256: str | None
+    recruiter_archive_root: str | None
+    recruiter_archive_manifest_relative_path: str | None
     orchestration_sha256: str
     release_authority: bool = False
     schema_version: str = ORCHESTRATION_SCHEMA
@@ -291,6 +307,47 @@ class CVCompositionOrchestrationResult:
         self.rebuild.__post_init__()
         self.final_constraint_receipt.__post_init__()
         self.final_quality_receipt.__post_init__()
+        if self.environment not in {"production", "synthetic"}:
+            raise CVCompositionServiceError("CV orchestration environment is unsupported")
+        if (self.recruiter_transport_receipt is None) != (
+            self.recruiter_archive_receipt is None
+        ):
+            raise CVCompositionServiceError("recruiter transport evidence is incomplete")
+        if self.environment == "production":
+            if self.recruiter_transport_receipt is None:
+                raise CVCompositionServiceError(
+                    "production orchestration lacks detached recruiter evidence"
+                )
+            self.recruiter_transport_receipt.__post_init__()
+            self.recruiter_archive_receipt.__post_init__()
+            if (
+                not isinstance(self.recruiter_assessor_configuration_sha256, str)
+                or not _SHA256.fullmatch(
+                    self.recruiter_assessor_configuration_sha256
+                )
+                or not isinstance(self.recruiter_archive_root, str)
+                or not Path(self.recruiter_archive_root).is_absolute()
+                or self.recruiter_archive_manifest_relative_path
+                != self.recruiter_archive_receipt.manifest_relative_path
+                or
+                self.recruiter_receipt.receipt_sha256
+                != self.recruiter_archive_receipt.assessment_receipt_sha256
+                or self.recruiter_transport_receipt.receipt_sha256
+                != self.recruiter_archive_receipt.transport_receipt_sha256
+            ):
+                raise CVCompositionServiceError("production recruiter evidence differs")
+        elif any(
+            value is not None
+            for value in (
+                self.recruiter_transport_receipt,
+                self.recruiter_assessor_configuration_sha256,
+                self.recruiter_archive_root,
+                self.recruiter_archive_manifest_relative_path,
+            )
+        ):
+            raise CVCompositionServiceError(
+                "synthetic orchestration cannot carry production recruiter evidence"
+            )
         if (self.initial_benchmark_receipt is None) != (self.final_benchmark_receipt is None):
             raise CVCompositionServiceError("CV benchmark diagnostics are incomplete")
         if self.initial_benchmark_receipt is not None:
@@ -339,6 +396,7 @@ class CVCompositionOrchestrationResult:
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         value: dict[str, object] = {
             "editorial_receipt_sha256": self.editorial_receipt.receipt_sha256,
+            "environment": self.environment,
             "final_artifact_set_sha256": self.final_artifacts.artifact_set_sha256,
             "final_constraint_receipt_sha256": (
                 self.final_constraint_receipt.receipt_sha256
@@ -355,6 +413,21 @@ class CVCompositionOrchestrationResult:
             ),
             "rebuild_sha256": self.rebuild.rebuild_sha256,
             "recruiter_receipt_sha256": self.recruiter_receipt.receipt_sha256,
+            "recruiter_assessor_configuration_sha256": (
+                self.recruiter_assessor_configuration_sha256
+            ),
+            "recruiter_archive_root": self.recruiter_archive_root,
+            "recruiter_archive_manifest_relative_path": (
+                self.recruiter_archive_manifest_relative_path
+            ),
+            "recruiter_transport_receipt_sha256": (
+                self.recruiter_transport_receipt.receipt_sha256
+                if self.recruiter_transport_receipt is not None else None
+            ),
+            "recruiter_archive_manifest_sha256": (
+                self.recruiter_archive_receipt.manifest_sha256
+                if self.recruiter_archive_receipt is not None else None
+            ),
             "final_benchmark_receipt_sha256": (
                 self.final_benchmark_receipt.receipt_sha256
                 if self.final_benchmark_receipt is not None else None
@@ -378,17 +451,34 @@ def run_cv_composition_orchestration(
     listing_text: str,
     form_fields: Sequence[tuple[str, str, str]],
     bindings: Sequence[RecruiterImprovementBinding],
+    environment: str,
     recruiter_assessor: RecruiterAssessor | None = None,
     recruiter_receipt: RecruiterAssessmentReceipt | None = None,
+    production_recruiter_assessor: ProductionDetachedRecruiterAssessor | None = None,
     improvement_binder: ImprovementBinder | None = None,
     benchmark_manifest: CVBenchmarkManifest | None = None,
 ) -> CVCompositionOrchestrationResult:
     """Run one offline-safe CV composition, assessment and rebuild cycle."""
 
-    if (recruiter_assessor is None) == (recruiter_receipt is None):
-        raise CVCompositionServiceError(
-            "provide exactly one recruiter assessor or precomputed receipt"
-        )
+    if environment == "production":
+        if (
+            type(production_recruiter_assessor)
+            is not ProductionDetachedRecruiterAssessor
+            or recruiter_assessor is not None
+            or recruiter_receipt is not None
+        ):
+            raise CVCompositionServiceError(
+                "production requires the typed detached recruiter assessor"
+            )
+    elif environment == "synthetic":
+        if production_recruiter_assessor is not None or (
+            (recruiter_assessor is None) == (recruiter_receipt is None)
+        ):
+            raise CVCompositionServiceError(
+                "synthetic requires exactly one injected assessor or receipt"
+            )
+    else:
+        raise CVCompositionServiceError("CV orchestration environment is unsupported")
     if improvement_binder is not None and bindings:
         raise CVCompositionServiceError(
             "provide static bindings or one post-assessment binder, not both"
@@ -438,13 +528,29 @@ def run_cv_composition_orchestration(
             company_name=initial_source.company_name,
         ),
     )
-    assessed = (
-        recruiter_assessor(package)
-        if recruiter_assessor is not None
-        else recruiter_receipt
-    )
+    production_assessment: ProductionRecruiterAssessment | None = None
+    if environment == "production":
+        assert production_recruiter_assessor is not None
+        production_assessment = production_recruiter_assessor.assess(package)
+        if (
+            production_assessment.assessor_configuration_sha256
+            != production_recruiter_assessor.configuration_sha256
+            or production_assessment.archive_root
+            != production_recruiter_assessor.archive_root
+        ):
+            raise CVCompositionServiceError(
+                "production recruiter configuration differs from its result"
+            )
+        assessed = production_assessment.assessment
+    else:
+        assessed = (
+            recruiter_assessor(package)
+            if recruiter_assessor is not None
+            else recruiter_receipt
+        )
     if not isinstance(assessed, RecruiterAssessmentReceipt):
         raise CVCompositionServiceError("recruiter assessor returned no valid receipt")
+    verify_recruiter_assessment_receipt(assessed, package)
     resolved_bindings = (
         tuple(improvement_binder(request, assessed))
         if improvement_binder is not None
@@ -485,6 +591,7 @@ def run_cv_composition_orchestration(
     )
     values = {
         "editorial_receipt_sha256": editorial_receipt.receipt_sha256,
+        "environment": environment,
         "final_artifact_set_sha256": final_artifacts.artifact_set_sha256,
         "final_constraint_receipt_sha256": final_constraint.receipt_sha256,
         "final_quality_receipt_sha256": final_quality.receipt_sha256,
@@ -496,6 +603,26 @@ def run_cv_composition_orchestration(
         ),
         "rebuild_sha256": rebuild.rebuild_sha256,
         "recruiter_receipt_sha256": assessed.receipt_sha256,
+        "recruiter_assessor_configuration_sha256": (
+            production_assessment.assessor_configuration_sha256
+            if production_assessment is not None else None
+        ),
+        "recruiter_archive_root": (
+            str(production_assessment.archive_root)
+            if production_assessment is not None else None
+        ),
+        "recruiter_archive_manifest_relative_path": (
+            production_assessment.archive.manifest_relative_path
+            if production_assessment is not None else None
+        ),
+        "recruiter_transport_receipt_sha256": (
+            production_assessment.transport.receipt_sha256
+            if production_assessment is not None else None
+        ),
+        "recruiter_archive_manifest_sha256": (
+            production_assessment.archive.manifest_sha256
+            if production_assessment is not None else None
+        ),
         "final_benchmark_receipt_sha256": (
             final_benchmark.receipt_sha256 if final_benchmark is not None else None
         ),
@@ -514,6 +641,27 @@ def run_cv_composition_orchestration(
         final_artifacts=final_artifacts,
         final_quality_receipt=final_quality,
         final_benchmark_receipt=final_benchmark,
+        environment=environment,
+        recruiter_transport_receipt=(
+            production_assessment.transport
+            if production_assessment is not None else None
+        ),
+        recruiter_archive_receipt=(
+            production_assessment.archive
+            if production_assessment is not None else None
+        ),
+        recruiter_assessor_configuration_sha256=(
+            production_assessment.assessor_configuration_sha256
+            if production_assessment is not None else None
+        ),
+        recruiter_archive_root=(
+            str(production_assessment.archive_root)
+            if production_assessment is not None else None
+        ),
+        recruiter_archive_manifest_relative_path=(
+            production_assessment.archive.manifest_relative_path
+            if production_assessment is not None else None
+        ),
         orchestration_sha256=content_hash(values),
     )
 

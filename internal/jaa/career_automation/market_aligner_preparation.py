@@ -12,7 +12,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -84,6 +84,12 @@ class MarketApplicationPreparation:
     path: Path
     receipt_sha256: str
     orchestration_sha256: str
+    recruiter_receipt_sha256: str | None = None
+    recruiter_transport_receipt_sha256: str | None = None
+    recruiter_archive_manifest_sha256: str | None = None
+    recruiter_assessor_configuration_sha256: str | None = None
+    recruiter_archive_root: str | None = None
+    recruiter_archive_manifest_relative_path: str | None = None
     release_authority: bool = False
 
 
@@ -121,15 +127,16 @@ def prepare_admitted_market_application_from_authorities(
     candidate_authority_path: Path,
     contact_authority_path: Path,
     input_materializer: PreparationInputMaterializer,
+    environment: str,
     contact_authority_loader: Callable[..., CandidateContactAuthority] = (
         load_candidate_contact_authority
     ),
 ) -> MarketApplicationPreparation:
     """Materialize one real preparation from admitted and operator authority.
 
-    Provider-backed writing remains outside this function.  The injected
-    materializer must return the already typed, evidence-bound editorial
-    request/drafts and recruiter assessor used by the existing orchestration.
+    Provider-backed writing remains outside this function. The materializer
+    returns typed, evidence-bound editorial inputs. Production recruiter
+    execution is separately constrained by the orchestration boundary.
     """
 
     repository = repository_root.resolve(strict=True)
@@ -156,6 +163,11 @@ def prepare_admitted_market_application_from_authorities(
     contact_object_sha256 = hashlib.sha256(contact_bytes).hexdigest()
 
     verified = admission_store.for_boundary(application_id, "strategy")
+    if verified.environment != environment:
+        raise HandoffAdmissionError(
+            "preparation_environment",
+            "requested preparation environment differs from admitted environment",
+        )
     arguments = dict(
         input_materializer(verified, candidate_sha256, contact_authority)
     )
@@ -176,6 +188,7 @@ def prepare_admitted_market_application_from_authorities(
         contact_authority_sha256=contact_authority.authority_sha256,
         contact_object_sha256=contact_object_sha256,
         orchestration_arguments=arguments,
+        environment=environment,
     )
 
 
@@ -191,6 +204,7 @@ def prepare_admitted_market_application(
     contact_authority_sha256: str,
     contact_object_sha256: str | None = None,
     orchestration_arguments: Mapping[str, Any],
+    environment: str,
 ) -> MarketApplicationPreparation:
     """Prepare one admitted application; never authorize upload or submission."""
 
@@ -219,11 +233,42 @@ def prepare_admitted_market_application(
     ).hexdigest()
     if listing_sha256 != request.vacancy_sha256:
         raise ValueError("editorial request differs from exact listing")
-    assessor = orchestration_arguments.get("recruiter_assessor")
-    assessor_identity = None
-    if assessor is not None:
+    verified = admission_store.for_boundary(application_id, "strategy")
+    if verified.environment != environment:
+        raise HandoffAdmissionError(
+            "preparation_environment",
+            "requested preparation environment differs from admitted environment",
+        )
+    if environment not in {"production", "synthetic"}:
+        raise HandoffAdmissionError(
+            "preparation_environment", "admitted environment is unsupported"
+        )
+    assessor = orchestration_arguments.get("production_recruiter_assessor")
+    if environment == "production":
+        from .production_recruiter_assessor import ProductionDetachedRecruiterAssessor
+
+        if (
+            type(assessor) is not ProductionDetachedRecruiterAssessor
+            or orchestration_arguments.get("recruiter_assessor") is not None
+            or orchestration_arguments.get("recruiter_receipt") is not None
+        ):
+            raise ValueError(
+                "production preparation requires the typed detached recruiter assessor"
+            )
+        assessor_identity = assessor.configuration_sha256
+        if content_hash(assessor.configuration_document()) != assessor_identity:
+            raise ValueError("production recruiter configuration identity differs")
+    else:
+        if assessor is not None:
+            raise ValueError(
+                "synthetic preparation cannot use the production recruiter assessor"
+            )
+        synthetic_assessor = orchestration_arguments.get("recruiter_assessor")
         assessor_identity = (
-            f"{assessor.__class__.__module__}.{assessor.__class__.__qualname__}"
+            None
+            if synthetic_assessor is None
+            else f"{synthetic_assessor.__class__.__module__}."
+            f"{synthetic_assessor.__class__.__qualname__}"
         )
     input_identity = {
         "application_id": application_id,
@@ -234,6 +279,7 @@ def prepare_admitted_market_application(
         "candidate_authority_sha256": candidate_authority_sha256,
         "contact_authority_sha256": contact_authority_sha256,
         "contact_object_sha256": exact_contact_sha256,
+        "environment": environment,
         "form_fields_sha256": content_hash(
             list(orchestration_arguments.get("form_fields", ()))
         ),
@@ -249,7 +295,7 @@ def prepare_admitted_market_application(
             None,
         ),
         "request_sha256": request.request_sha256,
-        "schema_version": "jaa.market-application-preparation-input.v2",
+        "schema_version": "jaa.market-application-preparation-input.v3",
         "writer_evidence_sha256": content_hash(
             _input_document(orchestration_arguments.get("writer_evidence"))
         ),
@@ -259,18 +305,6 @@ def prepare_admitted_market_application(
     root = _private_external_root(data_home, repository_root)
     destination = root / "preparations" / preparation_id
     receipt_path = destination / "receipt.json"
-    if not receipt_path.exists() and exact_contact_sha256 == contact_authority_sha256:
-        legacy_identity = dict(input_identity)
-        legacy_identity.pop("contact_object_sha256")
-        legacy_identity["schema_version"] = (
-            "jaa.market-application-preparation-input.v1"
-        )
-        legacy_preparation_id = content_hash(legacy_identity)
-        legacy_destination = root / "preparations" / legacy_preparation_id
-        if (legacy_destination / "receipt.json").exists():
-            preparation_id = legacy_preparation_id
-            destination = legacy_destination
-            receipt_path = destination / "receipt.json"
     if receipt_path.exists():
         receipt_bytes = _read_private(receipt_path)
         try:
@@ -292,10 +326,22 @@ def prepare_admitted_market_application(
             "release_authority",
             "schema_version",
         }
-        if schema_version == "jaa.market-application-preparation.v2":
-            expected_keys.add("contact_object_sha256")
-        elif schema_version != "jaa.market-application-preparation.v1":
+        if schema_version != "jaa.market-application-preparation.v3":
             raise ValueError("stored preparation receipt schema differs")
+        expected_keys.update(
+            {
+                "contact_object_sha256",
+                "environment",
+                "recruiter_archive_manifest_sha256",
+                "recruiter_archive_manifest_relative_path",
+                "recruiter_archive_receipt",
+                "recruiter_archive_root",
+                "recruiter_assessor_configuration",
+                "recruiter_assessor_configuration_sha256",
+                "recruiter_receipt_sha256",
+                "recruiter_transport_receipt_sha256",
+            }
+        )
         stored_contact_object_sha256 = str(
             receipt.get("contact_object_sha256", receipt.get("contact_authority_sha256"))
         )
@@ -308,6 +354,36 @@ def prepare_admitted_market_application(
             != candidate_authority_sha256
             or receipt.get("contact_authority_sha256") != contact_authority_sha256
             or receipt.get("release_authority") is not False
+            or receipt.get("environment") != environment
+            or (
+                environment == "production"
+                and (
+                    receipt.get("recruiter_transport_receipt_sha256") is None
+                    or receipt.get("recruiter_archive_manifest_sha256") is None
+                    or receipt.get("recruiter_assessor_configuration_sha256")
+                    != assessor_identity
+                    or receipt.get("recruiter_assessor_configuration")
+                    != assessor.configuration_document()
+                    or content_hash(receipt.get("recruiter_assessor_configuration"))
+                    != assessor_identity
+                    or receipt.get("recruiter_archive_root")
+                    != str(assessor.archive_root)
+                    or not receipt.get("recruiter_archive_manifest_relative_path")
+                    or not isinstance(receipt.get("recruiter_archive_receipt"), dict)
+                )
+            )
+            or (
+                environment == "synthetic"
+                and (
+                    receipt.get("recruiter_transport_receipt_sha256") is not None
+                    or receipt.get("recruiter_archive_manifest_sha256") is not None
+                    or receipt.get("recruiter_assessor_configuration_sha256") is not None
+                    or receipt.get("recruiter_assessor_configuration") is not None
+                    or receipt.get("recruiter_archive_root") is not None
+                    or receipt.get("recruiter_archive_manifest_relative_path") is not None
+                    or receipt.get("recruiter_archive_receipt") is not None
+                )
+            )
             or stored_contact_object_sha256 != exact_contact_sha256
             or hashlib.sha256(_read_private(destination / "cv.pdf")).hexdigest()
             != receipt.get("cv_pdf_sha256")
@@ -325,13 +401,59 @@ def prepare_admitted_market_application(
             != stored_contact_object_sha256
         ):
             raise ValueError("stored preparation replay is invalid")
+        if environment == "production":
+            from .adversarial_recruiter_archive import (
+                RecruiterDiagnosticArchiveReceipt,
+                verify_recruiter_diagnostic_archive,
+            )
+
+            try:
+                archived = RecruiterDiagnosticArchiveReceipt(
+                    **dict(receipt["recruiter_archive_receipt"])
+                )
+                replayed = verify_recruiter_diagnostic_archive(
+                    archived, root=Path(str(receipt["recruiter_archive_root"]))
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("stored recruiter archive replay is invalid") from exc
+            if (
+                archived.manifest_sha256
+                != receipt["recruiter_archive_manifest_sha256"]
+                or archived.manifest_relative_path
+                != receipt["recruiter_archive_manifest_relative_path"]
+                or replayed.assessment.receipt_sha256
+                != receipt["recruiter_receipt_sha256"]
+                or replayed.transport.receipt_sha256
+                != receipt["recruiter_transport_receipt_sha256"]
+            ):
+                raise ValueError("stored recruiter archive replay differs")
         return MarketApplicationPreparation(
             preparation_id,
             destination,
             hashlib.sha256(receipt_bytes).hexdigest(),
             str(receipt["orchestration_sha256"]),
+            str(receipt["recruiter_receipt_sha256"]),
+            (
+                str(receipt["recruiter_transport_receipt_sha256"])
+                if receipt["recruiter_transport_receipt_sha256"] is not None else None
+            ),
+            (
+                str(receipt["recruiter_archive_manifest_sha256"])
+                if receipt["recruiter_archive_manifest_sha256"] is not None else None
+            ),
+            (
+                str(receipt["recruiter_assessor_configuration_sha256"])
+                if receipt["recruiter_assessor_configuration_sha256"] is not None else None
+            ),
+            (
+                str(receipt["recruiter_archive_root"])
+                if receipt["recruiter_archive_root"] is not None else None
+            ),
+            (
+                str(receipt["recruiter_archive_manifest_relative_path"])
+                if receipt["recruiter_archive_manifest_relative_path"] is not None else None
+            ),
         )
-    verified = admission_store.for_boundary(application_id, "strategy")
     exact = {
         "job_key": (base_source.job_key, verified.job_key),
         "role_title": (base_source.role_title, verified.role_title),
@@ -350,7 +472,7 @@ def prepare_admitted_market_application(
             "preparation_listing", "CV request differs from admitted raw listing"
         )
     result: CVCompositionOrchestrationResult = run_cv_composition_orchestration(
-        **dict(orchestration_arguments)
+        **dict(orchestration_arguments), environment=environment
     )
     if result.release_authority:
         raise RuntimeError("CV preparation unexpectedly acquired release authority")
@@ -380,10 +502,35 @@ def prepare_admitted_market_application(
             "cover_letter_pdf_sha256": result.final_artifacts.cover_letter_pdf.pdf_sha256,
             "current_boundary_receipt_sha256": verified.current_boundary_receipt_sha256,
             "handoff_root_sha256": verified.handoff_root_sha256,
+            "environment": environment,
             "orchestration_sha256": result.orchestration_sha256,
             "preparation_id": preparation_id,
+            "recruiter_archive_manifest_sha256": (
+                result.recruiter_archive_receipt.manifest_sha256
+                if result.recruiter_archive_receipt is not None else None
+            ),
+            "recruiter_archive_manifest_relative_path": (
+                result.recruiter_archive_manifest_relative_path
+            ),
+            "recruiter_archive_receipt": (
+                asdict(result.recruiter_archive_receipt)
+                if result.recruiter_archive_receipt is not None else None
+            ),
+            "recruiter_archive_root": result.recruiter_archive_root,
+            "recruiter_assessor_configuration": (
+                assessor.configuration_document()
+                if environment == "production" else None
+            ),
+            "recruiter_assessor_configuration_sha256": (
+                result.recruiter_assessor_configuration_sha256
+            ),
+            "recruiter_receipt_sha256": result.recruiter_receipt.receipt_sha256,
+            "recruiter_transport_receipt_sha256": (
+                result.recruiter_transport_receipt.receipt_sha256
+                if result.recruiter_transport_receipt is not None else None
+            ),
             "release_authority": False,
-            "schema_version": "jaa.market-application-preparation.v2",
+            "schema_version": "jaa.market-application-preparation.v3",
         }
         receipt_bytes = _json_bytes(receipt)
         _write(temporary / "receipt.json", receipt_bytes)
@@ -398,6 +545,18 @@ def prepare_admitted_market_application(
         destination,
         hashlib.sha256(receipt_bytes).hexdigest(),
         result.orchestration_sha256,
+        result.recruiter_receipt.receipt_sha256,
+        (
+            result.recruiter_transport_receipt.receipt_sha256
+            if result.recruiter_transport_receipt is not None else None
+        ),
+        (
+            result.recruiter_archive_receipt.manifest_sha256
+            if result.recruiter_archive_receipt is not None else None
+        ),
+        result.recruiter_assessor_configuration_sha256,
+        result.recruiter_archive_root,
+        result.recruiter_archive_manifest_relative_path,
     )
 
 

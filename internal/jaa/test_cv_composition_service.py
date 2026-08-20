@@ -21,6 +21,10 @@ from career_automation.market_aligner_preparation import (
     prepare_admitted_market_application,
     prepare_admitted_market_application_from_authorities,
 )
+from career_automation.production_recruiter_assessor import (
+    ProductionDetachedRecruiterAssessor,
+    ProductionRecruiterAssessorError,
+)
 from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.evidence_matching import content_hash
 from cv_generation.adversarial_rebuild import bind_recruiter_improvement
@@ -279,6 +283,7 @@ def test_offline_injected_service_runs_the_complete_cv_cycle(tmp_path) -> None:
     base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
 
     first = run_cv_composition_orchestration(
+        environment="synthetic",
         request=request,
         writer_draft=draft,
         humanized_draft=draft,
@@ -316,6 +321,7 @@ def test_offline_injected_service_runs_the_complete_cv_cycle(tmp_path) -> None:
 def test_precomputed_receipt_path_applies_only_bound_claims(tmp_path) -> None:
     base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
     diagnostic = run_cv_composition_orchestration(
+        environment="synthetic",
         request=request,
         writer_draft=draft,
         humanized_draft=draft,
@@ -328,6 +334,7 @@ def test_precomputed_receipt_path_applies_only_bound_claims(tmp_path) -> None:
         recruiter_assessor=assessor,
     )
     replay = run_cv_composition_orchestration(
+        environment="synthetic",
         request=request,
         writer_draft=draft,
         humanized_draft=draft,
@@ -353,6 +360,7 @@ def test_precomputed_receipt_path_applies_only_bound_claims(tmp_path) -> None:
 def test_service_never_selects_a_provider_implicitly(tmp_path) -> None:
     base, listing, request, draft, writer, humanizer, _ = _fixture(tmp_path)
     values = {
+        "environment": "synthetic",
         "request": request,
         "writer_draft": draft,
         "humanized_draft": draft,
@@ -372,10 +380,95 @@ def test_service_never_selects_a_provider_implicitly(tmp_path) -> None:
         )
 
 
+def test_production_orchestration_rejects_injected_or_precomputed_recruiter(
+    tmp_path,
+) -> None:
+    base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
+    values = {
+        "environment": "production",
+        "request": request,
+        "writer_draft": draft,
+        "humanized_draft": draft,
+        "writer_evidence": writer,
+        "humanizer_evidence": humanizer,
+        "base_source": base,
+        "listing_text": listing,
+        "form_fields": (),
+        "bindings": (),
+    }
+    with pytest.raises(CVCompositionServiceError, match="typed detached"):
+        run_cv_composition_orchestration(**values, recruiter_assessor=assessor)
+
+    synthetic = run_cv_composition_orchestration(
+        **{**values, "environment": "synthetic"}, recruiter_assessor=assessor
+    )
+    with pytest.raises(CVCompositionServiceError, match="typed detached"):
+        run_cv_composition_orchestration(
+            **values, recruiter_receipt=synthetic.recruiter_receipt
+        )
+
+
+def test_production_assessor_requires_external_archive(tmp_path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    binary = tmp_path / "codex"
+    binary.write_bytes(b"fixture binary")
+    binary.chmod(0o700)
+    with pytest.raises(ProductionRecruiterAssessorError, match="explicit"):
+        ProductionDetachedRecruiterAssessor(
+            model="gpt-5.6",
+            archive_root=tmp_path / "archive",
+            repository_root=repository,
+            codex_binary=None,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ProductionRecruiterAssessorError, match="outside"):
+        ProductionDetachedRecruiterAssessor(
+            model="gpt-5.6",
+            archive_root=repository / "archive",
+            repository_root=repository,
+            codex_binary=str(binary),
+        )
+
+
+def test_production_assessor_configuration_rejects_replay_substitution(
+    tmp_path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    binary_a = tmp_path / "codex-a"
+    binary_b = tmp_path / "codex-b"
+    binary_a.write_bytes(b"fixture binary a")
+    binary_b.write_bytes(b"fixture binary b")
+    binary_a.chmod(0o700)
+    binary_b.chmod(0o700)
+
+    def assessor(*, model="gpt-5.6", binary=binary_a, archive="archive-a"):
+        return ProductionDetachedRecruiterAssessor(
+            model=model,
+            archive_root=tmp_path / archive,
+            repository_root=repository,
+            codex_binary=str(binary),
+        )
+
+    baseline = assessor()
+    identities = {
+        baseline.configuration_sha256,
+        assessor(model="gpt-5.6-mini").configuration_sha256,
+        assessor(binary=binary_b).configuration_sha256,
+        assessor(archive="archive-b").configuration_sha256,
+    }
+    assert len(identities) == 4
+    assert content_hash(baseline.configuration_document()) == baseline.configuration_sha256
+    binary_a.write_bytes(b"substituted after configuration")
+    with pytest.raises(ProductionRecruiterAssessorError, match="changed"):
+        baseline.assess(None)  # type: ignore[arg-type]
+
+
 def test_listing_and_canonical_artifact_authority_fail_closed(tmp_path) -> None:
     base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
     with pytest.raises(CVCompositionServiceError, match="job listing differs"):
         run_cv_composition_orchestration(
+            environment="synthetic",
             request=request,
             writer_draft=draft,
             humanized_draft=draft,
@@ -431,6 +524,7 @@ def test_listing_and_canonical_artifact_authority_fail_closed(tmp_path) -> None:
     )
     with pytest.raises(CVCompositionServiceError, match="no canonical artifact fact"):
         run_cv_composition_orchestration(
+            environment="synthetic",
             request=extended,
             writer_draft=extended_draft,
             humanized_draft=extended_draft,
@@ -447,6 +541,7 @@ def test_listing_and_canonical_artifact_authority_fail_closed(tmp_path) -> None:
 def test_orchestration_receipt_is_tamper_evident_and_non_release(tmp_path) -> None:
     base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
     result = run_cv_composition_orchestration(
+        environment="synthetic",
         request=request,
         writer_draft=draft,
         humanized_draft=draft,
@@ -552,6 +647,7 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
         "improvement_binder": lambda req, receipt: (_binding(req, receipt),),
     }
     inputs = {
+        "environment": "synthetic",
         "admission_store": store,
         "application_id": verified.application_id,
         "repository_root": Path(__file__).resolve().parents[1],
@@ -563,6 +659,24 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
         "contact_object_sha256": contact_object_sha,
         "orchestration_arguments": arguments,
     }
+    class _ProductionStore:
+        def for_boundary(self, application_id, boundary):
+            assert application_id == verified.application_id
+            assert boundary == "strategy"
+            return replace(verified, environment="production")
+
+    with pytest.raises(ValueError, match="typed detached"):
+        prepare_admitted_market_application(
+            **{
+                **inputs,
+                "admission_store": _ProductionStore(),
+                "environment": "production",
+            }
+        )
+    with pytest.raises(HandoffAdmissionError, match="environment differs"):
+        prepare_admitted_market_application(
+            **{**inputs, "environment": "production"}
+        )
     with pytest.raises(ValueError, match="contact authority exact bytes differ"):
         prepare_admitted_market_application(
             **{**inputs, "contact_object_sha256": "0" * 64}
@@ -575,7 +689,7 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
     second = prepare_admitted_market_application(**inputs)
     assert first == second
     assert first.release_authority is False
-    assert store.calls == 1
+    assert store.calls == 3
     assert assessor.calls == 1
     assert (first.path / "cv.pdf").is_file()
     assert (first.path / "cover-letter.pdf").is_file()
@@ -673,6 +787,7 @@ def test_authority_runner_materializes_exact_admitted_inputs_without_provider(tm
 
     store = _Store()
     result = prepare_admitted_market_application_from_authorities(
+        environment="synthetic",
         admission_store=store,
         application_id=verified.application_id,
         repository_root=Path(__file__).resolve().parents[1],
@@ -706,6 +821,7 @@ def test_authority_runner_rejects_candidate_not_bound_to_handoff(tmp_path) -> No
 
     with pytest.raises(HandoffAdmissionError, match="candidate authority differs"):
         prepare_admitted_market_application_from_authorities(
+            environment="synthetic",
             admission_store=_Store(),
             application_id="app_" + "1" * 64,
             repository_root=Path(__file__).resolve().parents[1],
