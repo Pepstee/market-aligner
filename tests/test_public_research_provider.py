@@ -15,6 +15,7 @@ from market_aligner.research.public_provider import (
     PublicResearchError, PublicResearchPlan, ScraplingPublicSourceFetcher,
     SourceBoundResearchProvider, _safe_public_url,
 )
+from market_aligner.research.models import ResearchDossier
 from market_aligner.research.store import AssessmentStore
 from market_aligner.research.worker import ResearchWorker
 from market_aligner.state.vacancies import JobDatabase
@@ -134,6 +135,18 @@ def test_v2_archives_verbatim_claim_and_persists_reconciled_store_binding(
     assert store.research_evidence(task.profile_id, task.job_key)["dossier_hash"] == dossier[
         "dossier_hash"
     ]
+    assert store.refresh_completed_research_if_needed(task.profile_id, task.job_key) is False
+    result.receipt_path.unlink()
+    assert store.refresh_completed_research_if_needed(task.profile_id, task.job_key) is True
+    with store.connection() as connection:
+        queue = connection.execute(
+            "SELECT status,last_error FROM employer_research_queue"
+        ).fetchone()
+        assert queue["status"] == "queued"
+        assert "valid current v2 evidence" in queue["last_error"]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM employer_research_evidence"
+        ).fetchone()[0] == 0
 
 
 def test_v2_rejects_loader_shell_or_any_claim_without_exact_support(tmp_path: Path) -> None:
@@ -248,3 +261,24 @@ def test_legacy_dossier_has_no_v2_store_binding(tmp_path: Path) -> None:
     )
     with pytest.raises(KeyError):
         store.research_evidence(profile_id, JOB_KEY)
+    task = store.claim_research("legacy-worker")
+    assert task is not None
+    store.complete_research(
+        ResearchDossier(
+            task.profile_id, task.job_key, task.company, task.title, (), ()
+        ),
+        "legacy-worker",
+    )
+    assert store.refresh_completed_research_if_needed(profile_id, JOB_KEY) is True
+    assert store.refresh_completed_research_if_needed(profile_id, JOB_KEY) is False
+    with store.connection() as connection:
+        queue = connection.execute(
+            "SELECT status,lease_owner,lease_until FROM employer_research_queue"
+        ).fetchone()
+        event_count = connection.execute(
+            """SELECT COUNT(*) FROM assessment_events
+               WHERE event_type='employer_research_v2_refresh_queued'"""
+        ).fetchone()[0]
+    assert queue["status"] == "queued"
+    assert queue["lease_owner"] is None and queue["lease_until"] is None
+    assert event_count == 1

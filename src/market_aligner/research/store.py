@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -20,6 +21,34 @@ from .models import (
     ResearchEvidenceBinding,
     ResearchTask,
 )
+
+
+_BYTE_SELECTOR = re.compile(r"^bytes:(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$")
+
+
+def _vacancy_snapshot_sha256(values: dict[str, Any]) -> str | None:
+    if (
+        values.get("source_content_sha256") is None
+        or values.get("promotion_receipt_sha256") is None
+    ):
+        return None
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "company": values["company"],
+                "job_key": values["job_key"],
+                "promotion_receipt_sha256": values["promotion_receipt_sha256"],
+                "schema_version": "market-aligner.research-vacancy-snapshot.v1",
+                "source_content_sha256": values["source_content_sha256"],
+                "title": values["title"],
+                "url": values["url"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 SCHEMA = """
@@ -539,31 +568,212 @@ class AssessmentStore:
                 (worker_id, lease_until.isoformat(), row["profile_id"], row["job_key"]),
             )
             values = dict(row)
-            values["vacancy_snapshot_sha256"] = (
-                None
-                if values["source_content_sha256"] is None
-                or values["promotion_receipt_sha256"] is None
-                else hashlib.sha256(
+            values["vacancy_snapshot_sha256"] = _vacancy_snapshot_sha256(values)
+            return ResearchTask(**values)
+
+    def _has_current_v2_evidence(self, row: sqlite3.Row) -> bool:
+        try:
+            document = json.loads(row["dossier_json"])
+            expected_snapshot = _vacancy_snapshot_sha256(dict(row))
+            if (
+                not isinstance(document, dict)
+                or document.get("schema_version")
+                != "market-aligner.employer-dossier.v2"
+                or hashlib.sha256(row["dossier_json"].encode("utf-8")).hexdigest()
+                != row["dossier_hash"]
+                or row["evidence_dossier_hash"] != row["dossier_hash"]
+                or row["evidence_schema_version"]
+                != "market-aligner.research-store-binding.v2"
+                or row["evidence_source_content_sha256"]
+                != row["source_content_sha256"]
+                or row["evidence_vacancy_snapshot_sha256"] != expected_snapshot
+                or row["evidence_promotion_receipt_sha256"]
+                != row["promotion_receipt_sha256"]
+                or document.get("source_content_sha256")
+                != row["source_content_sha256"]
+                or document.get("vacancy_snapshot_sha256") != expected_snapshot
+                or document.get("promotion_receipt_sha256")
+                != row["promotion_receipt_sha256"]
+                or document.get("canonical_vacancy_object_sha256")
+                != row["canonical_vacancy_object_sha256"]
+            ):
+                return False
+            binding = ResearchEvidenceBinding(
+                row["evidence_dossier_hash"],
+                row["evidence_source_content_sha256"],
+                row["evidence_vacancy_snapshot_sha256"],
+                row["evidence_promotion_receipt_sha256"],
+                row["canonical_vacancy_object_sha256"],
+                row["semantic_receipt_sha256"],
+                row["receipt_file_sha256"],
+                row["archive_root_identity"],
+                row["archive_root_policy_sha256"],
+                row["receipt_relative_path"],
+                row["evidence_schema_version"],
+            )
+            binding.validate()
+            root = (self.data_home / binding.archive_root_identity).resolve()
+            if self.data_home not in root.parents or root.is_symlink():
+                return False
+            receipt_path = root / binding.receipt_relative_path
+            object_path = root / "objects" / binding.canonical_vacancy_object_sha256
+            if (
+                receipt_path.is_symlink()
+                or object_path.is_symlink()
+                or not receipt_path.is_file()
+                or not object_path.is_file()
+            ):
+                return False
+            receipt_bytes = receipt_path.read_bytes()
+            object_bytes = object_path.read_bytes()
+            if (
+                hashlib.sha256(receipt_bytes).hexdigest()
+                != binding.receipt_file_sha256
+                or hashlib.sha256(object_bytes).hexdigest()
+                != binding.canonical_vacancy_object_sha256
+            ):
+                return False
+            receipt = json.loads(receipt_bytes)
+            semantic_body = dict(receipt)
+            semantic = semantic_body.pop("semantic_receipt_sha256", None)
+            if (
+                receipt_bytes
+                != json.dumps(
+                    receipt,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                or semantic != binding.semantic_receipt_sha256
+                or hashlib.sha256(
                     json.dumps(
-                        {
-                        "company": values["company"],
-                        "job_key": values["job_key"],
-                        "promotion_receipt_sha256": values[
-                            "promotion_receipt_sha256"
-                        ],
-                        "schema_version": "market-aligner.research-vacancy-snapshot.v1",
-                        "source_content_sha256": values["source_content_sha256"],
-                        "title": values["title"],
-                        "url": values["url"],
-                        },
+                        semantic_body,
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
                         allow_nan=False,
                     ).encode("utf-8")
                 ).hexdigest()
+                != semantic
+                or receipt.get("schema_version")
+                != "market-aligner.public-research-materialization.v2"
+                or receipt.get("dossier_sha256") != row["dossier_hash"]
+            ):
+                return False
+            citations = document.get("citations")
+            claims = document.get("claims")
+            if (
+                not isinstance(citations, list)
+                or len(citations) != 1
+                or citations[0].get("source_kind") != "canonical_vacancy"
+                or citations[0].get("content_sha256")
+                != binding.canonical_vacancy_object_sha256
+                or not isinstance(claims, list)
+                or not claims
+            ):
+                return False
+            citation_id = citations[0].get("citation_id")
+            for claim in claims:
+                supports = claim.get("supports")
+                if not isinstance(supports, list) or not supports:
+                    return False
+                for support in supports:
+                    match = _BYTE_SELECTOR.fullmatch(str(support.get("selector", "")))
+                    if match is None or support.get("citation_id") != citation_id:
+                        return False
+                    start, end = int(match.group(1)), int(match.group(2))
+                    selected = object_bytes[start:end]
+                    if (
+                        end > len(object_bytes)
+                        or hashlib.sha256(selected).hexdigest()
+                        != support.get("excerpt_sha256")
+                        or selected.decode("utf-8") != support.get("excerpt")
+                        or " ".join(str(claim.get("claim", "")).split())
+                        != " ".join(str(support.get("excerpt", "")).split())
+                    ):
+                        return False
+            return True
+        except (KeyError, TypeError, ValueError, OSError, UnicodeError, json.JSONDecodeError):
+            return False
+
+    def refresh_completed_research_if_needed(
+        self, profile_id: str, job_key: str
+    ) -> bool:
+        """Requeue completed research only when its current v2 evidence is invalid."""
+
+        validate_profile_id(profile_id)
+        with self.transaction() as connection:
+            row = connection.execute(
+                """SELECT q.status,q.job_key,a.title,a.company,a.url,
+                          p.source_content_sha256,
+                          p.receipt_sha256 AS promotion_receipt_sha256,
+                          d.dossier_json,d.dossier_hash,
+                          e.dossier_hash AS evidence_dossier_hash,
+                          e.source_content_sha256 AS evidence_source_content_sha256,
+                          e.vacancy_snapshot_sha256 AS evidence_vacancy_snapshot_sha256,
+                          e.promotion_receipt_sha256 AS evidence_promotion_receipt_sha256,
+                          e.canonical_vacancy_object_sha256,
+                          e.semantic_receipt_sha256,e.receipt_file_sha256,
+                          e.archive_root_identity,e.archive_root_policy_sha256,
+                          e.receipt_relative_path,
+                          e.schema_version AS evidence_schema_version
+                   FROM employer_research_queue q JOIN assessments a
+                     ON a.profile_id=q.profile_id AND a.job_key=q.job_key
+                   LEFT JOIN assessment_promotions p
+                     ON p.profile_id=q.profile_id AND p.job_key=q.job_key
+                   LEFT JOIN employer_dossiers d
+                     ON d.profile_id=q.profile_id AND d.job_key=q.job_key
+                   LEFT JOIN employer_research_evidence e
+                     ON e.profile_id=q.profile_id AND e.job_key=q.job_key
+                   WHERE q.profile_id=? AND q.job_key=?""",
+                (profile_id, job_key),
+            ).fetchone()
+            if row is None:
+                raise KeyError((profile_id, job_key))
+            if row["status"] != "completed" or self._has_current_v2_evidence(row):
+                return False
+            connection.execute(
+                """UPDATE employer_research_queue SET status='queued',available_at=CURRENT_TIMESTAMP,
+                     lease_owner=NULL,lease_until=NULL,last_error=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE profile_id=? AND job_key=?""",
+                ("completed research lacks valid current v2 evidence", profile_id, job_key),
             )
-            return ResearchTask(**values)
+            connection.execute(
+                "DELETE FROM employer_research_evidence WHERE profile_id=? AND job_key=?",
+                (profile_id, job_key),
+            )
+            connection.execute(
+                """UPDATE assessments SET state='employer_research_queued',
+                     updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND job_key=?""",
+                (profile_id, job_key),
+            )
+            connection.execute(
+                """INSERT OR IGNORE INTO assessment_events(
+                     profile_id,job_key,event_type,actor_kind,payload_json,idempotency_key
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    profile_id,
+                    job_key,
+                    "employer_research_v2_refresh_queued",
+                    "deterministic",
+                    json.dumps(
+                        {
+                            "prior_dossier_hash": row["dossier_hash"],
+                            "promotion_receipt_sha256": row[
+                                "promotion_receipt_sha256"
+                            ],
+                            "reason": "missing_or_invalid_current_v2_evidence",
+                        },
+                        sort_keys=True,
+                    ),
+                    (
+                        f"research-v2-refresh:{profile_id}:{job_key}:"
+                        f"{row['dossier_hash']}:{row['promotion_receipt_sha256']}"
+                    ),
+                ),
+            )
+            return True
 
     def complete_research(
         self,
