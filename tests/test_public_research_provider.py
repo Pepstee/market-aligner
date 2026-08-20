@@ -310,13 +310,16 @@ def test_canonical_unchanged_refresh_requeues_and_same_worker_rebuilds(
     ) is False
 
     second_task = _task_and_reset(store)
-    second_source = loader(second_task)
+    refreshed_loader = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    second_source = refreshed_loader(second_task)
     assert second_source.accessed_at == "2026-08-21T01:00:00+00:00"
     second_provider = SourceBoundResearchProvider(
         plan=_plan(second_task, second_source),
         repository_root=repository,
         archive_root=archive,
-        canonical_vacancy_loader=loader,
+        canonical_vacancy_loader=refreshed_loader,
     )
     run = ResearchWorker(store, second_provider, "worker-new").run_one()
     assert run.status == "completed", run.error
@@ -392,6 +395,206 @@ def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
     assert event["source_content_sha256"] == legacy_digest
     assert event["old_collector_content_sha256"] == legacy_digest
     assert event["old_canonical_content_sha256"] == canonical_digest
+
+    refreshed_task = _task_and_reset(store)
+    assert refreshed_task.source_content_sha256 == legacy_digest
+    assert refreshed_task.refresh_event_id is not None
+    assert refreshed_task.refresh_legacy_content_sha256 == legacy_digest
+    assert refreshed_task.refresh_canonical_content_sha256 == canonical_digest
+    assert refreshed_task.refresh_receipt_sha256 == receipt["receipt_sha256"]
+    assert refreshed_task.refresh_transition_sha256 == receipt["transition_sha256"]
+    assert refreshed_task.refresh_promotion_receipt_sha256 == PROMOTION
+
+    bridge_loader = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    refreshed_source = bridge_loader(refreshed_task)
+    envelope = json.loads(refreshed_source.body)
+    assert envelope["schema_version"] == "market-aligner.canonical-collector-vacancy.v2"
+    assert envelope["authority_source_content_sha256"] == legacy_digest
+    assert envelope["canonical_current_content_sha256"] == canonical_digest
+    assert refreshed_source.authority_source_content_sha256 == legacy_digest
+
+    provider = SourceBoundResearchProvider(
+        plan=_plan(refreshed_task, refreshed_source),
+        repository_root=repository,
+        archive_root=tmp_path / "state" / "public-employer-research-v2",
+        canonical_vacancy_loader=bridge_loader,
+    )
+    rebuilt = ResearchWorker(store, provider, "bridge-worker").run_one()
+    assert rebuilt.status == "completed", rebuilt.error
+    assert provider.last_materialization is not None
+    assert provider.last_materialization.dossier.source_content_sha256 == legacy_digest
+    with store.connection() as connection:
+        assert connection.execute(
+            "SELECT source_content_sha256 FROM employer_research_evidence"
+        ).fetchone()[0] == legacy_digest
+    apply_gate(store, profile_id, JOB_KEY)
+    with store.connection() as connection:
+        assert connection.execute(
+            "SELECT refresh_event_id FROM employer_research_queue"
+        ).fetchone()[0] is None
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("refresh_event_id", None),
+        ("refresh_event_id", 999999),
+        ("refresh_receipt_sha256", "9" * 64),
+        ("refresh_receipt_file_sha256", "8" * 64),
+        ("refresh_transition_sha256", "7" * 64),
+        ("refresh_id", "substituted-refresh"),
+        ("refresh_context_sha256", "6" * 64),
+        ("refresh_operation_id", "substituted-operation"),
+        ("refresh_legacy_content_sha256", "5" * 64),
+        ("refresh_canonical_content_sha256", "4" * 64),
+        ("refresh_raw_object_sha256", "3" * 64),
+        ("refresh_fetched_at", "2026-08-21T09:00:00+00:00"),
+        ("refresh_promotion_receipt_sha256", "2" * 64),
+    ),
+)
+def test_refresh_worker_bridge_rejects_task_identity_substitution(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    provider = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=tmp_path / "state" / "public-employer-research-v2",
+        canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, provider, "legacy-worker").run_one().status == "completed"
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    refreshed_task = _task_and_reset(store)
+    bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    with pytest.raises(PublicResearchError):
+        bridge(replace(refreshed_task, **{field: replacement}))
+
+
+def test_ordinary_research_task_has_no_refresh_bridge_and_v1_envelope(
+    tmp_path: Path,
+) -> None:
+    loader, digest = _collector(tmp_path / "collector.sqlite3")
+    store, _profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", digest
+    )
+    task = _task_and_reset(store)
+    assert task.refresh_event_id is None
+    assert task.refresh_receipt_sha256 is None
+    source = loader(task)
+    assert json.loads(source.body)["schema_version"] == (
+        "market-aligner.canonical-collector-vacancy.v1"
+    )
+
+
+def test_refresh_worker_bridge_reads_receipt_and_posting_in_one_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    provider = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=tmp_path / "state" / "public-employer-research-v2",
+        canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, provider, "legacy-worker").run_one().status == "completed"
+    receipt_path, database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    refreshed_task = _task_and_reset(store)
+    original_verify = JobDatabase.verify_vacancy_refresh_receipt
+    raced = False
+
+    def verify_then_race(self, *args, **kwargs):
+        nonlocal raced
+        verified = original_verify(self, *args, **kwargs)
+        if not raced and kwargs.get("schema", "main") == "main":
+            with sqlite3.connect(self.path) as contender:
+                contender.execute(
+                    "UPDATE postings SET fetched_at=? WHERE key=?",
+                    ("2026-08-21T09:00:00+00:00", JOB_KEY),
+                )
+            raced = True
+        return verified
+
+    monkeypatch.setattr(JobDatabase, "verify_vacancy_refresh_receipt", verify_then_race)
+    bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    result = bridge(refreshed_task)
+    assert raced
+    assert result.accessed_at == refreshed_task.refresh_fetched_at
+    assert json.loads(result.body)["fetched_at"] == refreshed_task.refresh_fetched_at
+    with pytest.raises(PublicResearchError):
+        bridge(refreshed_task)
+
+
+def test_refresh_worker_bridge_rejects_canonical_event_substitution(
+    tmp_path: Path,
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    provider = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=tmp_path / "state" / "public-employer-research-v2",
+        canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, provider, "legacy-worker").run_one().status == "completed"
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    refreshed_task = _task_and_reset(store)
+    with store.connection() as connection:
+        payload = json.loads(connection.execute(
+            "SELECT payload_json FROM assessment_events WHERE id=?",
+            (refreshed_task.refresh_event_id,),
+        ).fetchone()[0])
+        payload["new_fetched_at"] = "2026-08-21T09:00:00+00:00"
+        connection.execute(
+            "UPDATE assessment_events SET payload_json=? WHERE id=?",
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")),
+             refreshed_task.refresh_event_id),
+        )
+    bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    with pytest.raises(PublicResearchError, match="event differs"):
+        bridge(refreshed_task)
 
 
 def test_dual_identity_v3_rejects_relabelled_promotion_and_canonical_drift(

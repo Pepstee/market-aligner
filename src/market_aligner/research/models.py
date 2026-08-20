@@ -170,3 +170,15 @@ class ResearchTask:
     source_content_sha256: str | None = None
     vacancy_snapshot_sha256: str | None = None
     promotion_receipt_sha256: str | None = None
+    refresh_event_id: int | None = None
+    refresh_receipt_sha256: str | None = None
+    refresh_receipt_file_sha256: str | None = None
+    refresh_transition_sha256: str | None = None
+    refresh_id: str | None = None
+    refresh_context_sha256: str | None = None
+    refresh_operation_id: str | None = None
+    refresh_legacy_content_sha256: str | None = None
+    refresh_canonical_content_sha256: str | None = None
+    refresh_raw_object_sha256: str | None = None
+    refresh_fetched_at: str | None = None
+    refresh_promotion_receipt_sha256: str | None = None

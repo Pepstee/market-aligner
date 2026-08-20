@@ -106,10 +106,12 @@ CREATE TABLE IF NOT EXISTS employer_research_queue (
   lease_owner TEXT,
   lease_until TEXT,
   last_error TEXT,
+  refresh_event_id INTEGER,
   queued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(profile_id,job_key),
-  FOREIGN KEY(profile_id,job_key) REFERENCES assessments(profile_id,job_key) ON DELETE CASCADE
+  FOREIGN KEY(profile_id,job_key) REFERENCES assessments(profile_id,job_key) ON DELETE CASCADE,
+  FOREIGN KEY(refresh_event_id) REFERENCES assessment_events(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS employer_dossiers (
@@ -182,6 +184,18 @@ class AssessmentStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
             connection.executescript(SCHEMA)
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(employer_research_queue)"
+                )
+            }
+            if "refresh_event_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE employer_research_queue ADD COLUMN "
+                    "refresh_event_id INTEGER REFERENCES assessment_events(id) "
+                    "ON DELETE RESTRICT"
+                )
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -335,7 +349,8 @@ class AssessmentStore:
                 connection.execute(
                     """INSERT INTO employer_research_queue(profile_id,job_key,priority)
                        VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
-                       priority=excluded.priority,updated_at=CURRENT_TIMESTAMP""",
+                       priority=excluded.priority,refresh_event_id=NULL,
+                       updated_at=CURRENT_TIMESTAMP""",
                     (profile_id, job_key, priority),
                 )
             else:
@@ -464,7 +479,8 @@ class AssessmentStore:
                 connection.execute(
                     """INSERT INTO employer_research_queue(profile_id,job_key,priority)
                        VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
-                       priority=excluded.priority,updated_at=CURRENT_TIMESTAMP""",
+                       priority=excluded.priority,refresh_event_id=NULL,
+                       updated_at=CURRENT_TIMESTAMP""",
                     (profile_id, job_key, research_priority),
                 )
                 return False
@@ -504,7 +520,8 @@ class AssessmentStore:
             connection.execute(
                 """INSERT INTO employer_research_queue(profile_id,job_key,priority)
                    VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
-                   priority=excluded.priority,updated_at=CURRENT_TIMESTAMP""",
+                   priority=excluded.priority,refresh_event_id=NULL,
+                   updated_at=CURRENT_TIMESTAMP""",
                 (profile_id, job_key, research_priority),
             )
             connection.execute(
@@ -554,11 +571,17 @@ class AssessmentStore:
             row = connection.execute(
                 """SELECT q.profile_id,q.job_key,a.title,a.company,a.url,a.opportunity,
                           q.priority,q.attempts,p.source_content_sha256,
-                          p.receipt_sha256 AS promotion_receipt_sha256
+                          p.receipt_sha256 AS promotion_receipt_sha256,
+                          q.refresh_event_id,e.event_type AS refresh_event_type,
+                          e.actor_kind AS refresh_actor_kind,
+                          e.payload_json AS refresh_payload_json
                    FROM employer_research_queue q JOIN assessments a
                      ON a.profile_id=q.profile_id AND a.job_key=q.job_key
                    LEFT JOIN assessment_promotions p
                      ON p.profile_id=q.profile_id AND p.job_key=q.job_key
+                   LEFT JOIN assessment_events e
+                     ON e.id=q.refresh_event_id
+                    AND e.profile_id=q.profile_id AND e.job_key=q.job_key
                    WHERE (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
                       OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP)
                    ORDER BY q.priority DESC,a.opportunity DESC,q.queued_at LIMIT 1"""
@@ -572,7 +595,83 @@ class AssessmentStore:
                 (worker_id, lease_until.isoformat(), row["profile_id"], row["job_key"]),
             )
             values = dict(row)
+            refresh_event_id = values.pop("refresh_event_id")
+            refresh_event_type = values.pop("refresh_event_type")
+            refresh_actor_kind = values.pop("refresh_actor_kind")
+            refresh_payload_json = values.pop("refresh_payload_json")
+            refresh_values = {
+                "refresh_event_id": refresh_event_id,
+                "refresh_receipt_sha256": None,
+                "refresh_receipt_file_sha256": None,
+                "refresh_transition_sha256": None,
+                "refresh_id": None,
+                "refresh_context_sha256": None,
+                "refresh_operation_id": None,
+                "refresh_legacy_content_sha256": None,
+                "refresh_canonical_content_sha256": None,
+                "refresh_raw_object_sha256": None,
+                "refresh_fetched_at": None,
+                "refresh_promotion_receipt_sha256": None,
+            }
+            if refresh_event_id is not None:
+                try:
+                    payload = json.loads(str(refresh_payload_json))
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("research refresh event payload is invalid") from exc
+                expected_keys = {
+                    "collection_context_sha256",
+                    "collection_operation_id",
+                    "collection_receipt_file_sha256",
+                    "collection_receipt_sha256",
+                    "collection_refresh_id",
+                    "collection_transition_sha256",
+                    "new_fetched_at",
+                    "new_raw_object_sha256",
+                    "old_canonical_content_sha256",
+                    "old_collector_content_sha256",
+                    "prior_dossier_hash",
+                    "promotion_receipt_sha256",
+                    "source_content_sha256",
+                }
+                if (
+                    refresh_event_type
+                    != "employer_research_collection_refresh_queued"
+                    or refresh_actor_kind != "deterministic"
+                    or not isinstance(payload, dict)
+                    or set(payload) != expected_keys
+                    or payload["source_content_sha256"]
+                    != values["source_content_sha256"]
+                    or payload["old_collector_content_sha256"]
+                    != values["source_content_sha256"]
+                    or payload["promotion_receipt_sha256"]
+                    != values["promotion_receipt_sha256"]
+                ):
+                    raise ValueError("research refresh event differs from promotion")
+                refresh_values.update(
+                    refresh_receipt_sha256=payload["collection_receipt_sha256"],
+                    refresh_receipt_file_sha256=payload[
+                        "collection_receipt_file_sha256"
+                    ],
+                    refresh_transition_sha256=payload[
+                        "collection_transition_sha256"
+                    ],
+                    refresh_id=payload["collection_refresh_id"],
+                    refresh_context_sha256=payload["collection_context_sha256"],
+                    refresh_operation_id=payload["collection_operation_id"],
+                    refresh_legacy_content_sha256=payload[
+                        "old_collector_content_sha256"
+                    ],
+                    refresh_canonical_content_sha256=payload[
+                        "old_canonical_content_sha256"
+                    ],
+                    refresh_raw_object_sha256=payload["new_raw_object_sha256"],
+                    refresh_fetched_at=payload["new_fetched_at"],
+                    refresh_promotion_receipt_sha256=payload[
+                        "promotion_receipt_sha256"
+                    ],
+                )
             values["vacancy_snapshot_sha256"] = _vacancy_snapshot_sha256(values)
+            values.update(refresh_values)
             return ResearchTask(**values)
 
     def _has_current_v2_evidence(self, row: sqlite3.Row) -> bool:
@@ -872,36 +971,6 @@ class AssessmentStore:
                 f"research-collection-refresh:{profile_id}:{job_key}:"
                 f"{verified.transition_sha256}"
             )
-            if connection.execute(
-                "SELECT 1 FROM assessment_events WHERE idempotency_key=?", (event_key,)
-            ).fetchone() is not None:
-                connection.rollback()
-                return False
-            if row["status"] != "completed":
-                raise ValueError(
-                    "collection refresh can requeue only completed employer research"
-                )
-
-            connection.execute(
-                """UPDATE employer_research_queue SET status='queued',
-                     available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,
-                     last_error=?,updated_at=CURRENT_TIMESTAMP
-                   WHERE profile_id=? AND job_key=? AND status='completed'""",
-                (
-                    "canonical vacancy fetched_at changed under unchanged content",
-                    profile_id,
-                    job_key,
-                ),
-            )
-            connection.execute(
-                "DELETE FROM employer_research_evidence WHERE profile_id=? AND job_key=?",
-                (profile_id, job_key),
-            )
-            connection.execute(
-                """UPDATE assessments SET state='employer_research_queued',
-                     updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND job_key=?""",
-                (profile_id, job_key),
-            )
             payload = {
                 "collection_context_sha256": verified.context_sha256,
                 "collection_operation_id": verified.operation_id,
@@ -919,7 +988,52 @@ class AssessmentStore:
                 "promotion_receipt_sha256": row["promotion_receipt_sha256"],
                 "source_content_sha256": promotion_source,
             }
-            connection.execute(
+            existing_event = connection.execute(
+                """SELECT id,event_type,actor_kind,payload_json
+                   FROM assessment_events WHERE idempotency_key=?""",
+                (event_key,),
+            ).fetchone()
+            if existing_event is not None:
+                queue_event = connection.execute(
+                    """SELECT refresh_event_id FROM employer_research_queue
+                       WHERE profile_id=? AND job_key=?""",
+                    (profile_id, job_key),
+                ).fetchone()
+                try:
+                    existing_payload = json.loads(existing_event["payload_json"])
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        "collection refresh replay event is invalid"
+                    ) from exc
+                prior_hash = (
+                    existing_payload.get("prior_dossier_hash")
+                    if isinstance(existing_payload, dict)
+                    else None
+                )
+                replay_payload = dict(payload)
+                replay_payload["prior_dossier_hash"] = prior_hash
+                if (
+                    existing_event["event_type"]
+                    != "employer_research_collection_refresh_queued"
+                    or existing_event["actor_kind"] != "deterministic"
+                    or not isinstance(prior_hash, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", prior_hash)
+                    or existing_event["payload_json"]
+                    != json.dumps(
+                        replay_payload, sort_keys=True, separators=(",", ":")
+                    )
+                    or queue_event is None
+                    or queue_event["refresh_event_id"] != existing_event["id"]
+                ):
+                    raise ValueError("collection refresh replay binding differs")
+                connection.rollback()
+                return False
+            if row["status"] != "completed":
+                raise ValueError(
+                    "collection refresh can requeue only completed employer research"
+                )
+
+            cursor = connection.execute(
                 """INSERT INTO assessment_events(
                      profile_id,job_key,event_type,actor_kind,payload_json,idempotency_key
                    ) VALUES(?,?,?,?,?,?)""",
@@ -931,6 +1045,30 @@ class AssessmentStore:
                     json.dumps(payload, sort_keys=True, separators=(",", ":")),
                     event_key,
                 ),
+            )
+            refresh_event_id = int(cursor.lastrowid)
+            updated = connection.execute(
+                """UPDATE employer_research_queue SET status='queued',
+                     available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,
+                     last_error=?,refresh_event_id=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE profile_id=? AND job_key=? AND status='completed'""",
+                (
+                    "canonical vacancy fetched_at changed under unchanged content",
+                    refresh_event_id,
+                    profile_id,
+                    job_key,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("research refresh queue transition raced")
+            connection.execute(
+                "DELETE FROM employer_research_evidence WHERE profile_id=? AND job_key=?",
+                (profile_id, job_key),
+            )
+            connection.execute(
+                """UPDATE assessments SET state='employer_research_queued',
+                     updated_at=CURRENT_TIMESTAMP WHERE profile_id=? AND job_key=?""",
+                (profile_id, job_key),
             )
             # A second call through the same canonical verifier occurs while the
             # collector reservation is still held and before assessment commit.

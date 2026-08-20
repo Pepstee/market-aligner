@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import urlsplit
 
+from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
+
 from .models import ClaimSupport, ResearchClaim, ResearchDossier, ResearchTask, SourceCitation
 
 
@@ -282,45 +284,49 @@ class CanonicalCollectorVacancyLoader:
     intentionally a different hash domain.
     """
 
-    def __init__(self, database: Path) -> None:
-        self.database = database.absolute()
+    def __init__(
+        self,
+        database: Path | None = None,
+        *,
+        data_home: Path | None = None,
+        collection_config_path: Path | None = None,
+    ) -> None:
+        self.database = None if database is None else database.absolute()
+        self.data_home = None if data_home is None else data_home.absolute()
+        self.collection_config_path = (
+            None
+            if collection_config_path is None
+            else collection_config_path.absolute()
+        )
 
-    def __call__(self, task: ResearchTask) -> FetchedPublicSource:
+    @staticmethod
+    def _safe_database(path: Path, *, label: str) -> None:
         try:
-            details = self.database.lstat()
+            details = path.lstat()
         except OSError as exc:
-            raise PublicResearchError("canonical collector database is unavailable") from exc
+            raise PublicResearchError(f"{label} is unavailable") from exc
         if (
             not stat.S_ISREG(details.st_mode)
             or details.st_uid != os.geteuid()
             or details.st_mode & 0o022
-            or self.database.resolve(strict=True) != self.database
+            or path.resolve(strict=True) != path
         ):
-            raise PublicResearchError("canonical collector database is unsafe")
-        connection = sqlite3.connect(
-            f"file:{self.database.as_posix()}?mode=ro", uri=True, timeout=30
-        )
-        connection.row_factory = sqlite3.Row
-        try:
-            connection.execute("PRAGMA query_only=ON")
-            row = connection.execute(
-                """SELECT key,url,fetched_at,raw_text,raw_json,content_hash,fetch_status
-                   FROM postings WHERE key=?""",
-                (task.job_key,),
-            ).fetchone()
-        except sqlite3.Error as exc:
-            raise PublicResearchError("canonical collector database cannot be read") from exc
-        finally:
-            connection.close()
+            raise PublicResearchError(f"{label} is unsafe")
+
+    @staticmethod
+    def _posting_row(connection: sqlite3.Connection, job_key: str) -> sqlite3.Row | None:
+        return connection.execute(
+            """SELECT key,url,fetched_at,raw_text,raw_json,content_hash,fetch_status
+               FROM postings WHERE key=?""",
+            (job_key,),
+        ).fetchone()
+
+    @staticmethod
+    def _parsed_posting(row: sqlite3.Row, task: ResearchTask) -> tuple[str, object]:
         if row is None or row["fetch_status"] != "fetched":
             raise PublicResearchError("canonical collector vacancy is not fetched")
         if row["url"] != task.url:
             raise PublicResearchError("canonical collector vacancy URL differs from task")
-        if (
-            not _SHA256.fullmatch(str(row["content_hash"] or ""))
-            or row["content_hash"] != task.source_content_sha256
-        ):
-            raise PublicResearchError("canonical collector source authority differs from task")
         fetched_at = str(row["fetched_at"] or "")
         try:
             parsed_time = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
@@ -340,6 +346,214 @@ class CanonicalCollectorVacancyLoader:
                 raise PublicResearchError("canonical collector raw JSON is invalid") from exc
         if row["raw_text"] is None and raw_json is None:
             raise PublicResearchError("canonical collector vacancy has no source content")
+        return fetched_at, raw_json
+
+    def _bridge_event_payload(self, task: ResearchTask) -> dict[str, object]:
+        if self.data_home is None or self.collection_config_path is None:
+            raise PublicResearchError(
+                "refresh bridge requires deployment-bound data home and collection config"
+            )
+        required = {
+            "collection_context_sha256": task.refresh_context_sha256,
+            "collection_operation_id": task.refresh_operation_id,
+            "collection_receipt_file_sha256": task.refresh_receipt_file_sha256,
+            "collection_receipt_sha256": task.refresh_receipt_sha256,
+            "collection_refresh_id": task.refresh_id,
+            "collection_transition_sha256": task.refresh_transition_sha256,
+            "new_fetched_at": task.refresh_fetched_at,
+            "new_raw_object_sha256": task.refresh_raw_object_sha256,
+            "old_canonical_content_sha256": task.refresh_canonical_content_sha256,
+            "old_collector_content_sha256": task.refresh_legacy_content_sha256,
+            "promotion_receipt_sha256": task.refresh_promotion_receipt_sha256,
+            "source_content_sha256": task.source_content_sha256,
+        }
+        if (
+            type(task.refresh_event_id) is not int
+            or task.refresh_event_id <= 0
+            or any(value is None or value == "" for value in required.values())
+            or task.refresh_legacy_content_sha256 != task.source_content_sha256
+            or task.refresh_promotion_receipt_sha256
+            != task.promotion_receipt_sha256
+        ):
+            raise PublicResearchError("research refresh task binding is incomplete")
+        assessment_path = self.data_home / "state" / "assessments.sqlite3"
+        self._safe_database(assessment_path, label="canonical assessment database")
+        connection = sqlite3.connect(
+            f"file:{assessment_path.as_posix()}?mode=ro", uri=True, timeout=30
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            row = connection.execute(
+                """SELECT q.refresh_event_id,q.status,e.event_type,e.actor_kind,
+                          e.payload_json,p.source_content_sha256,
+                          p.receipt_sha256 AS promotion_receipt_sha256
+                   FROM employer_research_queue q
+                   JOIN assessment_events e
+                     ON e.id=q.refresh_event_id
+                    AND e.profile_id=q.profile_id AND e.job_key=q.job_key
+                   JOIN assessment_promotions p
+                     ON p.profile_id=q.profile_id AND p.job_key=q.job_key
+                   WHERE q.profile_id=? AND q.job_key=?""",
+                (task.profile_id, task.job_key),
+            ).fetchone()
+            if row is None:
+                raise PublicResearchError("research refresh event is not canonical")
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise PublicResearchError("research refresh event payload is invalid") from exc
+            expected = dict(required)
+            if not isinstance(payload, dict) or "prior_dossier_hash" not in payload:
+                raise PublicResearchError("research refresh event payload is incomplete")
+            expected["prior_dossier_hash"] = payload["prior_dossier_hash"]
+            if (
+                row["refresh_event_id"] != task.refresh_event_id
+                or row["status"] not in {"queued", "leased"}
+                or row["event_type"]
+                != "employer_research_collection_refresh_queued"
+                or row["actor_kind"] != "deterministic"
+                or payload != expected
+                or row["source_content_sha256"] != task.source_content_sha256
+                or row["promotion_receipt_sha256"]
+                != task.promotion_receipt_sha256
+            ):
+                raise PublicResearchError("research refresh event differs from task")
+            connection.commit()
+        finally:
+            connection.close()
+        return expected
+
+    def _load_bridge(self, task: ResearchTask) -> FetchedPublicSource:
+        self._bridge_event_payload(task)
+        assert self.data_home is not None
+        assert self.collection_config_path is not None
+        receipt_path = (
+            self.data_home
+            / "state"
+            / "collection-refresh-receipts"
+            / f"{task.refresh_receipt_sha256}.json"
+        )
+        try:
+            collector = JobDatabase.resolve_vacancy_refresh_collector(
+                self.data_home, receipt_path, self.collection_config_path
+            )
+            connection = collector.connect()
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("BEGIN")
+                verified = collector.verify_vacancy_refresh_receipt(
+                    receipt_path, job_key=task.job_key, connection=connection
+                )
+                row = self._posting_row(connection, task.job_key)
+                fetched_at, raw_json = self._parsed_posting(row, task)
+                if (
+                    verified.changed
+                    or verified.old_content_sha256
+                    != task.refresh_legacy_content_sha256
+                    or verified.old_content_sha256 != task.source_content_sha256
+                    or verified.old_canonical_content_sha256
+                    != verified.new_content_sha256
+                    or verified.new_content_sha256
+                    != task.refresh_canonical_content_sha256
+                    or str(row["content_hash"] or "")
+                    != task.refresh_canonical_content_sha256
+                    or verified.receipt_sha256 != task.refresh_receipt_sha256
+                    or verified.receipt_file_sha256
+                    != task.refresh_receipt_file_sha256
+                    or verified.transition_sha256 != task.refresh_transition_sha256
+                    or verified.refresh_id != task.refresh_id
+                    or verified.context_sha256 != task.refresh_context_sha256
+                    or verified.operation_id != task.refresh_operation_id
+                    or verified.new_raw_object_sha256
+                    != task.refresh_raw_object_sha256
+                    or verified.new_fetched_at != task.refresh_fetched_at
+                    or fetched_at != task.refresh_fetched_at
+                ):
+                    raise PublicResearchError(
+                        "canonical refresh receipt or current vacancy differs from task"
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error, VacancyRefreshConflict, ValueError) as exc:
+            if isinstance(exc, PublicResearchError):
+                raise
+            raise PublicResearchError("canonical refresh bridge verification failed") from exc
+        envelope = {
+            "authority_source_content_sha256": task.source_content_sha256,
+            "canonical_current_content_sha256": task.refresh_canonical_content_sha256,
+            "collection_refresh_event_id": task.refresh_event_id,
+            "collection_refresh_context_sha256": task.refresh_context_sha256,
+            "collection_refresh_id": task.refresh_id,
+            "collection_refresh_operation_id": task.refresh_operation_id,
+            "collection_refresh_raw_object_sha256": task.refresh_raw_object_sha256,
+            "collection_refresh_receipt_file_sha256": (
+                task.refresh_receipt_file_sha256
+            ),
+            "collection_refresh_receipt_sha256": task.refresh_receipt_sha256,
+            "collection_refresh_transition_sha256": task.refresh_transition_sha256,
+            "fetched_at": fetched_at,
+            "job_key": row["key"],
+            "promotion_receipt_sha256": task.promotion_receipt_sha256,
+            "raw_json": raw_json,
+            "raw_text": row["raw_text"],
+            "schema_version": "market-aligner.canonical-collector-vacancy.v2",
+            "url": row["url"],
+        }
+        return FetchedPublicSource(
+            requested_url=row["url"],
+            final_url=row["url"],
+            status=200,
+            body=_canonical_bytes(envelope),
+            content_type="application/vnd.market-aligner.canonical-vacancy+json",
+            accessed_at=fetched_at,
+            redirect_chain=(row["url"],),
+            source_kind="canonical_vacancy",
+            authority_source_content_sha256=task.source_content_sha256,
+        )
+
+    def __call__(self, task: ResearchTask) -> FetchedPublicSource:
+        refresh_values = (
+            task.refresh_event_id,
+            task.refresh_receipt_sha256,
+            task.refresh_receipt_file_sha256,
+            task.refresh_transition_sha256,
+            task.refresh_id,
+            task.refresh_context_sha256,
+            task.refresh_operation_id,
+            task.refresh_legacy_content_sha256,
+            task.refresh_canonical_content_sha256,
+            task.refresh_raw_object_sha256,
+            task.refresh_fetched_at,
+            task.refresh_promotion_receipt_sha256,
+        )
+        if any(value is not None for value in refresh_values):
+            if any(value is None for value in refresh_values):
+                raise PublicResearchError("research refresh task binding is incomplete")
+            return self._load_bridge(task)
+        if self.database is None:
+            raise PublicResearchError("canonical collector database is unavailable")
+        self._safe_database(self.database, label="canonical collector database")
+        connection = sqlite3.connect(
+            f"file:{self.database.as_posix()}?mode=ro", uri=True, timeout=30
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            row = self._posting_row(connection, task.job_key)
+        except sqlite3.Error as exc:
+            raise PublicResearchError("canonical collector database cannot be read") from exc
+        finally:
+            connection.close()
+        fetched_at, raw_json = self._parsed_posting(row, task)
+        if (
+            not _SHA256.fullmatch(str(row["content_hash"] or ""))
+            or row["content_hash"] != task.source_content_sha256
+        ):
+            raise PublicResearchError("canonical collector source authority differs from task")
         envelope = {
             "authority_source_content_sha256": row["content_hash"],
             "fetched_at": fetched_at,
