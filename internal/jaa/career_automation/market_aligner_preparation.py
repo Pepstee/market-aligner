@@ -26,6 +26,20 @@ from .candidate_contact_authority import (
     CandidateContactAuthority,
     load_candidate_contact_authority,
 )
+from .candidate_application_factory import (
+    CandidateApplicationMaterialization,
+    CandidateApplicationMaterializationReceipt,
+    CandidateApplicationDeploymentBinding,
+    build_candidate_application_deployment_binding,
+    materialize_candidate_application_source,
+)
+from cv_generation.editorial_composition import (
+    ApprovedCVClaim,
+    CandidateEditorialAuthority,
+    EditorialCompositionRuntime,
+    build_editorial_request,
+    run_editorial_composition_runtime,
+)
 from .handoff_admission import (
     HandoffAdmissionError,
     HandoffAdmissionStore,
@@ -99,9 +113,97 @@ class PreparationInputMaterializer(Protocol):
     def __call__(
         self,
         verified: VerifiedApplicationInput,
-        candidate_authority_sha256: str,
+        deployment_binding: CandidateApplicationDeploymentBinding,
         contact_authority: CandidateContactAuthority,
     ) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class CanonicalPreparationInputMaterializer:
+    """Pure authority compiler used before any production provider is available."""
+
+    candidate_authority_path: Path
+    decision_receipt: Mapping[str, object]
+    candidate_projection: Mapping[str, object]
+    job_key: str
+    vacancy_sha256: str
+    source_url: str
+    role_title: str
+    company_name: str
+
+    def __call__(
+        self,
+        verified: VerifiedApplicationInput,
+        deployment_binding: CandidateApplicationDeploymentBinding,
+        contact_authority: CandidateContactAuthority,
+    ) -> Mapping[str, Any]:
+        candidate_path = self.candidate_authority_path.resolve(strict=True)
+        if (
+            verified.job_key != self.job_key
+            or verified.vacancy_snapshot_sha256 != self.vacancy_sha256
+            or verified.role_title != self.role_title
+            or verified.company_name != self.company_name
+            or verified.canonical_url != self.source_url
+        ):
+            raise ValueError("canonical materializer vacancy differs from admission")
+        materialization = materialize_candidate_application_source(
+            candidate_authority_path=candidate_path,
+            deployment_binding=deployment_binding,
+            contact_authority=contact_authority,
+            decision_receipt=self.decision_receipt,
+            candidate_projection=self.candidate_projection,
+            job_key=self.job_key,
+            vacancy_sha256=self.vacancy_sha256,
+            source_url=self.source_url,
+            role_title=self.role_title,
+            company_name=self.company_name,
+            contact=contact_authority.contact,
+        )
+        heading_by_id = {
+            sentence_id: section.heading
+            for section in materialization.source.cv_sections
+            for sentence_id in section.sentence_ids
+        }
+        categories = {
+            "Professional Summary": "summary",
+            "Core Capabilities": "capability_domain",
+            "Projects": "project",
+            "Experience": "experience",
+            "Education": "education",
+        }
+        claims = tuple(
+            ApprovedCVClaim(
+                claim_id=str(row["sentence_id"]),
+                text=str(row["text"]),
+                text_sha256=str(row["text_sha256"]),
+                evidence_ids=tuple(str(value) for value in row["evidence_ids"]),
+                category=categories[heading_by_id[str(row["sentence_id"])]],
+            )
+            for row in materialization.receipt.fact_bindings
+            if row["document_kind"] == "cv"
+        )
+        request = build_editorial_request(
+            authority=CandidateEditorialAuthority(
+                candidate_name=contact_authority.contact.full_name,
+                candidate_city=contact_authority.contact.city,
+                graduation_month_year=None,
+                dissertation_title=None,
+                source_sha256=deployment_binding.candidate_authority_file_sha256,
+            ),
+            role_title=self.role_title,
+            company_name=self.company_name,
+            vacancy_sha256=self.vacancy_sha256,
+            approved_claims=claims,
+        )
+        listing_text = verified.raw_listing_bytes.decode("utf-8")
+        if hashlib.sha256(listing_text.encode()).hexdigest() != self.vacancy_sha256:
+            raise ValueError("canonical materializer listing differs from vacancy")
+        return {
+            "base_source": materialization.source,
+            "listing_text": listing_text,
+            "materialization": materialization,
+            "request": request,
+        }
 
 
 class _VerifiedBoundary:
@@ -128,6 +230,8 @@ def prepare_admitted_market_application_from_authorities(
     contact_authority_path: Path,
     input_materializer: PreparationInputMaterializer,
     environment: str,
+    editorial_runtime: EditorialCompositionRuntime | None = None,
+    orchestration_extras: Mapping[str, Any] | None = None,
     contact_authority_loader: Callable[..., CandidateContactAuthority] = (
         load_candidate_contact_authority
     ),
@@ -140,16 +244,43 @@ def prepare_admitted_market_application_from_authorities(
     """
 
     repository = repository_root.resolve(strict=True)
+    verified = admission_store.for_boundary(application_id, "strategy")
+    if verified.environment != environment:
+        raise HandoffAdmissionError(
+            "preparation_environment",
+            "requested preparation environment differs from admitted environment",
+        )
+    if environment == "production" and (
+        contact_authority_loader is not load_candidate_contact_authority
+    ):
+        raise ValueError("production preparation requires canonical contact loader")
+    if environment == "production" and (
+        type(input_materializer) is not CanonicalPreparationInputMaterializer
+        or type(editorial_runtime) is not EditorialCompositionRuntime
+    ):
+        raise ValueError(
+            "production preparation requires canonical materializer and editorial runtime"
+        )
     candidate_path = candidate_authority_path.resolve(strict=True)
+    if environment == "production" and (
+        input_materializer.candidate_authority_path.resolve(strict=True)
+        != candidate_path
+    ):
+        raise ValueError("production materializer targets another candidate authority")
     contact_path = contact_authority_path.resolve(strict=True)
     for label, path in (("candidate", candidate_path), ("contact", contact_path)):
         if repository == path or repository in path.parents:
             raise ValueError(f"{label} authority must be outside the repository")
     candidate_bytes = _read_private(candidate_path)
     candidate_sha256 = hashlib.sha256(candidate_bytes).hexdigest()
-    admitted_candidate_sha256 = admission_store.reference_sha256(
-        application_id, "candidate_intent.authority_source"
+    admitted_candidate_sha256 = getattr(
+        verified, "candidate_authority_sha256", None
     )
+    if not isinstance(admitted_candidate_sha256, str):
+        raise HandoffAdmissionError(
+            "preparation_candidate_authority",
+            "freshly verified handoff lacks candidate authority identity",
+        )
     if candidate_sha256 != admitted_candidate_sha256:
         raise HandoffAdmissionError(
             "preparation_candidate_authority",
@@ -162,21 +293,88 @@ def prepare_admitted_market_application_from_authorities(
     contact_bytes = _read_private(contact_path)
     contact_object_sha256 = hashlib.sha256(contact_bytes).hexdigest()
 
-    verified = admission_store.for_boundary(application_id, "strategy")
-    if verified.environment != environment:
-        raise HandoffAdmissionError(
-            "preparation_environment",
-            "requested preparation environment differs from admitted environment",
-        )
-    arguments = dict(
-        input_materializer(verified, candidate_sha256, contact_authority)
+    deployment_binding = build_candidate_application_deployment_binding(
+        application_id=verified.application_id,
+        environment=verified.environment,
+        handoff_root_sha256=verified.handoff_root_sha256,
+        admission_receipt_sha256=verified.admission_receipt_sha256,
+        current_boundary_receipt_sha256=(
+            verified.current_boundary_receipt_sha256
+        ),
+        candidate_authority_file_sha256=candidate_sha256,
     )
+    arguments = dict(input_materializer(verified, deployment_binding, contact_authority))
     source = arguments.get("base_source")
     request = arguments.get("request")
-    if source is None or source.contact != contact_authority.contact:
+    materialization = arguments.get("materialization")
+    if source is None:
+        raise ValueError("preparation materializer omitted the application source")
+    if request is None:
+        raise ValueError("preparation materializer omitted the editorial request")
+    if not isinstance(materialization, CandidateApplicationMaterialization):
+        raise ValueError("preparation requires typed candidate materialization")
+    receipt = materialization.receipt
+    if not isinstance(receipt, CandidateApplicationMaterializationReceipt):
+        raise ValueError("preparation materialization receipt type differs")
+    receipt.__post_init__()
+    if (
+        receipt.deployment_binding != deployment_binding
+        or receipt.candidate_authority_file_sha256 != candidate_sha256
+        or receipt.contact_authority_sha256 != contact_authority.authority_sha256
+        or receipt.contact_envelope_sha256 != contact_object_sha256
+        or receipt.contact_registry_sha256 != contact_authority.registry_sha256
+        or receipt.contact_signer_public_key_sha256
+        != contact_authority.signer_public_key_sha256
+        or materialization.source != source
+        or receipt.application_source_id != source.source_id
+        or receipt.application_source_sha256 != source.content_sha256
+    ):
+        raise ValueError("materialization differs from admitted candidate authorities")
+    if source.contact != contact_authority.contact:
         raise ValueError("materialized application contact differs from operator authority")
-    if request is None or request.authority.source_sha256 != candidate_sha256:
+    if request.authority.source_sha256 != candidate_sha256:
         raise ValueError("materialized editorial request differs from candidate authority")
+    receipt.authorize_editorial_request(request)
+    arguments["materialization_receipt"] = receipt
+    if environment == "production":
+        assert editorial_runtime is not None
+        reserved = {
+            "base_source",
+            "humanized_draft",
+            "humanizer_evidence",
+            "listing_text",
+            "materialization",
+            "materialization_receipt",
+            "request",
+            "writer_draft",
+            "writer_evidence",
+        }
+        extras = dict(orchestration_extras or {})
+        if reserved & set(extras):
+            raise ValueError("production orchestration extras override authority inputs")
+        (
+            writer_draft,
+            humanized_draft,
+            writer_evidence,
+            humanizer_evidence,
+        ) = run_editorial_composition_runtime(
+            request,
+            runtime=editorial_runtime,
+            materialization_receipt=receipt,
+        )
+        arguments.update(extras)
+        arguments.update(
+            {
+                "writer_draft": writer_draft,
+                "humanized_draft": humanized_draft,
+                "writer_evidence": writer_evidence,
+                "humanizer_evidence": humanizer_evidence,
+            }
+        )
+    elif editorial_runtime is not None or orchestration_extras is not None:
+        raise ValueError(
+            "synthetic preparation receives complete injected orchestration inputs"
+        )
     return prepare_admitted_market_application(
         admission_store=_VerifiedBoundary(verified),
         application_id=application_id,
@@ -561,6 +759,7 @@ def prepare_admitted_market_application(
 
 
 __all__ = [
+    "CanonicalPreparationInputMaterializer",
     "MarketApplicationPreparation",
     "PreparationInputMaterializer",
     "prepare_admitted_market_application",

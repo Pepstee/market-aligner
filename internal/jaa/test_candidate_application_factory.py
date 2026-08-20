@@ -10,12 +10,21 @@ import pytest
 
 from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import (
+    build_candidate_application_deployment_binding,
     build_candidate_application_package,
     materialize_candidate_application_source,
 )
+from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.candidate_authority import APPROVED_EVIDENCE_PATH
 from career_automation.production_attempt import _approved_fact_authorities
 from career_automation.release_gate import cv_constraint_release_binding
+from career_automation import market_aligner_preparation
+from career_automation.handoff_admission import HandoffAdmissionError
+from cv_generation.editorial_composition import (
+    ApprovedCVClaim,
+    CandidateEditorialAuthority,
+    build_editorial_request,
+)
 
 
 AUTHORITY_PATH = Path(
@@ -59,6 +68,32 @@ def _inputs() -> dict[str, object]:
             provenance_sha256="a" * 64,
         ),
     }
+
+
+def _materialization_inputs(tmp_path: Path) -> dict[str, object]:
+    values = _inputs()
+    contact_path = tmp_path / "signed-contact.json"
+    contact_path.write_bytes(b'{"fixture":"signed-contact-envelope"}\n')
+    contact_path.chmod(0o600)
+    contact_object_sha256 = hashlib.sha256(contact_path.read_bytes()).hexdigest()
+    contact = CandidateContactAuthority(
+        contact=values["contact"],
+        issued_at="2026-08-21T00:00:00+00:00",
+        authority_sha256=values["contact"].provenance_sha256,
+        envelope_sha256=contact_object_sha256,
+        registry_sha256="d" * 64,
+        signer_public_key_sha256="e" * 64,
+        source_path=contact_path,
+    )
+    binding = build_candidate_application_deployment_binding(
+        application_id="app_" + "1" * 64,
+        environment="synthetic",
+        handoff_root_sha256="2" * 64,
+        admission_receipt_sha256="3" * 64,
+        current_boundary_receipt_sha256="4" * 64,
+        candidate_authority_file_sha256=AUTHORITY_PATH.stem,
+    )
+    return {**values, "deployment_binding": binding, "contact_authority": contact}
 
 
 def test_builds_plain_vacancy_bound_documents_from_approved_atoms() -> None:
@@ -194,7 +229,9 @@ def test_rejects_candidate_evidence_byte_substitution(tmp_path: Path) -> None:
         build_candidate_application_package(**_inputs(), approved_evidence_path=changed)
 
 
-def test_materializes_exact_authority_bound_source_without_pdf(monkeypatch) -> None:
+def test_materializes_exact_authority_bound_source_without_pdf(
+    monkeypatch, tmp_path: Path
+) -> None:
     def reject_pdf(*args, **kwargs):
         raise AssertionError("source materialization must not render a PDF")
 
@@ -203,9 +240,8 @@ def test_materializes_exact_authority_bound_source_without_pdf(monkeypatch) -> N
         reject_pdf,
     )
     materialized = materialize_candidate_application_source(
-        **_inputs(),
+        **_materialization_inputs(tmp_path),
         candidate_authority_path=AUTHORITY_PATH,
-        candidate_authority_file_sha256=AUTHORITY_PATH.stem,
     )
 
     receipt = materialized.receipt
@@ -247,29 +283,44 @@ def test_materializes_exact_authority_bound_source_without_pdf(monkeypatch) -> N
     cv_binding = next(
         row for row in receipt.fact_bindings if row["document_kind"] == "cv"
     )
-    claim = SimpleNamespace(
-        claim_id=cv_binding["sentence_id"],
-        text=cv_binding["text"],
-        text_sha256=cv_binding["text_sha256"],
-        evidence_ids=tuple(cv_binding["evidence_ids"]),
+    claims = tuple(
+        SimpleNamespace(
+            claim_id=row["sentence_id"],
+            text=row["text"],
+            text_sha256=row["text_sha256"],
+            evidence_ids=tuple(row["evidence_ids"]),
+            category={
+                "Professional Summary": "summary",
+                "Core Capabilities": "capability_domain",
+                "Projects": "project",
+                "Education": "education",
+            }[row["section_heading"]],
+        )
+        for row in receipt.fact_bindings
+        if row["document_kind"] == "cv"
     )
     request = SimpleNamespace(
         authority=SimpleNamespace(source_sha256=AUTHORITY_PATH.stem),
         vacancy_sha256=materialized.source.vacancy_sha256,
         role_title=materialized.source.role_title,
         company_name=materialized.source.company_name,
-        approved_claims=(claim,),
+        approved_claims=claims,
     )
     receipt.authorize_editorial_request(request)
-    with pytest.raises(ValueError, match="claim differs"):
+    with pytest.raises(ValueError, match="claim set differs"):
+        receipt.authorize_editorial_request(
+            SimpleNamespace(**{**request.__dict__, "approved_claims": claims[:1]})
+        )
+    with pytest.raises(ValueError, match="claim set differs"):
         receipt.authorize_editorial_request(
             SimpleNamespace(
                 **{
                     **request.__dict__,
                     "approved_claims": (
                         SimpleNamespace(
-                            **{**claim.__dict__, "text_sha256": "f" * 64}
+                            **{**claims[0].__dict__, "text_sha256": "f" * 64}
                         ),
+                        *claims[1:],
                     ),
                 }
             )
@@ -284,8 +335,9 @@ def test_materialization_rejects_authority_and_unsupported_packet_substitution(
     with pytest.raises(ValueError, match="authority file hash differs"):
         materialize_candidate_application_source(
             **_inputs(),
+            deployment_binding=_materialization_inputs(tmp_path)["deployment_binding"],
+            contact_authority=_materialization_inputs(tmp_path)["contact_authority"],
             candidate_authority_path=substituted_authority,
-            candidate_authority_file_sha256=AUTHORITY_PATH.stem,
         )
 
     proposal = json.loads(APPROVED_EVIDENCE_PATH.read_bytes())
@@ -301,10 +353,212 @@ def test_materialization_rejects_authority_and_unsupported_packet_substitution(
     proposal_path.write_text(json.dumps(proposal))
     with pytest.raises(ValueError, match="evidence hash differs"):
         materialize_candidate_application_source(
-            **_inputs(),
+            **_materialization_inputs(tmp_path),
             candidate_authority_path=AUTHORITY_PATH,
-            candidate_authority_file_sha256=AUTHORITY_PATH.stem,
             approved_evidence_path=proposal_path,
+        )
+
+    inputs = _materialization_inputs(tmp_path)
+    substituted_contact = replace(
+        inputs["contact_authority"], envelope_sha256="0" * 64
+    )
+    with pytest.raises(ValueError, match="envelope hash differs"):
+        materialize_candidate_application_source(
+            **{**inputs, "contact_authority": substituted_contact},
+            candidate_authority_path=AUTHORITY_PATH,
+        )
+
+
+def test_authority_runner_requires_fresh_graph_identity_and_exact_materialization(
+    monkeypatch, tmp_path: Path
+) -> None:
+    inputs = _materialization_inputs(tmp_path)
+    materialized = materialize_candidate_application_source(
+        **inputs,
+        candidate_authority_path=AUTHORITY_PATH,
+    )
+    fact_heading = {
+        sentence_id: section.heading
+        for section in materialized.source.cv_sections
+        for sentence_id in section.sentence_ids
+    }
+    categories = {
+        "Professional Summary": "summary",
+        "Core Capabilities": "capability_domain",
+        "Projects": "project",
+        "Education": "education",
+    }
+    claims = tuple(
+        ApprovedCVClaim(
+            claim_id=row["sentence_id"],
+            text=row["text"],
+            text_sha256=row["text_sha256"],
+            evidence_ids=tuple(row["evidence_ids"]),
+            category=categories[fact_heading[row["sentence_id"]]],
+        )
+        for row in materialized.receipt.fact_bindings
+        if row["document_kind"] == "cv"
+    )
+    request = build_editorial_request(
+        authority=CandidateEditorialAuthority(
+            candidate_name=materialized.source.contact.full_name,
+            candidate_city=materialized.source.contact.city,
+            graduation_month_year=None,
+            dissertation_title=None,
+            source_sha256=AUTHORITY_PATH.stem,
+        ),
+        role_title=materialized.source.role_title,
+        company_name=materialized.source.company_name,
+        vacancy_sha256=materialized.source.vacancy_sha256,
+        approved_claims=claims,
+    )
+    verified = SimpleNamespace(
+        application_id=inputs["deployment_binding"].application_id,
+        environment="synthetic",
+        handoff_root_sha256=inputs["deployment_binding"].handoff_root_sha256,
+        admission_receipt_sha256=(
+            inputs["deployment_binding"].admission_receipt_sha256
+        ),
+        current_boundary_receipt_sha256=(
+            inputs["deployment_binding"].current_boundary_receipt_sha256
+        ),
+        candidate_authority_sha256=AUTHORITY_PATH.stem,
+    )
+
+    class _Store:
+        def for_boundary(self, application_id, boundary):
+            assert (application_id, boundary) == (verified.application_id, "strategy")
+            return verified
+
+    captured = {"calls": 0}
+
+    def downstream(**kwargs):
+        captured["calls"] += 1
+        captured.update(kwargs)
+        return "prepared"
+
+    monkeypatch.setattr(
+        market_aligner_preparation,
+        "prepare_admitted_market_application",
+        downstream,
+    )
+    result = market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+        admission_store=_Store(),
+        application_id=verified.application_id,
+        repository_root=Path(__file__).resolve().parents[1],
+        data_home=tmp_path / "data-home",
+        candidate_authority_path=AUTHORITY_PATH,
+        contact_authority_path=inputs["contact_authority"].source_path,
+        input_materializer=lambda observed, binding, contact: {
+            "base_source": materialized.source,
+            "request": request,
+            "materialization": materialized,
+        },
+        environment="synthetic",
+        contact_authority_loader=lambda *args, **kwargs: inputs["contact_authority"],
+    )
+    assert result == "prepared"
+    assert captured["orchestration_arguments"]["materialization_receipt"] == (
+        materialized.receipt
+    )
+    assert captured["calls"] == 1
+
+    for field in ("registry_sha256", "signer_public_key_sha256"):
+        substituted = replace(inputs["contact_authority"], **{field: "0" * 64})
+        with pytest.raises(ValueError, match="differs from admitted candidate"):
+            market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+                admission_store=_Store(),
+                application_id=verified.application_id,
+                repository_root=Path(__file__).resolve().parents[1],
+                data_home=tmp_path / f"substituted-{field}",
+                candidate_authority_path=AUTHORITY_PATH,
+                contact_authority_path=substituted.source_path,
+                input_materializer=lambda *args: {
+                    "base_source": materialized.source,
+                    "request": request,
+                    "materialization": materialized,
+                },
+                environment="synthetic",
+                contact_authority_loader=lambda *args, value=substituted, **kwargs: value,
+            )
+        assert captured["calls"] == 1
+
+    substituted_verified = SimpleNamespace(
+        **{**vars(verified), "admission_receipt_sha256": "0" * 64}
+    )
+    with pytest.raises(ValueError, match="differs from admitted candidate"):
+        market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+            admission_store=SimpleNamespace(
+                for_boundary=lambda *args: substituted_verified
+            ),
+            application_id=verified.application_id,
+            repository_root=Path(__file__).resolve().parents[1],
+            data_home=tmp_path / "substituted-deployment",
+            candidate_authority_path=AUTHORITY_PATH,
+            contact_authority_path=inputs["contact_authority"].source_path,
+            input_materializer=lambda *args: {
+                "base_source": materialized.source,
+                "request": request,
+                "materialization": materialized,
+            },
+            environment="synthetic",
+            contact_authority_loader=lambda *args, **kwargs: inputs[
+                "contact_authority"
+            ],
+        )
+    assert captured["calls"] == 1
+
+    production_verified = SimpleNamespace(**{
+        **vars(verified),
+        "environment": "production",
+    })
+    production_store = SimpleNamespace(
+        for_boundary=lambda *args: production_verified
+    )
+    with pytest.raises(ValueError, match="canonical contact loader"):
+        market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+            admission_store=production_store,
+            application_id=verified.application_id,
+            repository_root=Path(__file__).resolve().parents[1],
+            data_home=tmp_path / "production-home",
+            candidate_authority_path=AUTHORITY_PATH,
+            contact_authority_path=inputs["contact_authority"].source_path,
+            input_materializer=lambda *args: {},
+            environment="production",
+            contact_authority_loader=lambda *args, **kwargs: inputs["contact_authority"],
+        )
+    def forbidden_production_callable(*args):
+        raise AssertionError("arbitrary production materializer was invoked")
+
+    with pytest.raises(ValueError, match="canonical materializer"):
+        market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+            admission_store=production_store,
+            application_id=verified.application_id,
+            repository_root=Path(__file__).resolve().parents[1],
+            data_home=tmp_path / "production-materializer-home",
+            candidate_authority_path=AUTHORITY_PATH,
+            contact_authority_path=inputs["contact_authority"].source_path,
+            input_materializer=forbidden_production_callable,
+            environment="production",
+        )
+
+    missing_graph_identity = SimpleNamespace(**{
+        key: value for key, value in vars(verified).items()
+        if key != "candidate_authority_sha256"
+    })
+    with pytest.raises(HandoffAdmissionError, match="lacks candidate authority"):
+        market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+            admission_store=SimpleNamespace(
+                for_boundary=lambda *args: missing_graph_identity
+            ),
+            application_id=verified.application_id,
+            repository_root=Path(__file__).resolve().parents[1],
+            data_home=tmp_path / "other-home",
+            candidate_authority_path=AUTHORITY_PATH,
+            contact_authority_path=inputs["contact_authority"].source_path,
+            input_materializer=lambda *args: {},
+            environment="synthetic",
+            contact_authority_loader=lambda *args, **kwargs: inputs["contact_authority"],
         )
 
 

@@ -53,7 +53,9 @@ class CandidateContactAuthority:
     contact: CandidateContact
     issued_at: str
     authority_sha256: str
+    envelope_sha256: str
     registry_sha256: str
+    signer_public_key_sha256: str
     source_path: Path
 
 
@@ -390,7 +392,9 @@ def load_candidate_contact_authority(
         contact=projection,
         issued_at=issued_at.isoformat(),
         authority_sha256=authority_sha256,
+        envelope_sha256=hashlib.sha256(value).hexdigest(),
         registry_sha256=registry_sha256,
+        signer_public_key_sha256=enrolled,
         source_path=resolved,
     )
 

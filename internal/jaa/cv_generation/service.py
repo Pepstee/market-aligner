@@ -29,6 +29,7 @@ from career_automation.application_compiler import (
     verify_application_source,
 )
 from career_automation.candidate_application_factory import (
+    CandidateApplicationMaterializationReceipt,
     CandidateApplicationPackage,
     GenerationRevisionWriter,
     build_candidate_application_package,
@@ -457,10 +458,22 @@ def run_cv_composition_orchestration(
     production_recruiter_assessor: ProductionDetachedRecruiterAssessor | None = None,
     improvement_binder: ImprovementBinder | None = None,
     benchmark_manifest: CVBenchmarkManifest | None = None,
+    materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
 ) -> CVCompositionOrchestrationResult:
     """Run one offline-safe CV composition, assessment and rebuild cycle."""
 
     if environment == "production":
+        if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
+            raise CVCompositionServiceError(
+                "production requires exact candidate source materialization"
+            )
+        try:
+            materialization_receipt.__post_init__()
+            materialization_receipt.authorize_editorial_request(request)
+        except ValueError as exc:
+            raise CVCompositionServiceError(
+                "production editorial request differs from materialization"
+            ) from exc
         if (
             type(production_recruiter_assessor)
             is not ProductionDetachedRecruiterAssessor

@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -396,13 +397,13 @@ def test_production_orchestration_rejects_injected_or_precomputed_recruiter(
         "form_fields": (),
         "bindings": (),
     }
-    with pytest.raises(CVCompositionServiceError, match="typed detached"):
+    with pytest.raises(CVCompositionServiceError, match="source materialization"):
         run_cv_composition_orchestration(**values, recruiter_assessor=assessor)
 
     synthetic = run_cv_composition_orchestration(
         **{**values, "environment": "synthetic"}, recruiter_assessor=assessor
     )
-    with pytest.raises(CVCompositionServiceError, match="typed detached"):
+    with pytest.raises(CVCompositionServiceError, match="source materialization"):
         run_cv_composition_orchestration(
             **values, recruiter_receipt=synthetic.recruiter_receipt
         )
@@ -759,19 +760,23 @@ def test_authority_runner_materializes_exact_admitted_inputs_without_provider(tm
             assert application_id == verified.application_id
             assert boundary == "strategy"
             self.boundary_calls += 1
-            return verified
+            return SimpleNamespace(
+                **vars(verified), candidate_authority_sha256=candidate_sha
+            )
 
     authority = CandidateContactAuthority(
         contact=contact,
         issued_at="2026-08-21T00:00:00Z",
         authority_sha256=contact_sha,
+        envelope_sha256=contact_object_sha,
         registry_sha256="d" * 64,
+        signer_public_key_sha256="e" * 64,
         source_path=contact_path,
     )
 
-    def materialize(admitted, authority_sha256, loaded_contact):
-        assert admitted == verified
-        assert authority_sha256 == candidate_sha
+    def materialize(admitted, deployment_binding, loaded_contact):
+        assert admitted.candidate_authority_sha256 == candidate_sha
+        assert deployment_binding.candidate_authority_file_sha256 == candidate_sha
         assert loaded_contact == authority
         return {
             "request": request,
@@ -788,25 +793,20 @@ def test_authority_runner_materializes_exact_admitted_inputs_without_provider(tm
         }
 
     store = _Store()
-    result = prepare_admitted_market_application_from_authorities(
-        environment="synthetic",
-        admission_store=store,
-        application_id=verified.application_id,
-        repository_root=Path(__file__).resolve().parents[1],
-        data_home=tmp_path / "external-data-home",
-        candidate_authority_path=candidate_path,
-        contact_authority_path=contact_path,
-        input_materializer=materialize,
-        contact_authority_loader=lambda *args, **kwargs: authority,
-    )
-    assert result.release_authority is False
+    with pytest.raises(ValueError, match="typed candidate materialization"):
+        prepare_admitted_market_application_from_authorities(
+            environment="synthetic",
+            admission_store=store,
+            application_id=verified.application_id,
+            repository_root=Path(__file__).resolve().parents[1],
+            data_home=tmp_path / "external-data-home",
+            candidate_authority_path=candidate_path,
+            contact_authority_path=contact_path,
+            input_materializer=materialize,
+            contact_authority_loader=lambda *args, **kwargs: authority,
+        )
     assert store.boundary_calls == 1
-    assert assessor.calls == 1
-    assert (result.path / "cv.pdf").is_file()
-    receipt = json.loads((result.path / "receipt.json").read_bytes())
-    assert receipt["contact_authority_sha256"] == contact_sha
-    assert receipt["contact_object_sha256"] == contact_object_sha
-    assert (result.path / "objects" / contact_object_sha).read_bytes() == contact_bytes
+    assert assessor.calls == 0
 
 
 def test_authority_runner_rejects_candidate_not_bound_to_handoff(tmp_path) -> None:
@@ -820,6 +820,12 @@ def test_authority_runner_rejects_candidate_not_bound_to_handoff(tmp_path) -> No
     class _Store:
         def reference_sha256(self, application_id, reference_key):
             return "0" * 64
+
+        def for_boundary(self, application_id, boundary):
+            return SimpleNamespace(
+                candidate_authority_sha256="0" * 64,
+                environment="synthetic",
+            )
 
     with pytest.raises(HandoffAdmissionError, match="candidate authority differs"):
         prepare_admitted_market_application_from_authorities(

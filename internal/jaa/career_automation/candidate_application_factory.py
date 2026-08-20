@@ -29,6 +29,7 @@ from .candidate_authority import (
     APPROVED_CANDIDATE_SOURCE_HASHES,
     APPROVED_EVIDENCE_PATH,
 )
+from .candidate_contact_authority import CandidateContactAuthority
 from .evidence_matching import (
     PROOF_CLASSES,
     MatchResult,
@@ -141,12 +142,91 @@ class CandidateApplicationPackage:
 
 
 @dataclass(frozen=True)
+class CandidateApplicationDeploymentBinding:
+    application_id: str
+    environment: str
+    handoff_root_sha256: str
+    admission_receipt_sha256: str
+    current_boundary_receipt_sha256: str
+    candidate_authority_file_sha256: str
+    binding_sha256: str
+    schema_version: str = "jaa.candidate-application-deployment-binding.v1"
+
+    def __post_init__(self) -> None:
+        if not self.application_id.startswith("app_") or self.environment not in {
+            "production",
+            "synthetic",
+        }:
+            raise ValueError("candidate deployment binding scope is invalid")
+        for value in (
+            self.handoff_root_sha256,
+            self.admission_receipt_sha256,
+            self.current_boundary_receipt_sha256,
+            self.candidate_authority_file_sha256,
+            self.binding_sha256,
+        ):
+            if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError("candidate deployment binding hash is invalid")
+        if self.binding_sha256 != content_hash(self.document(include_identity=False)):
+            raise ValueError("candidate deployment binding identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "admission_receipt_sha256": self.admission_receipt_sha256,
+            "application_id": self.application_id,
+            "candidate_authority_file_sha256": self.candidate_authority_file_sha256,
+            "current_boundary_receipt_sha256": self.current_boundary_receipt_sha256,
+            "environment": self.environment,
+            "handoff_root_sha256": self.handoff_root_sha256,
+            "schema_version": self.schema_version,
+        }
+        if include_identity:
+            value["binding_sha256"] = self.binding_sha256
+        return value
+
+
+def build_candidate_application_deployment_binding(
+    *,
+    application_id: str,
+    environment: str,
+    handoff_root_sha256: str,
+    admission_receipt_sha256: str,
+    current_boundary_receipt_sha256: str,
+    candidate_authority_file_sha256: str,
+) -> CandidateApplicationDeploymentBinding:
+    body = {
+        "admission_receipt_sha256": admission_receipt_sha256,
+        "application_id": application_id,
+        "candidate_authority_file_sha256": candidate_authority_file_sha256,
+        "current_boundary_receipt_sha256": current_boundary_receipt_sha256,
+        "environment": environment,
+        "handoff_root_sha256": handoff_root_sha256,
+        "schema_version": "jaa.candidate-application-deployment-binding.v1",
+    }
+    return CandidateApplicationDeploymentBinding(
+        application_id=application_id,
+        environment=environment,
+        handoff_root_sha256=handoff_root_sha256,
+        admission_receipt_sha256=admission_receipt_sha256,
+        current_boundary_receipt_sha256=current_boundary_receipt_sha256,
+        candidate_authority_file_sha256=candidate_authority_file_sha256,
+        binding_sha256=content_hash(body),
+    )
+
+
+@dataclass(frozen=True)
 class CandidateApplicationMaterializationReceipt:
     """Non-release proof that exact authorities produced one application source."""
 
     candidate_authority_file_sha256: str
     candidate_authority_object_sha256: str
     candidate_projection_sha256: str
+    deployment_binding: CandidateApplicationDeploymentBinding
+    contact_authority_sha256: str
+    contact_envelope_sha256: str
+    contact_registry_sha256: str
+    contact_signer_public_key_sha256: str
+    cv_claim_set_sha256: str
     approved_evidence_file_sha256: str
     approved_evidence_object_sha256: str
     decision_receipt_sha256: str
@@ -169,6 +249,11 @@ class CandidateApplicationMaterializationReceipt:
             self.candidate_authority_file_sha256,
             self.candidate_authority_object_sha256,
             self.candidate_projection_sha256,
+            self.contact_authority_sha256,
+            self.contact_envelope_sha256,
+            self.contact_registry_sha256,
+            self.contact_signer_public_key_sha256,
+            self.cv_claim_set_sha256,
             self.approved_evidence_file_sha256,
             self.approved_evidence_object_sha256,
             self.decision_receipt_sha256,
@@ -191,6 +276,21 @@ class CandidateApplicationMaterializationReceipt:
         if not isinstance(self.source_policy_receipt, CandidateSourcePolicyReceipt):
             raise ValueError("materialization source policy receipt type is invalid")
         self.source_policy_receipt.__post_init__()
+        if not isinstance(self.deployment_binding, CandidateApplicationDeploymentBinding):
+            raise ValueError("materialization deployment binding type is invalid")
+        self.deployment_binding.__post_init__()
+        if (
+            self.deployment_binding.candidate_authority_file_sha256
+            != self.candidate_authority_file_sha256
+        ):
+            raise ValueError("materialization candidate authority is not admitted")
+        cv_claim_rows = [
+            dict(row)
+            for row in self.fact_bindings
+            if row.get("document_kind") == "cv"
+        ]
+        if self.cv_claim_set_sha256 != content_hash(cv_claim_rows):
+            raise ValueError("materialization CV claim-set identity is invalid")
         if self.receipt_sha256 != content_hash(self.document(include_identity=False)):
             raise ValueError("materialization receipt identity is invalid")
 
@@ -203,6 +303,14 @@ class CandidateApplicationMaterializationReceipt:
             "candidate_authority_file_sha256": self.candidate_authority_file_sha256,
             "candidate_authority_object_sha256": self.candidate_authority_object_sha256,
             "candidate_projection_sha256": self.candidate_projection_sha256,
+            "contact_authority_sha256": self.contact_authority_sha256,
+            "contact_envelope_sha256": self.contact_envelope_sha256,
+            "contact_registry_sha256": self.contact_registry_sha256,
+            "contact_signer_public_key_sha256": (
+                self.contact_signer_public_key_sha256
+            ),
+            "cv_claim_set_sha256": self.cv_claim_set_sha256,
+            "deployment_binding": self.deployment_binding.document(),
             "source_policy_receipt": self.source_policy_receipt.document(),
             "decision_receipt_sha256": self.decision_receipt_sha256,
             "fact_bindings": [dict(row) for row in self.fact_bindings],
@@ -240,6 +348,32 @@ class CandidateApplicationMaterializationReceipt:
         claims = getattr(request, "approved_claims", ())
         if not claims:
             raise ValueError("editorial request has no materialized claims")
+        request_rows = {
+            claim.claim_id: {
+                "category": claim.category,
+                "evidence_ids": tuple(claim.evidence_ids),
+                "text": claim.text,
+                "text_sha256": claim.text_sha256,
+            }
+            for claim in claims
+        }
+        expected_rows = {
+            sentence_id: {
+                "category": {
+                    "Professional Summary": "summary",
+                    "Core Capabilities": "capability_domain",
+                    "Projects": "project",
+                    "Experience": "experience",
+                    "Education": "education",
+                }[str(binding["section_heading"])],
+                "evidence_ids": tuple(binding["evidence_ids"]),
+                "text": binding["text"],
+                "text_sha256": binding["text_sha256"],
+            }
+            for sentence_id, binding in cv_bindings.items()
+        }
+        if request_rows != expected_rows:
+            raise ValueError("editorial request claim set differs from materialization")
         for claim in claims:
             binding = cv_bindings.get(claim.claim_id)
             if (
@@ -1171,7 +1305,8 @@ def _fact_binding(
 def materialize_candidate_application_source(
     *,
     candidate_authority_path: Path,
-    candidate_authority_file_sha256: str,
+    deployment_binding: CandidateApplicationDeploymentBinding,
+    contact_authority: CandidateContactAuthority,
     decision_receipt: Mapping[str, object],
     candidate_projection: Mapping[str, object],
     job_key: str,
@@ -1184,9 +1319,15 @@ def materialize_candidate_application_source(
     revision_writer: GenerationRevisionWriter | None = None,
 ) -> CandidateApplicationMaterialization:
     """Materialize exact source authority without rendering or release authority."""
+    deployment_binding.__post_init__()
+    if contact != contact_authority.contact:
+        raise ValueError("application contact differs from signed operator authority")
+    contact_bytes = contact_authority.source_path.read_bytes()
+    if _sha256(contact_bytes) != contact_authority.envelope_sha256:
+        raise ValueError("signed contact authority envelope hash differs")
     authority, decision_sha256 = _authority_document(
         path=candidate_authority_path,
-        expected_file_sha256=candidate_authority_file_sha256,
+        expected_file_sha256=deployment_binding.candidate_authority_file_sha256,
         decision_receipt=decision_receipt,
         candidate_projection=candidate_projection,
     )
@@ -1214,9 +1355,28 @@ def materialize_candidate_application_source(
         for row in evidence_document["statements"]
         if isinstance(row, Mapping)
     }
+    section_by_sentence_id = {
+        sentence_id: section.heading
+        for section in source.cv_sections
+        for sentence_id in section.sentence_ids
+    }
     fact_bindings = tuple(
-        _fact_binding(fact, approved_statements=approved_statements)
+        {
+            **_fact_binding(fact, approved_statements=approved_statements),
+            "section_heading": (
+                section_by_sentence_id[fact.sentence_id]
+                if fact.document_kind == "cv"
+                else next(
+                    section.heading
+                    for section in source.letter_sections
+                    if fact.sentence_id in section.sentence_ids
+                )
+            ),
+        }
         for fact in source.facts
+    )
+    cv_claim_set_sha256 = content_hash(
+        [dict(row) for row in fact_bindings if row["document_kind"] == "cv"]
     )
     style_bindings = tuple(
         {
@@ -1231,9 +1391,19 @@ def materialize_candidate_application_source(
         "application_source_sha256": source.content_sha256,
         "approved_evidence_file_sha256": _sha256(evidence_bytes),
         "approved_evidence_object_sha256": content_hash(evidence_document),
-        "candidate_authority_file_sha256": candidate_authority_file_sha256,
+        "candidate_authority_file_sha256": (
+            deployment_binding.candidate_authority_file_sha256
+        ),
         "candidate_authority_object_sha256": content_hash(authority),
         "candidate_projection_sha256": str(candidate_projection["projection_sha256"]),
+        "contact_authority_sha256": contact_authority.authority_sha256,
+        "contact_envelope_sha256": contact_authority.envelope_sha256,
+        "contact_registry_sha256": contact_authority.registry_sha256,
+        "contact_signer_public_key_sha256": (
+            contact_authority.signer_public_key_sha256
+        ),
+        "cv_claim_set_sha256": cv_claim_set_sha256,
+        "deployment_binding": deployment_binding.document(),
         "source_policy_receipt": source_policy.document(),
         "decision_receipt_sha256": decision_sha256,
         "fact_bindings": [dict(row) for row in fact_bindings],
@@ -1247,9 +1417,19 @@ def materialize_candidate_application_source(
         "vacancy_sha256": vacancy_sha256,
     }
     receipt = CandidateApplicationMaterializationReceipt(
-        candidate_authority_file_sha256=candidate_authority_file_sha256,
+        candidate_authority_file_sha256=(
+            deployment_binding.candidate_authority_file_sha256
+        ),
         candidate_authority_object_sha256=content_hash(authority),
         candidate_projection_sha256=str(candidate_projection["projection_sha256"]),
+        deployment_binding=deployment_binding,
+        contact_authority_sha256=contact_authority.authority_sha256,
+        contact_envelope_sha256=contact_authority.envelope_sha256,
+        contact_registry_sha256=contact_authority.registry_sha256,
+        contact_signer_public_key_sha256=(
+            contact_authority.signer_public_key_sha256
+        ),
+        cv_claim_set_sha256=cv_claim_set_sha256,
         approved_evidence_file_sha256=_sha256(evidence_bytes),
         approved_evidence_object_sha256=content_hash(evidence_document),
         decision_receipt_sha256=decision_sha256,
@@ -1283,7 +1463,9 @@ def materialize_candidate_application_source(
 __all__ = [
     "CandidateApplicationMaterialization",
     "CandidateApplicationMaterializationReceipt",
+    "CandidateApplicationDeploymentBinding",
     "CandidateApplicationPackage",
     "build_candidate_application_package",
+    "build_candidate_application_deployment_binding",
     "materialize_candidate_application_source",
 ]
