@@ -618,10 +618,55 @@ def _research_evidence(
         raise ProductionHandoffError("official_source_route", "source job identity differs")
     object_raw = archive.read("objects", str(object_sha))
     envelope = _document(object_raw, "canonical vacancy object")
+    schema = envelope.get("schema_version")
+    v1_keys = {
+        "authority_source_content_sha256", "fetched_at", "job_key", "raw_json",
+        "raw_text", "schema_version", "url",
+    }
+    v2_sha_fields = {
+        "canonical_current_content_sha256", "collection_refresh_context_sha256",
+        "collection_refresh_raw_object_sha256",
+        "collection_refresh_receipt_file_sha256",
+        "collection_refresh_receipt_sha256",
+        "collection_refresh_transition_sha256",
+        "promotion_receipt_sha256",
+    }
+    v2_keys = v1_keys | v2_sha_fields | {
+        "collection_refresh_event_id", "collection_refresh_id",
+        "collection_refresh_operation_id",
+    }
+    schema_valid = (
+        (schema == "market-aligner.canonical-collector-vacancy.v1"
+         and set(envelope) == v1_keys)
+        or (
+            schema == "market-aligner.canonical-collector-vacancy.v2"
+            and set(envelope) == v2_keys
+            and all(
+                type(envelope.get(field)) is str
+                and _SHA256.fullmatch(str(envelope[field]))
+                for field in v2_sha_fields
+            )
+            and type(envelope.get("collection_refresh_event_id")) is int
+            and envelope["collection_refresh_event_id"] > 0
+            and type(envelope.get("collection_refresh_id")) is str
+            and bool(_SHA256.fullmatch(str(envelope["collection_refresh_id"])))
+            and envelope["collection_refresh_id"] == _sha(_canonical({
+                "context_sha256": envelope["collection_refresh_context_sha256"],
+                "schema_version": "market-aligner.vacancy-refresh-id.v1",
+            }))
+            and type(envelope.get("collection_refresh_operation_id")) is str
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+                str(envelope["collection_refresh_operation_id"]),
+            ))
+            and envelope["promotion_receipt_sha256"]
+            == evidence_row.get("promotion_receipt_sha256")
+        )
+    )
     if (
         _sha(object_raw) != object_sha
         or _canonical(envelope) != object_raw
-        or envelope.get("schema_version") != "market-aligner.canonical-collector-vacancy.v1"
+        or not schema_valid
         or envelope.get("job_key") != source_job_key
         or envelope.get("url") != canonical_url
         or envelope.get("authority_source_content_sha256") != source_content_sha256

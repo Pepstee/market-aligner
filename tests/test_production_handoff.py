@@ -42,13 +42,33 @@ def _private_tree(root: Path) -> None:
         os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
 
-def _archive(tmp_path: Path, *, url: str = FLAT_URL, accessed_at: str = "2026-08-21T00:00:00+00:00"):
+def _archive(
+    tmp_path: Path, *, url: str = FLAT_URL,
+    accessed_at: str = "2026-08-21T00:00:00+00:00",
+    object_schema: str = "market-aligner.canonical-collector-vacancy.v1",
+):
     raw_text = "Build agentic software systems."
     envelope = {
         "authority_source_content_sha256": SOURCE_SHA, "fetched_at": accessed_at,
         "job_key": JOB_KEY, "raw_json": None, "raw_text": raw_text,
-        "schema_version": "market-aligner.canonical-collector-vacancy.v1", "url": url,
+        "schema_version": object_schema, "url": url,
     }
+    if object_schema == "market-aligner.canonical-collector-vacancy.v2":
+        envelope.update({
+            "canonical_current_content_sha256": "c" * 64,
+            "collection_refresh_context_sha256": "d" * 64,
+            "collection_refresh_event_id": 22,
+            "collection_refresh_id": _sha(canonical_json_bytes({
+                "context_sha256": "d" * 64,
+                "schema_version": "market-aligner.vacancy-refresh-id.v1",
+            })),
+            "collection_refresh_operation_id": "cogna-refresh-r1",
+            "collection_refresh_raw_object_sha256": "f" * 64,
+            "collection_refresh_receipt_file_sha256": "1" * 64,
+            "collection_refresh_receipt_sha256": "2" * 64,
+            "collection_refresh_transition_sha256": "3" * 64,
+            "promotion_receipt_sha256": PROMOTION_SHA,
+        })
     object_bytes = canonical_json_bytes(envelope)
     object_sha = _sha(object_bytes)
     start = object_bytes.index(raw_text.encode())
@@ -170,6 +190,74 @@ def test_v2_revalidates_flat_route_and_exact_support(tmp_path: Path) -> None:
     first = _verify(tmp_path, row, dossier, dossier_bytes)
     second = _verify(tmp_path, row, dossier, dossier_bytes)
     assert first == second and first[1] == object_bytes
+
+
+def test_research_accepts_exact_refresh_bridge_v2_object(tmp_path: Path) -> None:
+    row, dossier, dossier_bytes, object_bytes, _ = _archive(
+        tmp_path, object_schema="market-aligner.canonical-collector-vacancy.v2"
+    )
+    assert _verify(tmp_path, row, dossier, dossier_bytes)[1] == object_bytes
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", "market-aligner.canonical-collector-vacancy.v3"),
+        ("collection_refresh_event_id", "22"),
+        ("collection_refresh_id", "not-a-digest"),
+        ("promotion_receipt_sha256", "f" * 64),
+        ("collection_refresh_operation_id", ""),
+    ],
+)
+def test_research_rejects_refresh_bridge_v2_schema_and_field_substitution(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    row, dossier, dossier_bytes, object_bytes, root = _archive(
+        tmp_path, object_schema="market-aligner.canonical-collector-vacancy.v2"
+    )
+    envelope = json.loads(object_bytes)
+    envelope[field] = value
+    replacement = canonical_json_bytes(envelope)
+    replacement_sha = _sha(replacement)
+    old_sha = row["canonical_vacancy_object_sha256"]
+    (root / "objects" / old_sha).unlink()
+    (root / "objects" / replacement_sha).write_bytes(replacement)
+    (root / "objects" / replacement_sha).chmod(0o600)
+    dossier["canonical_vacancy_object_sha256"] = replacement_sha
+    dossier["citations"][0]["content_sha256"] = replacement_sha
+    dossier_bytes = json.dumps(dossier, ensure_ascii=False, sort_keys=True).encode()
+    row["canonical_vacancy_object_sha256"] = replacement_sha
+    receipt_path = root / row["receipt_relative_path"]
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt.pop("semantic_receipt_sha256")
+    old_metadata_sha = receipt["entries"][0]["metadata_sha256"]
+    old_metadata_path = root / "metadata" / f"{old_metadata_sha}.json"
+    metadata = json.loads(old_metadata_path.read_bytes())
+    metadata["content_sha256"] = replacement_sha
+    metadata_bytes = canonical_json_bytes(metadata)
+    metadata_sha = _sha(metadata_bytes)
+    old_metadata_path.unlink()
+    new_metadata_path = root / "metadata" / f"{metadata_sha}.json"
+    new_metadata_path.write_bytes(metadata_bytes)
+    new_metadata_path.chmod(0o600)
+    receipt["canonical_vacancy_object_sha256"] = replacement_sha
+    receipt["entries"][0]["object_sha256"] = replacement_sha
+    receipt["entries"][0]["metadata_sha256"] = metadata_sha
+    receipt["dossier_sha256"] = _sha(dossier_bytes)
+    semantic = _sha(canonical_json_bytes(receipt))
+    exact = canonical_json_bytes({**receipt, "semantic_receipt_sha256": semantic})
+    receipt_path.unlink()
+    new_path = root / "receipts" / f"{semantic}.json"
+    new_path.write_bytes(exact)
+    new_path.chmod(0o600)
+    row.update({
+        "dossier_hash": _sha(dossier_bytes),
+        "semantic_receipt_sha256": semantic,
+        "receipt_file_sha256": _sha(exact),
+        "receipt_relative_path": f"receipts/{semantic}.json",
+    })
+    with pytest.raises(ProductionHandoffError, match="research_object"):
+        _verify(tmp_path, row, dossier, dossier_bytes)
 
 
 @pytest.mark.parametrize("field", [
