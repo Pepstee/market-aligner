@@ -439,7 +439,7 @@ def test_authority_runner_requires_fresh_graph_identity_and_exact_materializatio
 
     monkeypatch.setattr(
         market_aligner_preparation,
-        "prepare_admitted_market_application",
+        "_prepare_admitted_market_application",
         downstream,
     )
     result = market_aligner_preparation.prepare_admitted_market_application_from_authorities(

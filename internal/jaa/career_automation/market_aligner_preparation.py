@@ -375,7 +375,7 @@ def prepare_admitted_market_application_from_authorities(
         raise ValueError(
             "synthetic preparation receives complete injected orchestration inputs"
         )
-    return prepare_admitted_market_application(
+    return _prepare_admitted_market_application(
         admission_store=_VerifiedBoundary(verified),
         application_id=application_id,
         repository_root=repository,
@@ -391,6 +391,48 @@ def prepare_admitted_market_application_from_authorities(
 
 
 def prepare_admitted_market_application(
+    *,
+    admission_store: HandoffAdmissionStore,
+    application_id: str,
+    repository_root: Path,
+    data_home: Path,
+    candidate_authority_bytes: bytes,
+    candidate_authority_sha256: str,
+    contact_authority_bytes: bytes,
+    contact_authority_sha256: str,
+    contact_object_sha256: str | None = None,
+    orchestration_arguments: Mapping[str, Any],
+    environment: str,
+) -> MarketApplicationPreparation:
+    """Prepare one synthetic application through the compatibility entry point.
+
+    Production must enter through
+    :func:`prepare_admitted_market_application_from_authorities`, which resolves
+    and verifies the signed candidate/contact authority graph before delegating
+    to the private preparation implementation.
+    """
+
+    if environment != "synthetic":
+        raise HandoffAdmissionError(
+            "preparation_entry_point",
+            "direct production preparation is forbidden; use the authority wrapper",
+        )
+    return _prepare_admitted_market_application(
+        admission_store=admission_store,
+        application_id=application_id,
+        repository_root=repository_root,
+        data_home=data_home,
+        candidate_authority_bytes=candidate_authority_bytes,
+        candidate_authority_sha256=candidate_authority_sha256,
+        contact_authority_bytes=contact_authority_bytes,
+        contact_authority_sha256=contact_authority_sha256,
+        contact_object_sha256=contact_object_sha256,
+        orchestration_arguments=orchestration_arguments,
+        environment=environment,
+    )
+
+
+def _prepare_admitted_market_application(
     *,
     admission_store: HandoffAdmissionStore,
     application_id: str,

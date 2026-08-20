@@ -667,7 +667,7 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
             assert boundary == "strategy"
             return replace(verified, environment="production")
 
-    with pytest.raises(ValueError, match="typed detached"):
+    with pytest.raises(HandoffAdmissionError, match="direct production preparation"):
         prepare_admitted_market_application(
             **{
                 **inputs,
@@ -675,10 +675,12 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
                 "environment": "production",
             }
         )
-    with pytest.raises(HandoffAdmissionError, match="environment differs"):
+    with pytest.raises(HandoffAdmissionError, match="direct production preparation"):
         prepare_admitted_market_application(
             **{**inputs, "environment": "production"}
         )
+    assert assessor.calls == 0
+    assert store.calls == 0
     with pytest.raises(ValueError, match="contact authority exact bytes differ"):
         prepare_admitted_market_application(
             **{**inputs, "contact_object_sha256": "0" * 64}
@@ -691,7 +693,7 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
     second = prepare_admitted_market_application(**inputs)
     assert first == second
     assert first.release_authority is False
-    assert store.calls == 3
+    assert store.calls == 2
     assert assessor.calls == 1
     assert (first.path / "cv.pdf").is_file()
     assert (first.path / "cover-letter.pdf").is_file()
@@ -760,9 +762,7 @@ def test_authority_runner_materializes_exact_admitted_inputs_without_provider(tm
             assert application_id == verified.application_id
             assert boundary == "strategy"
             self.boundary_calls += 1
-            return SimpleNamespace(
-                **vars(verified), candidate_authority_sha256=candidate_sha
-            )
+            return SimpleNamespace(**vars(verified))
 
     authority = CandidateContactAuthority(
         contact=contact,
