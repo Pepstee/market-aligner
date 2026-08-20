@@ -1392,6 +1392,7 @@ def run_editorial_composition_runtime(
     request: CVEditorialRequest,
     *,
     runtime: EditorialCompositionRuntime,
+    materialization_receipt: object | None = None,
 ) -> tuple[
     CVEditorialDraft,
     CVEditorialDraft,
@@ -1402,6 +1403,26 @@ def run_editorial_composition_runtime(
 
     request.__post_init__()
     runtime.__post_init__()
+    if runtime.environment == "production":
+        # Local import keeps the compiler/factory independent of this runtime while
+        # preventing duck-typed production authority substitution.
+        from career_automation.candidate_application_factory import (
+            CandidateApplicationMaterializationReceipt,
+        )
+
+        if not isinstance(
+            materialization_receipt, CandidateApplicationMaterializationReceipt
+        ):
+            raise EditorialCompositionError(
+                "production editorial composition requires source materialization"
+            )
+        try:
+            materialization_receipt.__post_init__()
+            materialization_receipt.authorize_editorial_request(request)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise EditorialCompositionError(
+                "production editorial request differs from source materialization"
+            ) from exc
     if runtime.writer.available() is not True or runtime.humanizer.available() is not True:
         raise EditorialCompositionError("editorial runtime adapter is unavailable")
     writer_request = canonical_json(

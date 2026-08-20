@@ -234,6 +234,51 @@ class CVConstraintReceipt:
 
 
 @dataclass(frozen=True)
+class CandidateSourcePolicyReceipt:
+    """Pre-render source check; deliberately inadmissible as a final CV gate."""
+
+    source_id: str
+    cv_sha256: str
+    policy_sha256: str
+    receipt_sha256: str
+    passed: bool = True
+    release_authority: bool = False
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.source_id,
+            self.cv_sha256,
+            self.policy_sha256,
+            self.receipt_sha256,
+        ):
+            if not _SHA256.fullmatch(value):
+                raise ValueError("candidate source policy hashes must be SHA-256")
+        if self.passed is not True or self.release_authority is not False:
+            raise ValueError("candidate source policy cannot grant release authority")
+        body = {
+            "schema_version": "jaa.candidate-source-policy-receipt.v1",
+            "source_id": self.source_id,
+            "cv_sha256": self.cv_sha256,
+            "policy_sha256": self.policy_sha256,
+            "passed": True,
+            "release_authority": False,
+        }
+        if self.receipt_sha256 != _digest(_canonical_json(body).encode()):
+            raise ValueError("candidate source policy receipt identity is invalid")
+
+    def document(self) -> dict[str, object]:
+        return {
+            "schema_version": "jaa.candidate-source-policy-receipt.v1",
+            "source_id": self.source_id,
+            "cv_sha256": self.cv_sha256,
+            "policy_sha256": self.policy_sha256,
+            "passed": True,
+            "release_authority": False,
+            "receipt_sha256": self.receipt_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class CVPopplerQualityReceipt:
     """Immutable evidence that Poppler parsed and rendered the retained PDF."""
 
@@ -449,7 +494,8 @@ def validate_generated_cv(
     rendered_pages: Iterable[Sequence[str]],
     policy: CVPolicy | None = None,
     target_role_title: str | None = None,
-) -> CVConstraintReceipt:
+    _source_policy_only: bool = False,
+) -> CVConstraintReceipt | CandidateSourcePolicyReceipt:
     """Fail closed on forbidden CV content and candidate-specific invariants."""
     selected = policy or policy_for_candidate(candidate_name)
     if not _SHA256.fullmatch(source_id) or not _SHA256.fullmatch(cv_sha256):
@@ -556,15 +602,23 @@ def validate_generated_cv(
         if "wolverhampton" in folded:
             raise CVConstraintError("conflicting candidate location is forbidden")
 
+    receipt_schema = (
+        "jaa.candidate-source-policy-receipt.v1"
+        if _source_policy_only
+        else "jaa.cv-constraint-receipt.v1"
+    )
     receipt_body = {
-        "schema_version": "jaa.cv-constraint-receipt.v1",
+        "schema_version": receipt_schema,
         "source_id": source_id,
         "cv_sha256": cv_sha256,
         "policy_sha256": selected.policy_sha256,
         "passed": True,
         "release_authority": False,
     }
-    return CVConstraintReceipt(
+    receipt_type = (
+        CandidateSourcePolicyReceipt if _source_policy_only else CVConstraintReceipt
+    )
+    return receipt_type(
         source_id=source_id,
         cv_sha256=cv_sha256,
         policy_sha256=selected.policy_sha256,
@@ -572,14 +626,26 @@ def validate_generated_cv(
     )
 
 
+def validate_candidate_source_policy(
+    **kwargs: object,
+) -> CandidateSourcePolicyReceipt:
+    """Run settled CV content policy without claiming rendered-artifact admission."""
+    receipt = validate_generated_cv(**kwargs, _source_policy_only=True)
+    if not isinstance(receipt, CandidateSourcePolicyReceipt):
+        raise CVConstraintError("candidate source validation returned the wrong receipt")
+    return receipt
+
+
 __all__ = [
     "ARTIOM_GUTU_CV_POLICY",
     "BASE_CV_POLICY",
     "CVConstraintError",
     "CVConstraintReceipt",
+    "CandidateSourcePolicyReceipt",
     "CVPopplerQualityReceipt",
     "CVPolicy",
     "policy_for_candidate",
     "validate_generated_cv",
+    "validate_candidate_source_policy",
     "verify_poppler_cv_quality",
 ]

@@ -4,15 +4,18 @@ import json
 import hashlib
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import (
     build_candidate_application_package,
+    materialize_candidate_application_source,
 )
 from career_automation.candidate_authority import APPROVED_EVIDENCE_PATH
 from career_automation.production_attempt import _approved_fact_authorities
+from career_automation.release_gate import cv_constraint_release_binding
 
 
 AUTHORITY_PATH = Path(
@@ -189,6 +192,120 @@ def test_rejects_candidate_evidence_byte_substitution(tmp_path: Path) -> None:
     changed.write_bytes(APPROVED_EVIDENCE_PATH.read_bytes() + b" ")
     with pytest.raises(ValueError, match="evidence hash differs"):
         build_candidate_application_package(**_inputs(), approved_evidence_path=changed)
+
+
+def test_materializes_exact_authority_bound_source_without_pdf(monkeypatch) -> None:
+    def reject_pdf(*args, **kwargs):
+        raise AssertionError("source materialization must not render a PDF")
+
+    monkeypatch.setattr(
+        "career_automation.candidate_application_factory.render_pdf_artifacts",
+        reject_pdf,
+    )
+    materialized = materialize_candidate_application_source(
+        **_inputs(),
+        candidate_authority_path=AUTHORITY_PATH,
+        candidate_authority_file_sha256=AUTHORITY_PATH.stem,
+    )
+
+    receipt = materialized.receipt
+    assert receipt.candidate_authority_file_sha256 == AUTHORITY_PATH.stem
+    assert receipt.application_source_id == materialized.source.source_id
+    assert receipt.application_source_sha256 == materialized.source.content_sha256
+    assert receipt.source_policy_receipt.passed is True
+    assert receipt.source_policy_receipt.document()["schema_version"] == (
+        "jaa.candidate-source-policy-receipt.v1"
+    )
+    with pytest.raises(ValueError, match="receipt identity is invalid"):
+        replace(receipt.source_policy_receipt, receipt_sha256="f" * 64)
+    with pytest.raises(ValueError, match="unsupported schema"):
+        cv_constraint_release_binding(
+            receipt_document=receipt.source_policy_receipt.document(),
+            expected_policy_sha256=receipt.source_policy_receipt.policy_sha256,
+            source=materialized.source,
+            artifacts=None,
+        )
+    assert receipt.release_authority is False
+    assert {row["document_kind"] for row in receipt.fact_bindings} == {
+        "cv",
+        "cover_letter",
+    }
+    assert all(row["authority"] for row in receipt.fact_bindings)
+    assert all(
+        row["approved_evidence_statement_sha256"]
+        for row in receipt.fact_bindings
+        if row["fact_kind"] == "candidate"
+    )
+    assert receipt.receipt_sha256 == hashlib.sha256(
+        json.dumps(
+            receipt.document(include_identity=False),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    cv_binding = next(
+        row for row in receipt.fact_bindings if row["document_kind"] == "cv"
+    )
+    claim = SimpleNamespace(
+        claim_id=cv_binding["sentence_id"],
+        text=cv_binding["text"],
+        text_sha256=cv_binding["text_sha256"],
+        evidence_ids=tuple(cv_binding["evidence_ids"]),
+    )
+    request = SimpleNamespace(
+        authority=SimpleNamespace(source_sha256=AUTHORITY_PATH.stem),
+        vacancy_sha256=materialized.source.vacancy_sha256,
+        role_title=materialized.source.role_title,
+        company_name=materialized.source.company_name,
+        approved_claims=(claim,),
+    )
+    receipt.authorize_editorial_request(request)
+    with pytest.raises(ValueError, match="claim differs"):
+        receipt.authorize_editorial_request(
+            SimpleNamespace(
+                **{
+                    **request.__dict__,
+                    "approved_claims": (
+                        SimpleNamespace(
+                            **{**claim.__dict__, "text_sha256": "f" * 64}
+                        ),
+                    ),
+                }
+            )
+        )
+
+
+def test_materialization_rejects_authority_and_unsupported_packet_substitution(
+    tmp_path: Path,
+) -> None:
+    substituted_authority = tmp_path / "authority.json"
+    substituted_authority.write_bytes(AUTHORITY_PATH.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="authority file hash differs"):
+        materialize_candidate_application_source(
+            **_inputs(),
+            candidate_authority_path=substituted_authority,
+            candidate_authority_file_sha256=AUTHORITY_PATH.stem,
+        )
+
+    proposal = json.loads(APPROVED_EVIDENCE_PATH.read_bytes())
+    proposal["statements"].append(
+        {
+            "id": "proposal-not-authority",
+            "kind": "project_evidence",
+            "proof_class": "project_evidence",
+            "statement": "An unsupported proposed claim.",
+        }
+    )
+    proposal_path = tmp_path / "proposal.json"
+    proposal_path.write_text(json.dumps(proposal))
+    with pytest.raises(ValueError, match="evidence hash differs"):
+        materialize_candidate_application_source(
+            **_inputs(),
+            candidate_authority_path=AUTHORITY_PATH,
+            candidate_authority_file_sha256=AUTHORITY_PATH.stem,
+            approved_evidence_path=proposal_path,
+        )
 
 
 def test_rejects_noneligible_or_vacancy_swapped_decision() -> None:

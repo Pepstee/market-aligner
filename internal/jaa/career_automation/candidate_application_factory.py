@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Mapping, Protocol
@@ -40,8 +40,18 @@ from .external_document_assurance import (
     ExternalDocumentAssuranceError,
     assert_employer_facing_text,
 )
-from .rendering import ApplicationArtifacts, render_pdf_artifacts
-from cv_generation.constraints import validate_generated_cv
+from .rendering import (
+    ApplicationArtifacts,
+    EditableArtifacts,
+    render_editable_text,
+    render_pdf_artifacts,
+)
+from cv_generation.constraints import (
+    CVConstraintReceipt,
+    CandidateSourcePolicyReceipt,
+    validate_candidate_source_policy,
+    validate_generated_cv,
+)
 
 
 PROFILE_CV_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -127,6 +137,131 @@ OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
 class CandidateApplicationPackage:
     source: ApplicationSource
     artifacts: ApplicationArtifacts
+    vacancy_requirements: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CandidateApplicationMaterializationReceipt:
+    """Non-release proof that exact authorities produced one application source."""
+
+    candidate_authority_file_sha256: str
+    candidate_authority_object_sha256: str
+    candidate_projection_sha256: str
+    approved_evidence_file_sha256: str
+    approved_evidence_object_sha256: str
+    decision_receipt_sha256: str
+    vacancy_sha256: str
+    job_key: str
+    role_title: str
+    company_name: str
+    source_url: str
+    application_source_id: str
+    application_source_sha256: str
+    fact_bindings: tuple[Mapping[str, object], ...]
+    style_bindings: tuple[Mapping[str, object], ...]
+    source_policy_receipt: CandidateSourcePolicyReceipt
+    receipt_sha256: str
+    schema_version: str = "jaa.candidate-application-materialization-receipt.v1"
+    release_authority: bool = False
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.candidate_authority_file_sha256,
+            self.candidate_authority_object_sha256,
+            self.candidate_projection_sha256,
+            self.approved_evidence_file_sha256,
+            self.approved_evidence_object_sha256,
+            self.decision_receipt_sha256,
+            self.vacancy_sha256,
+            self.application_source_id,
+            self.application_source_sha256,
+            self.receipt_sha256,
+        ):
+            if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError("materialization receipt identity is not SHA-256")
+        if (
+            not self.job_key
+            or not self.role_title
+            or not self.company_name
+            or not self.source_url
+            or not self.fact_bindings
+            or self.release_authority is not False
+        ):
+            raise ValueError("materialization receipt authority is malformed")
+        if not isinstance(self.source_policy_receipt, CandidateSourcePolicyReceipt):
+            raise ValueError("materialization source policy receipt type is invalid")
+        self.source_policy_receipt.__post_init__()
+        if self.receipt_sha256 != content_hash(self.document(include_identity=False)):
+            raise ValueError("materialization receipt identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "application_source_id": self.application_source_id,
+            "application_source_sha256": self.application_source_sha256,
+            "approved_evidence_file_sha256": self.approved_evidence_file_sha256,
+            "approved_evidence_object_sha256": self.approved_evidence_object_sha256,
+            "candidate_authority_file_sha256": self.candidate_authority_file_sha256,
+            "candidate_authority_object_sha256": self.candidate_authority_object_sha256,
+            "candidate_projection_sha256": self.candidate_projection_sha256,
+            "source_policy_receipt": self.source_policy_receipt.document(),
+            "decision_receipt_sha256": self.decision_receipt_sha256,
+            "fact_bindings": [dict(row) for row in self.fact_bindings],
+            "job_key": self.job_key,
+            "role_title": self.role_title,
+            "company_name": self.company_name,
+            "source_url": self.source_url,
+            "release_authority": False,
+            "schema_version": self.schema_version,
+            "style_bindings": [dict(row) for row in self.style_bindings],
+            "vacancy_sha256": self.vacancy_sha256,
+        }
+        if include_identity:
+            value["receipt_sha256"] = self.receipt_sha256
+        return value
+
+    def authorize_editorial_request(self, request: object) -> None:
+        """Fail closed unless a CV request is an exact projection of this receipt."""
+        if getattr(getattr(request, "authority", None), "source_sha256", None) != (
+            self.candidate_authority_file_sha256
+        ):
+            raise ValueError("editorial request candidate authority differs")
+        if getattr(request, "vacancy_sha256", None) != self.vacancy_sha256:
+            raise ValueError("editorial request vacancy authority differs")
+        if (
+            getattr(request, "role_title", None) != self.role_title
+            or getattr(request, "company_name", None) != self.company_name
+        ):
+            raise ValueError("editorial request vacancy identity differs")
+        cv_bindings = {
+            str(row["sentence_id"]): row
+            for row in self.fact_bindings
+            if row.get("document_kind") == "cv"
+        }
+        claims = getattr(request, "approved_claims", ())
+        if not claims:
+            raise ValueError("editorial request has no materialized claims")
+        for claim in claims:
+            binding = cv_bindings.get(claim.claim_id)
+            if (
+                binding is None
+                or binding["text_sha256"] != claim.text_sha256
+                or binding["text"] != claim.text
+                or tuple(binding["evidence_ids"]) != tuple(claim.evidence_ids)
+            ):
+                raise ValueError("editorial request claim differs from materialization")
+
+
+@dataclass(frozen=True)
+class CandidateApplicationMaterialization:
+    source: ApplicationSource
+    editable: EditableArtifacts
+    vacancy_requirements: tuple[str, ...]
+    receipt: CandidateApplicationMaterializationReceipt
+
+
+@dataclass(frozen=True)
+class _CandidateApplicationSourceBuild:
+    source: ApplicationSource
     vacancy_requirements: tuple[str, ...]
 
 
@@ -383,7 +518,7 @@ def _assert_package_quality(source: ApplicationSource) -> None:
         raise ValueError("candidate cover letter lacks company-bound vacancy context")
 
 
-def build_candidate_application_package(
+def _build_candidate_application_source(
     *,
     decision_receipt: Mapping[str, object],
     candidate_projection: Mapping[str, object],
@@ -395,7 +530,7 @@ def build_candidate_application_package(
     contact: CandidateContact,
     approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
     revision_writer: GenerationRevisionWriter | None = None,
-) -> CandidateApplicationPackage:
+) -> _CandidateApplicationSourceBuild:
     """Build a plain UK CV and letter using verbatim approved factual atoms."""
     if revision_writer is not None:
         revision_writer(
@@ -851,20 +986,83 @@ def build_candidate_application_package(
             value=(canonical_json(source.document()) + "\n").encode(),
             media_type="application/json",
         )
-    artifacts = render_pdf_artifacts(source)
+    return _CandidateApplicationSourceBuild(source, tuple(all_requirements))
+
+
+def _constraint_receipt(
+    source: ApplicationSource,
+    editable: EditableArtifacts,
+    *,
+    rendered_pages: tuple[tuple[str, ...], ...],
+) -> CVConstraintReceipt:
     cv_facts = {row.sentence_id: row.text for row in source.facts}
-    constraint_receipt = validate_generated_cv(
+    return validate_generated_cv(
         source_id=source.source_id,
         candidate_name=source.contact.full_name,
         candidate_city=source.contact.city,
-        cv_text=artifacts.editable.cv_text,
-        cv_sha256=artifacts.editable.cv_sha256,
+        cv_text=editable.cv_text,
+        cv_sha256=editable.cv_sha256,
         sections={
             section.heading: tuple(cv_facts[value] for value in section.sentence_ids)
             for section in source.cv_sections
         },
-        rendered_pages=artifacts.cv_pdf.rendered_lines,
+        rendered_pages=rendered_pages,
         target_role_title=source.role_title,
+    )
+
+
+def _source_policy_receipt(
+    source: ApplicationSource,
+    editable: EditableArtifacts,
+) -> CandidateSourcePolicyReceipt:
+    cv_facts = {row.sentence_id: row.text for row in source.facts}
+    return validate_candidate_source_policy(
+        source_id=source.source_id,
+        candidate_name=source.contact.full_name,
+        candidate_city=source.contact.city,
+        cv_text=editable.cv_text,
+        cv_sha256=editable.cv_sha256,
+        sections={
+            section.heading: tuple(cv_facts[value] for value in section.sentence_ids)
+            for section in source.cv_sections
+        },
+        rendered_pages=(tuple(editable.cv_text.splitlines()),),
+        target_role_title=source.role_title,
+    )
+
+
+def build_candidate_application_package(
+    *,
+    decision_receipt: Mapping[str, object],
+    candidate_projection: Mapping[str, object],
+    job_key: str,
+    vacancy_sha256: str,
+    source_url: str,
+    role_title: str,
+    company_name: str,
+    contact: CandidateContact,
+    approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
+    revision_writer: GenerationRevisionWriter | None = None,
+) -> CandidateApplicationPackage:
+    """Build the canonical application source, then render its PDF artifacts."""
+    built = _build_candidate_application_source(
+        decision_receipt=decision_receipt,
+        candidate_projection=candidate_projection,
+        job_key=job_key,
+        vacancy_sha256=vacancy_sha256,
+        source_url=source_url,
+        role_title=role_title,
+        company_name=company_name,
+        contact=contact,
+        approved_evidence_path=approved_evidence_path,
+        revision_writer=revision_writer,
+    )
+    source = built.source
+    artifacts = render_pdf_artifacts(source)
+    constraint_receipt = _constraint_receipt(
+        source,
+        artifacts.editable,
+        rendered_pages=artifacts.cv_pdf.rendered_lines,
     )
     if revision_writer is not None:
         revision_writer(
@@ -891,8 +1089,201 @@ def build_candidate_application_package(
     return CandidateApplicationPackage(
         source=source,
         artifacts=artifacts,
-        vacancy_requirements=tuple(all_requirements),
+        vacancy_requirements=built.vacancy_requirements,
     )
 
 
-__all__ = ["CandidateApplicationPackage", "build_candidate_application_package"]
+def _authority_document(
+    *,
+    path: Path,
+    expected_file_sha256: str,
+    decision_receipt: Mapping[str, object],
+    candidate_projection: Mapping[str, object],
+) -> tuple[dict[str, object], str]:
+    authority_bytes = path.read_bytes()
+    if _sha256(authority_bytes) != expected_file_sha256:
+        raise ValueError("candidate authority file hash differs")
+    value = json.loads(authority_bytes)
+    if not isinstance(value, dict) or value.get("schema_version") != (
+        "jaa.production-candidate-authority.v2"
+    ):
+        raise ValueError("candidate authority object is malformed")
+    if value.get("candidate_projection") != dict(candidate_projection):
+        raise ValueError("candidate projection differs from exact authority")
+    rows = value.get("decisions")
+    matches = (
+        [
+            row
+            for row in rows
+            if isinstance(row, Mapping)
+            and row.get("receipt") == dict(decision_receipt)
+        ]
+        if isinstance(rows, list)
+        else []
+    )
+    if len(matches) != 1:
+        raise ValueError("decision receipt differs from exact candidate authority")
+    expected_receipt_sha256 = _sha256(
+        (canonical_json(dict(decision_receipt)) + "\n").encode()
+    )
+    if matches[0].get("receipt_sha256") != expected_receipt_sha256:
+        raise ValueError("candidate authority decision receipt identity is invalid")
+    return value, str(matches[0]["receipt_sha256"])
+
+
+def _fact_binding(
+    fact: FactualSentence,
+    *,
+    approved_statements: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    authority = asdict(fact.authority)
+    evidence_ids: tuple[str, ...]
+    approved_evidence_statement_sha256: str | None = None
+    if fact.fact_kind == "candidate":
+        evidence_id = str(authority["candidate_evidence_id"])
+        statement = approved_statements.get(evidence_id)
+        if statement is None:
+            raise ValueError("candidate fact lacks approved packet authority")
+        approved_evidence_statement_sha256 = _sha256(
+            str(statement["statement"]).encode()
+        )
+        if approved_evidence_statement_sha256 != _sha256(
+            fact.approved_source_text.encode()
+        ):
+            raise ValueError("candidate fact differs from approved packet statement")
+        evidence_ids = (evidence_id,)
+    else:
+        evidence_ids = (str(authority["employer_research_claim_id"]),)
+    return {
+        "approved_source_text_sha256": _sha256(fact.approved_source_text.encode()),
+        "approved_evidence_statement_sha256": approved_evidence_statement_sha256,
+        "authority": authority,
+        "authority_kind": type(fact.authority).__name__,
+        "document_kind": fact.document_kind,
+        "evidence_ids": list(evidence_ids),
+        "fact_kind": fact.fact_kind,
+        "sentence_id": fact.sentence_id,
+        "text": fact.text,
+        "text_sha256": _sha256(fact.text.encode()),
+    }
+
+
+def materialize_candidate_application_source(
+    *,
+    candidate_authority_path: Path,
+    candidate_authority_file_sha256: str,
+    decision_receipt: Mapping[str, object],
+    candidate_projection: Mapping[str, object],
+    job_key: str,
+    vacancy_sha256: str,
+    source_url: str,
+    role_title: str,
+    company_name: str,
+    contact: CandidateContact,
+    approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
+    revision_writer: GenerationRevisionWriter | None = None,
+) -> CandidateApplicationMaterialization:
+    """Materialize exact source authority without rendering or release authority."""
+    authority, decision_sha256 = _authority_document(
+        path=candidate_authority_path,
+        expected_file_sha256=candidate_authority_file_sha256,
+        decision_receipt=decision_receipt,
+        candidate_projection=candidate_projection,
+    )
+    evidence_bytes = approved_evidence_path.read_bytes()
+    if _sha256(evidence_bytes) != APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]:
+        raise ValueError("application factory candidate evidence hash differs")
+    evidence_document = json.loads(evidence_bytes)
+    built = _build_candidate_application_source(
+        decision_receipt=decision_receipt,
+        candidate_projection=candidate_projection,
+        job_key=job_key,
+        vacancy_sha256=vacancy_sha256,
+        source_url=source_url,
+        role_title=role_title,
+        company_name=company_name,
+        contact=contact,
+        approved_evidence_path=approved_evidence_path,
+        revision_writer=revision_writer,
+    )
+    source = built.source
+    editable = render_editable_text(source)
+    source_policy = _source_policy_receipt(source, editable)
+    approved_statements = {
+        str(row["id"]): row
+        for row in evidence_document["statements"]
+        if isinstance(row, Mapping)
+    }
+    fact_bindings = tuple(
+        _fact_binding(fact, approved_statements=approved_statements)
+        for fact in source.facts
+    )
+    style_bindings = tuple(
+        {
+            "document_kind": slot.document_kind,
+            "slot_id": slot.slot_id,
+            "text_sha256": _sha256(slot.text.encode()),
+        }
+        for slot in source.style_slots
+    )
+    body = {
+        "application_source_id": source.source_id,
+        "application_source_sha256": source.content_sha256,
+        "approved_evidence_file_sha256": _sha256(evidence_bytes),
+        "approved_evidence_object_sha256": content_hash(evidence_document),
+        "candidate_authority_file_sha256": candidate_authority_file_sha256,
+        "candidate_authority_object_sha256": content_hash(authority),
+        "candidate_projection_sha256": str(candidate_projection["projection_sha256"]),
+        "source_policy_receipt": source_policy.document(),
+        "decision_receipt_sha256": decision_sha256,
+        "fact_bindings": [dict(row) for row in fact_bindings],
+        "job_key": job_key,
+        "role_title": role_title,
+        "company_name": company_name,
+        "source_url": source_url,
+        "release_authority": False,
+        "schema_version": "jaa.candidate-application-materialization-receipt.v1",
+        "style_bindings": [dict(row) for row in style_bindings],
+        "vacancy_sha256": vacancy_sha256,
+    }
+    receipt = CandidateApplicationMaterializationReceipt(
+        candidate_authority_file_sha256=candidate_authority_file_sha256,
+        candidate_authority_object_sha256=content_hash(authority),
+        candidate_projection_sha256=str(candidate_projection["projection_sha256"]),
+        approved_evidence_file_sha256=_sha256(evidence_bytes),
+        approved_evidence_object_sha256=content_hash(evidence_document),
+        decision_receipt_sha256=decision_sha256,
+        vacancy_sha256=vacancy_sha256,
+        job_key=job_key,
+        role_title=role_title,
+        company_name=company_name,
+        source_url=source_url,
+        application_source_id=source.source_id,
+        application_source_sha256=source.content_sha256,
+        fact_bindings=fact_bindings,
+        style_bindings=style_bindings,
+        source_policy_receipt=source_policy,
+        receipt_sha256=content_hash(body),
+    )
+    receipt.__post_init__()
+    if revision_writer is not None:
+        revision_writer(
+            role="document.source_materialization_receipt",
+            value=(canonical_json(receipt.document()) + "\n").encode(),
+            media_type="application/json",
+        )
+    return CandidateApplicationMaterialization(
+        source=source,
+        editable=editable,
+        vacancy_requirements=built.vacancy_requirements,
+        receipt=receipt,
+    )
+
+
+__all__ = [
+    "CandidateApplicationMaterialization",
+    "CandidateApplicationMaterializationReceipt",
+    "CandidateApplicationPackage",
+    "build_candidate_application_package",
+    "materialize_candidate_application_source",
+]

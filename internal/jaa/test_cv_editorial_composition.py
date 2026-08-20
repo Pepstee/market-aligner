@@ -212,6 +212,33 @@ def test_runtime_invokes_explicit_writer_and_humanizer_then_admits_outputs() -> 
     assert writer_adapter.calls[0][1] != humanizer_adapter.calls[0][1]
 
 
+def test_production_runtime_requires_exact_source_materialization() -> None:
+    request, writer, final = _fixture()
+    runtime = EditorialCompositionRuntime(
+        environment="production",
+        writer=_ScriptedStageAdapter(
+            "production-writer", "writer-v2", writer, environment="production"
+        ),
+        humanizer=_ScriptedStageAdapter(
+            "production-humanizer", "humanizer-v2", final, environment="production"
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="requires source materialization"):
+        run_editorial_composition_runtime(request, runtime=runtime)
+
+    class _DuckTypedReceipt:
+        def authorize_editorial_request(self, candidate_request):
+            raise AssertionError("duck-typed authority must never be called")
+
+    with pytest.raises(EditorialCompositionError, match="requires source materialization"):
+        run_editorial_composition_runtime(
+            request,
+            runtime=runtime,
+            materialization_receipt=_DuckTypedReceipt(),
+        )
+    assert not runtime.writer.calls
+
+
 def test_runtime_rejects_provider_identity_substitution() -> None:
     request, writer, final = _fixture()
 
