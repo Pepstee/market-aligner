@@ -39,8 +39,20 @@ def _save_raw(base: Path, row: RawPosting) -> None:
 class Collector:
     """Uncapped parallel collector with durable resume state and fair fetching."""
 
-    def __init__(self, cfg: dict[str, Any], data_root: Path, log=print) -> None:
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        data_root: Path,
+        log=print,
+        *,
+        adapter_loader=None,
+        sleeper=time.sleep,
+        monotonic=time.monotonic,
+    ) -> None:
         self.cfg, self.root, self.log = cfg, Path(data_root), log
+        self.adapter_loader = adapter_loader
+        self.sleeper = sleeper
+        self.monotonic = monotonic
         io = cfg.get("io", {}) or {}
         self.urls_path = self.root / io.get("job_urls", "state/job_urls.jsonl")
         self.raw_cache = self.root / io.get("raw_cache", "raw/vacancies")
@@ -52,7 +64,8 @@ class Collector:
         self.source_workers = int(collection.get("source_workers", len(self.boards) or 1))
         self.fetch_workers = int(collection.get("fetch_workers", 12))
         scrapling = dict(cfg.get("scrapling", {}) or {})
-        runtime_root = Path(scrapling.get("runtime_root") or self.root)
+        runtime_setting = Path(scrapling.get("runtime_root") or ".")
+        runtime_root = runtime_setting if runtime_setting.is_absolute() else self.root / runtime_setting
         self.scrapling = (
             ScraplingClient(runtime_root, scrapling) if scrapling.get("enabled", False) else None
         )
@@ -111,7 +124,8 @@ class Collector:
             self.log(f"[migrate] preserved {added} discovered and {fetched} fetched legacy rows")
 
     def _discover_board(self, board: str) -> tuple[str, Any, list[JobUrl], Exception | None]:
-        adapter = load_adapter(board, config=dict(self.cfg.get(board, {}) or {}))
+        adapter_loader = self.adapter_loader or load_adapter
+        adapter = adapter_loader(board, config=dict(self.cfg.get(board, {}) or {}))
         rows: list[JobUrl] = []
         try:
             for row in adapter.discover(self.terms, live=True):
@@ -205,11 +219,23 @@ class Collector:
         self.log(f"[cycle] {result}")
         return result
 
-    def run(self, hours: float = 0, poll_minutes: float = 15, once: bool = False) -> None:
+    def run(
+        self, hours: float = 0, poll_minutes: float = 15, once: bool = False
+    ) -> list[dict[str, int]]:
+        if once == (hours > 0):
+            raise ValueError("collector requires exactly one of once=True or hours>0")
+        if poll_minutes <= 0:
+            raise ValueError("poll interval must be positive")
         self.migrate_existing()
-        started = time.monotonic()
+        started = self.monotonic()
+        deadline = started + hours * 3600 if hours > 0 else None
+        cycles: list[dict[str, int]] = []
         while True:
-            self.cycle()
-            if once or (hours > 0 and time.monotonic() - started >= hours * 3600):
-                return
-            time.sleep(max(1, poll_minutes * 60))
+            cycles.append(self.cycle())
+            if once:
+                return cycles
+            assert deadline is not None
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                return cycles
+            self.sleeper(min(max(1, poll_minutes * 60), remaining))

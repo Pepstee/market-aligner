@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from market_aligner.profiler.importers import import_evidence_led, import_guided
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.assessment.scoring import AssessmentAxes
-from market_aligner.service.api import AssessmentRequest, MarketAlignerService
+from market_aligner.service.api import AssessmentRequest, CollectionService, MarketAlignerService
 
 
 def _add_data_home(parser: argparse.ArgumentParser) -> None:
@@ -120,6 +121,19 @@ def _handoff_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_command(args: argparse.Namespace) -> int:
+    service = CollectionService(args.data_home)
+    receipt = service.collect(
+        args.config,
+        once=bool(args.once),
+        hours=float(args.hours or 0),
+        poll_minutes=float(args.poll_minutes),
+        log=lambda message: print(message, file=sys.stderr),
+    )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="market-aligner")
     parser.add_argument("--version", action="version", version=__version__)
@@ -170,6 +184,17 @@ def build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--output", type=Path, required=True)
     _add_data_home(handoff)
     handoff.set_defaults(handler=_handoff_command)
+
+    collect = commands.add_parser(
+        "collect", help="Run the resumable raw-vacancy collector without application authority."
+    )
+    collect.add_argument("--config", type=Path, required=True)
+    duration = collect.add_mutually_exclusive_group(required=True)
+    duration.add_argument("--once", action="store_true")
+    duration.add_argument("--hours", type=float)
+    collect.add_argument("--poll-minutes", type=float, default=15.0)
+    _add_data_home(collect)
+    collect.set_defaults(handler=_collect_command)
     return parser
 
 

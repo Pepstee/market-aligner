@@ -117,7 +117,7 @@ class JobDatabase:
         placeholders = ",".join("?" for _ in selected)
         with closing(self.connect()) as conn, conn:
             rows = conn.execute(
-                f"SELECT DISTINCT board FROM postings WHERE fetch_status='discovered' "
+                f"SELECT DISTINCT board FROM postings WHERE fetch_status!='fetched' "
                 f"AND board IN ({placeholders})",
                 selected,
             ).fetchall()
@@ -175,3 +175,38 @@ class JobDatabase:
             normalized = conn.execute("SELECT COUNT(*) FROM normalised_jobs").fetchone()[0]
             scored = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
         return {"postings": total, "fetched": fetched, "normalized": normalized, "scored": scored}
+
+    def collection_state(self) -> dict[str, object]:
+        """Return a deterministic projection of resumable collection state."""
+
+        with closing(self.connect()) as conn:
+            postings = [
+                {
+                    "board": row[0],
+                    "job_id": row[1],
+                    "url": row[2],
+                    "content_hash": row[3],
+                    "fetch_status": row[4],
+                    "fetch_error": row[5],
+                }
+                for row in conn.execute(
+                    """SELECT board,job_id,url,content_hash,fetch_status,fetch_error
+                       FROM postings ORDER BY board,job_id"""
+                )
+            ]
+            sources = [
+                {
+                    "board": row[0],
+                    "last_polled_at": row[1],
+                    "last_error": row[2],
+                }
+                for row in conn.execute(
+                    """SELECT board,last_polled_at,last_error
+                       FROM source_state ORDER BY board"""
+                )
+            ]
+        return {
+            "postings": postings,
+            "schema_version": "market-aligner.collection-state.v1",
+            "sources": sources,
+        }
