@@ -11,13 +11,17 @@ from cv_generation.editorial_composition import (
     CandidateEditorialAuthority,
     EditorialAtom,
     EditorialCompositionError,
+    EditorialBackendResult,
+    EditorialCompositionRuntime,
     EditorialStageEvidence,
     admit_editorial_composition,
     build_editorial_draft,
     build_editorial_request,
     humanizer_request_sha256,
+    run_editorial_composition_runtime,
     validate_editorial_draft,
 )
+from career_automation.evidence_matching import canonical_json
 
 
 TITLE = (
@@ -139,6 +143,164 @@ def _stage_evidence(request, writer, final):
             response_sha256=final.draft_sha256,
         ),
     )
+
+
+class _ScriptedStageSession:
+    def __init__(self, adapter, invocation_id):
+        self.adapter = adapter
+        self.invocation_id = invocation_id
+
+    def invoke(self, *, request_bytes):
+        return self.adapter._invoke(
+            request_bytes=request_bytes, invocation_id=self.invocation_id
+        )
+
+
+class _ScriptedStageAdapter:
+    def __init__(self, provider, model, draft, *, environment="synthetic"):
+        self.provider = provider
+        self.model = model
+        self.transport_identity = f"fixture.transport.{provider}"
+        self.environment = environment
+        self.draft = draft
+        self.calls = []
+
+    def open_fresh_session(self, *, invocation_id):
+        return _ScriptedStageSession(self, invocation_id)
+
+    def available(self):
+        return True
+
+    def _invoke(self, *, request_bytes, invocation_id):
+        self.calls.append((request_bytes, invocation_id))
+        return EditorialBackendResult(
+            response_bytes=(response := canonical_json(self.draft.document()).encode()),
+            invocation_id=invocation_id,
+            environment=self.environment,
+            provider=self.provider,
+            model=self.model,
+            transport_identity=self.transport_identity,
+            request_sha256=hashlib.sha256(request_bytes).hexdigest(),
+            response_sha256=hashlib.sha256(response).hexdigest(),
+        )
+
+
+def test_runtime_invokes_explicit_writer_and_humanizer_then_admits_outputs() -> None:
+    request, writer, final = _fixture()
+    writer_adapter = _ScriptedStageAdapter("fixture-writer", "writer-v2", writer)
+    humanizer_adapter = _ScriptedStageAdapter(
+        "fixture-humanizer", "humanizer-v2", final
+    )
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+    )
+
+    result = run_editorial_composition_runtime(request, runtime=runtime)
+
+    assert result[:2] == (writer, final)
+    assert result[2].provider == "fixture-writer"
+    assert result[3].provider == "fixture-humanizer"
+    assert len(writer_adapter.calls) == len(humanizer_adapter.calls) == 1
+    assert writer_adapter.calls[0][1] != humanizer_adapter.calls[0][1]
+
+
+def test_runtime_rejects_provider_identity_substitution() -> None:
+    request, writer, final = _fixture()
+
+    class _SubstitutingAdapter(_ScriptedStageAdapter):
+        def _invoke(self, *, request_bytes, invocation_id):
+            result = super()._invoke(
+                request_bytes=request_bytes, invocation_id=invocation_id
+            )
+            return replace(result, provider="different-provider")
+
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=_SubstitutingAdapter("fixture-writer", "writer-v2", writer),
+        humanizer=_ScriptedStageAdapter("fixture-humanizer", "humanizer-v2", final),
+    )
+    with pytest.raises(EditorialCompositionError, match="configured adapter"):
+        run_editorial_composition_runtime(request, runtime=runtime)
+
+
+def test_runtime_rejects_transport_request_hash_substitution() -> None:
+    request, writer, final = _fixture()
+
+    class _SubstitutingAdapter(_ScriptedStageAdapter):
+        def _invoke(self, *, request_bytes, invocation_id):
+            result = super()._invoke(
+                request_bytes=request_bytes, invocation_id=invocation_id
+            )
+            return replace(result, request_sha256="0" * 64)
+
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=_SubstitutingAdapter("fixture-writer", "writer-v2", writer),
+        humanizer=_ScriptedStageAdapter("fixture-humanizer", "humanizer-v2", final),
+    )
+    with pytest.raises(EditorialCompositionError, match="configured adapter"):
+        run_editorial_composition_runtime(request, runtime=runtime)
+
+
+def test_runtime_rejects_reused_cross_stage_session() -> None:
+    request, writer, final = _fixture()
+    shared_session = _ScriptedStageSession(
+        _ScriptedStageAdapter("fixture-shared", "shared-v1", writer),
+        "unused",
+    )
+
+    class _ReusingAdapter(_ScriptedStageAdapter):
+        def open_fresh_session(self, *, invocation_id):
+            shared_session.invocation_id = invocation_id
+            shared_session.adapter = self
+            return shared_session
+
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=_ReusingAdapter("fixture-writer", "writer-v2", writer),
+        humanizer=_ReusingAdapter("fixture-humanizer", "humanizer-v2", final),
+    )
+    with pytest.raises(EditorialCompositionError, match="distinct requested session"):
+        run_editorial_composition_runtime(request, runtime=runtime)
+
+
+def test_production_runtime_rejects_synthetic_stage_adapter() -> None:
+    request, writer, final = _fixture()
+    with pytest.raises(EditorialCompositionError, match="environment differs"):
+        EditorialCompositionRuntime(
+            environment="production",
+            writer=_ScriptedStageAdapter("fixture-writer", "writer-v2", writer),
+            humanizer=_ScriptedStageAdapter(
+                "production-humanizer",
+                "humanizer-v2",
+                final,
+                environment="production",
+            ),
+        )
+
+
+def test_runtime_rejects_backend_with_history_access() -> None:
+    request, writer, final = _fixture()
+
+    class _HistoryAdapter(_ScriptedStageAdapter):
+        def _invoke(self, *, request_bytes, invocation_id):
+            return replace(
+                super()._invoke(
+                    request_bytes=request_bytes,
+                    invocation_id=invocation_id,
+                ),
+                history_access=True,
+            )
+
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=_HistoryAdapter("fixture-writer", "writer-v2", writer),
+        humanizer=_ScriptedStageAdapter("fixture-humanizer", "humanizer-v2", final),
+    )
+    with pytest.raises(EditorialCompositionError, match="isolation is not fail-closed"):
+        run_editorial_composition_runtime(request, runtime=runtime)
 
 
 def test_admits_evidence_bound_writer_and_distinct_humanizer_sessions() -> None:
