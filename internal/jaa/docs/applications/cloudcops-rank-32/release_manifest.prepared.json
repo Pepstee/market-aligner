@@ -1,0 +1,65 @@
+{
+  "schema_version": "jaa11.personio-canary-release-manifest.prepared.v1",
+  "state": "prepared_not_armed_not_submitted",
+  "candidate": {
+    "frozen_rank": 32,
+    "frozen_key": "himalayas:https://himalayas.app/companies/cloudcops/jobs/junior-devops-cloud-engineer-5760182217",
+    "frozen_entry_sha256": "923ef22e3502a66881a55dfaf9327b86758c7bd7c000bbb5ae0d84ac7b524035",
+    "frozen_snapshot_file_sha256": "a37b133be37e811a468bd7ae98e6679903fac9eae04b2e8b6d03e0b33affae8d"
+  },
+  "official_route": {
+    "vacancy_url": "https://cloudcops.jobs.personio.com/job/2183016?language=en",
+    "application_url": "https://cloudcops.jobs.personio.com/job/2183016?language=en&apply",
+    "employer": "CloudCops",
+    "title": "Junior DevOps / Cloud Engineer",
+    "ats": "personio",
+    "job_id": "2183016"
+  },
+  "form_boundary": {
+    "required": [
+      "first_name",
+      "last_name",
+      "email",
+      "phone",
+      "cv"
+    ],
+    "optional": [
+      "linkedin_url",
+      "additional_document"
+    ],
+    "forbidden_markers": [
+      "captcha",
+      "recaptcha",
+      "hcaptcha",
+      "turnstile",
+      "login",
+      "account",
+      "password",
+      "mfa",
+      "payment",
+      "identity_verification"
+    ],
+    "schema_sha256": "5362dbec192ec45e777617683996ecb500c8a9d14e4377326c735d33a7221f93"
+  },
+  "evidence": {
+    "approved_evidence_packet_sha256": "6ee3cc29b2074b4244686ca938028ad397ca0a39ab6323de59b52eb20d6eadb7",
+    "authoritative_contact_source_sha256": "51d4f2d56ac5fadf768351b9c04a89fca3348e63af25d4c4548151d62d2c3260",
+    "canonical_contact_subset_sha256": "c4ef9416b833b92c37643555096ec05f8c7ce496bd05f6d5ac99bcbd3b4ec67f",
+    "canary_selection_report_sha256": "f6d6bb716b45e3fbf2cc8b3088a99c8b34c4db83008b8fc5d7d67369cae4bd4b"
+  },
+  "artifacts": {
+    "cv_relative_path": "docs/applications/cloudcops-rank-32/artifacts/Artiom_Gutu_CV_CloudCops.pdf",
+    "cv_sha256": "0ed48218b2637726ef2277a42aff9f0a835da6c793e679cc9f73c1352e285de3",
+    "linkedin_included": false,
+    "additional_document_included": false
+  },
+  "release": {
+    "jaa08_token_sha256": null,
+    "durable_circuit_id": null,
+    "armed": false,
+    "submit_authority_consumed": false,
+    "click_count": 0,
+    "official_receipt_sha256": null,
+    "production_certification": "withheld"
+  }
+}

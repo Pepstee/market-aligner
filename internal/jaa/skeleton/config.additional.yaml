@@ -1,0 +1,35 @@
+extends: config.yaml
+
+io:
+  job_urls: scraper/data_additional/job_urls.jsonl
+  raw_cache: scraper/data_additional/raw_cache
+  jobs: scraper/data_additional/jobs.jsonl
+  jobs_scored: skeleton/data_additional/jobs_scored.jsonl
+  outputs_dir: outputs/additional
+
+boards:
+  enabled: [lever, smartrecruiters]
+  mode: live
+  rate_limit_seconds: 0.25
+  max_jobs_total: 0
+
+lever:
+  timeout_seconds: 30
+  limit_per_company: 200
+  companies:
+    palantir: Palantir Technologies
+    electric-twin: Electric Twin
+    moneyboxapp: Moneybox
+    octoenergy: Octopus Energy Group
+    spotify: Spotify
+  exclude_title_terms: [director, head of, product design, account executive, sales manager]
+
+smartrecruiters:
+  timeout_seconds: 30
+  page_size: 100
+  max_pages_per_company: 10
+  companies:
+    Version1: Version 1
+    BoschGroup: Bosch Group
+    Entain: Entain
+  exclude_title_terms: [director, head of, product design, account executive, sales manager]

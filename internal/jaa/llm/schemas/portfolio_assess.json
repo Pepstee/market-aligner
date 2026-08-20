@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "portfolio_assess",
+  "description": "Advisory evidence read of a candidate portfolio against configured UK AI/IT tracks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["per_field", "detected_skills", "overall_summary"],
+  "properties": {
+    "per_field": {
+      "type": "array",
+      "description": "One entry per career the portfolio shows evidence for.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["career", "evidence_strength", "note"],
+        "properties": {
+          "career": {
+            "type": "string",
+            "enum": [
+              "Agentic_AI_Engineer",
+              "AI_Automation_Engineer",
+              "Applied_AI_Engineer",
+              "ML_MLOps_Engineer",
+              "Cloud_Platform_Engineer",
+              "Security_Detection_Engineer",
+              "Backend_Engineer",
+              "Full_Stack_Engineer",
+              "Technical_Solutions_Engineer"
+            ]
+          },
+          "evidence_strength": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10,
+            "description": "0-10 how strongly the portfolio demonstrates this field."
+          },
+          "note": {
+            "type": "string",
+            "description": "1 sentence: what in the portfolio supports this."
+          }
+        }
+      }
+    },
+    "detected_skills": {
+      "type": "array",
+      "description": "Canonical skill ids the portfolio evidences.",
+      "items": { "type": "string" }
+    },
+    "overall_summary": {
+      "type": "string",
+      "description": "1-2 sentence overall read of where the portfolio is strongest."
+    }
+  }
+}

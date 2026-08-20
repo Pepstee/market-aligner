@@ -1,0 +1,31 @@
+{
+  "data": {
+    "job": {
+      "id": 210077,
+      "position": "공간디자인 / VMD 디자이너",
+      "status": "active",
+      "company": {
+        "id": 5120,
+        "name": "리테일랩",
+        "industry_name": "리테일 / 공간 브랜딩"
+      },
+      "category_tags": ["공간디자인", "VMD", "전시디자인"],
+      "detail": {
+        "intro": "리테일랩은 브랜드 플래그십 스토어와 팝업 공간을 기획하고 디자인합니다.",
+        "main_tasks": "- 매장 및 팝업 공간 VMD 기획/디자인\n- 3D 공간 시각화 및 도면 작업\n- 시공 감리 및 현장 관리",
+        "requirements": "- 경력무관 (신입 지원 가능)\n- SketchUp, AutoCAD 사용 가능\n- 3ds Max 또는 Rhino 우대\n- 공간/전시 포트폴리오",
+        "preferred_points": "- V-Ray 렌더링 경험\n- 브랜드 공간 프로젝트 경험",
+        "benefits": "- 4대보험\n- 현장 출장비 지원"
+      },
+      "address": {
+        "country": "kr",
+        "location": "서울 성동구",
+        "full_location": "서울특별시 성동구 성수이로 45"
+      },
+      "annual_from": 0,
+      "annual_to": 3,
+      "due_time": null,
+      "posted_at": "2026-06-28"
+    }
+  }
+}

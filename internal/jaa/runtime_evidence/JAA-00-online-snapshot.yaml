@@ -1,0 +1,220 @@
+evidence: JAA-00:first-adopted-frozen-baseline
+canonical_adoption:
+  repository_role: neutral-versioned-successor
+  original_project_canonical: false
+  original_project_recoverable: true
+  historical_market_aligner_copies_canonical: false
+secret_policy:
+  references_only: true
+  values_persisted: false
+publication:
+  format: jaa-00-deterministic-evidence/v2
+  stability: byte-stable-for-unchanged-verified-inputs
+  volatile_fields: []
+  verification: fail-closed-independent-review
+  replacement: atomic-after-successful-verification
+receipt:
+  label: runtime:jaa00-v2-20260722-quiescent-b7b9f4b:receipt
+  content_sha256: b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971
+repository:
+  label: canonical-repository
+  revision: b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6
+revision_binding:
+  source_revision:
+    contract:
+      algorithm: sha256
+      domain: jaa-source-content-revision-v2
+      entry_encoding: uint64be-length-prefixed-path-mode-content
+      exclusions:
+      - runtime_evidence/
+      ordering: repository-relative-path-byte-order
+      scope: current-tracked-source-tree
+    revision: sha256:b6dcfa352b25797771bfb28737cd209a7ec044e02d05be6c921982c8cf27dc58
+  source_inventory:
+    configured_credential_names_checked: []
+    configured_credential_values_tracked: false
+    content_inventory_sha256: b46cdc144d911b154d82190af14b3eebe123b348a643db311270fdb20809ebf9
+    runtime_or_private_database_files_tracked: false
+    secret_policy: receipt-retains-reference-names-only-never-values-or-host-paths
+    tracked_files: 256
+  certified_revision: b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6
+  certification:
+    contract: jaa-00-source-revision-binding/v1
+    inputs_sha256: 00915aca29a4cc2c31694eba0cca7f2f1822a0e0462f84a0d9f594a81ef23340
+reconciliation:
+  command: python -m baseline_adoption.cli reconcile --receipt <receipt> --data-root
+    <runtime>
+  result: ok
+  receipt_content_sha256: b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971
+  receipt_filename_matches_content_sha256: true
+  adopted_database_hashes_match: true
+  integrity_check: ok
+  counts_match: true
+  schema_matches: true
+  adopted_snapshots_sidecar_free: true
+databases:
+  raw_jobs:
+    source_label: source:raw_jobs
+    destination_label: destination:raw_jobs
+    snapshot_sha256: d71169d79deac68bc27252650a6af7fdd82fb46f7fb9b8f7a1a7a7a157a67171
+    snapshot_bytes: 130260992
+    schema_sha256: d40bb9b317ccbbf30cc60fecd6bab4231b663782ccd37226966f353ba064040c
+    schema_objects: 6
+    counts:
+      collection_runs: 0
+      normalised_jobs: 619
+      postings: 10303
+      scores: 619
+      source_state: 39
+    integrity_check:
+    - ok
+    historical_observation:
+      status: superseded-by-frozen-snapshot
+      snapshot_sha256: 87aefc638ae5c0d5b11e6dd8dfb8da5cd8bbfaed5cdba630f5aa3216bf170e57
+      schema_sha256: d40bb9b317ccbbf30cc60fecd6bab4231b663782ccd37226966f353ba064040c
+      schema_objects: 6
+      table_row_counts:
+        collection_runs: 0
+        normalised_jobs: 548
+        postings: 9407
+        scores: 548
+        source_state: 39
+  career_pipeline:
+    source_label: source:career_pipeline
+    destination_label: destination:career_pipeline
+    snapshot_sha256: 6f57c4d62ea22cfd303a9481e2620cc6f747540597d9de96b5e5822abcb7b328
+    snapshot_bytes: 6238208
+    schema_sha256: 2b582efd6d32d907149fbbc0eb1002a78f78c7b161b524fc5d0e14381f269205
+    schema_objects: 39
+    counts:
+      browser_workflow_checkpoints: 0
+      browser_workflow_definitions: 0
+      browser_workflow_events: 0
+      browser_workflow_runs: 0
+      ca_fetch_attempts: 0
+      ca_fetch_policies: 2
+      ca_fetch_relocations: 0
+      ca_fetch_selector_fingerprints: 0
+      ca_obs_events: 0
+      ca_obs_flows: 2
+      ca_obs_outbox: 0
+      ca_obs_spans: 0
+      ca_obs_traces: 0
+      career_deployment_checks: 0
+      career_deployment_events: 0
+      career_deployment_releases: 0
+      career_schema_migrations: 0
+      employer_dossiers: 0
+      employer_research_queue: 58
+      pipeline_events: 924
+      pipeline_jobs: 462
+    integrity_check:
+    - ok
+    historical_observation:
+      status: superseded-by-frozen-snapshot
+      snapshot_sha256: dd99efe519b5fcfe09cba2a0d08d18ce6ce84d570ef8649c5d250ebba03f9a8b
+      schema_sha256: 2b582efd6d32d907149fbbc0eb1002a78f78c7b161b524fc5d0e14381f269205
+      schema_objects: 39
+      table_row_counts:
+        browser_workflow_checkpoints: 0
+        browser_workflow_definitions: 0
+        browser_workflow_events: 0
+        browser_workflow_runs: 0
+        ca_fetch_attempts: 0
+        ca_fetch_policies: 2
+        ca_fetch_relocations: 0
+        ca_fetch_selector_fingerprints: 0
+        ca_obs_events: 0
+        ca_obs_flows: 2
+        ca_obs_outbox: 0
+        ca_obs_spans: 0
+        ca_obs_traces: 0
+        career_deployment_checks: 0
+        career_deployment_events: 0
+        career_deployment_releases: 0
+        career_schema_migrations: 0
+        employer_dossiers: 0
+        employer_research_queue: 58
+        pipeline_events: 924
+        pipeline_jobs: 462
+capture_and_drift_semantics:
+  method: sqlite-online-backup
+  adopted_snapshot: frozen
+  live_source_after_capture: may_continue_changing
+  source_open: read-only-query-only
+  source_write_operations: none
+  raw_jobs:
+    main_content_unchanged_during_capture: true
+    wal_content_unchanged_during_capture: true
+    drift_observed: true
+    changed_components:
+    - shm
+    shm_comparison: identity-metadata-only
+  career_pipeline:
+    main_content_unchanged_during_capture: true
+    wal_content_unchanged_during_capture: true
+    drift_observed: true
+    changed_components:
+    - shm
+    shm_comparison: identity-metadata-only
+inventory:
+  tracked_files: 256
+  content_inventory_sha256: b46cdc144d911b154d82190af14b3eebe123b348a643db311270fdb20809ebf9
+  runtime_or_private_database_files_tracked: false
+  configured_credential_values_tracked: false
+  configured_credential_names_checked: []
+  secret_policy: receipt-retains-reference-names-only-never-values-or-host-paths
+  receipt_secret_reference_names: []
+  receipt_secret_values_persisted: false
+runtime:
+  required_python: '>=3.10'
+  required_distributions:
+  - PyYAML
+  - requests
+  - openpyxl
+  - pypdf
+  observed:
+    dependencies:
+      PyYAML: 6.0.3
+      openpyxl: 3.1.5
+      pypdf: 6.6.0
+      requests: 2.32.5
+    platform: macOS-26.4.1-arm64-arm-64bit
+    python: 3.12.13
+    sqlite: 3.53.1
+dependency_records:
+- path: requirements-test.lock
+  role: fully-pinned-lock
+  bytes: 369
+  sha256: dd4d894bc89e6ed2ec3006f8e429e0d37eb74146e2a5c9b5461d47cb69f2b6ed
+- path: requirements-scrapling-full.txt
+  role: pinned-runtime-input
+  bytes: 262
+  sha256: bccc6c760d37c8467173d198efe26bbbb0566584fdeefd98079b483bbd903cd6
+host_prerequisites:
+  python: '>=3.10'
+  sqlite: online-backup-and-read-only-uri-support
+  filesystem: same-directory-atomic-replace-and-fsync
+  source_access: read-only-files-and-git-object-database
+preservation:
+  original_project:
+    canonical: false
+    recoverable: true
+    mutated: false
+  historical_market_aligner_copies:
+    canonical: false
+    count: 2
+  adopted_sources:
+  - source:raw_jobs
+  - source:career_pipeline
+secret_references:
+  names: []
+  values_persisted: false
+rollback:
+  precondition: reconcile-must-pass-immediately-before-removal
+  preserved_source_labels:
+  - source:raw_jobs
+  - source:career_pipeline
+  removable_destination_labels:
+  - destination:raw_jobs
+  - destination:career_pipeline

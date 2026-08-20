@@ -1,0 +1,3 @@
+# Full Scrapling distribution, pinned to the commit reviewed for this project.
+# Includes fetchers, Playwright, Patchright stealth, spiders, AI/MCP and shell.
+scrapling[all] @ git+https://github.com/D4Vinci/Scrapling.git@5320319155127519b46c0d35cc7a5037b936af05

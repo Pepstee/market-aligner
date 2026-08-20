@@ -1,0 +1,31 @@
+{
+  "after": {
+    "median_page_ms": 56.948321,
+    "samples_ms_excluding_one_startup": [
+      60.161011,
+      55.213792,
+      56.247527,
+      56.948321,
+      57.924302
+    ],
+    "strategy": "one_warm_browser_separate_preparation_pages",
+    "total_ms_including_one_startup": 358.271105
+  },
+  "applications": 5,
+  "assurance_change": "none",
+  "before": {
+    "median_ms": 186.06463,
+    "samples_ms": [
+      186.06463,
+      178.186177,
+      166.56355,
+      223.050501,
+      199.161691
+    ],
+    "strategy": "fresh_browser_per_application",
+    "total_ms": 953.0265489999999
+  },
+  "final_submit_policy": "serialized_and_recomputed_per_application",
+  "schema_version": "jaa.throughput-benchmark.v1",
+  "speedup": 2.6600709231072375
+}

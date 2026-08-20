@@ -1,0 +1,34 @@
+# --- personal data — NEVER commit (privacy rule, Architecture.md) -----------
+profiler/data/
+scraper/data/
+llm/data/cache/
+llm/data/usage.jsonl
+llm/data/skill_merges.jsonl
+skeleton/data/
+
+# --- generated outputs -------------------------------------------------------
+outputs/
+graphify-out/
+archive/
+.playwright-cli/
+transcripts/
+runtime_evidence/jaa04/corpus/
+runtime_evidence/jaa04/inflight/
+runtime_evidence/jaa04/runs/
+career_automation/fixtures/jaa04_capture
+career_automation/fixtures/.jaa04_capture-releases/
+*.jaa04-inflight/
+.jaa04-inflight/
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.venv-scrapling/
+
+# --- secrets -----------------------------------------------------------------
+.env
+*.key
