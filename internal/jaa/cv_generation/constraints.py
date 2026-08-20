@@ -38,6 +38,40 @@ _FORMAT_INVENTORY = re.compile(
     r"(?:^|[,|;/]\s*)(?:jsonl?|ya?ml|xml|csv|sqlite|sql)(?:\s*[,|;/]|$)",
     re.IGNORECASE,
 )
+_REJECTION_SIGNAL = re.compile(
+    r"\b(?:ai[- ](?:generated|assisted)|built (?:by|with) ai|ai agents?|"
+    r"honesty note|full disclosure|internal (?:process|review|workflow)|"
+    r"missing (?:skill|experience)|lack(?:ing|s)? (?:skill|experience)|"
+    r"not (?:proficient|experienced|qualified)|implementation attribution|"
+    r"production mastery (?:is )?not proved)\b",
+    re.IGNORECASE,
+)
+_STALE_OR_IRRELEVANT = re.compile(
+    r"\b(?:GCSEs?|front[- ]end (?:website|project)|British Chamber of Commerce|"
+    r"Counter Trafficking Network|DHL operative)\b|\b2022\b",
+    re.IGNORECASE,
+)
+_TOOL_TOKEN = re.compile(
+    r"\b(?:python|javascript|typescript|html5?|css3?|php|lua|shell|git|github|"
+    r"docker|aws lambda|runpod|hugging face|pytest|unittest|robot framework|"
+    r"wireshark|nmap|metasploit|hydra|nikto|wordpress|axure|slack|"
+    r"microsoft office|windows|linux|macos|jsonl?|ya?ml|xml|csv|sqlite|sql)\b",
+    re.IGNORECASE,
+)
+_CAPABILITY_LANGUAGE = re.compile(
+    r"\b(?:orchestration|systems? design|architecture|automation|engineering|"
+    r"development|testing|assurance|security|analysis|delivery|integration|"
+    r"research|evaluation|reliability|observability|model routing)\b",
+    re.IGNORECASE,
+)
+_STANDARD_HEADINGS = (
+    "Professional Summary",
+    "Core Capabilities",
+    "Projects",
+    "Experience",
+    "Education",
+    "Certifications",
+)
 
 
 class CVConstraintError(ValueError):
@@ -89,6 +123,9 @@ class CVPolicy:
                 "graduation_day_forbidden": True,
                 "continuation_banner_forbidden": True,
                 "format_inventory_as_skill_forbidden": True,
+                "tool_inventory_as_capability_forbidden": True,
+                "volunteered_rejection_signals_forbidden": True,
+                "target_role_as_current_identity_forbidden": True,
                 "ats_single_column_text_only": True,
             },
         }
@@ -170,6 +207,7 @@ def validate_generated_cv(
     sections: Mapping[str, Sequence[str]],
     rendered_pages: Iterable[Sequence[str]],
     policy: CVPolicy | None = None,
+    target_role_title: str | None = None,
 ) -> CVConstraintReceipt:
     """Fail closed on forbidden CV content and candidate-specific invariants."""
     selected = policy or policy_for_candidate(candidate_name)
@@ -183,15 +221,42 @@ def validate_generated_cv(
     work_rights = next((value for value in _WORK_RIGHTS if value in folded), None)
     if work_rights is not None:
         raise CVConstraintError("work-rights and visa declarations are forbidden in CVs")
+    if _REJECTION_SIGNAL.search(cv_text):
+        raise CVConstraintError("volunteered rejection signals are forbidden in CVs")
+
+    headings = tuple(sections)
+    if not headings or headings[0] != "Professional Summary":
+        raise CVConstraintError("CV hierarchy must start with Professional Summary")
+    if any(heading not in _STANDARD_HEADINGS for heading in headings):
+        raise CVConstraintError("CV uses a non-standard ATS section heading")
+    if "Core Capabilities" not in headings:
+        raise CVConstraintError("capability-led skills are required")
+    if "Projects" in headings and headings.index("Core Capabilities") > headings.index("Projects"):
+        raise CVConstraintError("Core Capabilities must precede Projects")
+
+    if target_role_title is not None:
+        role = " ".join(target_role_title.casefold().split())
+        summary_lines = tuple(
+            " ".join(line.casefold().strip(" :.-").split())
+            for line in sections.get("Professional Summary", ())
+        )
+        if any(line == role or line.startswith(f"target role {role}") for line in summary_lines):
+            raise CVConstraintError("target role cannot masquerade as current identity")
 
     education = _section_text(sections, "Education")
     if _DAY_MONTH_YEAR.search(education):
         raise CVConstraintError("graduation dates must use month and year only")
     for heading in ("Skills", "Core Capabilities"):
-        if _FORMAT_INVENTORY.search(_section_text(sections, heading)):
+        section_text = _section_text(sections, heading)
+        if _FORMAT_INVENTORY.search(section_text):
             raise CVConstraintError(
                 "formats, interchange syntax and storage engines cannot be listed as skills"
             )
+        for line in sections.get(heading, ()):
+            if len(_TOOL_TOKEN.findall(line)) >= 2 and not _CAPABILITY_LANGUAGE.search(line):
+                raise CVConstraintError(
+                    "tools and platforms must support a capability, not replace one"
+                )
 
     pages = tuple(tuple(page) for page in rendered_pages)
     if not pages:
@@ -217,6 +282,10 @@ def validate_generated_cv(
             raise CVConstraintError("canonical dissertation title is absent")
         if selected.required_capabilities_heading not in sections:
             raise CVConstraintError("professional capabilities section is absent")
+        if "Projects" not in sections:
+            raise CVConstraintError("verified projects section is required")
+        if _STALE_OR_IRRELEVANT.search(cv_text):
+            raise CVConstraintError("stale or irrelevant candidate detail is forbidden")
 
     receipt_body = {
         "schema_version": "jaa.cv-constraint-receipt.v1",

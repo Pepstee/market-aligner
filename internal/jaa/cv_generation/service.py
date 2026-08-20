@@ -233,6 +233,7 @@ def _validate_artifact_cv(
         sections=sections,
         rendered_pages=artifacts.cv_pdf.rendered_lines,
         policy=selected,
+        target_role_title=request.role_title,
     )
 
 

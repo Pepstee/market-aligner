@@ -583,6 +583,7 @@ def finalize_rebuilt_cv(
         sections=sections,
         rendered_pages=rendered_pages,
         policy=selected,
+        target_role_title=request.role_title,
     )
     values = {
         "constraint_receipt_sha256": constraint_receipt.receipt_sha256,

@@ -864,6 +864,7 @@ def build_candidate_application_package(
             for section in source.cv_sections
         },
         rendered_pages=artifacts.cv_pdf.rendered_lines,
+        target_role_title=source.role_title,
     )
     if revision_writer is not None:
         revision_writer(

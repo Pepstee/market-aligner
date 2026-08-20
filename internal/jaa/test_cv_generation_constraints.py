@@ -137,3 +137,84 @@ def test_receipt_hash_tampering_is_rejected() -> None:
     receipt = _valid()
     with pytest.raises(ValueError, match="hashes"):
         replace(receipt, receipt_sha256="not-a-hash")
+
+
+@pytest.mark.parametrize(
+    "addition",
+    (
+        "\nHonesty note: this CV was AI-generated.\n",
+        "\nBuilt with AI agents under an internal review process.\n",
+        "\nMissing skill: Kubernetes.\n",
+        "\nI am not experienced with production systems.\n",
+    ),
+)
+def test_forbids_volunteered_rejection_signals(addition: str) -> None:
+    with pytest.raises(CVConstraintError, match="rejection signals"):
+        _valid(cv_text=_base_text() + addition)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "Nine GCSEs.",
+        "DHL operative, 2022.",
+        "Earlier front-end website project.",
+    ),
+)
+def test_forbids_stale_or_irrelevant_candidate_detail(detail: str) -> None:
+    with pytest.raises(CVConstraintError, match="stale or irrelevant"):
+        _valid(cv_text=_base_text() + "\n" + detail)
+
+
+def test_target_role_cannot_be_presented_as_current_identity() -> None:
+    sections = {
+        "Professional Summary": ("Junior AI Engineer",),
+        "Core Capabilities": ("AI orchestration and systems design.",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    with pytest.raises(CVConstraintError, match="current identity"):
+        _valid(sections=sections, target_role_title="Junior AI Engineer")
+
+
+def test_tools_must_support_a_capability_not_replace_one() -> None:
+    sections = {
+        "Professional Summary": ("AI systems engineer.",),
+        "Core Capabilities": ("Python, Docker, GitHub, AWS Lambda",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    with pytest.raises(CVConstraintError, match="support a capability"):
+        _valid(sections=sections)
+
+
+def test_tools_are_allowed_as_supporting_experience() -> None:
+    sections = {
+        "Professional Summary": ("AI systems engineer.",),
+        "Core Capabilities": ("Workflow automation and systems integration using Python and Docker.",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    assert _valid(sections=sections).passed is True
+
+
+@pytest.mark.parametrize(
+    "sections",
+    (
+        {
+            "Core Capabilities": ("AI orchestration.",),
+            "Professional Summary": ("AI systems engineer.",),
+            "Projects": ("Built reliable automation.",),
+            "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+        },
+        {
+            "Professional Summary": ("AI systems engineer.",),
+            "Projects": ("Built reliable automation.",),
+            "Core Capabilities": ("AI orchestration.",),
+            "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+        },
+    ),
+)
+def test_requires_restrained_ats_hierarchy(sections) -> None:
+    with pytest.raises(CVConstraintError, match="hierarchy|precede"):
+        _valid(sections=sections)
