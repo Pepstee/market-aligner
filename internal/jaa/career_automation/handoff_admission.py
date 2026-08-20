@@ -8,8 +8,10 @@ are available solely through the explicitly named synthetic-test entry point.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -262,6 +264,195 @@ class TrustedHandoffResolver(Protocol):
         evaluated_at: str,
     ) -> None:
         """Authenticate the metadata trust proof against configured state."""
+
+
+class ProtectedLocalOutbox:
+    """Concrete no-secret trust adapter for one pinned MA outbox bundle.
+
+    Integrity comes from content addressing; authority comes from the consumer
+    configuration pinning the exact source-record digest and producer commit,
+    plus a private local directory inaccessible to group/other writers.
+    """
+
+    def __init__(
+        self,
+        bundle_path: str | Path,
+        *,
+        repository_root: str | Path,
+        expected_source_record_sha256: str,
+        allowed_producer_commits: frozenset[str],
+    ) -> None:
+        self.bundle_path = Path(bundle_path).resolve(strict=True)
+        repository = Path(repository_root).resolve(strict=True)
+        if repository == self.bundle_path or repository in self.bundle_path.parents:
+            raise HandoffAdmissionError(
+                "outbox_location", "protected handoff bundle must be outside the repository"
+            )
+        _digest(expected_source_record_sha256, "expected source record")
+        if (
+            not allowed_producer_commits
+            or any(not _COMMIT.fullmatch(value) for value in allowed_producer_commits)
+        ):
+            raise HandoffAdmissionError(
+                "outbox_configuration", "producer commit allowlist is invalid"
+            )
+        self.expected_source_record_sha256 = expected_source_record_sha256
+        self.allowed_producer_commits = allowed_producer_commits
+        self._assert_private_tree()
+        self._manifest_bytes = self._read("manifest.json")
+        self._manifest = self._decode(self._manifest_bytes, "outbox manifest")
+        if set(self._manifest) != {
+            "context_sha256",
+            "handoff_root_sha256",
+            "schema_version",
+            "source_record_sha256",
+        } or self._manifest.get("schema_version") != "market-aligner.protected-handoff-bundle.v1":
+            raise HandoffAdmissionError("outbox_manifest", "outbox manifest schema differs")
+        self._source_record_bytes = self._read("source-record.json")
+        if hashlib.sha256(self._source_record_bytes).hexdigest() != expected_source_record_sha256:
+            raise HandoffAdmissionError("outbox_pin", "source record differs from configured pin")
+        self._source_record = self._decode(self._source_record_bytes, "outbox source record")
+        if self._manifest.get("source_record_sha256") != expected_source_record_sha256:
+            raise HandoffAdmissionError("outbox_pin", "manifest source record differs")
+        if self._source_record.get("producer_commit_sha") not in allowed_producer_commits:
+            raise HandoffAdmissionError("outbox_producer", "producer commit is not allowed")
+        rows = self._source_record.get("entries")
+        if not isinstance(rows, list) or not rows:
+            raise HandoffAdmissionError("outbox_manifest", "source record has no entries")
+        self._entries = {
+            str(row["reference_key"]): dict(row)
+            for row in rows
+            if isinstance(row, dict)
+            and set(row) == {"metadata_sha256", "object_sha256", "reference_key"}
+        }
+        if len(self._entries) != len(rows):
+            raise HandoffAdmissionError("outbox_manifest", "source record entries are ambiguous")
+        identity = {
+            "allowed_producer_commits": sorted(allowed_producer_commits),
+            "source_record_sha256": expected_source_record_sha256,
+            "trust_root_id": self._source_record.get("trust_root_id"),
+        }
+        self.authenticator_identity_sha256 = hashlib.sha256(
+            canonical_json_bytes({"kind": "protected-local-outbox-context", **identity})
+        ).hexdigest()
+        self.resolver_identity_sha256 = hashlib.sha256(
+            canonical_json_bytes({"kind": "protected-local-outbox-resolver", **identity})
+        ).hexdigest()
+
+    @staticmethod
+    def _decode(value: bytes, label: str) -> dict[str, Any]:
+        try:
+            document = decode_canonical_json(value, label=label)
+        except HandoffContractError as exc:
+            raise HandoffAdmissionError("outbox_bytes", exc.message) from exc
+        if type(document) is not dict:
+            raise HandoffAdmissionError("outbox_schema", f"{label} must be an object")
+        return document
+
+    def _assert_private_tree(self) -> None:
+        current = self.bundle_path
+        while True:
+            metadata = current.lstat()
+            if current.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+                raise HandoffAdmissionError("outbox_permissions", "outbox path is not a real directory")
+            if stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise HandoffAdmissionError("outbox_permissions", "outbox is group/other writable")
+            if current == current.parent:
+                break
+            # The bundle and its content-addressed parent are the protected
+            # boundary; generic ancestors such as /tmp are outside that boundary.
+            if current.name == "bundles":
+                break
+            current = current.parent
+
+    def _read(self, relative: str) -> bytes:
+        path = self.bundle_path / relative
+        if path.is_symlink():
+            raise HandoffAdmissionError("outbox_permissions", "outbox files cannot be symlinks")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise HandoffAdmissionError("outbox_missing", f"outbox object is absent: {relative}") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+                raise HandoffAdmissionError("outbox_permissions", "outbox file is not private")
+            value = os.read(descriptor, MAX_WIRE_BYTES + 1)
+            if not value or len(value) > MAX_WIRE_BYTES:
+                raise HandoffAdmissionError("outbox_bytes", "outbox file size is invalid")
+            return value
+        finally:
+            os.close(descriptor)
+
+    @property
+    def handoff_bytes(self) -> bytes:
+        value = self._read("handoff.json")
+        if hashlib.sha256(value).hexdigest() != self._manifest["handoff_root_sha256"]:
+            raise HandoffAdmissionError("outbox_handoff", "handoff differs from manifest")
+        return value
+
+    @property
+    def context_bytes(self) -> bytes:
+        value = self._read("context.json")
+        if hashlib.sha256(value).hexdigest() != self._manifest["context_sha256"]:
+            raise HandoffAdmissionError("outbox_context", "context differs from manifest")
+        return value
+
+    def authenticate(
+        self,
+        *,
+        context_bytes: bytes | None = None,
+        handoff_bytes: bytes | None = None,
+        metadata_bytes: bytes | None = None,
+        exact_bytes: bytes | None = None,
+        admission_context_bytes: bytes | None = None,
+        evaluated_at: str,
+    ) -> None:
+        del evaluated_at
+        if context_bytes is not None and handoff_bytes is not None:
+            if context_bytes != self.context_bytes or handoff_bytes != self.handoff_bytes:
+                raise HandoffAdmissionError("outbox_context", "admission bytes differ from pinned bundle")
+            context = self._decode(context_bytes, "outbox context")
+            basis = dict(context)
+            proof = basis.pop("trust_proof_sha256", None)
+            if (
+                context.get("source_record_sha256") != self.expected_source_record_sha256
+                or context.get("producer_commit_sha") not in self.allowed_producer_commits
+                or proof != hashlib.sha256(canonical_json_bytes(basis)).hexdigest()
+            ):
+                raise HandoffAdmissionError("outbox_context", "context proof differs")
+            return
+        if metadata_bytes is None or exact_bytes is None or admission_context_bytes is None:
+            raise HandoffAdmissionError("outbox_authentication", "authentication inputs are incomplete")
+        metadata = self._decode(metadata_bytes, "outbox reference metadata")
+        context = self._decode(admission_context_bytes, "outbox context")
+        basis = dict(metadata)
+        proof = basis.pop("trust_proof_sha256", None)
+        basis.update(
+            {
+                "handoff_root_sha256": context["handoff_root_sha256"],
+                "producer_commit_sha": context["producer_commit_sha"],
+            }
+        )
+        if (
+            hashlib.sha256(exact_bytes).hexdigest() != metadata.get("object_sha256")
+            or proof != hashlib.sha256(canonical_json_bytes(basis)).hexdigest()
+        ):
+            raise HandoffAdmissionError("outbox_reference", "reference proof differs")
+
+    def resolve(self, request: ReferenceRequest) -> ResolvedReference:
+        try:
+            row = self._entries[request.spec.reference_key]
+        except KeyError as exc:
+            raise FileNotFoundError(request.spec.reference_key) from exc
+        if row["object_sha256"] != request.sha256:
+            raise HandoffAdmissionError("outbox_reference", "reference object digest differs")
+        exact = self._read(f"objects/{row['object_sha256']}")
+        metadata = self._read(f"metadata/{row['metadata_sha256']}")
+        if hashlib.sha256(metadata).hexdigest() != row["metadata_sha256"]:
+            raise HandoffAdmissionError("outbox_reference", "reference metadata digest differs")
+        return ResolvedReference(exact, metadata)
 
 
 @dataclass(frozen=True)
@@ -2025,6 +2216,7 @@ __all__ = [
     "HandoffAdmission",
     "HandoffAdmissionError",
     "HandoffAdmissionStore",
+    "ProtectedLocalOutbox",
     "REFERENCE_REGISTRY",
     "ReferenceRequest",
     "ResolvedReference",

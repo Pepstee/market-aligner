@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from importlib.resources import files
@@ -19,7 +20,11 @@ sys.path.insert(0, str(SOURCE_ROOT))
 sys.path.insert(0, str(JAA_ROOT))
 
 from market_aligner.assessment.scoring import FitStatus, ScoreResult
-from market_aligner.applications.producer import HandoffProducerError
+from market_aligner.applications.producer import (
+    HandoffProducerError,
+    HandoffReference,
+    write_protected_handoff_bundle,
+)
 from market_aligner.cli import main as market_aligner_main
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile
 from market_aligner.profiler.store import ProfileStore
@@ -28,7 +33,9 @@ from market_aligner.service.api import MarketAlignerService
 from career_automation.current_time import configured_hmac_current_time_witness
 from career_automation.handoff_admission import (
     ADMISSION_KIND_V1,
+    HandoffAdmissionError,
     HandoffAdmissionStore,
+    ProtectedLocalOutbox,
     ResolvedReference,
 )
 from career_automation.market_aligner_handoff import (
@@ -155,6 +162,83 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
     assert replay.verification_receipt_sha256 == admission.verification_receipt_sha256
     assert admission.created is True
     assert replay.created is False
+
+
+def test_protected_outbox_bundle_authenticates_and_replays_idempotently(tmp_path) -> None:
+    fixture_bytes = files("career_automation").joinpath(
+        "fixtures/market-aligner-v1-vectors.json"
+    ).read_bytes()
+    document = json.loads(fixture_bytes)
+    handoff_bytes = base64.b64decode(
+        document["handoff"]["canonical_base64"], validate=True
+    )
+    handoff = parse_handoff(handoff_bytes)
+    references = {}
+    for row in document["reference_bundle"]["value"]["entries"]:
+        metadata = row["metadata"]
+        references[metadata["reference_key"]] = HandoffReference(
+            exact_bytes=base64.b64decode(row["object_base64"], validate=True),
+            type_id=metadata["type_id"],
+            schema_version=metadata["schema_version"],
+            subject=metadata["subject"],
+            issued_at=metadata["issued_at"],
+            valid_until=metadata["valid_until"],
+            issuer_id=metadata["issuer_id"],
+        )
+    output_root = tmp_path / "external-data-home"
+    first = write_protected_handoff_bundle(
+        output_root,
+        handoff,
+        references=references,
+        environment="synthetic",
+        trust_root_id="synthetic-market-root",
+        issued_at="2026-08-10T10:04:00Z",
+        source_job_key="workable:synthetic:42",
+    )
+    second = write_protected_handoff_bundle(
+        output_root,
+        handoff,
+        references=references,
+        environment="synthetic",
+        trust_root_id="synthetic-market-root",
+        issued_at="2026-08-10T10:04:00Z",
+        source_job_key="workable:synthetic:42",
+    )
+    assert second == first
+    adapter = ProtectedLocalOutbox(
+        first.path,
+        repository_root=Path(__file__).resolve().parents[1],
+        expected_source_record_sha256=first.source_record_sha256,
+        allowed_producer_commits=frozenset({handoff.payload["producer"]["commit_sha"]}),
+    )
+    witness = configured_hmac_current_time_witness(
+        authentication_key=b"protected-outbox-time-key-32bytes",
+        environment="synthetic",
+        trust_root_id="synthetic-market-time-root",
+        witness_identity_sha256=hashlib.sha256(b"protected-outbox-time").hexdigest(),
+        clock=lambda: ADMISSION_TIME,
+        nonce_source=lambda: b"protected-outbox-time-nonce",
+    )
+    store = HandoffAdmissionStore(
+        tmp_path / "protected-outbox.sqlite3",
+        context_authenticator=adapter,
+        resolver=adapter,
+        current_time_witness=witness,
+    )
+    admitted = store.admit_authenticated(adapter.handoff_bytes, adapter.context_bytes)
+    replay = store.admit_authenticated(adapter.handoff_bytes, adapter.context_bytes)
+    assert admitted.created is True
+    assert replay.created is False
+    assert admitted.application_id == handoff.application_id
+
+    os.chmod(first.path / "context.json", 0o644)
+    with pytest.raises(HandoffAdmissionError, match="outbox file is not private"):
+        ProtectedLocalOutbox(
+            first.path,
+            repository_root=Path(__file__).resolve().parents[1],
+            expected_source_record_sha256=first.source_record_sha256,
+            allowed_producer_commits=frozenset({handoff.payload["producer"]["commit_sha"]}),
+        ).context_bytes
 
 
 def test_recovered_canonical_vectors_preserve_declared_dispositions() -> None:

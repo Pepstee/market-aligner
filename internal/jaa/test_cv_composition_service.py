@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,10 @@ from career_automation.adversarial_recruiter import (
     assess_application_as_recruiter,
 )
 from career_automation.application_compiler import DocumentSection, StyleSlot
+from career_automation.handoff_admission import VerifiedApplicationInput
+from career_automation.market_aligner_preparation import (
+    prepare_admitted_market_application,
+)
 from career_automation.evidence_matching import content_hash
 from cv_generation.adversarial_rebuild import bind_recruiter_improvement
 from cv_generation.constraints import CVConstraintReceipt
@@ -471,3 +476,91 @@ def test_orchestration_receipt_is_tamper_evident_and_non_release(tmp_path) -> No
                 }
             ),
         )
+
+
+def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_path) -> None:
+    base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
+    candidate_bytes = b'{"synthetic":"candidate-authority"}\n'
+    contact_bytes = b'{"synthetic":"contact-authority"}\n'
+    candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
+    contact_sha = hashlib.sha256(contact_bytes).hexdigest()
+    request = build_editorial_request(
+        authority=replace(request.authority, source_sha256=candidate_sha),
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=request.approved_claims,
+    )
+    writer = replace(writer, request_sha256=request.request_sha256)
+    humanizer = replace(
+        humanizer, request_sha256=humanizer_request_sha256(request, draft)
+    )
+    base = _reidentify_source(
+        replace(base, contact=replace(base.contact, provenance_sha256=contact_sha))
+    )
+    verified = VerifiedApplicationInput(
+        application_id="app_" + "1" * 64,
+        admission_kind="market_aligner_handoff_v1",
+        environment="synthetic",
+        authority_scope="none",
+        handoff_root_sha256="2" * 64,
+        vacancy_source_identity=base.vacancy_source_identity,
+        profile_id="prf_" + "3" * 32,
+        profile_version="synthetic-v1",
+        job_key=base.job_key,
+        vacancy_snapshot_sha256=base.vacancy_sha256,
+        raw_listing_sha256=hashlib.sha256(listing.encode()).hexdigest(),
+        raw_listing_bytes=listing.encode(),
+        requirements_sha256="4" * 64,
+        requirements_bytes=b"synthetic requirements",
+        canonical_url="https://jobs.example.test/42",
+        company_name=base.company_name,
+        role_title=base.role_title,
+        location={},
+        admission_receipt_sha256="5" * 64,
+        current_boundary="strategy",
+        current_boundary_receipt_sha256="6" * 64,
+    )
+
+    class _Store:
+        calls = 0
+
+        def for_boundary(self, application_id, boundary):
+            assert application_id == verified.application_id
+            assert boundary == "strategy"
+            self.calls += 1
+            return verified
+
+    store = _Store()
+    arguments = {
+        "request": request,
+        "writer_draft": draft,
+        "humanized_draft": draft,
+        "writer_evidence": writer,
+        "humanizer_evidence": humanizer,
+        "base_source": base,
+        "listing_text": listing,
+        "form_fields": (),
+        "bindings": (),
+        "recruiter_assessor": assessor,
+        "improvement_binder": lambda req, receipt: (_binding(req, receipt),),
+    }
+    inputs = {
+        "admission_store": store,
+        "application_id": verified.application_id,
+        "repository_root": Path(__file__).resolve().parents[1],
+        "data_home": tmp_path / "external-data-home",
+        "candidate_authority_bytes": candidate_bytes,
+        "candidate_authority_sha256": candidate_sha,
+        "contact_authority_bytes": contact_bytes,
+        "contact_authority_sha256": contact_sha,
+        "orchestration_arguments": arguments,
+    }
+    first = prepare_admitted_market_application(**inputs)
+    second = prepare_admitted_market_application(**inputs)
+    assert first == second
+    assert first.release_authority is False
+    assert store.calls == 1
+    assert assessor.calls == 1
+    assert (first.path / "cv.pdf").is_file()
+    assert (first.path / "cover-letter.pdf").is_file()
