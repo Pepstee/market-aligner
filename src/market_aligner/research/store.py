@@ -863,8 +863,7 @@ class AssessmentStore:
             promotion_source = row["source_content_sha256"]
             if (
                 promotion_source is None
-                or promotion_source != verified.old_canonical_content_sha256
-                or promotion_source != verified.new_content_sha256
+                or promotion_source != verified.old_content_sha256
             ):
                 raise ValueError(
                     "refresh content differs from the current assessment promotion"

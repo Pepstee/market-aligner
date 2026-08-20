@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,13 @@ from market_aligner.research.models import ResearchDossier
 from market_aligner.research.store import AssessmentStore
 from market_aligner.research.worker import ResearchWorker
 from market_aligner.service.api import CollectionService
-from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
+from market_aligner.state.vacancies import (
+    JobDatabase,
+    VacancyRefreshConflict,
+    raw_posting_bytes,
+    raw_posting_content_sha256,
+    raw_posting_from_bytes,
+)
 
 DIGEST = "a" * 64
 PROMOTION = "b" * 64
@@ -48,6 +55,26 @@ def _collector(path: Path) -> tuple[CanonicalCollectorVacancyLoader, str]:
     return CanonicalCollectorVacancyLoader(path), digest
 
 
+def _legacy_bridge_collector(
+    path: Path,
+) -> tuple[CanonicalCollectorVacancyLoader, str, str]:
+    database = JobDatabase(path)
+    database.upsert_discovered(JobUrl("workable", "cogna:847CFBC5F4", URL))
+    raw = RawPosting(
+        "workable", "cogna:847CFBC5F4", URL,
+        "2026-08-21T00:00:00+00:00", BODY.decode(), {"z": 1, "a": 2},
+    )
+    database.store_raw(raw)
+    with database.connect() as connection:
+        legacy_digest = connection.execute(
+            "SELECT content_hash FROM postings WHERE key=?", (JOB_KEY,)
+        ).fetchone()[0]
+    canonical_raw = raw_posting_from_bytes(raw_posting_bytes(raw))
+    canonical_digest = raw_posting_content_sha256(canonical_raw)
+    assert legacy_digest != canonical_digest
+    return CanonicalCollectorVacancyLoader(path), legacy_digest, canonical_digest
+
+
 def _canonical_collection_refresh(
     root: Path,
     *,
@@ -56,9 +83,15 @@ def _canonical_collection_refresh(
 ) -> tuple[Path, JobDatabase, Path]:
     database_relative = Path("scraper/data_overnight/jobs.sqlite3")
     database = JobDatabase(root / database_relative, data_home=root)
+    with database.connect() as connection:
+        stored = connection.execute(
+            """SELECT url,fetched_at,raw_text,raw_json
+               FROM postings WHERE key=?""",
+            (JOB_KEY,),
+        ).fetchone()
     old = RawPosting(
-        "workable", "cogna:847CFBC5F4", URL,
-        "2026-08-21T00:00:00+00:00", BODY.decode(), None,
+        "workable", "cogna:847CFBC5F4", str(stored[0]), str(stored[1]),
+        stored[2], None if stored[3] is None else json.loads(str(stored[3])),
     )
     write_jsonl(
         root / "raw" / "vacancies" / "workable" / "cogna_847CFBC5F4.json",
@@ -94,7 +127,7 @@ def _canonical_collection_refresh(
             assert live is True
             return RawPosting(
                 job.board, job.job_id, job.url,
-                "2026-08-21T01:00:00+00:00", raw_text, None,
+                "2026-08-21T01:00:00+00:00", raw_text, old.raw_json,
             )
 
     def factory(loaded, data_home, log=print):
@@ -311,6 +344,101 @@ def test_canonical_unchanged_refresh_requeues_and_same_worker_rebuilds(
     receipt = json.loads(receipt_path.read_bytes())
     assert payload["collection_operation_id"] == "unchanged-research-refresh"
     assert payload["collection_transition_sha256"] == receipt["transition_sha256"]
+
+
+def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
+    tmp_path: Path,
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    provider = SourceBoundResearchProvider(
+        plan=_plan(task, source),
+        repository_root=repository,
+        archive_root=tmp_path / "state" / "public-employer-research-v2",
+        canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, provider, "legacy-worker").run_one().status == "completed"
+
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    receipt = json.loads(receipt_path.read_bytes())
+    assert receipt["changed"] is False
+    assert receipt["old_content_sha256"] == legacy_digest
+    assert receipt["old_canonical_content_sha256"] == canonical_digest
+    assert receipt["new_content_sha256"] == canonical_digest
+    assert store.refresh_completed_research_if_needed(
+        profile_id,
+        JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    with store.connection() as connection:
+        promotion = connection.execute(
+            """SELECT source_content_sha256 FROM assessment_promotions
+               WHERE profile_id=? AND job_key=?""",
+            (profile_id, JOB_KEY),
+        ).fetchone()[0]
+        event = json.loads(connection.execute(
+            """SELECT payload_json FROM assessment_events
+               WHERE event_type='employer_research_collection_refresh_queued'"""
+        ).fetchone()[0])
+    assert promotion == legacy_digest
+    assert event["source_content_sha256"] == legacy_digest
+    assert event["old_collector_content_sha256"] == legacy_digest
+    assert event["old_canonical_content_sha256"] == canonical_digest
+
+
+def test_dual_identity_v3_rejects_relabelled_promotion_and_canonical_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    _loader, legacy_digest, canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", canonical_digest
+    )
+    with store.connection() as connection:
+        connection.execute(
+            """UPDATE employer_research_queue SET status='completed'
+               WHERE profile_id=? AND job_key=?""",
+            (profile_id, JOB_KEY),
+        )
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    with pytest.raises(ValueError, match="current assessment promotion"):
+        store.refresh_completed_research_if_needed(
+            profile_id,
+            JOB_KEY,
+            collection_refresh_receipt_path=receipt_path,
+            collection_config_path=config,
+        )
+
+    with store.connection() as connection:
+        connection.execute(
+            """UPDATE assessment_promotions SET source_content_sha256=?
+               WHERE profile_id=? AND job_key=?""",
+            (legacy_digest, profile_id, JOB_KEY),
+        )
+    original_verify = JobDatabase.verify_vacancy_refresh_receipt
+
+    def verify_with_semantic_drift(self, *args, **kwargs):
+        verified = original_verify(self, *args, **kwargs)
+        return replace(verified, old_canonical_content_sha256="f" * 64)
+
+    monkeypatch.setattr(
+        JobDatabase, "verify_vacancy_refresh_receipt", verify_with_semantic_drift
+    )
+    with pytest.raises(ValueError, match="changed vacancy content"):
+        store.refresh_completed_research_if_needed(
+            profile_id,
+            JOB_KEY,
+            collection_refresh_receipt_path=receipt_path,
+            collection_config_path=config,
+        )
 
 
 @pytest.mark.parametrize(
