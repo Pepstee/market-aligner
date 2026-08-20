@@ -15,7 +15,11 @@ from market_aligner.assessment.opportunity import (
     derive_opportunity_axes,
 )
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, ScoreResult, score
-from market_aligner.assessment.viability import assess_viability
+from market_aligner.assessment.viability import (
+    FirstJobScopePolicy,
+    assess_first_job_scope,
+    assess_viability,
+)
 from market_aligner.assessment.geography import (
     GeographicPreferencePolicy,
     classify_geographic_preference,
@@ -97,8 +101,12 @@ def _processing_config(config: dict[str, Any]) -> dict[str, Any]:
     geographic = value.get("geographic_preference")
     if geographic is not None and not isinstance(geographic, dict):
         raise ValueError("processing geographic_preference must be an object")
+    first_job_scope = value.get("first_job_scope")
+    if first_job_scope is not None and not isinstance(first_job_scope, dict):
+        raise ValueError("processing first_job_scope must be an object")
     return {
         "exclude_boards": exclude_boards,
+        "first_job_scope": first_job_scope,
         "geographic_preference": geographic,
         "include_boards": include_boards,
         "lease_seconds": lease_seconds,
@@ -174,11 +182,13 @@ class ProcessingService:
         *,
         opportunity_policy: OpportunityAxisPolicy | None = None,
         geographic_policy: GeographicPreferencePolicy | None = None,
+        first_job_policy: FirstJobScopePolicy | None = None,
     ) -> None:
         self.paths = ProductPaths.resolve(data_home).ensure()
         self.worker = semantic_worker
         self.opportunity_policy = opportunity_policy or OpportunityAxisPolicy()
         self.geographic_policy = geographic_policy or GeographicPreferencePolicy()
+        self.first_job_policy = first_job_policy or FirstJobScopePolicy()
         self.profiles = ProfileStore(self.paths.root)
         self.jobs = JobDatabase(self.paths.state / "vacancies.sqlite3")
         self.assessments = AssessmentStore(self.paths.state / "assessments.sqlite3")
@@ -217,6 +227,10 @@ class ProcessingService:
             processing["geographic_preference"],
             default=self.geographic_policy,
         )
+        first_job_policy = FirstJobScopePolicy.from_mapping(
+            processing["first_job_scope"],
+            default=self.first_job_policy,
+        )
         scope = {
             "exclude_boards": processing["exclude_boards"],
             "include_boards": processing["include_boards"],
@@ -235,6 +249,7 @@ class ProcessingService:
         config_sha256 = _sha256(
             {
                 "geographic_preference_policy": asdict(geographic_policy),
+                "first_job_scope_policy": asdict(first_job_policy),
                 "loaded_config": config,
                 "opportunity_policy": asdict(self.opportunity_policy),
             }
@@ -250,7 +265,7 @@ class ProcessingService:
             exclude_boards=processing["exclude_boards"],
             max_total=processing["max_total"],
         )
-        completed = rejected = errors = 0
+        completed = rejected = parked = errors = 0
         for raw in claimed:
             try:
                 shell = vacancy_shell_from_raw(raw)
@@ -277,14 +292,19 @@ class ProcessingService:
                     policy=geographic_policy,
                 )
                 viability = assess_viability(vacancy)
-                if viability.decision != "include":
+                first_job_scope = assess_first_job_scope(vacancy, first_job_policy)
+                if viability.decision != "include" or first_job_scope.decision != "include":
                     result: dict[str, object] = {
+                        "first_job_scope": asdict(first_job_scope),
                         "included": False,
                         "geographic_preference": asdict(geographic_preference),
                         "viability": asdict(viability),
                         "vacancy": asdict(vacancy),
                     }
-                    rejected += 1
+                    if viability.decision != "include" or first_job_scope.decision == "exclude":
+                        rejected += 1
+                    else:
+                        parked += 1
                 else:
                     alignment_context = {
                         "evidence_authority_sha256": authority_sha256,
@@ -326,6 +346,7 @@ class ProcessingService:
                     result = {
                         "alignment_receipt": asdict(alignment_receipt),
                         "extraction_receipt": asdict(extraction_receipt),
+                        "first_job_scope": asdict(first_job_scope),
                         "geographic_preference": asdict(geographic_preference),
                         "included": True,
                         "opportunity_axes": asdict(opportunity),
@@ -385,9 +406,11 @@ class ProcessingService:
             "errors": errors,
             "evidence_authority_sha256": authority_sha256,
             "geographic_preference_policy_sha256": geographic_policy.policy_hash,
+            "first_job_scope_policy_sha256": first_job_policy.policy_hash,
             "included": completed,
             "job_specific_opportunity_axes": True,
             "opportunity_policy_sha256": self.opportunity_policy.policy_hash,
+            "parked": parked,
             "profile_id": profile_id,
             "promotion": promotion,
             "promotion_receipt_path": str(promotion_receipt_path),

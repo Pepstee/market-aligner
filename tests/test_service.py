@@ -565,6 +565,62 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(2, sum(int(result["unchanged"]) for result in results))
             self.assertEqual(2, target.stats()["fetched"])
 
+    def test_first_job_scope_rejects_explicit_barriers_before_alignment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root, jobs=0)
+            database = JobDatabase(root / "state" / "vacancies.sqlite3")
+            titles = (
+                "Senior Full Stack Developer",
+                "Azure Principal Platform Engineer - UK Security Clearance eligibility required",
+            )
+            for index, title in enumerate(titles, 1):
+                row = JobUrl("workable", str(index), f"https://jobs.example.test/{index}")
+                database.upsert_discovered(row)
+                database.store_raw(
+                    RawPosting(
+                        row.board,
+                        row.job_id,
+                        row.url,
+                        "2026-08-20T00:00:00Z",
+                        raw_json={
+                            "title": title,
+                            "company": "Example",
+                            "location": "Remote UK",
+                            "description": "Lead a task while building reliable automation.",
+                        },
+                    )
+                )
+            config.write_text(
+                "processing:\n  shard_size: 10\n  lease_seconds: 60\n",
+                encoding="utf-8",
+            )
+            worker = FixtureSemanticWorker()
+            service = ProcessingService(root, worker)
+            receipt = service.process(
+                config, profile_id=profile_id, track="automation", worker_id="scope-gate"
+            )
+            self.assertEqual((2, 0), (worker.extractions, worker.alignments))
+            self.assertEqual((2, 0, 0), (
+                receipt["rejected"], receipt["parked"], receipt["ranked_count"],
+            ))
+            results = service.jobs.completed_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=str(receipt["evidence_authority_sha256"]),
+            )
+            self.assertEqual(2, len(results))
+            self.assertTrue(all(not result["included"] for result in results))
+            self.assertEqual(
+                {"explicit_senior_title", "explicit_clearance_barrier"},
+                {result["first_job_scope"]["reason"] for result in results},
+            )
+            self.assertTrue(all(
+                result["first_job_scope"]["policy_sha256"]
+                == receipt["first_job_scope_policy_sha256"]
+                for result in results
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,11 @@ from market_aligner.assessment.eligibility import (
 )
 from market_aligner.assessment.opportunity import apply_gate, derive_opportunity_axes
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, score
-from market_aligner.assessment.viability import assess_viability
+from market_aligner.assessment.viability import (
+    FirstJobScopePolicy,
+    assess_first_job_scope,
+    assess_viability,
+)
 from market_aligner.domain.contracts import Vacancy
 from market_aligner.llm.contracts import EvidenceAlignment, EvidenceMatch
 from market_aligner.normalisation.deduplication import deduplicate
@@ -99,6 +103,59 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual("reject", mismatch.decision)
         self.assertIn("work_authorisation_mismatch", mismatch.reasons)
         self.assertIn("experience_requirement_exceeds_policy", mismatch.reasons)
+
+    def test_first_job_scope_uses_title_and_explicit_requirements_not_description_prose(self) -> None:
+        positives = (
+            ("Graduate Software Engineer", "explicit_entry_title"),
+            ("Junior Automation Developer", "explicit_entry_title"),
+            ("Implementation Consultant", "configured_adjacent_role"),
+            ("Automation Engineer", "configured_adjacent_role"),
+        )
+        for index, (title, reason) in enumerate(positives, 1):
+            decision = assess_first_job_scope(
+                vacancy(job_id=f"positive-{index}", title=title)
+            )
+            self.assertEqual(("include", reason), (decision.decision, decision.reason))
+            self.assertEqual(64, len(decision.facts_sha256))
+            self.assertEqual(64, len(decision.policy_sha256))
+
+        for title in (
+            "Senior Full Stack Developer",
+            "Principal Platform Engineer",
+            "Staff Software Engineer",
+            "Engineering Lead",
+            "Director of Automation",
+        ):
+            decision = assess_first_job_scope(vacancy(title=title))
+            self.assertEqual(("exclude", "explicit_senior_title"), (
+                decision.decision, decision.reason,
+            ))
+
+        clearance = assess_first_job_scope(
+            vacancy(title="Azure Platform Engineer - UK Security Clearance eligibility required")
+        )
+        self.assertEqual(("exclude", "explicit_clearance_barrier"), (
+            clearance.decision, clearance.reason,
+        ))
+        task_leadership = assess_first_job_scope(
+            vacancy(
+                title="Automation Engineer",
+                description="Lead a task from discovery through delivery.",
+            )
+        )
+        self.assertEqual("include", task_leadership.decision)
+        unknown = assess_first_job_scope(vacancy(title="Technology Generalist"))
+        self.assertEqual(("park", "first_job_scope_unknown"), (
+            unknown.decision, unknown.reason,
+        ))
+
+        configured = FirstJobScopePolicy.from_mapping(
+            {"adjacent_title_patterns": [r"\bproduct operator\b"]}
+        )
+        self.assertEqual(
+            "include",
+            assess_first_job_scope(vacancy(title="Product Operator"), configured).decision,
+        )
 
     def test_fit_is_explicitly_uncalibrated_and_profile_specific(self) -> None:
         candidate = profile()
