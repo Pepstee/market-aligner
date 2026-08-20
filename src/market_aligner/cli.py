@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from market_aligner import __version__
+from market_aligner.applications.producer import write_handoff
 from market_aligner.profiler.importers import import_evidence_led, import_guided_profile
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
@@ -97,6 +98,28 @@ def _assess_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handoff_command(args: argparse.Namespace) -> int:
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    service = MarketAlignerService(args.data_home)
+    handoff = service.handoff(args.profile_id, args.job_key, manifest)
+    write_handoff(args.output, handoff)
+    print(
+        json.dumps(
+            {
+                "application_id": handoff.application_id,
+                "job_key": args.job_key,
+                "output": str(args.output),
+                "payload_sha256": handoff.payload_sha256,
+                "profile_id": args.profile_id,
+                "root_sha256": handoff.root_sha256,
+                "schema_version": "market-aligner.jaa-handoff.v1",
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="market-aligner")
     parser.add_argument("--version", action="version", version=__version__)
@@ -137,6 +160,16 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--apply-opportunity-gate", action="store_true")
     _add_data_home(assess)
     assess.set_defaults(handler=_assess_command)
+
+    handoff = commands.add_parser(
+        "handoff", help="Emit one opportunity-gated assessment for internal JAA."
+    )
+    handoff.add_argument("--profile-id", required=True)
+    handoff.add_argument("--job-key", required=True)
+    handoff.add_argument("--manifest", type=Path, required=True)
+    handoff.add_argument("--output", type=Path, required=True)
+    _add_data_home(handoff)
+    handoff.set_defaults(handler=_handoff_command)
     return parser
 
 

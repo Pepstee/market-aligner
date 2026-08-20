@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 
+from market_aligner.applications.handoff import HandoffEnvelope
+from market_aligner.applications.producer import produce_handoff
 from market_aligner.assessment.opportunity import OpportunityDecision, apply_gate
 from market_aligner.assessment.scoring import AssessmentAxes, ScoreResult, ScoringParams, score
 from market_aligner.profiler.store import ProfileStore
@@ -46,3 +49,18 @@ class MarketAlignerService:
 
     def gate(self, profile_id: str, job_key: str) -> OpportunityDecision:
         return apply_gate(self.assessments, profile_id, job_key)
+
+    def handoff(
+        self,
+        profile_id: str,
+        job_key: str,
+        manifest: Mapping[str, Any],
+    ) -> HandoffEnvelope:
+        profile, _evidence = self.profiles.load(profile_id)
+        return produce_handoff(
+            self.assessments,
+            profile_id=profile.profile_id,
+            profile_version=profile.version,
+            job_key=job_key,
+            manifest=manifest,
+        )

@@ -14,7 +14,16 @@ import pytest
 
 
 JAA_ROOT = Path(__file__).resolve().parents[1] / "internal" / "jaa"
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(SOURCE_ROOT))
 sys.path.insert(0, str(JAA_ROOT))
+
+from market_aligner.assessment.scoring import FitStatus, ScoreResult
+from market_aligner.applications.producer import HandoffProducerError
+from market_aligner.cli import main as market_aligner_main
+from market_aligner.profiler.schema import CandidateProfile, TrackProfile
+from market_aligner.profiler.store import ProfileStore
+from market_aligner.service.api import MarketAlignerService
 
 from career_automation.current_time import configured_hmac_current_time_witness
 from career_automation.handoff_admission import (
@@ -164,3 +173,144 @@ def test_recovered_canonical_vectors_preserve_declared_dispositions() -> None:
         assert vector["expected"] == "admit_base_release_blocked"
         parsed = parse_handoff(candidate)
         assert parsed.emission_profile == COMPATIBILITY_PROFILE, vector["id"]
+
+
+def test_persisted_gated_assessment_emits_exact_handoff_and_enters_jaa(
+    tmp_path, capsys
+) -> None:
+    fixture_bytes = files("career_automation").joinpath(
+        "fixtures/market-aligner-v1-vectors.json"
+    ).read_bytes()
+    document = json.loads(fixture_bytes)
+    expected_bytes = base64.b64decode(
+        document["handoff"]["canonical_base64"], validate=True
+    )
+    expected = json.loads(expected_bytes)["payload"]
+    assessment = expected["assessment"]
+
+    data_home = tmp_path / "market-data"
+    ProfileStore(data_home).save(
+        CandidateProfile(
+            profile_id=expected["profile_id"],
+            version=expected["profile_version"],
+            tracks={
+                "synthetic_track": TrackProfile(
+                    interest=8,
+                    demonstrated_skill=8,
+                    confidence=0.95,
+                    market_readiness=8,
+                    rationale="Synthetic cross-product contract fixture.",
+                )
+            },
+        ),
+        [],
+    )
+    service = MarketAlignerService(data_home)
+    service.assessments.upsert_score(
+        ScoreResult(
+            profile_id=expected["profile_id"],
+            job_key=expected["job_key"],
+            track="synthetic_track",
+            fit=assessment["fit"],
+            opportunity=assessment["opportunity"],
+            final=assessment["final"] * 100.0,
+            fit_status=FitStatus.UNCALIBRATED,
+            parameters_hash=assessment["scoring_parameters_sha256"],
+            fit_subscores=assessment["fit_components"],
+            opportunity_subscores=assessment["opportunity_components"],
+        ),
+        url=expected["vacancy"]["provenance"]["canonical_url"],
+        title=expected["vacancy"]["role_title"],
+        company=expected["vacancy"]["company_name"],
+        extraction_confidence=assessment["extraction_confidence"],
+    )
+    manifest = {
+        "assessment_receipt_sha256": assessment["assessment_receipt_sha256"],
+        "candidate_intent_sha256": expected["candidate_intent_sha256"],
+        "created_at": expected["created_at"],
+        "eligibility": expected["eligibility"],
+        "employer_dossier_sha256": expected["employer_dossier_sha256"],
+        "evidence_ledger_sha256": expected["evidence_ledger_sha256"],
+        "producer_commit_sha": expected["producer"]["commit_sha"],
+        "selection": expected["selection"],
+        "vacancy": expected["vacancy"],
+    }
+    with pytest.raises(HandoffProducerError, match="opportunity-gate pass"):
+        service.handoff(expected["profile_id"], expected["job_key"], manifest)
+
+    service.assessments.apply_opportunity_gate(
+        profile_id=expected["profile_id"],
+        job_key=expected["job_key"],
+        passed=True,
+        reason="opportunity_warrants_employer_reconnaissance",
+        policy_hash=expected["selection"]["selection_policy_sha256"],
+        priority=2_083_367,
+    )
+    substituted_manifest = json.loads(json.dumps(manifest))
+    substituted_manifest["selection"]["selection_policy_sha256"] = "f" * 64
+    with pytest.raises(HandoffProducerError, match="persisted gate policy"):
+        service.handoff(
+            expected["profile_id"], expected["job_key"], substituted_manifest
+        )
+
+    manifest_path = tmp_path / "handoff-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_path = tmp_path / "handoff.json"
+
+    assert (
+        market_aligner_main(
+            [
+                "handoff",
+                "--profile-id",
+                expected["profile_id"],
+                "--job-key",
+                expected["job_key"],
+                "--manifest",
+                str(manifest_path),
+                "--output",
+                str(output_path),
+                "--data-home",
+                str(data_home),
+            ]
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert output_path.read_bytes() == expected_bytes
+    assert receipt["root_sha256"] == MARKET_HANDOFF_ROOT
+    assert receipt["application_id"] == MARKET_APPLICATION_ID
+
+    context = canonical_json_bytes(
+        {
+            "environment": "synthetic",
+            "handoff_root_sha256": receipt["root_sha256"],
+            "issued_at": "2026-08-10T10:04:00Z",
+            "producer_commit_sha": expected["producer"]["commit_sha"],
+            "producer_product": "market-aligner",
+            "source_record_sha256": MARKET_VECTOR_SHA256,
+            "trust_mode": "authenticated_attestation",
+            "trust_proof_sha256": hashlib.sha256(
+                b"jaa-market-vector-context-proof-v1"
+            ).hexdigest(),
+            "trust_root_id": "synthetic-market-root",
+        }
+    )
+    witness = configured_hmac_current_time_witness(
+        authentication_key=b"market-vector-time-key-32-bytes!",
+        environment="synthetic",
+        trust_root_id="synthetic-market-time-root",
+        witness_identity_sha256=hashlib.sha256(
+            b"synthetic-market-time-witness"
+        ).hexdigest(),
+        clock=lambda: ADMISSION_TIME,
+        nonce_source=lambda: b"market-vector-fixed-time-nonce",
+    )
+    admission = HandoffAdmissionStore(
+        tmp_path / "jaa-admission.sqlite3",
+        context_authenticator=_MarketVectorContextAuthenticator(),
+        resolver=_MarketVectorResolver(document),
+        current_time_witness=witness,
+    ).admit_authenticated(output_path.read_bytes(), context)
+    assert admission.application_id == MARKET_APPLICATION_ID
+    assert admission.job_key == MARKET_JOB_KEY
+    assert admission.admission_kind == ADMISSION_KIND_V1
