@@ -707,24 +707,22 @@ class AssessmentStore:
         job_key: str,
         *,
         collection_refresh_receipt_path: str | Path | None = None,
-        collector_database: JobDatabase | None = None,
+        collection_config_path: str | Path | None = None,
     ) -> bool:
         """Requeue invalid v2 evidence or admit one exact unchanged refresh."""
 
         validate_profile_id(profile_id)
-        if (collection_refresh_receipt_path is None) != (collector_database is None):
+        if (collection_refresh_receipt_path is None) != (collection_config_path is None):
             raise ValueError(
-                "collection refresh admission requires both receipt and collector database"
-            )
+                "collection refresh admission requires both receipt and bound config"
+        )
         if collection_refresh_receipt_path is not None:
-            if type(collector_database) is not JobDatabase:
-                raise TypeError("collection refresh requires the canonical JobDatabase")
-            assert collector_database is not None
+            assert collection_config_path is not None
             return self._requeue_from_unchanged_collection_refresh(
                 profile_id,
                 job_key,
                 receipt_path=Path(collection_refresh_receipt_path),
-                collector_database=collector_database,
+                config_path=Path(collection_config_path),
             )
         with self.transaction() as connection:
             row = connection.execute(
@@ -804,13 +802,20 @@ class AssessmentStore:
         job_key: str,
         *,
         receipt_path: Path,
-        collector_database: JobDatabase,
+        config_path: Path,
     ) -> bool:
         """Atomically bind a locked collector snapshot to the research requeue."""
 
-        expected_collector = (self.data_home / "state" / "vacancies.sqlite3").absolute()
+        collector_database = JobDatabase.resolve_vacancy_refresh_collector(
+            self.data_home, receipt_path, config_path
+        )
+        expected_collector = collector_database.path.absolute()
         supplied_collector = collector_database.path.absolute()
-        if supplied_collector != expected_collector:
+        if (
+            collector_database.data_home != self.data_home.absolute()
+            or supplied_collector != expected_collector
+            or self.data_home not in supplied_collector.parents
+        ):
             raise ValueError("collector database is outside the assessment data home")
         connection = self.connect()
         try:
@@ -849,7 +854,8 @@ class AssessmentStore:
                 raise KeyError((profile_id, job_key))
             if (
                 verified.changed
-                or verified.old_content_sha256 != verified.new_content_sha256
+                or verified.old_canonical_content_sha256
+                != verified.new_content_sha256
             ):
                 raise ValueError(
                     "changed vacancy content requires assessment promotion supersession"
@@ -857,7 +863,7 @@ class AssessmentStore:
             promotion_source = row["source_content_sha256"]
             if (
                 promotion_source is None
-                or promotion_source != verified.old_content_sha256
+                or promotion_source != verified.old_canonical_content_sha256
                 or promotion_source != verified.new_content_sha256
             ):
                 raise ValueError(
@@ -906,6 +912,10 @@ class AssessmentStore:
                 "collection_transition_sha256": verified.transition_sha256,
                 "new_fetched_at": verified.new_fetched_at,
                 "new_raw_object_sha256": verified.new_raw_object_sha256,
+                "old_canonical_content_sha256": (
+                    verified.old_canonical_content_sha256
+                ),
+                "old_collector_content_sha256": verified.old_content_sha256,
                 "prior_dossier_hash": row["dossier_hash"],
                 "promotion_receipt_sha256": row["promotion_receipt_sha256"],
                 "source_content_sha256": promotion_source,

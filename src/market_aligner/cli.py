@@ -17,6 +17,7 @@ from market_aligner.profiler.importers import (
 )
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
+from market_aligner.research.store import AssessmentStore
 from market_aligner.llm.codex_gateway import (
     SYNTHETIC_CANARY_MARKER,
     CodexSemanticGateway,
@@ -209,12 +210,13 @@ def _refresh_vacancy_command(args: argparse.Namespace) -> int:
 
 
 def _refresh_research_command(args: argparse.Namespace) -> int:
-    service = MarketAlignerService(args.data_home)
-    queued = service.assessments.refresh_completed_research_if_needed(
+    profiles = ProfileStore(args.data_home)
+    assessments = AssessmentStore(profiles.paths.state / "assessments.sqlite3")
+    queued = assessments.refresh_completed_research_if_needed(
         args.profile_id,
         args.job_key,
         collection_refresh_receipt_path=args.collection_refresh_receipt,
-        collector_database=service.jobs,
+        collection_config_path=args.collection_config,
     )
     print(
         json.dumps(
@@ -391,6 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_research.add_argument(
         "--collection-refresh-receipt", type=Path, required=True
     )
+    refresh_research.add_argument("--collection-config", type=Path, required=True)
     _add_data_home(refresh_research)
     refresh_research.set_defaults(handler=_refresh_research_command)
 

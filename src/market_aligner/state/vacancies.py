@@ -22,6 +22,7 @@ from market_aligner.domain.contracts import (
     to_dict,
     write_jsonl,
 )
+from market_aligner.config_loader import load_config
 from market_aligner.state.importers import iter_raw_cache_roots
 
 
@@ -51,6 +52,7 @@ class VerifiedVacancyRefreshReceipt:
     job_key: str
     changed: bool
     old_content_sha256: str
+    old_canonical_content_sha256: str
     new_content_sha256: str
     old_fetched_at: str
     new_fetched_at: str
@@ -62,6 +64,15 @@ class VerifiedVacancyRefreshReceipt:
     receipt_file_sha256: str
     receipt_path: Path
     new_raw_object_sha256: str
+
+
+@dataclass(frozen=True)
+class _LoadedVacancyRefreshReceipt:
+    path: Path
+    exact_bytes: bytes
+    document: dict[str, object]
+    sealed_body: dict[str, object]
+    receipt_sha256: str
 
 
 def _read_exact_private_file(path: Path, *, label: str) -> bytes:
@@ -89,6 +100,52 @@ def _read_exact_private_file(path: Path, *, label: str) -> bytes:
         return b"".join(chunks)
     finally:
         os.close(descriptor)
+
+
+def _load_vacancy_refresh_receipt(
+    data_home: Path, receipt_path: str | Path
+) -> _LoadedVacancyRefreshReceipt:
+    expected_directory = data_home / "state" / "collection-refresh-receipts"
+    supplied = Path(receipt_path)
+    absolute = supplied if supplied.is_absolute() else supplied.absolute()
+    if absolute.parent != expected_directory or absolute.name in {"", ".", ".."}:
+        raise VacancyRefreshConflict(
+            "refresh receipt path is outside the canonical external data home"
+        )
+    for directory in (data_home, data_home / "state", expected_directory):
+        try:
+            metadata = directory.lstat()
+        except OSError as exc:
+            raise VacancyRefreshConflict(
+                "refresh receipt ancestor is unavailable"
+            ) from exc
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise VacancyRefreshConflict("refresh receipt ancestor is unsafe")
+    receipt_bytes = _read_exact_private_file(absolute, label="refresh receipt")
+    try:
+        receipt = _strict_json_loads(receipt_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise VacancyRefreshConflict("refresh receipt is not canonical JSON") from exc
+    if not isinstance(receipt, dict):
+        raise VacancyRefreshConflict("refresh receipt is not an object")
+    canonical_receipt = json.dumps(
+        receipt,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if canonical_receipt != receipt_bytes:
+        raise VacancyRefreshConflict("refresh receipt bytes are not canonical")
+    body = dict(receipt)
+    receipt_sha256 = body.pop("receipt_sha256", None)
+    if not isinstance(receipt_sha256, str) or _canonical_hash(body) != receipt_sha256:
+        raise VacancyRefreshConflict("refresh receipt identity differs")
+    if absolute.name != f"{receipt_sha256}.json":
+        raise VacancyRefreshConflict("refresh receipt filename differs from identity")
+    return _LoadedVacancyRefreshReceipt(
+        absolute, receipt_bytes, receipt, body, receipt_sha256
+    )
 
 
 def raw_posting_content_sha256(row: RawPosting) -> str:
@@ -994,14 +1051,104 @@ def _insert_migrated_refresh(
 
 
 class JobDatabase:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, data_home: str | Path | None = None) -> None:
         self.path = Path(path)
+        self.data_home = (
+            Path(data_home).absolute()
+            if data_home is not None
+            else self.path.parent.parent.absolute()
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as conn, conn:
             conn.executescript(SCHEMA)
             self._migrate_vacancy_refresh_schema(conn)
             self._validate_vacancy_refresh_rows(conn)
             self._migrate_processing_identity(conn)
+
+    @classmethod
+    def resolve_vacancy_refresh_collector(
+        cls,
+        data_home: str | Path,
+        receipt_path: str | Path,
+        config_path: str | Path,
+    ) -> "JobDatabase":
+        """Resolve the collector DB only through the receipt-bound full config."""
+
+        root = Path(data_home).absolute()
+        loaded_receipt = _load_vacancy_refresh_receipt(root, receipt_path)
+        config = load_config(config_path)
+        if _canonical_hash(config) != loaded_receipt.document.get("config_sha256"):
+            raise VacancyRefreshConflict(
+                "collection config identity differs from refresh receipt"
+            )
+        io = config.get("io")
+        if not isinstance(io, dict):
+            raise VacancyRefreshConflict("collection config has no io mapping")
+        database_value = io.get("database")
+        if not isinstance(database_value, str) or not database_value.strip():
+            raise VacancyRefreshConflict("collection config has no database path")
+        relative = Path(database_value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise VacancyRefreshConflict(
+                "collection config database must remain below the external data home"
+            )
+        database = (root / relative).absolute()
+        if database == root or root not in database.parents:
+            raise VacancyRefreshConflict(
+                "collection config database escaped the external data home"
+            )
+        board = str(loaded_receipt.document.get("adapter", ""))
+        job_key = str(loaded_receipt.document.get("job_key", ""))
+        boards = config.get("boards")
+        enabled = boards.get("enabled") if isinstance(boards, dict) else None
+        if (
+            not board
+            or not job_key.startswith(f"{board}:")
+            or not isinstance(enabled, list)
+            or board not in enabled
+        ):
+            raise VacancyRefreshConflict(
+                "collection config does not own the receipt vacancy"
+            )
+        source_sha256 = _canonical_hash(
+            {
+                "adapter": board,
+                "adapter_config": config.get(board, {}) or {},
+                "job_key": job_key,
+            }
+        )
+        if source_sha256 != loaded_receipt.document.get("source_sha256"):
+            raise VacancyRefreshConflict(
+                "collection config adapter identity differs from refresh receipt"
+            )
+        current = root
+        for component in relative.parts[:-1]:
+            current = current / component
+            try:
+                metadata = current.lstat()
+            except OSError as exc:
+                raise VacancyRefreshConflict(
+                    "configured collector database ancestor is unavailable"
+                ) from exc
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise VacancyRefreshConflict(
+                    "configured collector database ancestor is unsafe"
+                )
+        try:
+            metadata = database.lstat()
+        except OSError as exc:
+            raise VacancyRefreshConflict(
+                "configured collector database is unavailable"
+            ) from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise VacancyRefreshConflict("configured collector database is unsafe")
+        return cls(database, data_home=root)
 
     @staticmethod
     def _validate_vacancy_refresh_rows(conn: sqlite3.Connection) -> None:
@@ -1238,45 +1385,13 @@ class JobDatabase:
             raise ValueError("collector verification schema is unsupported")
         if not job_key or ":" not in job_key:
             raise ValueError("refresh receipt requires a board-qualified job key")
-        data_home = self.path.parent.parent.absolute()
-        expected_directory = data_home / "state" / "collection-refresh-receipts"
-        supplied = Path(receipt_path)
-        absolute = supplied if supplied.is_absolute() else supplied.absolute()
-        if absolute.parent != expected_directory or absolute.name in {"", ".", ".."}:
-            raise VacancyRefreshConflict(
-                "refresh receipt path is outside the canonical external data home"
-            )
-        for directory in (data_home, data_home / "state", expected_directory):
-            try:
-                metadata = directory.lstat()
-            except OSError as exc:
-                raise VacancyRefreshConflict(
-                    "refresh receipt ancestor is unavailable"
-                ) from exc
-            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-                raise VacancyRefreshConflict("refresh receipt ancestor is unsafe")
-        receipt_bytes = _read_exact_private_file(absolute, label="refresh receipt")
-        try:
-            receipt = _strict_json_loads(receipt_bytes)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise VacancyRefreshConflict("refresh receipt is not canonical JSON") from exc
-        if not isinstance(receipt, dict):
-            raise VacancyRefreshConflict("refresh receipt is not an object")
-        canonical_receipt = json.dumps(
-            receipt,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        if canonical_receipt != receipt_bytes:
-            raise VacancyRefreshConflict("refresh receipt bytes are not canonical")
-        body = dict(receipt)
-        receipt_sha256 = body.pop("receipt_sha256", None)
-        if not isinstance(receipt_sha256, str) or _canonical_hash(body) != receipt_sha256:
-            raise VacancyRefreshConflict("refresh receipt identity differs")
-        if absolute.name != f"{receipt_sha256}.json":
-            raise VacancyRefreshConflict("refresh receipt filename differs from identity")
+        data_home = self.data_home
+        loaded_receipt = _load_vacancy_refresh_receipt(data_home, receipt_path)
+        absolute = loaded_receipt.path
+        receipt_bytes = loaded_receipt.exact_bytes
+        receipt = loaded_receipt.document
+        body = loaded_receipt.sealed_body
+        receipt_sha256 = loaded_receipt.receipt_sha256
         if (
             receipt.get("schema_version")
             != "market-aligner.vacancy-refresh-receipt.v3"
@@ -1349,6 +1464,9 @@ class JobDatabase:
             job_key=job_key,
             changed=bool(receipt["changed"]),
             old_content_sha256=str(receipt["old_content_sha256"]),
+            old_canonical_content_sha256=str(
+                receipt["old_canonical_content_sha256"]
+            ),
             new_content_sha256=str(receipt["new_content_sha256"]),
             old_fetched_at=str(receipt["old_fetched_at"]),
             new_fetched_at=str(receipt["new_fetched_at"]),

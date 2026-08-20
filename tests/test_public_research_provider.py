@@ -53,8 +53,9 @@ def _canonical_collection_refresh(
     *,
     raw_text: str = BODY.decode(),
     operation_id: str = "unchanged-research-refresh",
-) -> tuple[Path, JobDatabase]:
-    database = JobDatabase(root / "state" / "vacancies.sqlite3")
+) -> tuple[Path, JobDatabase, Path]:
+    database_relative = Path("scraper/data_overnight/jobs.sqlite3")
+    database = JobDatabase(root / database_relative, data_home=root)
     old = RawPosting(
         "workable", "cogna:847CFBC5F4", URL,
         "2026-08-21T00:00:00+00:00", BODY.decode(), None,
@@ -70,8 +71,8 @@ def _canonical_collection_refresh(
                 "boards": {"enabled": ["workable"]},
                 "collection": {"fetch_workers": 1, "source_workers": 1},
                 "io": {
-                    "database": "state/vacancies.sqlite3",
-                    "job_urls": "state/job_urls.jsonl",
+                    "database": str(database_relative),
+                    "job_urls": "scraper/data_overnight/job_urls.jsonl",
                     "raw_cache": "raw/vacancies",
                 },
                 "search_terms": [],
@@ -112,7 +113,7 @@ def _canonical_collection_refresh(
         operation_id=operation_id,
         log=lambda _message: None,
     )
-    return Path(str(receipt["receipt_path"])), database
+    return Path(str(receipt["receipt_path"])), database, config
 
 
 def _queued_store(path: Path, source_digest: str) -> tuple[AssessmentStore, str]:
@@ -176,7 +177,8 @@ def test_v2_archives_verbatim_claim_and_persists_reconciled_store_binding(
 ) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
-    loader, source_digest = _collector(tmp_path / "state" / "vacancies.sqlite3")
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, source_digest = _collector(collector_path)
     store, _ = _queued_store(
         tmp_path / "state" / "assessments.sqlite3", source_digest
     )
@@ -226,7 +228,8 @@ def test_canonical_unchanged_refresh_requeues_and_same_worker_rebuilds(
 ) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
-    loader, source_digest = _collector(tmp_path / "state" / "vacancies.sqlite3")
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, source_digest = _collector(collector_path)
     store, profile_id = _queued_store(
         tmp_path / "state" / "assessments.sqlite3", source_digest
     )
@@ -243,7 +246,7 @@ def test_canonical_unchanged_refresh_requeues_and_same_worker_rebuilds(
     first_materialization = first_provider.last_materialization
     assert first_materialization is not None
 
-    receipt_path, database = _canonical_collection_refresh(tmp_path)
+    receipt_path, database, config = _canonical_collection_refresh(tmp_path)
     original_verify = JobDatabase.verify_vacancy_refresh_receipt
     lock_observed = False
 
@@ -263,14 +266,14 @@ def test_canonical_unchanged_refresh_requeues_and_same_worker_rebuilds(
         profile_id,
         JOB_KEY,
         collection_refresh_receipt_path=receipt_path,
-        collector_database=database,
+        collection_config_path=config,
     ) is True
     assert lock_observed
     assert store.refresh_completed_research_if_needed(
         profile_id,
         JOB_KEY,
         collection_refresh_receipt_path=receipt_path,
-        collector_database=database,
+        collection_config_path=config,
     ) is False
 
     second_task = _task_and_reset(store)
@@ -294,7 +297,7 @@ def test_canonical_unchanged_refresh_requeues_and_same_worker_rebuilds(
         profile_id,
         JOB_KEY,
         collection_refresh_receipt_path=receipt_path,
-        collector_database=database,
+        collection_config_path=config,
     ) is False
     with store.connection() as connection:
         event = connection.execute(
@@ -321,11 +324,12 @@ def test_canonical_unchanged_refresh_requeues_and_same_worker_rebuilds(
 def test_canonical_refresh_admission_rejects_substitution(
     tmp_path: Path, mutation: str
 ) -> None:
-    _loader, source_digest = _collector(tmp_path / "state" / "vacancies.sqlite3")
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    _loader, source_digest = _collector(collector_path)
     store, profile_id = _queued_store(
         tmp_path / "state" / "assessments.sqlite3", source_digest
     )
-    receipt_path, database = _canonical_collection_refresh(tmp_path)
+    receipt_path, database, config = _canonical_collection_refresh(tmp_path)
     receipt = json.loads(receipt_path.read_bytes())
     if mutation == "receipt_symlink":
         real = receipt_path.with_suffix(".real")
@@ -375,7 +379,7 @@ def test_canonical_refresh_admission_rejects_substitution(
             profile_id,
             JOB_KEY,
             collection_refresh_receipt_path=receipt_path,
-            collector_database=database,
+            collection_config_path=config,
         )
     with store.connection() as connection:
         assert connection.execute(
@@ -390,11 +394,12 @@ def test_canonical_refresh_admission_rejects_substitution(
 def test_changed_refresh_wrong_data_home_and_noncanonical_store_are_rejected(
     tmp_path: Path,
 ) -> None:
-    _loader, source_digest = _collector(tmp_path / "state" / "vacancies.sqlite3")
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    _loader, source_digest = _collector(collector_path)
     store, profile_id = _queued_store(
         tmp_path / "state" / "assessments.sqlite3", source_digest
     )
-    changed_receipt, database = _canonical_collection_refresh(
+    changed_receipt, _database, config = _canonical_collection_refresh(
         tmp_path, raw_text="Changed official vacancy content."
     )
     with pytest.raises(ValueError, match="changed vacancy content"):
@@ -402,23 +407,30 @@ def test_changed_refresh_wrong_data_home_and_noncanonical_store_are_rejected(
             profile_id,
             JOB_KEY,
             collection_refresh_receipt_path=changed_receipt,
-            collector_database=database,
+            collection_config_path=config,
         )
 
-    other_database = JobDatabase(tmp_path / "other" / "state" / "vacancies.sqlite3")
-    with pytest.raises(ValueError, match="outside the assessment data home"):
+    substituted_config = tmp_path / "substituted.yaml"
+    substituted = yaml.safe_load(config.read_text(encoding="utf-8"))
+    substituted["io"]["database"] = "state/attacker.sqlite3"
+    substituted_config.write_text(yaml.safe_dump(substituted), encoding="utf-8")
+    with pytest.raises(VacancyRefreshConflict, match="config identity"):
         store.refresh_completed_research_if_needed(
             profile_id,
             JOB_KEY,
             collection_refresh_receipt_path=changed_receipt,
-            collector_database=other_database,
+            collection_config_path=substituted_config,
         )
-    with pytest.raises(TypeError, match="canonical JobDatabase"):
+    absolute_config = tmp_path / "absolute.yaml"
+    absolute = yaml.safe_load(config.read_text(encoding="utf-8"))
+    absolute["io"]["database"] = str(tmp_path / "elsewhere.sqlite3")
+    absolute_config.write_text(yaml.safe_dump(absolute), encoding="utf-8")
+    with pytest.raises(VacancyRefreshConflict, match="config identity"):
         store.refresh_completed_research_if_needed(
             profile_id,
             JOB_KEY,
             collection_refresh_receipt_path=changed_receipt,
-            collector_database=object(),  # type: ignore[arg-type]
+            collection_config_path=absolute_config,
         )
 
 
@@ -429,9 +441,11 @@ def test_refresh_research_cli_requires_receipt_and_has_no_force() -> None:
             "--profile-id", "prf_" + "1" * 32,
             "--job-key", JOB_KEY,
             "--collection-refresh-receipt", "/tmp/receipt.json",
+            "--collection-config", "/tmp/collection.yaml",
         ]
     )
     assert parsed.collection_refresh_receipt == Path("/tmp/receipt.json")
+    assert parsed.collection_config == Path("/tmp/collection.yaml")
     assert "force" not in vars(parsed)
 
 
