@@ -218,6 +218,8 @@ class CanonicalProfileProjectionReceipt:
     authority_projection_sha256: str
     evidence_packet_sha256: str
     legacy_profile_sha256: str
+    legacy_evidence_sha256: str | None
+    evidence_mapping_sha256: str | None
     profile_sha256: str
     evidence_ledger_sha256: str
     mappings: tuple[ProjectionDecision, ...]
@@ -242,6 +244,9 @@ class CanonicalProfileProjectionReceipt:
         ):
             if not re.fullmatch(r"[0-9a-f]{64}", value):
                 raise ValueError("projection receipt hash is invalid")
+        for value in (self.legacy_evidence_sha256, self.evidence_mapping_sha256):
+            if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("projection receipt optional hash is invalid")
         for decision in (*self.mappings, *self.omissions, *self.conflicts):
             decision.__post_init__()
         if self.release_authority is not False:
@@ -258,6 +263,8 @@ class CanonicalProfileProjectionReceipt:
             "authority_projection_sha256": self.authority_projection_sha256,
             "evidence_packet_sha256": self.evidence_packet_sha256,
             "legacy_profile_sha256": self.legacy_profile_sha256,
+            "legacy_evidence_sha256": self.legacy_evidence_sha256,
+            "evidence_mapping_sha256": self.evidence_mapping_sha256,
             "profile_sha256": self.profile_sha256,
             "evidence_ledger_sha256": self.evidence_ledger_sha256,
             "mappings": [asdict(item) for item in self.mappings],

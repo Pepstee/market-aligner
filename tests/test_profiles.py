@@ -7,7 +7,10 @@ import json
 from pathlib import Path
 
 import yaml
+from contextlib import redirect_stdout
+from io import StringIO
 
+from market_aligner.cli import main
 from market_aligner.profiler.importers import (
     import_evidence_led,
     import_guided_profile,
@@ -212,6 +215,24 @@ class ProfileTests(unittest.TestCase):
         )
         return authority, packet, legacy
 
+    def _projection_mapping(self, root: Path, authority: Path, packet: Path, legacy: Path) -> Path:
+        mapping = root / "mapping.json"
+        mapping.write_text(
+            json.dumps(
+                {
+                    "schema": "market-aligner.canonical-evidence-mapping.v1",
+                    "authority_sha256": hashlib.sha256(authority.read_bytes()).hexdigest(),
+                    "evidence_packet_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
+                    "legacy_profile_sha256": hashlib.sha256(legacy.read_bytes()).hexdigest(),
+                    "legacy_evidence_sha256": hashlib.sha256(legacy.read_bytes()).hexdigest(),
+                    "mappings": {"E-001": ["E-001"]},
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return mapping
+
     def test_canonical_projection_maps_exact_evidence_and_records_losses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -245,6 +266,38 @@ class ProfileTests(unittest.TestCase):
                 data_home=data_home,
             )
             self.assertEqual((profile, evidence, receipt), replay)
+
+    def test_project_canonical_cli_uses_hash_bound_mapping_and_replays(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authority, packet, legacy = self._projection_sources(root)
+            mapping = self._projection_mapping(root, authority, packet, legacy)
+            data_home = root / "external-data"
+            argv = [
+                "profiles", "project-canonical",
+                "--authority", str(authority),
+                "--approved-evidence", str(packet),
+                "--legacy-profile", str(legacy),
+                "--legacy-evidence", str(legacy),
+                "--evidence-mapping", str(mapping),
+                "--data-home", str(data_home),
+            ]
+            first = StringIO()
+            with redirect_stdout(first):
+                self.assertEqual(0, main(argv))
+            second = StringIO()
+            with redirect_stdout(second):
+                self.assertEqual(0, main(argv))
+            self.assertEqual(json.loads(first.getvalue()), json.loads(second.getvalue()))
+            result = json.loads(first.getvalue())
+            self.assertEqual(["automation"], result["track_names"])
+            self.assertFalse(result["release_authority"])
+
+            mapping_payload = json.loads(mapping.read_text())
+            mapping_payload["legacy_profile_sha256"] = "0" * 64
+            mapping.write_text(json.dumps(mapping_payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "does not bind"):
+                main(argv)
 
     def test_projection_rejects_source_and_destination_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

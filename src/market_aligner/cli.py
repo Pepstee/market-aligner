@@ -10,7 +10,11 @@ from pathlib import Path
 
 from market_aligner import __version__
 from market_aligner.applications.producer import write_handoff
-from market_aligner.profiler.importers import import_evidence_led, import_guided_profile
+from market_aligner.profiler.importers import (
+    import_evidence_led,
+    import_guided_profile,
+    project_canonical_authority,
+)
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.llm.codex_gateway import (
@@ -89,6 +93,32 @@ def _profile_command(args: argparse.Namespace) -> int:
         payload.pop("display_label", None)
         payload["evidence_items"] = len(evidence)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.profile_action == "project-canonical":
+        profile, _, receipt = project_canonical_authority(
+            authority_path=args.authority,
+            evidence_packet_path=args.approved_evidence,
+            legacy_profile_path=args.legacy_profile,
+            legacy_evidence_path=args.legacy_evidence,
+            evidence_mapping_path=args.evidence_mapping,
+            data_home=args.data_home,
+        )
+        print(
+            json.dumps(
+                {
+                    "profile_id": profile.profile_id,
+                    "track_names": sorted(profile.tracks),
+                    "receipt_sha256": receipt.receipt_sha256,
+                    "profile_sha256": receipt.profile_sha256,
+                    "evidence_ledger_sha256": receipt.evidence_ledger_sha256,
+                    "mappings": len(receipt.mappings),
+                    "omissions": len(receipt.omissions),
+                    "conflicts": len(receipt.conflicts),
+                    "release_authority": False,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     raise AssertionError(f"unhandled profile action: {args.profile_action}")
 
@@ -212,6 +242,18 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("profile_id")
     _add_data_home(show)
     show.set_defaults(handler=_profile_command)
+
+    projector = profile_commands.add_parser(
+        "project-canonical",
+        help="Create or exactly replay a hash-bound canonical profile projection.",
+    )
+    projector.add_argument("--authority", type=Path, required=True)
+    projector.add_argument("--approved-evidence", type=Path, required=True)
+    projector.add_argument("--legacy-profile", type=Path, required=True)
+    projector.add_argument("--legacy-evidence", type=Path, required=True)
+    projector.add_argument("--evidence-mapping", type=Path, required=True)
+    _add_data_home(projector)
+    projector.set_defaults(handler=_profile_command)
 
     assess = commands.add_parser("assess", help="Assess one vacancy for an opaque profile ID.")
     assess.add_argument("--profile-id", required=True)

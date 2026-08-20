@@ -138,9 +138,44 @@ def _json_document(path: Path) -> dict[str, Any]:
 
 def _legacy_version(source: dict[str, Any]) -> str:
     version = str((source.get("meta") or {}).get("version") or "").strip()
-    if version not in {"v1.4", "1.4"}:
+    if not re.fullmatch(r"v?1\.4(?:-[a-z0-9-]+)?", version, re.IGNORECASE):
         raise ValueError("canonical projection requires legacy profile v1.4")
     return version
+
+
+def _evidence_mapping(
+    path: Path,
+    *,
+    authority_sha256: str,
+    packet_sha256: str,
+    legacy_profile_sha256: str,
+    legacy_evidence_sha256: str,
+) -> dict[str, tuple[str, ...]]:
+    value = _json_document(path)
+    if value.get("schema") != "market-aligner.canonical-evidence-mapping.v1":
+        raise ValueError("unsupported canonical evidence mapping")
+    expected = {
+        "authority_sha256": authority_sha256,
+        "evidence_packet_sha256": packet_sha256,
+        "legacy_profile_sha256": legacy_profile_sha256,
+        "legacy_evidence_sha256": legacy_evidence_sha256,
+    }
+    if any(value.get(key) != expected_value for key, expected_value in expected.items()):
+        raise ValueError("canonical evidence mapping does not bind the supplied sources")
+    raw = value.get("mappings")
+    if not isinstance(raw, dict):
+        raise ValueError("canonical evidence mapping requires a mappings object")
+    result: dict[str, tuple[str, ...]] = {}
+    for legacy_id, canonical_ids in raw.items():
+        if not isinstance(legacy_id, str) or not legacy_id.strip():
+            raise ValueError("canonical evidence mapping has an invalid legacy ID")
+        if not isinstance(canonical_ids, list) or not canonical_ids:
+            raise ValueError("canonical evidence mapping targets must be a non-empty list")
+        targets = tuple(str(item).strip() for item in canonical_ids)
+        if any(not item for item in targets) or len(set(targets)) != len(targets):
+            raise ValueError("canonical evidence mapping targets must be unique IDs")
+        result[legacy_id] = targets
+    return result
 
 
 def project_canonical_authority(
@@ -148,6 +183,8 @@ def project_canonical_authority(
     authority_path: str | Path,
     evidence_packet_path: str | Path,
     legacy_profile_path: str | Path,
+    legacy_evidence_path: str | Path | None = None,
+    evidence_mapping_path: str | Path | None = None,
     data_home: str | Path,
 ) -> tuple[CandidateProfile, list[EvidenceItem], CanonicalProfileProjectionReceipt]:
     """Project JAA authority into one immutable external Market Aligner profile.
@@ -161,12 +198,19 @@ def project_canonical_authority(
     authority_file = Path(authority_path).resolve(strict=True)
     packet_file = Path(evidence_packet_path).resolve(strict=True)
     legacy_file = Path(legacy_profile_path).resolve(strict=True)
+    legacy_evidence_file = (
+        Path(legacy_evidence_path).resolve(strict=True)
+        if legacy_evidence_path is not None
+        else legacy_file
+    )
     authority_sha256 = _file_sha256(authority_file)
     packet_sha256 = _file_sha256(packet_file)
     legacy_sha256 = _file_sha256(legacy_file)
+    legacy_evidence_sha256 = _file_sha256(legacy_evidence_file)
     authority = _json_document(authority_file)
     packet = _json_document(packet_file)
     legacy = _document(legacy_file)
+    legacy_evidence_document = _document(legacy_evidence_file)
     legacy_version = _legacy_version(legacy)
 
     if authority.get("schema_version") != "jaa.production-candidate-authority.v2":
@@ -205,11 +249,35 @@ def project_canonical_authority(
             raise ValueError("approved evidence IDs are not unique")
         canonical[statement_id] = statement
 
+    mapping_file = (
+        Path(evidence_mapping_path).resolve(strict=True)
+        if evidence_mapping_path is not None
+        else None
+    )
+    explicit_mapping = (
+        _evidence_mapping(
+            mapping_file,
+            authority_sha256=authority_sha256,
+            packet_sha256=packet_sha256,
+            legacy_profile_sha256=legacy_sha256,
+            legacy_evidence_sha256=legacy_evidence_sha256,
+        )
+        if mapping_file is not None
+        else None
+    )
+    mapping_sha256 = _file_sha256(mapping_file) if mapping_file is not None else None
+
     legacy_profile = dict(legacy.get("candidate_profile") or {})
     raw_tracks = dict(legacy.get("career_tracks") or legacy_profile.get("tracks") or {})
     if not raw_tracks:
         raise ValueError("legacy profile v1.4 has no career tracks")
     raw_legacy_evidence = tuple(legacy.get("evidence") or ())
+    external_legacy_evidence = tuple(legacy_evidence_document.get("evidence") or ())
+    external_tracks = dict(legacy_evidence_document.get("career_tracks") or {})
+    if legacy_evidence_file != legacy_file and (
+        raw_legacy_evidence != external_legacy_evidence or raw_tracks != external_tracks
+    ):
+        raise ValueError("legacy profile and evidence ledger differ")
     legacy_claims = {
         str(item.get("id") or item.get("evidence_id") or ""): str(
             item.get("claim") or item.get("statement") or ""
@@ -217,6 +285,13 @@ def project_canonical_authority(
         for item in raw_legacy_evidence
         if isinstance(item, dict)
     }
+    if explicit_mapping is not None:
+        unknown_legacy = sorted(set(explicit_mapping) - set(legacy_claims))
+        unknown_canonical = sorted(
+            {item for values in explicit_mapping.values() for item in values} - set(canonical)
+        )
+        if unknown_legacy or unknown_canonical:
+            raise ValueError("canonical evidence mapping references unknown evidence IDs")
 
     mappings: list[ProjectionDecision] = []
     omissions: list[ProjectionDecision] = []
@@ -228,8 +303,12 @@ def project_canonical_authority(
         references = tuple(str(item) for item in (raw.get("evidence") or raw.get("evidence_ids") or ()))
         admitted: list[str] = []
         for evidence_id in references:
-            item = canonical.get(evidence_id)
-            if item is None:
+            target_ids = (
+                explicit_mapping.get(evidence_id, ())
+                if explicit_mapping is not None
+                else ((evidence_id,) if evidence_id in canonical else ())
+            )
+            if not target_ids:
                 omissions.append(
                     ProjectionDecision(
                         target=f"tracks.{name}.evidence_ids",
@@ -239,8 +318,13 @@ def project_canonical_authority(
                     )
                 )
                 continue
-            legacy_claim = legacy_claims.get(evidence_id)
-            if legacy_claim and legacy_claim != item["statement"]:
+            if explicit_mapping is None:
+                item = canonical[evidence_id]
+                legacy_claim = legacy_claims.get(evidence_id)
+            else:
+                item = None
+                legacy_claim = None
+            if item is not None and legacy_claim and legacy_claim != item["statement"]:
                 conflicts.append(
                     ProjectionDecision(
                         target=f"tracks.{name}.evidence_ids",
@@ -252,7 +336,17 @@ def project_canonical_authority(
                     )
                 )
                 continue
-            admitted.append(evidence_id)
+            admitted.extend(target_ids)
+            if explicit_mapping is not None:
+                mappings.append(
+                    ProjectionDecision(
+                        target=f"tracks.{name}.evidence_ids",
+                        source=f"evidence_mapping.{evidence_id}",
+                        reason_code="explicit_hash_bound_evidence_mapping",
+                        evidence_ids=target_ids,
+                    )
+                )
+        admitted = list(dict.fromkeys(admitted))
         if not admitted:
             omissions.append(
                 ProjectionDecision(
@@ -357,7 +451,7 @@ def project_canonical_authority(
         )
 
     profile_id = "prf_" + hashlib.sha256(
-        f"{authority_sha256}:{packet_sha256}:{legacy_sha256}".encode()
+        f"{authority_sha256}:{packet_sha256}:{legacy_sha256}:{legacy_evidence_sha256}:{mapping_sha256 or ''}".encode()
     ).hexdigest()[:32]
     profile = CandidateProfile(
         profile_id=profile_id,
@@ -384,6 +478,8 @@ def project_canonical_authority(
         "authority_projection_sha256": projection_sha256,
         "evidence_packet_sha256": packet_sha256,
         "legacy_profile_sha256": legacy_sha256,
+        "legacy_evidence_sha256": legacy_evidence_sha256,
+        "evidence_mapping_sha256": mapping_sha256,
         "profile_sha256": profile_sha256,
         "evidence_ledger_sha256": evidence_sha256,
         "mappings": [asdict(item) for item in mappings],
@@ -397,6 +493,8 @@ def project_canonical_authority(
         authority_projection_sha256=projection_sha256,
         evidence_packet_sha256=packet_sha256,
         legacy_profile_sha256=legacy_sha256,
+        legacy_evidence_sha256=legacy_evidence_sha256,
+        evidence_mapping_sha256=mapping_sha256,
         profile_sha256=profile_sha256,
         evidence_ledger_sha256=evidence_sha256,
         mappings=tuple(mappings),
