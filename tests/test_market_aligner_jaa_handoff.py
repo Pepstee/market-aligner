@@ -172,6 +172,12 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
         == "candidate_intent.authority_source"
     )
     assert admitted_candidate_sha256 == expected_candidate_sha256
+    verified = store.for_boundary_at_for_test(
+        admission.application_id,
+        "strategy",
+        evaluated_at=ADMISSION_TIME,
+    )
+    assert verified.candidate_authority_sha256 == expected_candidate_sha256
     with pytest.raises(HandoffAdmissionError, match="unsupported"):
         store.reference_sha256(admission.application_id, "candidate.claims")
 

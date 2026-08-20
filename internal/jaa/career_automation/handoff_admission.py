@@ -499,6 +499,7 @@ class VerifiedGraph:
     references: tuple[VerifiedReference, ...]
     objects: Mapping[str, bytes]
     policy_rules: SelectionPolicyRules
+    candidate_authority_sha256: str
 
 
 @dataclass(frozen=True)
@@ -534,6 +535,7 @@ class VerifiedApplicationInput:
     vacancy_source_identity: str
     profile_id: str
     profile_version: str
+    candidate_authority_sha256: str
     job_key: str
     vacancy_snapshot_sha256: str
     raw_listing_sha256: str
@@ -866,10 +868,15 @@ def _verify_resolution(
         "resolver metadata",
     )
     spec = request.spec
+    accepted_schema_versions = {spec.schema_version}
+    if spec.reference_key == "employer_dossier":
+        # Registry v1.1 introduced this reference at dossier v1. Production
+        # research v2 is an additive, source-bound evidence contract under the
+        # same reference key and type; preserve exact metadata truth for both.
+        accepted_schema_versions.add("market-aligner.employer-dossier.v2")
     exact_values = {
         "reference_key": spec.reference_key,
         "type_id": spec.type_id,
-        "schema_version": spec.schema_version,
         "object_sha256": request.sha256,
         "trust_root_id": context_trust_root_id,
     }
@@ -881,6 +888,12 @@ def _verify_resolution(
                 f"metadata {key} differs from the registry/request",
                 reference_key=spec.reference_key,
             )
+    if metadata["schema_version"] not in accepted_schema_versions:
+        raise HandoffAdmissionError(
+            "reference_type_mismatch",
+            "metadata schema_version differs from the registry/request",
+            reference_key=spec.reference_key,
+        )
     if type(metadata["subject"]) is not dict or metadata["subject"] != dict(request.expected_subject):
         raise HandoffAdmissionError(
             "reference_subject_swap", "metadata subject differs from the handoff", reference_key=spec.reference_key
@@ -932,7 +945,7 @@ def _verify_resolution(
         VerifiedReference(
             reference_key=spec.reference_key,
             type_id=spec.type_id,
-            schema_version=spec.schema_version,
+            schema_version=str(metadata["schema_version"]),
             referenced_sha256=request.sha256,
             resolved_bytes_sha256=resolved_digest,
             byte_length=len(resolved.exact_bytes),
@@ -1010,7 +1023,7 @@ def _verify_graph(
             "handoff_future", "handoff creation exceeds the protected policy clock skew"
         )
     references.sort(key=lambda row: row.reference_key)
-    return VerifiedGraph(tuple(references), objects, rules)
+    return VerifiedGraph(tuple(references), objects, rules, authority_source_sha256)
 
 
 def _verification_receipt(
@@ -2038,6 +2051,7 @@ class HandoffAdmissionStore:
             vacancy_source_identity=handoff.vacancy_source_identity,
             profile_id=handoff.payload["profile_id"],
             profile_version=handoff.payload["profile_version"],
+            candidate_authority_sha256=graph.candidate_authority_sha256,
             job_key=handoff.payload["job_key"],
             vacancy_snapshot_sha256=vacancy["vacancy_snapshot_sha256"],
             raw_listing_sha256=vacancy["raw_listing_sha256"],
@@ -2162,6 +2176,7 @@ class HandoffAdmissionStore:
             vacancy_source_identity=handoff.vacancy_source_identity,
             profile_id=handoff.payload["profile_id"],
             profile_version=handoff.payload["profile_version"],
+            candidate_authority_sha256=graph.candidate_authority_sha256,
             job_key=handoff.payload["job_key"],
             vacancy_snapshot_sha256=vacancy["vacancy_snapshot_sha256"],
             raw_listing_sha256=vacancy["raw_listing_sha256"],
