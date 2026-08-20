@@ -15,6 +15,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -22,11 +23,12 @@ from typing import Iterable, Mapping, Sequence
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DAY_MONTH_YEAR = re.compile(
-    r"\b(?:[1-9]|[12]\d|3[01])\s+"
+    r"\b(?:[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s+"
     r"(?:January|February|March|April|May|June|July|August|September|"
     r"October|November|December)\s+20\d{2}\b",
     re.IGNORECASE,
 )
+_NUMERIC_DAY_DATE = re.compile(r"\b(?:0?[1-9]|[12]\d|3[01])[./-](?:0?[1-9]|1[0-2])[./-]20\d{2}\b")
 _WORK_RIGHTS = (
     "right to work",
     "work rights",
@@ -38,6 +40,20 @@ _WORK_RIGHTS = (
     "sponsorship not required",
     "settled status",
     "pre-settled status",
+    "eligible to work",
+    "eligibility to work",
+    "authorised to work",
+    "authorized to work",
+    "visa not required",
+    "no visa required",
+    "sponsorship not needed",
+    "no sponsorship needed",
+    "unrestricted employment",
+)
+_WORK_RIGHTS_PARAPHRASE = re.compile(
+    r"\b(?:permission|eligibility) (?:for|to) work\b|"
+    r"\b(?:do(?:es)? not|don't) require (?:visa )?sponsorship\b",
+    re.IGNORECASE,
 )
 _FORMAT_INVENTORY = re.compile(
     r"(?:^|[,|;/]\s*)(?:jsonl?|ya?ml|xml|csv|sqlite|sql)(?:\s*[,|;/]|$)",
@@ -48,12 +64,28 @@ _REJECTION_SIGNAL = re.compile(
     r"honesty note|full disclosure|internal (?:process|review|workflow)|"
     r"missing (?:skill|experience)|lack(?:ing|s)? (?:skill|experience)|"
     r"not (?:proficient|experienced|qualified)|implementation attribution|"
-    r"production mastery (?:is )?not proved)\b",
+    r"production mastery (?:is )?not proved|agent[- ]assisted|machine[- ]generated|"
+    r"llm[- ]produced|human[- ]in[- ]the[- ]loop authorship|"
+    r"(?:written|created|coded|developed|implemented|produced)\s+"
+    r"(?:with|using|through)\s+(?:generative ai|llms?|coding agents?|automated agents?)|"
+    r"(?:code|implementation) (?:was )?(?:produced|generated) (?:through|by) "
+    r"(?:automation|agents?|ai))\b",
     re.IGNORECASE,
 )
 _STALE_OR_IRRELEVANT = re.compile(
     r"\b(?:GCSEs?|front[- ]end (?:website|project)|British Chamber of Commerce|"
-    r"Counter Trafficking Network|DHL operative)\b|\b2022\b",
+    r"Counter Trafficking Network|DHL operative)\b",
+    re.IGNORECASE,
+)
+_IRRELEVANT_EXPERIENCE = re.compile(
+    r"\b(?:laboratory assistant|translator(?: and interpreter)?|interpreter|"
+    r"chamber of commerce assistant|warehouse operative|door[- ]to[- ]door sales)\b",
+    re.IGNORECASE,
+)
+_GENERIC_FILLER = re.compile(
+    r"\b(?:motivated professional|passionate individual|results[- ]driven|"
+    r"dynamic self[- ]starter|hard[- ]working|excellent communication skills|"
+    r"seeking (?:a|an|the) (?:challenging|exciting) opportunity)\b",
     re.IGNORECASE,
 )
 _TOOL_TOKEN = re.compile(
@@ -89,6 +121,12 @@ def _canonical_json(value: object) -> str:
 
 def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _fold_display_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    normalized = "".join(character for character in normalized if not unicodedata.combining(character))
+    return normalized.translate(str.maketrans({"‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-"})).casefold()
 
 
 @dataclass(frozen=True)
@@ -418,14 +456,21 @@ def validate_generated_cv(
         raise CVConstraintError("CV generation identities must be SHA-256")
     if _digest(cv_text.encode()) != cv_sha256:
         raise CVConstraintError("CV text differs from its retained hash")
-    folded = cv_text.casefold()
-    if "curriculum vitae" in folded or re.search(r"(?m)^\s*cv\s*$", cv_text, re.I):
+    folded = _fold_display_text(cv_text)
+    if re.search(
+        r"(?mi)^\s*(?:.*\s[-|:]\s*)?(?:curriculum[ -]?vit(?:ae|æ)|c\.?\s*v\.?|resume)\s*$",
+        folded,
+    ):
         raise CVConstraintError("CV document labels are forbidden")
     work_rights = next((value for value in _WORK_RIGHTS if value in folded), None)
     if work_rights is not None:
         raise CVConstraintError("work-rights and visa declarations are forbidden in CVs")
+    if _WORK_RIGHTS_PARAPHRASE.search(cv_text):
+        raise CVConstraintError("work-rights and visa declarations are forbidden in CVs")
     if _REJECTION_SIGNAL.search(cv_text):
         raise CVConstraintError("volunteered rejection signals are forbidden in CVs")
+    if _GENERIC_FILLER.search(_section_text(sections, "Professional Summary")):
+        raise CVConstraintError("generic professional-summary filler is forbidden")
 
     headings = tuple(sections)
     if not headings or headings[0] != "Professional Summary":
@@ -443,11 +488,16 @@ def validate_generated_cv(
             " ".join(line.casefold().strip(" :.-").split())
             for line in sections.get("Professional Summary", ())
         )
-        if any(line == role or line.startswith(f"target role {role}") for line in summary_lines):
+        if any(
+            line == role
+            or line.startswith(f"target role {role}")
+            or re.match(rf"^{re.escape(role)}\b", line)
+            for line in summary_lines
+        ):
             raise CVConstraintError("target role cannot masquerade as current identity")
 
     education = _section_text(sections, "Education")
-    if _DAY_MONTH_YEAR.search(education):
+    if _DAY_MONTH_YEAR.search(education) or _NUMERIC_DAY_DATE.search(education):
         raise CVConstraintError("graduation dates must use month and year only")
     for heading in ("Skills", "Core Capabilities"):
         section_text = _section_text(sections, heading)
@@ -456,7 +506,12 @@ def validate_generated_cv(
                 "formats, interchange syntax and storage engines cannot be listed as skills"
             )
         for line in sections.get(heading, ()):
-            if len(_TOOL_TOKEN.findall(line)) >= 2 and not _CAPABILITY_LANGUAGE.search(line):
+            tool_count = len(_TOOL_TOKEN.findall(line))
+            bridged = re.search(r"\b(?:using|with|through|across|via)\b", line, re.I)
+            inventory_shape = len(re.findall(r"[,|;/]", line)) >= 2 or ":" in line
+            if tool_count >= 2 and not _CAPABILITY_LANGUAGE.search(line) or (
+                tool_count >= 3 and inventory_shape and not bridged
+            ):
                 raise CVConstraintError(
                     "tools and platforms must support a capability, not replace one"
                 )
@@ -483,12 +538,23 @@ def validate_generated_cv(
             raise CVConstraintError("required month-and-year graduation is absent")
         if selected.required_dissertation_title not in education:
             raise CVConstraintError("canonical dissertation title is absent")
+        dissertation_lines = tuple(
+            line for line in sections.get("Education", ()) if "dissertation" in line.casefold()
+        )
+        if any(selected.required_dissertation_title not in line for line in dissertation_lines):
+            raise CVConstraintError("generic or alternate dissertation wording is forbidden")
         if selected.required_capabilities_heading not in sections:
             raise CVConstraintError("professional capabilities section is absent")
         if "Projects" not in sections:
             raise CVConstraintError("verified projects section is required")
         if _STALE_OR_IRRELEVANT.search(cv_text):
             raise CVConstraintError("stale or irrelevant candidate detail is forbidden")
+        if _IRRELEVANT_EXPERIENCE.search(_section_text(sections, "Experience")):
+            raise CVConstraintError("irrelevant historic experience is forbidden")
+        if re.search(r"\b2022\b", _section_text(sections, "Experience")):
+            raise CVConstraintError("irrelevant historic experience is forbidden")
+        if "wolverhampton" in folded:
+            raise CVConstraintError("conflicting candidate location is forbidden")
 
     receipt_body = {
         "schema_version": "jaa.cv-constraint-receipt.v1",

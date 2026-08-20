@@ -218,3 +218,136 @@ def test_tools_are_allowed_as_supporting_experience() -> None:
 def test_requires_restrained_ats_hierarchy(sections) -> None:
     with pytest.raises(CVConstraintError, match="hierarchy|precede"):
         _valid(sections=sections)
+
+
+@pytest.mark.parametrize(
+    "addition",
+    (
+        "\nEligible to work in the UK.\n",
+        "\nVisa not required.\n",
+        "\nNo sponsorship needed.\n",
+        "\nUnrestricted employment in the United Kingdom.\n",
+        "\nI do not require sponsorship.\n",
+        "\nPermission to work in the UK.\n",
+    ),
+)
+def test_work_rights_paraphrases_cannot_bypass_policy(addition: str) -> None:
+    with pytest.raises(CVConstraintError, match="work-rights"):
+        _valid(cv_text=_base_text() + addition)
+
+
+@pytest.mark.parametrize("label", ("Résumé", "Curriculum-Vitae", "Curriculum‑Vitae", "Curriculum Vitæ", "C.V.", "Artiom Gutu - Résumé"))
+def test_polished_document_labels_remain_forbidden(label: str) -> None:
+    with pytest.raises(CVConstraintError, match="document labels"):
+        _valid(cv_text=label + "\n" + _base_text())
+
+
+@pytest.mark.parametrize(
+    "summary",
+    (
+        "Junior AI Engineer focused on automation.",
+        "Junior AI Engineer with strong systems skills.",
+    ),
+)
+def test_target_role_identity_paraphrases_are_rejected(summary: str) -> None:
+    sections = {
+        "Professional Summary": (summary,),
+        "Core Capabilities": ("AI orchestration and systems design.",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    with pytest.raises(CVConstraintError, match="current identity"):
+        _valid(sections=sections, target_role_title="Junior AI Engineer")
+
+
+@pytest.mark.parametrize(
+    "addition",
+    (
+        "\nAgent-assisted implementation with human review.\n",
+        "\nDeveloped using coding agents.\n",
+        "\nLLM-produced project code.\n",
+    ),
+)
+def test_euphemistic_ai_disclosures_are_rejected(addition: str) -> None:
+    with pytest.raises(CVConstraintError, match="rejection signals"):
+        _valid(cv_text=_base_text() + addition)
+
+
+def test_tool_salad_cannot_hide_behind_capability_label() -> None:
+    sections = {
+        "Professional Summary": ("AI systems engineer.",),
+        "Core Capabilities": ("Engineering: Python | Docker | GitHub | AWS Lambda",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    with pytest.raises(CVConstraintError, match="support a capability"):
+        _valid(sections=sections)
+
+
+@pytest.mark.parametrize("summary", ("Motivated professional.", "Results-driven engineer."))
+def test_generic_summary_filler_is_rejected(summary: str) -> None:
+    sections = {
+        "Professional Summary": (summary,),
+        "Core Capabilities": ("AI orchestration and systems design.",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    with pytest.raises(CVConstraintError, match="generic professional-summary"):
+        _valid(sections=sections)
+
+
+def test_old_role_without_year_is_still_irrelevant() -> None:
+    sections = {
+        "Professional Summary": ("AI systems engineer.",),
+        "Core Capabilities": ("AI orchestration and systems design.",),
+        "Projects": ("Built reliable automation.",),
+        "Experience": ("Translator and interpreter for a charity.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    with pytest.raises(CVConstraintError, match="irrelevant historic experience"):
+        _valid(sections=sections)
+
+
+def test_old_year_is_rejected_only_when_used_as_experience() -> None:
+    sections = {
+        "Professional Summary": ("AI systems engineer.",),
+        "Core Capabilities": ("AI orchestration and systems design.",),
+        "Projects": ("Built reliable automation using a dataset spanning 2022 to 2026.",),
+        "Education": (f"BSc Computer Science, July 2026. Dissertation: {TITLE}.",),
+    }
+    assert _valid(sections=sections).passed is True
+    sections["Experience"] = ("Customer-service assistant, 2022.",)
+    with pytest.raises(CVConstraintError, match="irrelevant historic experience"):
+        _valid(sections=sections)
+
+
+def test_generic_dissertation_line_cannot_hide_beside_real_title() -> None:
+    sections = {
+        "Professional Summary": ("AI systems engineer.",),
+        "Core Capabilities": ("AI orchestration and systems design.",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (
+            "BSc Computer Science, July 2026.",
+            "Dissertation: anomaly detection in the cloud.",
+            f"Dissertation: {TITLE}.",
+        ),
+    }
+    with pytest.raises(CVConstraintError, match="generic or alternate dissertation"):
+        _valid(sections=sections)
+
+
+@pytest.mark.parametrize("date", ("2nd July 2026", "02/07/2026"))
+def test_day_level_date_variants_are_rejected(date: str) -> None:
+    sections = {
+        "Professional Summary": ("AI systems engineer.",),
+        "Core Capabilities": ("AI orchestration and systems design.",),
+        "Projects": ("Built reliable automation.",),
+        "Education": (f"BSc Computer Science, {date}. Dissertation: {TITLE}.",),
+    }
+    with pytest.raises(CVConstraintError, match="month and year"):
+        _valid(sections=sections)
+
+
+def test_conflicting_location_cannot_hide_beside_birmingham() -> None:
+    with pytest.raises(CVConstraintError, match="conflicting candidate location"):
+        _valid(cv_text=_base_text() + "\nBased in Wolverhampton.\n")
