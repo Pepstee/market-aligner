@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import tempfile
 import unittest
@@ -13,16 +14,71 @@ import yaml
 
 from market_aligner.cli import build_parser, main
 from market_aligner.collectors.adapters.base import load_adapter
+from market_aligner.collectors.adapters.workable import WorkableAdapter
 from market_aligner.collectors.engine import Collector
 from market_aligner.domain.contracts import JobUrl, RawPosting
 from market_aligner.service.api import CollectionService
-from market_aligner.state.vacancies import JobDatabase
+from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class CollectionTests(unittest.TestCase):
+    def _refresh_fixture(
+        self,
+        root: Path,
+        adapter: object,
+    ) -> tuple[Path, JobDatabase, str, dict[str, int], object]:
+        config = root / "collect.yaml"
+        config.write_text(
+            yaml.safe_dump(
+                {
+                    "boards": {"enabled": ["injected"]},
+                    "collection": {"fetch_workers": 1, "source_workers": 1},
+                    "injected": {"tenant": "official-test"},
+                    "io": {
+                        "database": "state/vacancies.sqlite3",
+                        "job_urls": "state/job_urls.jsonl",
+                        "raw_cache": "raw/vacancies",
+                    },
+                    "search_terms": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        database = JobDatabase(root / "state" / "vacancies.sqlite3")
+        job = JobUrl("injected", "tenant:1", "https://example.test/jobs/1")
+        database.upsert_discovered(job)
+        database.store_raw(
+            RawPosting(
+                job.board,
+                job.job_id,
+                job.url,
+                "2026-08-20T00:00:00Z",
+                raw_text="old official bytes",
+            )
+        )
+        _job, old_hash, _fetched_at = database.fetched_posting(job.key)
+        calls = {"fetch": 0}
+
+        def adapter_loader(board, *, config):
+            self.assertEqual("injected", board)
+            self.assertEqual({"tenant": "official-test"}, config)
+            return adapter
+
+        def collector_factory(loaded_config, data_home, log=print):
+            return Collector(
+                loaded_config,
+                data_home,
+                log=log,
+                adapter_loader=adapter_loader,
+            )
+
+        adapter.calls = calls
+        adapter.database = database
+        return config, database, old_hash, calls, collector_factory
+
     def test_audited_fixture_adapters_retain_contract(self) -> None:
         for board in ("wanted", "saramin", "jobkorea", "notefolio"):
             adapter = load_adapter(board, fixture_dir=FIXTURES)
@@ -163,6 +219,197 @@ class CollectionTests(unittest.TestCase):
             self.assertNotIn("receipt_path", stored)
             self.assertEqual(second["receipt_sha256"], stored["receipt_sha256"])
 
+    def test_exact_refresh_changes_one_vacancy_and_emits_old_new_receipt(self) -> None:
+        class ChangedAdapter:
+            board = "injected"
+
+            def owns(self, job):
+                return job.key == "injected:tenant:1"
+
+            def fetch(self, job, live=False):
+                self.calls["fetch"] += 1
+                self.live = live
+                return RawPosting(
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T01:00:00Z",
+                    raw_text="new official bytes",
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            adapter = ChangedAdapter()
+            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            service = CollectionService(
+                root,
+                collector_factory=factory,
+                now=lambda: datetime(2026, 8, 20, 1, tzinfo=timezone.utc),
+            )
+            receipt = service.refresh_vacancy(
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                log=lambda _message: None,
+            )
+            self.assertEqual(1, calls["fetch"])
+            self.assertTrue(adapter.live)
+            self.assertTrue(receipt["changed"])
+            self.assertEqual(old_hash, receipt["old_content_sha256"])
+            self.assertNotEqual(old_hash, receipt["new_content_sha256"])
+            self.assertEqual(1, receipt["official_fetch_count"])
+            _job, current_hash, fetched_at = database.fetched_posting("injected:tenant:1")
+            self.assertEqual(receipt["new_content_sha256"], current_hash)
+            self.assertEqual("2026-08-20T01:00:00Z", fetched_at)
+            stored = json.loads(Path(receipt["receipt_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(receipt["receipt_sha256"], stored["receipt_sha256"])
+            raw_cache = root / receipt["raw_cache_path"]
+            self.assertTrue(raw_cache.is_file())
+            self.assertEqual(
+                receipt["raw_cache_file_sha256"],
+                hashlib.sha256(raw_cache.read_bytes()).hexdigest(),
+            )
+
+    def test_exact_refresh_records_unchanged_official_content(self) -> None:
+        class UnchangedAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, job, live=False):
+                self.calls["fetch"] += 1
+                return RawPosting(
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T02:00:00Z",
+                    raw_text="old official bytes",
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            adapter = UnchangedAdapter()
+            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                log=lambda _message: None,
+            )
+            self.assertEqual(1, calls["fetch"])
+            self.assertFalse(receipt["changed"])
+            self.assertEqual(old_hash, receipt["new_content_sha256"])
+            self.assertEqual(
+                "2026-08-20T02:00:00Z",
+                database.fetched_posting("injected:tenant:1")[2],
+            )
+
+    def test_exact_refresh_loses_cas_race_without_overwriting_winner(self) -> None:
+        class RacingAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, job, live=False):
+                self.calls["fetch"] += 1
+                self.database.store_raw(
+                    RawPosting(
+                        job.board,
+                        job.job_id,
+                        job.url,
+                        "2026-08-20T03:00:00Z",
+                        raw_text="concurrent winner",
+                    )
+                )
+                return RawPosting(
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T03:01:00Z",
+                    raw_text="losing refresh",
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            adapter = RacingAdapter()
+            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            with self.assertRaises(VacancyRefreshConflict):
+                CollectionService(root, collector_factory=factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    log=lambda _message: None,
+                )
+            self.assertEqual(1, calls["fetch"])
+            self.assertNotEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
+            self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
+            self.assertFalse((root / "raw" / "vacancies").exists())
+
+    def test_exact_refresh_fetch_error_preserves_existing_good_state(self) -> None:
+        class ErrorAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, _job, live=False):
+                self.calls["fetch"] += 1
+                raise RuntimeError("official source unavailable")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            adapter = ErrorAdapter()
+            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            with self.assertRaisesRegex(RuntimeError, "official source unavailable"):
+                CollectionService(root, collector_factory=factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    log=lambda _message: None,
+                )
+            self.assertEqual(1, calls["fetch"])
+            self.assertEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
+            self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
+
+    def test_workable_exact_fetch_is_one_config_owned_official_request(self) -> None:
+        adapter = WorkableAdapter(config={"companies": {"cogna": "Cogna"}})
+        job = JobUrl(
+            "workable",
+            "cogna:847CFBC5F4",
+            "https://apply.workable.com/j/847CFBC5F4",
+        )
+        payload = {
+            "name": "Cogna",
+            "jobs": [
+                {
+                    "shortcode": "847CFBC5F4",
+                    "title": "Software Engineer",
+                    "description": "Build reliable software.",
+                    "url": job.url,
+                }
+            ],
+        }
+        with mock.patch(
+            "market_aligner.collectors.adapters.workable.http_get_json",
+            return_value=payload,
+        ) as official_get:
+            raw = adapter.fetch(job, live=True)
+        self.assertEqual(job.key, raw.key)
+        self.assertEqual("Cogna", raw.raw_json["company"])
+        official_get.assert_called_once()
+        self.assertEqual(1, official_get.call_args.kwargs["attempts"])
+        with mock.patch(
+            "market_aligner.collectors.adapters.workable.http_get_json"
+        ) as forbidden_get:
+            with self.assertRaisesRegex(ValueError, "does not own"):
+                adapter.fetch(
+                    JobUrl("workable", "other:847CFBC5F4", job.url),
+                    live=True,
+                )
+        forbidden_get.assert_not_called()
+
     def test_partial_source_failure_preserves_every_yielded_discovery(self) -> None:
         class PartialAdapter:
             board = "partial"
@@ -211,6 +458,18 @@ class CollectionTests(unittest.TestCase):
         )
         self.assertTrue(parsed.once)
         self.assertIsNone(parsed.hours)
+        refresh = parser.parse_args(
+            [
+                "refresh-vacancy",
+                "--config",
+                "collect.yaml",
+                "--job-key",
+                "workable:cogna:847CFBC5F4",
+                "--expected-content-sha256",
+                "a" * 64,
+            ]
+        )
+        self.assertEqual("workable:cogna:847CFBC5F4", refresh.job_key)
 
     def test_collection_service_rejects_unbounded_run_and_data_home_escape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

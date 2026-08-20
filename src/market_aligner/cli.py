@@ -196,6 +196,17 @@ def _collect_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refresh_vacancy_command(args: argparse.Namespace) -> int:
+    receipt = CollectionService(args.data_home).refresh_vacancy(
+        args.config,
+        job_key=args.job_key,
+        expected_content_sha256=args.expected_content_sha256,
+        log=lambda message: print(message, file=sys.stderr),
+    )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def _codex_gateway(args: argparse.Namespace) -> CodexSemanticGateway:
     return CodexSemanticGateway(
         model=args.model,
@@ -318,6 +329,16 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--poll-minutes", type=float, default=15.0)
     _add_data_home(collect)
     collect.set_defaults(handler=_collect_command)
+
+    refresh = commands.add_parser(
+        "refresh-vacancy",
+        help="CAS-refresh one exact existing fetched vacancy without broad discovery.",
+    )
+    refresh.add_argument("--config", type=Path, required=True)
+    refresh.add_argument("--job-key", required=True)
+    refresh.add_argument("--expected-content-sha256", required=True)
+    _add_data_home(refresh)
+    refresh.set_defaults(handler=_refresh_vacancy_command)
 
     process = commands.add_parser(
         "process",

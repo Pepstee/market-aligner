@@ -18,6 +18,18 @@ from market_aligner.state.importers import iter_raw_cache_roots
 LEGACY_PROCESSING_CONFIG_SHA256 = "0" * 64
 
 
+class VacancyRefreshConflict(RuntimeError):
+    """The exact fetched vacancy changed before a guarded refresh committed."""
+
+
+def raw_posting_content_sha256(row: RawPosting) -> str:
+    """Return the existing collector content identity for a raw posting."""
+
+    raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
+    material = (row.raw_text or "") + (raw_json or "")
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=30000;
@@ -168,14 +180,91 @@ class JobDatabase:
 
     def store_raw(self, row: RawPosting) -> None:
         raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
-        material = (row.raw_text or "") + (raw_json or "")
-        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        digest = raw_posting_content_sha256(row)
         with closing(self.connect()) as conn, conn:
             conn.execute(
                 """UPDATE postings SET fetched_at=?,raw_text=?,raw_json=?,content_hash=?,
                    fetch_status='fetched',fetch_error=NULL WHERE key=?""",
                 (row.fetched_at, row.raw_text, raw_json, digest, row.key),
             )
+
+    def fetched_posting(self, key: str) -> tuple[JobUrl, str, str]:
+        """Load one existing fetched row and its guarded refresh identity."""
+
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """SELECT board,job_id,url,posted_at,content_hash,fetched_at,fetch_status
+                   FROM postings WHERE key=?""",
+                (key,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown vacancy key: {key}")
+        if row[6] != "fetched" or not row[4] or not row[5]:
+            raise ValueError(f"vacancy is not an existing fetched row: {key}")
+        job = JobUrl(board=str(row[0]), job_id=str(row[1]), url=str(row[2]), posted_at=row[3])
+        if job.key != key:
+            raise ValueError(f"stored vacancy identity does not match key: {key}")
+        return job, str(row[4]), str(row[5])
+
+    def compare_and_swap_raw(
+        self,
+        row: RawPosting,
+        *,
+        expected_content_sha256: str,
+    ) -> dict[str, object]:
+        """Atomically replace one fetched row only at its expected content hash."""
+
+        if len(expected_content_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_content_sha256
+        ):
+            raise ValueError("expected content identity must be lowercase SHA-256")
+        raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
+        new_content_sha256 = raw_posting_content_sha256(row)
+        with closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """SELECT board,job_id,content_hash,fetched_at,fetch_status
+                   FROM postings WHERE key=?""",
+                (row.key,),
+            ).fetchone()
+            if current is None:
+                conn.rollback()
+                raise KeyError(f"unknown vacancy key: {row.key}")
+            if str(current[0]) != row.board or str(current[1]) != row.job_id:
+                conn.rollback()
+                raise ValueError(f"refreshed posting identity does not match stored row: {row.key}")
+            if current[4] != "fetched" or current[2] != expected_content_sha256:
+                conn.rollback()
+                raise VacancyRefreshConflict(
+                    f"vacancy changed before refresh commit: {row.key}"
+                )
+            cursor = conn.execute(
+                """UPDATE postings SET url=?,fetched_at=?,raw_text=?,raw_json=?,content_hash=?,
+                   fetch_status='fetched',fetch_error=NULL
+                   WHERE key=? AND fetch_status='fetched' AND content_hash=?""",
+                (
+                    row.url,
+                    row.fetched_at,
+                    row.raw_text,
+                    raw_json,
+                    new_content_sha256,
+                    row.key,
+                    expected_content_sha256,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise VacancyRefreshConflict(
+                    f"vacancy changed before refresh commit: {row.key}"
+                )
+            conn.commit()
+        return {
+            "changed": new_content_sha256 != expected_content_sha256,
+            "new_content_sha256": new_content_sha256,
+            "new_fetched_at": row.fetched_at,
+            "old_content_sha256": expected_content_sha256,
+            "old_fetched_at": str(current[3]),
+        }
 
     def record_error(self, key: str, message: str) -> None:
         with closing(self.connect()) as conn, conn:

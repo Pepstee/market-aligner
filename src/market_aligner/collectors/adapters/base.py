@@ -100,6 +100,16 @@ class Adapter:
         detail = self._load_detail(job_url.job_id)
         return self._to_raw_posting(job_url, detail)
 
+    def owns(self, job_url: JobUrl) -> bool:
+        """Return whether this configured adapter owns an exact existing key.
+
+        The default contract is deliberately strict about the board identity.
+        Multi-tenant adapters override this to bind tenant ownership to their
+        injected external configuration as well.
+        """
+
+        return bool(self.board) and job_url.board == self.board
+
     # -- live hooks (subclasses override with real request logic) ----------- #
     def _discover_live(self, terms: list[str]) -> Iterable[JobUrl]:
         raise NotImplementedError(

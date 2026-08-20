@@ -136,6 +136,52 @@ class Collector:
             return board, adapter, rows, exc
         return board, adapter, rows, None
 
+    def refresh_vacancy(
+        self,
+        job_key: str,
+        *,
+        expected_content_sha256: str,
+    ) -> dict[str, object]:
+        """Fetch and CAS-replace exactly one configured, already-fetched vacancy."""
+
+        job, observed_content_sha256, old_fetched_at = self.db.fetched_posting(job_key)
+        if observed_content_sha256 != expected_content_sha256:
+            raise ValueError(
+                f"expected content identity does not match current vacancy: {job_key}"
+            )
+        if job.board not in self.boards:
+            raise ValueError(f"vacancy board is not enabled by collection config: {job.board}")
+        adapter_loader = self.adapter_loader or load_adapter
+        adapter_config = dict(self.cfg.get(job.board, {}) or {})
+        adapter = adapter_loader(job.board, config=adapter_config)
+        owns = getattr(adapter, "owns", None)
+        if not callable(owns) or not owns(job):
+            raise ValueError(
+                f"configured adapter does not own exact vacancy key: {job_key}"
+            )
+        # A guarded refresh is deliberately one official adapter invocation.
+        # Unlike broad collection, it must not turn an authoritative absence
+        # or source error into a second, differently scoped fallback fetch.
+        raw = adapter.fetch(job, True)
+        fallback_engine = None
+        if raw.key != job_key or raw.board != job.board or raw.job_id != job.job_id:
+            raise ValueError(f"adapter returned a different vacancy identity: {raw.key}")
+        result = self.db.compare_and_swap_raw(
+            raw,
+            expected_content_sha256=expected_content_sha256,
+        )
+        _save_raw(self.raw_cache, raw)
+        raw_path = _raw_path(self.raw_cache, raw)
+        return {
+            **result,
+            "adapter": job.board,
+            "adapter_config": adapter_config,
+            "fallback_engine": fallback_engine,
+            "job_key": job_key,
+            "old_fetched_at": old_fetched_at,
+            "raw_cache_path": str(raw_path),
+        }
+
     def cycle(self) -> dict[str, int]:
         adapters: dict[str, Any] = {}
         fetch_queue: list[tuple[Any, JobUrl]] = []

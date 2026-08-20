@@ -167,6 +167,78 @@ class CollectionService:
         _write_receipt(receipt_path, receipt)
         return {**receipt, "receipt_path": str(receipt_path)}
 
+    def refresh_vacancy(
+        self,
+        config_path: str | Path,
+        *,
+        job_key: str,
+        expected_content_sha256: str,
+        log=print,
+    ) -> dict[str, object]:
+        """Refresh exactly one configured existing vacancy under a SQLite CAS."""
+
+        if not job_key or ":" not in job_key:
+            raise ValueError("refresh requires an exact board-qualified job key")
+        if len(expected_content_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_content_sha256
+        ):
+            raise ValueError("expected content identity must be lowercase SHA-256")
+        config = load_config(config_path)
+        _validate_collection_config(config)
+        board = job_key.split(":", 1)[0]
+        if board not in config["boards"]["enabled"]:
+            raise ValueError(f"vacancy board is not enabled by collection config: {board}")
+        config_sha256 = _sha256(config)
+        source_sha256 = _sha256(
+            {
+                "adapter": board,
+                "adapter_config": config.get(board, {}) or {},
+                "job_key": job_key,
+            }
+        )
+        started_at = self.now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        collector = self.collector_factory(config, self.paths.root, log=log)
+        refreshed = collector.refresh_vacancy(
+            job_key,
+            expected_content_sha256=expected_content_sha256,
+        )
+        finished_at = self.now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_path = Path(str(refreshed["raw_cache_path"])).resolve()
+        try:
+            raw_cache_path = str(raw_path.relative_to(self.paths.root.resolve()))
+        except ValueError as exc:
+            raise ValueError("collector raw cache escaped the external data home") from exc
+        raw_cache_file_sha256 = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        body: dict[str, object] = {
+            "adapter": str(refreshed["adapter"]),
+            "application_authority": False,
+            "authority_scope": "collection_only",
+            "changed": bool(refreshed["changed"]),
+            "config_sha256": config_sha256,
+            "expected_old_content_sha256": expected_content_sha256,
+            "fallback_engine": refreshed["fallback_engine"],
+            "finished_at": finished_at,
+            "job_key": job_key,
+            "new_content_sha256": str(refreshed["new_content_sha256"]),
+            "new_fetched_at": str(refreshed["new_fetched_at"]),
+            "official_fetch_count": 1,
+            "old_content_sha256": str(refreshed["old_content_sha256"]),
+            "old_fetched_at": str(refreshed["old_fetched_at"]),
+            "raw_cache_file_sha256": raw_cache_file_sha256,
+            "raw_cache_path": raw_cache_path,
+            "schema_version": "market-aligner.vacancy-refresh-receipt.v1",
+            "source_sha256": source_sha256,
+            "started_at": started_at,
+            "state_sha256": _sha256(collector.db.collection_state()),
+        }
+        receipt_sha256 = _sha256(body)
+        receipt = {**body, "receipt_sha256": receipt_sha256}
+        receipt_path = (
+            self.paths.state / "collection-refresh-receipts" / f"{receipt_sha256}.json"
+        )
+        _write_receipt(receipt_path, receipt)
+        return {**receipt, "receipt_path": str(receipt_path)}
+
 
 class MarketAlignerService:
     def __init__(self, data_home: str | Path | None = None) -> None:
