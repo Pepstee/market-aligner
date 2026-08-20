@@ -239,7 +239,9 @@ def _refresh_research_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _research_run_one_command(args: argparse.Namespace) -> int:
+def _refresh_research_provider(
+    args: argparse.Namespace, *, selector_review_receipt: Path | None = None
+) -> tuple[AssessmentStore, RefreshDerivedResearchProvider]:
     profiles = ProfileStore(args.data_home)
     assessments = AssessmentStore(profiles.paths.state / "assessments.sqlite3")
     loader = CanonicalCollectorVacancyLoader(
@@ -253,23 +255,71 @@ def _research_run_one_command(args: argparse.Namespace) -> int:
         archive_root=(
             assessments.data_home / "state" / "public-employer-research-v2"
         ),
+        selector_review_receipt_path=selector_review_receipt,
     )
-    run = ResearchWorker(assessments, provider, args.worker_id).run_one(
-        profile_id=args.profile_id,
-        job_key=args.job_key,
-        require_refresh_bridge=True,
+    return assessments, provider
+
+
+def _research_admit_selector_review_command(args: argparse.Namespace) -> int:
+    assessments, provider = _refresh_research_provider(args)
+    task = assessments.preview_refresh_research(args.profile_id, args.job_key)
+    if task is None:
+        print(json.dumps({
+            "application_authority": False,
+            "admitted": False,
+            "job_key": args.job_key,
+            "profile_id": args.profile_id,
+            "release_authority": False,
+            "schema_version": "market-aligner.selector-review-admission-run.v1",
+            "status": "idle",
+        }, sort_keys=True))
+        return 1
+    result = provider.admit_selector_review(task, args.selector_review_input)
+    print(json.dumps({
+        "application_authority": False,
+        "admitted": True,
+        "authority_mode": "selector_occurrence_only",
+        "current_canonical_object_sha256": result.current_canonical_object_sha256,
+        "job_key": args.job_key,
+        "map_path": str(result.map_path),
+        "map_sha256": result.map_sha256,
+        "prior_dossier_sha256": result.prior_dossier_sha256,
+        "profile_id": args.profile_id,
+        "receipt_file_sha256": result.receipt_file_sha256,
+        "receipt_path": str(result.receipt_path),
+        "receipt_sha256": result.semantic_receipt_sha256,
+        "release_authority": False,
+        "schema_version": "market-aligner.selector-review-admission-run.v1",
+        "status": "admitted",
+    }, sort_keys=True))
+    return 0
+
+
+def _research_run_one_command(args: argparse.Namespace) -> int:
+    assessments, provider = _refresh_research_provider(
+        args, selector_review_receipt=args.selector_review_receipt
     )
+    preview = assessments.preview_refresh_research(args.profile_id, args.job_key)
+    if preview is None:
+        run = None
+    else:
+        provider.preflight(preview)
+        run = ResearchWorker(assessments, provider, args.worker_id).run_one(
+            profile_id=args.profile_id,
+            job_key=args.job_key,
+            require_refresh_bridge=True,
+        )
     derivation = provider.last_derivation
     output = {
         "application_authority": False,
-        "completed": run.status == "completed",
-        "dossier_sha256": run.dossier_sha256,
-        "error": run.error,
+        "completed": run is not None and run.status == "completed",
+        "dossier_sha256": None if run is None else run.dossier_sha256,
+        "error": None if run is None else run.error,
         "job_key": args.job_key,
         "profile_id": args.profile_id,
         "release_authority": False,
         "schema_version": "market-aligner.research-run-one.v1",
-        "status": run.status,
+        "status": "idle" if run is None else run.status,
         "worker_id": args.worker_id,
     }
     if derivation is not None:
@@ -291,7 +341,7 @@ def _research_run_one_command(args: argparse.Namespace) -> int:
             }
         )
     print(json.dumps(output, ensure_ascii=False, sort_keys=True))
-    return 0 if run.status == "completed" else 1
+    return 0 if run is not None and run.status == "completed" else 1
 
 
 def _codex_gateway(args: argparse.Namespace) -> CodexSemanticGateway:
@@ -457,6 +507,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_data_home(refresh_research)
     refresh_research.set_defaults(handler=_refresh_research_command)
 
+    selector_review = commands.add_parser(
+        "research-admit-selector-review",
+        help="Admit an exact selector-occurrence map for one refresh-linked task.",
+    )
+    selector_review.add_argument("--profile-id", required=True)
+    selector_review.add_argument("--job-key", required=True)
+    selector_review.add_argument(
+        "--selector-review-input", type=Path, required=True
+    )
+    selector_review.add_argument("--collection-config", type=Path, required=True)
+    _add_data_home(selector_review)
+    selector_review.set_defaults(handler=_research_admit_selector_review_command)
+
     research_run_one = commands.add_parser(
         "research-run-one",
         help="Rebuild one exact refresh-linked dossier without new public claims.",
@@ -465,6 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_run_one.add_argument("--job-key", required=True)
     research_run_one.add_argument("--worker-id", required=True)
     research_run_one.add_argument("--collection-config", type=Path, required=True)
+    research_run_one.add_argument("--selector-review-receipt", type=Path)
     _add_data_home(research_run_one)
     research_run_one.set_defaults(handler=_research_run_one_command)
 

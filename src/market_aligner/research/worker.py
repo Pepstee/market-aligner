@@ -57,6 +57,9 @@ class ResearchWorker:
             dossier = self.provider.research(task)
             if dossier.profile_id != task.profile_id or dossier.job_key != task.job_key:
                 raise ValueError("research provider returned a dossier for a different task")
+            completion_validator = getattr(self.provider, "validate_completion", None)
+            if completion_validator is not None:
+                completion_validator(task)
             evidence = None
             if dossier.schema_version == "market-aligner.employer-dossier.v2":
                 materialization = getattr(self.provider, "last_materialization", None)

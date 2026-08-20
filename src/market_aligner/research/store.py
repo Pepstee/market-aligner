@@ -16,7 +16,6 @@ from market_aligner.assessment.scoring import ScoreResult
 from market_aligner.profiler.schema import validate_profile_id
 from market_aligner.state.vacancies import (
     JobDatabase,
-    VerifiedVacancyRefreshReceipt,
 )
 
 from .models import (
@@ -609,6 +608,7 @@ class AssessmentStore:
         profile_id: str | None = None,
         job_key: str | None = None,
         require_refresh_bridge: bool = False,
+        _preview_without_lease: bool = False,
     ) -> ResearchTask | None:
         if (profile_id is None) != (job_key is None):
             raise ValueError("research claim scope requires both profile_id and job_key")
@@ -655,12 +655,13 @@ class AssessmentStore:
             ).fetchone()
             if row is None:
                 return None
-            connection.execute(
-                """UPDATE employer_research_queue SET status='leased',attempts=attempts+1,
-                     lease_owner=?,lease_until=?,updated_at=CURRENT_TIMESTAMP
-                   WHERE profile_id=? AND job_key=?""",
-                (worker_id, lease_until.isoformat(), row["profile_id"], row["job_key"]),
-            )
+            if not _preview_without_lease:
+                connection.execute(
+                    """UPDATE employer_research_queue SET status='leased',attempts=attempts+1,
+                         lease_owner=?,lease_until=?,updated_at=CURRENT_TIMESTAMP
+                       WHERE profile_id=? AND job_key=?""",
+                    (worker_id, lease_until.isoformat(), row["profile_id"], row["job_key"]),
+                )
             values = dict(row)
             refresh_event_id = values.pop("refresh_event_id")
             refresh_event_type = values.pop("refresh_event_type")
@@ -776,6 +777,19 @@ class AssessmentStore:
             values["vacancy_snapshot_sha256"] = _vacancy_snapshot_sha256(values)
             values.update(refresh_values)
             return ResearchTask(**values)
+
+    def preview_refresh_research(
+        self, profile_id: str, job_key: str
+    ) -> ResearchTask | None:
+        """Resolve one exact available refresh task without changing its lease."""
+
+        return self.claim_research(
+            "selector-review-preview",
+            profile_id=profile_id,
+            job_key=job_key,
+            require_refresh_bridge=True,
+            _preview_without_lease=True,
+        )
 
     def _has_current_v2_evidence(self, row: sqlite3.Row) -> bool:
         try:

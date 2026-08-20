@@ -183,7 +183,8 @@ def _task_and_reset(store: AssessmentStore):
     with store.connection() as connection:
         connection.execute(
             """UPDATE employer_research_queue SET status='queued',attempts=0,
-                 lease_owner=NULL,lease_until=NULL WHERE profile_id=? AND job_key=?""",
+                 lease_owner=NULL,lease_until=NULL,available_at='1970-01-01 00:00:00'
+               WHERE profile_id=? AND job_key=?""",
             (task.profile_id, task.job_key),
         )
     return task
@@ -206,6 +207,65 @@ def _plan(task, source, *, excerpt: str = BODY.decode(), final_url: str = URL):
         task.source_content_sha256, task.vacancy_snapshot_sha256,
         task.promotion_receipt_sha256, ("Hiring manager is unknown.",),
     )
+
+
+def _selector_review_fixture(tmp_path: Path):
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _ = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    archive = tmp_path / "state" / "public-employer-research-v2"
+    initial = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=archive, canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, initial, "initial-worker").run_one().status == "completed"
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    preview = store.preview_refresh_research(profile_id, JOB_KEY)
+    assert preview is not None
+    bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    current = bridge(preview)
+    with store.connection() as connection:
+        prior_document = json.loads(connection.execute(
+            "SELECT dossier_json FROM employer_dossiers WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone()[0])
+    prior_selector = prior_document["claims"][0]["supports"][0]["selector"]
+    current_start = current.body.index(BODY)
+    document = {
+        "job_key": JOB_KEY,
+        "profile_id": profile_id,
+        "rows": [{
+            "prior_selector": prior_selector,
+            "reviewed_current_selector": f"bytes:{current_start}-{current_start + len(BODY)}",
+        }],
+        "schema_version": "market-aligner.selector-occurrence-review-input.v1",
+    }
+    return store, profile_id, preview, bridge, config, archive, document
+
+
+def _write_review_input(archive: Path, document: dict, name: str = "review.json") -> Path:
+    root = archive / "review-inputs"
+    root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path = root / name
+    path.write_bytes(json.dumps(
+        document, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode())
+    path.chmod(0o600)
+    return path
 
 
 def test_v2_archives_verbatim_claim_and_persists_reconciled_store_binding(
@@ -749,7 +809,7 @@ def test_refresh_completion_revalidates_prior_dossier_after_provider(
         ).fetchone()[0] == "queued"
 
 
-def test_research_run_one_rejects_shifted_selector_and_leaves_sibling_untouched(
+def test_research_run_one_admits_shifted_selector_and_leaves_sibling_untouched(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
@@ -779,7 +839,62 @@ def test_research_run_one_rejects_shifted_selector_and_leaves_sibling_untouched(
         promotion="9" * 64,
     )
     assert sibling_store.path == store.path
+    preview = store.preview_refresh_research(profile_id, JOB_KEY)
+    assert preview is not None
+    current = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )(preview)
+    with store.connection() as connection:
+        prior_document = json.loads(connection.execute(
+            "SELECT dossier_json FROM employer_dossiers WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone()[0])
+    prior_selector = prior_document["claims"][0]["supports"][0]["selector"]
+    current_start = current.body.index(BODY)
+    reviewed_selector = f"bytes:{current_start}-{current_start + len(BODY)}"
+    review_document = {
+        "job_key": JOB_KEY,
+        "profile_id": profile_id,
+        "rows": [{
+            "prior_selector": prior_selector,
+            "reviewed_current_selector": reviewed_selector,
+        }],
+        "schema_version": "market-aligner.selector-occurrence-review-input.v1",
+    }
+    review_inputs = archive / "review-inputs"
+    review_inputs.mkdir(parents=True, mode=0o700)
+    review_input = review_inputs / "review.json"
+    review_input.write_bytes(json.dumps(
+        review_document, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode())
+    review_input.chmod(0o600)
     parser = build_parser()
+    with store.connection() as connection:
+        before_admission = tuple(connection.execute(
+            """SELECT status,attempts,lease_owner FROM employer_research_queue
+               WHERE profile_id=? AND job_key=?""", (profile_id, JOB_KEY),
+        ).fetchone())
+    admission = parser.parse_args(
+        [
+            "research-admit-selector-review",
+            "--profile-id", profile_id,
+            "--job-key", JOB_KEY,
+            "--selector-review-input", str(review_input),
+            "--collection-config", str(config),
+            "--data-home", str(tmp_path),
+        ]
+    )
+    assert admission.handler(admission) == 0
+    admitted = json.loads(capsys.readouterr().out)
+    assert admitted["status"] == "admitted"
+    assert admitted["authority_mode"] == "selector_occurrence_only"
+    with store.connection() as connection:
+        unleased = connection.execute(
+            """SELECT status,attempts,lease_owner FROM employer_research_queue
+               WHERE profile_id=? AND job_key=?""", (profile_id, JOB_KEY),
+        ).fetchone()
+    assert tuple(unleased) == before_admission
     parsed = parser.parse_args(
         [
             "research-run-one",
@@ -787,17 +902,19 @@ def test_research_run_one_rejects_shifted_selector_and_leaves_sibling_untouched(
             "--job-key", JOB_KEY,
             "--worker-id", "cli-worker",
             "--collection-config", str(config),
+            "--selector-review-receipt", admitted["receipt_path"],
             "--data-home", str(tmp_path),
         ]
     )
     assert parsed.handler.__name__ == "_research_run_one_command"
-    assert parsed.handler(parsed) == 1
+    assert parsed.handler(parsed) == 0
     output = json.loads(capsys.readouterr().out)
-    assert output["status"] == "retry_scheduled"
-    assert output["completed"] is False
-    assert "exact prior selector" in output["error"]
+    assert output["status"] == "completed"
+    assert output["completed"] is True
     assert output["application_authority"] is False
     assert output["release_authority"] is False
+    plan_document = json.loads(Path(output["plan_path"]).read_bytes())
+    assert plan_document["claims"][0]["supports"][0]["selector"] == reviewed_selector
     with store.connection() as connection:
         sibling = connection.execute(
             """SELECT status,attempts FROM employer_research_queue
@@ -811,6 +928,10 @@ def test_research_run_one_rejects_shifted_selector_and_leaves_sibling_untouched(
         ).fetchone()[0])
     assert tuple(sibling) == ("queued", 0)
     assert completed["source_content_sha256"] == legacy_digest
+    parsed.worker_id = "cli-worker-replay"
+    assert parsed.handler(parsed) == 1
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["status"] == "idle"
     with pytest.raises(ValueError, match="both profile_id and job_key"):
         store.claim_research("partial-scope", profile_id=profile_id)
 
@@ -875,6 +996,149 @@ def test_research_run_one_refuses_ordinary_queue_before_lease(
     assert tuple(row) == ("queued", 0, None, None)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "wrong", "out_of_range", "missing", "extra", "duplicate", "claim",
+        "citation", "excerpt", "confidence", "unknowns", "mode", "path",
+    ),
+)
+def test_selector_review_admission_rejects_invalid_map_without_lease(
+    tmp_path: Path, mutation: str,
+) -> None:
+    store, profile_id, task, bridge, _config, archive, document = (
+        _selector_review_fixture(tmp_path)
+    )
+    document = json.loads(json.dumps(document))
+    if mutation == "wrong":
+        document["rows"][0]["reviewed_current_selector"] = document["rows"][0]["prior_selector"]
+    elif mutation == "out_of_range":
+        document["rows"][0]["reviewed_current_selector"] = "bytes:999999-1000000"
+    elif mutation == "missing":
+        document["rows"] = []
+    elif mutation == "extra":
+        document["rows"].append({
+            "prior_selector": "bytes:0-1", "reviewed_current_selector": "bytes:0-1",
+        })
+    elif mutation == "duplicate":
+        document["rows"].append(dict(document["rows"][0]))
+    elif mutation in {"claim", "citation", "excerpt", "confidence", "unknowns"}:
+        document["rows"][0][mutation] = BODY.decode()
+    input_path = _write_review_input(archive, document)
+    if mutation == "mode":
+        input_path.chmod(0o644)
+    elif mutation == "path":
+        outside = tmp_path / "outside.json"
+        shutil.copyfile(input_path, outside)
+        outside.chmod(0o600)
+        input_path = outside
+    provider = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+    )
+    with store.connection() as connection:
+        before = tuple(connection.execute(
+            "SELECT status,attempts,lease_owner FROM employer_research_queue WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone())
+    with pytest.raises(PublicResearchError):
+        provider.admit_selector_review(task, input_path)
+    with store.connection() as connection:
+        after = tuple(connection.execute(
+            "SELECT status,attempts,lease_owner FROM employer_research_queue WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone())
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "mutation", ("map", "map_mode", "receipt", "receipt_mode", "receipt_path", "event")
+)
+def test_selector_review_runner_rejects_admission_substitution_before_claim(
+    tmp_path: Path, mutation: str,
+) -> None:
+    store, profile_id, task, bridge, _config, archive, document = (
+        _selector_review_fixture(tmp_path)
+    )
+    provider = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+    )
+    admitted = provider.admit_selector_review(
+        task, _write_review_input(archive, document)
+    )
+    receipt_path = admitted.receipt_path
+    if mutation == "map":
+        admitted.map_path.write_bytes(b"{}")
+    elif mutation == "map_mode":
+        admitted.map_path.chmod(0o644)
+    elif mutation == "receipt":
+        receipt_path.write_bytes(b"{}")
+    elif mutation == "receipt_mode":
+        receipt_path.chmod(0o644)
+    elif mutation == "receipt_path":
+        outside = tmp_path / "receipt.json"
+        shutil.copyfile(receipt_path, outside)
+        outside.chmod(0o600)
+        receipt_path = outside
+    consumer = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+        selector_review_receipt_path=receipt_path,
+    )
+    with store.connection() as connection:
+        before = tuple(connection.execute(
+            "SELECT status,attempts,lease_owner FROM employer_research_queue WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone())
+    checked_task = (
+        replace(task, refresh_event_id=(task.refresh_event_id or 0) + 1)
+        if mutation == "event" else task
+    )
+    with pytest.raises(PublicResearchError):
+        consumer.preflight(checked_task)
+    with store.connection() as connection:
+        after = tuple(connection.execute(
+            "SELECT status,attempts,lease_owner FROM employer_research_queue WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone())
+    assert after == before
+
+
+def test_selector_review_rejects_current_object_drift_before_claim(
+    tmp_path: Path,
+) -> None:
+    store, profile_id, task, bridge, _config, archive, document = (
+        _selector_review_fixture(tmp_path)
+    )
+    provider = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+    )
+    admitted = provider.admit_selector_review(
+        task, _write_review_input(archive, document)
+    )
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    with sqlite3.connect(collector_path) as connection:
+        connection.execute(
+            "UPDATE postings SET raw_text=raw_text || ' drift' WHERE key=?", (JOB_KEY,)
+        )
+    consumer = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+        selector_review_receipt_path=admitted.receipt_path,
+    )
+    with pytest.raises(PublicResearchError):
+        consumer.preflight(task)
+    with store.connection() as connection:
+        row = connection.execute(
+            "SELECT status,attempts,lease_owner FROM employer_research_queue WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone()
+    assert tuple(row)[0] == "queued"
+    assert tuple(row)[2] is None
+
+
 def test_refresh_plan_derivation_rejects_moved_identical_excerpt(
     tmp_path: Path,
 ) -> None:
@@ -908,6 +1172,28 @@ def test_refresh_plan_derivation_rejects_moved_identical_excerpt(
     )
     assert plan.claims[0].supports[0].selector == (
         prior.claims[0].supports[0].selector
+    )
+    prior_selector = prior.claims[0].supports[0].selector
+    old_start = int(prior_selector.split(":", 1)[1].split("-", 1)[0])
+    shifted_duplicate = replace(
+        source,
+        body=(b"x" * 919) + source.body + BODY,
+        accessed_at="2026-08-21T01:00:00+00:00",
+    )
+    reviewed_start = old_start + 919
+    mapping = provider._selector_map_rows(
+        prior,
+        source.body,
+        shifted_duplicate,
+        [{
+            "prior_selector": prior_selector,
+            "reviewed_current_selector": (
+                f"bytes:{reviewed_start}-{reviewed_start + len(BODY)}"
+            ),
+        }],
+    )
+    assert mapping[prior_selector] == (
+        f"bytes:{reviewed_start}-{reviewed_start + len(BODY)}"
     )
 
     with pytest.raises(PublicResearchError, match="exact prior selector"):

@@ -17,6 +17,7 @@ import secrets
 import socket
 import sqlite3
 import stat
+import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ from .store import AssessmentStore
 
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OID = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _BYTE_SELECTOR = re.compile(r"^bytes:(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$")
 
 
@@ -943,6 +945,62 @@ class RefreshPlanDerivation:
     current_canonical_object_sha256: str
 
 
+@dataclass(frozen=True)
+class SelectorOccurrenceReview:
+    map_sha256: str
+    map_path: Path
+    semantic_receipt_sha256: str
+    receipt_file_sha256: str
+    receipt_path: Path
+    prior_dossier_sha256: str
+    current_canonical_object_sha256: str
+
+
+def _private_exact_file(path: Path, parent: Path, *, label: str) -> bytes:
+    absolute = path.absolute()
+    if absolute.parent != parent.absolute() or absolute.name in {"", ".", ".."}:
+        raise PublicResearchError(f"{label} is outside its fixed archive directory")
+    try:
+        descriptor = os.open(absolute, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise PublicResearchError(f"{label} is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise PublicResearchError(f"{label} is not a private regular 0600 file")
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            value = handle.read()
+    finally:
+        os.close(descriptor)
+    if len(value) > _MAX_SOURCE_BYTES:
+        raise PublicResearchError(f"{label} exceeds the size limit")
+    return value
+
+
+def _repository_source_identity(repository_root: Path) -> dict[str, str]:
+    source = Path(__file__).resolve(strict=True)
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PublicResearchError("repository identity is unavailable") from exc
+    if not _GIT_OID.fullmatch(commit):
+        raise PublicResearchError("repository commit identity is invalid")
+    return {
+        "repository_commit_oid": commit,
+        "repository_root": str(repository_root),
+        "source_file": str(source.relative_to(repository_root)),
+        "source_file_sha256": _sha256(source.read_bytes()),
+    }
+
+
 def _research_dossier_from_document(document: object) -> ResearchDossier:
     if not isinstance(document, dict):
         raise PublicResearchError("prior research dossier is not an object")
@@ -1007,6 +1065,7 @@ class RefreshDerivedResearchProvider:
         canonical_vacancy_loader: CanonicalCollectorVacancyLoader,
         repository_root: Path,
         archive_root: Path,
+        selector_review_receipt_path: Path | None = None,
     ) -> None:
         self.store = store
         self.loader = canonical_vacancy_loader
@@ -1014,6 +1073,9 @@ class RefreshDerivedResearchProvider:
         self.repository_root = repository_root.resolve(strict=True)
         self.last_materialization: MaterializedPublicResearch | None = None
         self.last_derivation: RefreshPlanDerivation | None = None
+        self.selector_review_receipt_path = selector_review_receipt_path
+        self.last_selector_review: SelectorOccurrenceReview | None = None
+        self._selector_map: dict[str, str] | None = None
 
     def _load_prior(self, task: ResearchTask) -> tuple[ResearchDossier, bytes, str]:
         if task.refresh_event_id is None or task.refresh_bridge_sha256 is None:
@@ -1088,6 +1150,236 @@ class RefreshDerivedResearchProvider:
             raise PublicResearchError("prior canonical object hash differs")
         return value
 
+    def _selector_map_rows(
+        self,
+        prior: ResearchDossier,
+        prior_bytes: bytes,
+        current: FetchedPublicSource,
+        rows: object,
+    ) -> dict[str, str]:
+        if not isinstance(rows, list):
+            raise PublicResearchError("selector review rows are not a list")
+        mapping: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {
+                "prior_selector", "reviewed_current_selector"
+            }:
+                raise PublicResearchError("selector review row shape is invalid")
+            prior_selector = row["prior_selector"]
+            current_selector = row["reviewed_current_selector"]
+            if (
+                not isinstance(prior_selector, str)
+                or not isinstance(current_selector, str)
+                or prior_selector in mapping
+            ):
+                raise PublicResearchError("selector review rows are not one-to-one")
+            mapping[prior_selector] = current_selector
+
+        supports = [support for claim in prior.claims for support in claim.supports]
+        prior_selectors = [support.selector for support in supports]
+        if len(set(prior_selectors)) != len(prior_selectors):
+            raise PublicResearchError("prior dossier has duplicate support selectors")
+        if set(mapping) != set(prior_selectors) or len(mapping) != len(supports):
+            raise PublicResearchError("selector review does not cover every support exactly once")
+
+        for claim in prior.claims:
+            for support in claim.supports:
+                prior_match = _BYTE_SELECTOR.fullmatch(support.selector)
+                current_match = _BYTE_SELECTOR.fullmatch(mapping[support.selector])
+                if prior_match is None or current_match is None:
+                    raise PublicResearchError("selector review contains an invalid selector")
+                old_start, old_end = int(prior_match.group(1)), int(prior_match.group(2))
+                new_start, new_end = int(current_match.group(1)), int(current_match.group(2))
+                old_selected = prior_bytes[old_start:old_end]
+                new_selected = current.body[new_start:new_end]
+                try:
+                    old_excerpt = old_selected.decode("utf-8")
+                    new_excerpt = new_selected.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise PublicResearchError("selector review support is not UTF-8") from exc
+                normalized_claim = " ".join(claim.claim.split())
+                if (
+                    old_end > len(prior_bytes)
+                    or new_end > len(current.body)
+                    or old_excerpt != support.excerpt
+                    or new_excerpt != support.excerpt
+                    or _sha256(old_selected) != support.excerpt_sha256
+                    or _sha256(new_selected) != support.excerpt_sha256
+                    or normalized_claim != " ".join(old_excerpt.split())
+                    or normalized_claim != " ".join(new_excerpt.split())
+                ):
+                    raise PublicResearchError("selector review occurrence differs from claim authority")
+        return mapping
+
+    def _config_identity(self) -> dict[str, str]:
+        path = self.loader.collection_config_path
+        if path is None:
+            raise PublicResearchError("selector review requires exact collection config")
+        try:
+            resolved = path.resolve(strict=True)
+            value = resolved.read_bytes()
+        except OSError as exc:
+            raise PublicResearchError("collection config identity is unavailable") from exc
+        return {
+            "collection_config_path": str(resolved),
+            "collection_config_sha256": _sha256(value),
+        }
+
+    def admit_selector_review(
+        self, task: ResearchTask, input_path: Path
+    ) -> SelectorOccurrenceReview:
+        current = self.loader(task)
+        prior, _prior_dossier_bytes, prior_digest = self._load_prior(task)
+        prior_object = self._read_prior_object(prior)
+        input_root = self.root / "review-inputs"
+        input_directory_fd = _secure_directory(self.root, "review-inputs")
+        os.close(input_directory_fd)
+        input_bytes = _private_exact_file(
+            input_path, input_root, label="selector review input"
+        )
+        try:
+            document = json.loads(input_bytes)
+        except json.JSONDecodeError as exc:
+            raise PublicResearchError("selector review input is invalid JSON") from exc
+        if input_bytes != _canonical_bytes(document) or not isinstance(document, dict):
+            raise PublicResearchError("selector review input is not canonical JSON")
+        if set(document) != {"job_key", "profile_id", "rows", "schema_version"} or (
+            document.get("schema_version")
+            != "market-aligner.selector-occurrence-review-input.v1"
+            or document.get("profile_id") != task.profile_id
+            or document.get("job_key") != task.job_key
+        ):
+            raise PublicResearchError("selector review input scope is invalid")
+        self._selector_map_rows(prior, prior_object, current, document["rows"])
+        map_bytes = input_bytes
+        map_sha = _sha256(map_bytes)
+        map_path = _write_exact(
+            self.root, "selector-review-maps", f"{map_sha}.json", map_bytes
+        )
+        identities = {
+            **_repository_source_identity(self.repository_root),
+            **self._config_identity(),
+        }
+        receipt_body = {
+            "application_authority": False,
+            "authority_mode": "selector_occurrence_only",
+            "current_canonical_object_sha256": _sha256(current.body),
+            "job_key": task.job_key,
+            "map_file_sha256": map_sha,
+            "map_sha256": map_sha,
+            "prior_canonical_object_sha256": prior.canonical_vacancy_object_sha256,
+            "prior_dossier_sha256": prior_digest,
+            "profile_id": task.profile_id,
+            "refresh_bridge_sha256": task.refresh_bridge_sha256,
+            "refresh_event_id": task.refresh_event_id,
+            "refresh_event_idempotency_key": task.refresh_event_idempotency_key,
+            "release_authority": False,
+            "schema_version": "market-aligner.selector-occurrence-review-admission.v1",
+            **identities,
+        }
+        semantic_sha = _sha256(_canonical_bytes(receipt_body))
+        receipt_bytes = _canonical_bytes(
+            {**receipt_body, "semantic_receipt_sha256": semantic_sha}
+        )
+        receipt_path = _write_exact(
+            self.root,
+            "selector-review-receipts",
+            f"{semantic_sha}.json",
+            receipt_bytes,
+        )
+        result = SelectorOccurrenceReview(
+            map_sha, map_path, semantic_sha, _sha256(receipt_bytes), receipt_path,
+            prior_digest, _sha256(current.body),
+        )
+        self.last_selector_review = result
+        return result
+
+    def _load_admitted_selector_review(
+        self, task: ResearchTask
+    ) -> dict[str, str] | None:
+        if self.selector_review_receipt_path is None:
+            return None
+        receipts = self.root / "selector-review-receipts"
+        receipt_bytes = _private_exact_file(
+            self.selector_review_receipt_path,
+            receipts,
+            label="selector review admission receipt",
+        )
+        try:
+            receipt = json.loads(receipt_bytes)
+        except json.JSONDecodeError as exc:
+            raise PublicResearchError("selector review receipt is invalid JSON") from exc
+        semantic = receipt.get("semantic_receipt_sha256") if isinstance(receipt, dict) else None
+        body = dict(receipt) if isinstance(receipt, dict) else {}
+        body.pop("semantic_receipt_sha256", None)
+        identities = {
+            **_repository_source_identity(self.repository_root),
+            **self._config_identity(),
+        }
+        if (
+            receipt_bytes != _canonical_bytes(receipt)
+            or not isinstance(semantic, str)
+            or _sha256(_canonical_bytes(body)) != semantic
+            or self.selector_review_receipt_path.name != f"{semantic}.json"
+            or body.get("schema_version")
+            != "market-aligner.selector-occurrence-review-admission.v1"
+            or body.get("authority_mode") != "selector_occurrence_only"
+            or body.get("application_authority") is not False
+            or body.get("release_authority") is not False
+            or body.get("profile_id") != task.profile_id
+            or body.get("job_key") != task.job_key
+            or body.get("refresh_event_id") != task.refresh_event_id
+            or body.get("refresh_event_idempotency_key")
+            != task.refresh_event_idempotency_key
+            or body.get("refresh_bridge_sha256") != task.refresh_bridge_sha256
+            or any(body.get(key) != value for key, value in identities.items())
+        ):
+            raise PublicResearchError("selector review receipt differs from current authority")
+        current = self.loader(task)
+        prior, _prior_dossier_bytes, prior_digest = self._load_prior(task)
+        prior_object = self._read_prior_object(prior)
+        if (
+            body.get("prior_dossier_sha256") != prior_digest
+            or body.get("prior_canonical_object_sha256")
+            != prior.canonical_vacancy_object_sha256
+            or body.get("current_canonical_object_sha256") != _sha256(current.body)
+        ):
+            raise PublicResearchError("selector review source authority changed")
+        map_sha = body.get("map_sha256")
+        if not isinstance(map_sha, str) or not _SHA256.fullmatch(map_sha):
+            raise PublicResearchError("selector review map identity is invalid")
+        map_path = self.root / "selector-review-maps" / f"{map_sha}.json"
+        map_bytes = _private_exact_file(
+            map_path, map_path.parent, label="admitted selector review map"
+        )
+        try:
+            map_document = json.loads(map_bytes)
+        except json.JSONDecodeError as exc:
+            raise PublicResearchError("admitted selector review map is invalid JSON") from exc
+        if (
+            map_bytes != _canonical_bytes(map_document)
+            or _sha256(map_bytes) != map_sha
+            or body.get("map_file_sha256") != map_sha
+        ):
+            raise PublicResearchError("admitted selector review map differs")
+        mapping = self._selector_map_rows(
+            prior, prior_object, current, map_document.get("rows")
+        )
+        self.last_selector_review = SelectorOccurrenceReview(
+            map_sha, map_path, semantic, _sha256(receipt_bytes),
+            self.selector_review_receipt_path, prior_digest, _sha256(current.body),
+        )
+        return mapping
+
+    def preflight(self, task: ResearchTask) -> None:
+        self._selector_map = self._load_admitted_selector_review(task)
+
+    def validate_completion(self, task: ResearchTask) -> None:
+        expected = dict(self._selector_map) if self._selector_map is not None else None
+        actual = self._load_admitted_selector_review(task)
+        if actual != expected:
+            raise PublicResearchError("selector review changed before completion")
+
     def _derive_plan(
         self,
         task: ResearchTask,
@@ -1134,7 +1426,18 @@ class RefreshDerivedResearchProvider:
                     != " ".join(excerpt.split())
                 ):
                     raise PublicResearchError("prior claim support differs from dossier")
-                current_selected = current.body[start:end]
+                reviewed_selector = (
+                    self._selector_map.get(support.selector, support.selector)
+                    if self._selector_map is not None
+                    else support.selector
+                )
+                reviewed_match = _BYTE_SELECTOR.fullmatch(reviewed_selector)
+                if reviewed_match is None:
+                    raise PublicResearchError("reviewed current selector is invalid")
+                current_start, current_end = (
+                    int(reviewed_match.group(1)), int(reviewed_match.group(2))
+                )
+                current_selected = current.body[current_start:current_end]
                 try:
                     current_excerpt = current_selected.decode("utf-8")
                 except UnicodeDecodeError as exc:
@@ -1142,7 +1445,7 @@ class RefreshDerivedResearchProvider:
                         "current support at prior selector is not UTF-8"
                     ) from exc
                 if (
-                    end > len(current.body)
+                    current_end > len(current.body)
                     or current_excerpt != support.excerpt
                     or _sha256(current_selected) != support.excerpt_sha256
                     or " ".join(claim.claim.split())
@@ -1154,7 +1457,7 @@ class RefreshDerivedResearchProvider:
                 planned_supports.append(
                     PlannedSupport(
                         citation.citation_id,
-                        support.selector,
+                        reviewed_selector,
                         support.excerpt,
                     )
                 )
@@ -1227,6 +1530,7 @@ class RefreshDerivedResearchProvider:
         return plan
 
     def research(self, task: ResearchTask) -> ResearchDossier:
+        self.preflight(task)
         current = self.loader(task)
         prior, _exact_dossier_bytes, prior_digest = self._load_prior(task)
         prior_object = self._read_prior_object(prior)
@@ -1262,4 +1566,5 @@ __all__ = [
     "SourceBoundResearchProvider",
     "RefreshDerivedResearchProvider",
     "RefreshPlanDerivation",
+    "SelectorOccurrenceReview",
 ]
