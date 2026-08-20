@@ -57,6 +57,27 @@ _JAA08_SCHEMA_TABLES = (
     "release_validation_receipts",
     "release_tokens",
 )
+_JAA_OPERATIONAL_SCHEMA_TABLES = (
+    "application_admissions",
+    "application_admission_references",
+    "application_forward_validations",
+)
+_JAA_OPERATIONAL_SUBMISSION_SCHEMA_TABLES = (
+    "authenticated_time_evidence",
+    "exact_package_authority_grants",
+    "exact_package_authority_uses",
+    "submission_attempts",
+    "jaa_events",
+    "jaa_event_receipts",
+    "jaa_event_outbox",
+    "unsupported_route_handoffs",
+)
+_JAA_OPERATIONAL_ROLLOVER_SCHEMA_TABLES = (
+    "release_rollover_operations",
+)
+_JAA_OPERATIONAL_RECONCILIATION_SCHEMA_TABLES = (
+    "exact_package_reconciliation_receipts",
+)
 JAA05_INSTALLED_SCHEMA_SHA256 = (
     "3c4e4fe4d934b2995d8ccde907c59bfb9abc56615c193d081e6b07ca0f341dda"
 )
@@ -232,6 +253,158 @@ def verify_jaa08_installed_schema(conn: sqlite3.Connection) -> str:
             "installed JAA-08 schema or trigger set does not match the checked contract"
         )
     return digest
+
+
+def jaa_operational_installed_schema_digest(conn: sqlite3.Connection) -> str:
+    """Hash every table, index and trigger owned by operational admission."""
+    placeholders = ",".join("?" for _ in _JAA_OPERATIONAL_SCHEMA_TABLES)
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql
+            FROM sqlite_schema
+            WHERE sql IS NOT NULL AND tbl_name IN ({placeholders})
+            ORDER BY type,name""",
+        _JAA_OPERATIONAL_SCHEMA_TABLES,
+    ).fetchall()
+    document = json.dumps(
+        [list(row) for row in rows],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"jaa-operational-installed-schema-v1\0" + document).hexdigest()
+
+
+def verify_jaa_operational_installed_schema(conn: sqlite3.Connection) -> str:
+    """Compare installed operational DDL with a clean application of migration 9."""
+    actual = jaa_operational_installed_schema_digest(conn)
+    witness = sqlite3.connect(":memory:")
+    try:
+        witness.execute("PRAGMA foreign_keys=ON")
+        for statement in _JAA_OPERATIONAL_HANDOFF_MIGRATION.statements:
+            witness.execute(statement)
+        expected = jaa_operational_installed_schema_digest(witness)
+    finally:
+        witness.close()
+    if actual != expected:
+        raise RuntimeError(
+            "installed JAA operational admission schema differs from migration 9"
+        )
+    return actual
+
+
+def jaa_operational_submission_schema_digest(conn: sqlite3.Connection) -> str:
+    placeholders = ",".join("?" for _ in _JAA_OPERATIONAL_SUBMISSION_SCHEMA_TABLES)
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql
+            FROM sqlite_schema
+            WHERE sql IS NOT NULL AND tbl_name IN ({placeholders})
+            ORDER BY type,name""",
+        _JAA_OPERATIONAL_SUBMISSION_SCHEMA_TABLES,
+    ).fetchall()
+    document = json.dumps(
+        [list(row) for row in rows],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"jaa-operational-submission-schema-v1\0" + document).hexdigest()
+
+
+def verify_jaa_operational_submission_schema(conn: sqlite3.Connection) -> str:
+    actual = jaa_operational_submission_schema_digest(conn)
+    witness = sqlite3.connect(":memory:")
+    try:
+        witness.execute("PRAGMA foreign_keys=ON")
+        for statement in _JAA_OPERATIONAL_SUBMISSION_MIGRATION.statements:
+            witness.execute(statement)
+        for statement in _JAA_OPERATIONAL_REVIEW_RELEASE_JOIN_MIGRATION.statements:
+            witness.execute(statement)
+        expected = jaa_operational_submission_schema_digest(witness)
+    finally:
+        witness.close()
+    if actual != expected:
+        raise RuntimeError("installed JAA operational submission schema differs")
+    return actual
+
+
+def jaa_operational_rollover_schema_digest(conn: sqlite3.Connection) -> str:
+    """Hash the durable O-14 coordinator table, indexes and guards."""
+
+    placeholders = ",".join("?" for _ in _JAA_OPERATIONAL_ROLLOVER_SCHEMA_TABLES)
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql
+            FROM sqlite_schema
+            WHERE sql IS NOT NULL AND tbl_name IN ({placeholders})
+            ORDER BY type,name""",
+        _JAA_OPERATIONAL_ROLLOVER_SCHEMA_TABLES,
+    ).fetchall()
+    document = json.dumps(
+        [list(row) for row in rows],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"jaa-operational-rollover-schema-v1\0" + document).hexdigest()
+
+
+def verify_jaa_operational_rollover_schema(conn: sqlite3.Connection) -> str:
+    """Compare installed O-14 DDL with a clean application of migration 11."""
+
+    actual = jaa_operational_rollover_schema_digest(conn)
+    witness = sqlite3.connect(":memory:")
+    try:
+        witness.execute("PRAGMA foreign_keys=ON")
+        for statement in _JAA_OPERATIONAL_ROLLOVER_MIGRATION.statements:
+            witness.execute(statement)
+        expected = jaa_operational_rollover_schema_digest(witness)
+    finally:
+        witness.close()
+    if actual != expected:
+        raise RuntimeError("installed JAA operational rollover schema differs")
+    return actual
+
+
+def jaa_operational_reconciliation_schema_digest(conn: sqlite3.Connection) -> str:
+    """Hash exact reconciliation-byte storage and its immutability guards."""
+
+    placeholders = ",".join(
+        "?" for _ in _JAA_OPERATIONAL_RECONCILIATION_SCHEMA_TABLES
+    )
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql
+            FROM sqlite_schema
+            WHERE sql IS NOT NULL AND tbl_name IN ({placeholders})
+            ORDER BY type,name""",
+        _JAA_OPERATIONAL_RECONCILIATION_SCHEMA_TABLES,
+    ).fetchall()
+    document = json.dumps(
+        [list(row) for row in rows],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(
+        b"jaa-operational-reconciliation-schema-v1\0" + document
+    ).hexdigest()
+
+
+def verify_jaa_operational_reconciliation_schema(conn: sqlite3.Connection) -> str:
+    actual = jaa_operational_reconciliation_schema_digest(conn)
+    witness = sqlite3.connect(":memory:")
+    try:
+        witness.execute("PRAGMA foreign_keys=ON")
+        for statement in _JAA_OPERATIONAL_RECONCILIATION_MIGRATION.statements:
+            witness.execute(statement)
+        expected = jaa_operational_reconciliation_schema_digest(witness)
+    finally:
+        witness.close()
+    if actual != expected:
+        raise RuntimeError("installed JAA reconciliation receipt schema differs")
+    return actual
 
 
 def _verify_jaa00_legacy_boundary(conn: sqlite3.Connection) -> None:
@@ -1395,6 +1568,839 @@ _JAA_08_RELEASE_GATE_MIGRATION = Migration(
 )
 
 
+_JAA_OPERATIONAL_HANDOFF_MIGRATION = Migration(
+    9,
+    "jaa_operational_market_aligner_handoff_v1",
+    (
+        """CREATE TABLE application_admissions(
+             application_id TEXT PRIMARY KEY
+               CHECK(length(trim(application_id))>0),
+             admission_kind TEXT NOT NULL CHECK(admission_kind IN
+               ('market_aligner_handoff_v1','base_v1_compatibility',
+                'legacy_scored_jsonl')),
+             environment TEXT NOT NULL CHECK(environment IN
+               ('production','synthetic','legacy')),
+             authority_scope TEXT NOT NULL CHECK(authority_scope IN
+               ('production','synthetic','none')),
+             emission_profile TEXT CHECK(emission_profile IS NULL OR
+               emission_profile IN ('strict_v1','base_v1_compatibility')),
+             logical_identity_json TEXT,
+             logical_identity_sha256 TEXT UNIQUE
+               CHECK(logical_identity_sha256 IS NULL OR
+                 (length(logical_identity_sha256)=64
+                  AND logical_identity_sha256 NOT GLOB '*[^0-9a-f]*')),
+             trust_mode TEXT NOT NULL CHECK(trust_mode IN
+               ('protected_local_outbox','authenticated_attestation','synthetic_direct',
+                'legacy_scored_jsonl')),
+             trust_root_id TEXT NOT NULL CHECK(length(trim(trust_root_id))>0),
+             admission_context_bytes BLOB,
+             admission_context_sha256 TEXT UNIQUE,
+             context_authenticator_sha256 TEXT,
+             admitted_at TEXT NOT NULL CHECK(length(admitted_at)=20),
+             producer_product TEXT,
+             producer_commit_sha TEXT,
+             profile_id TEXT,
+             profile_version TEXT,
+             job_key TEXT NOT NULL CHECK(length(trim(job_key)) > 0),
+             handoff_root_sha256 TEXT UNIQUE,
+             payload_sha256 TEXT,
+             vacancy_snapshot_sha256 TEXT,
+             original_bytes BLOB NOT NULL CHECK(typeof(original_bytes)='blob'),
+             original_bytes_sha256 TEXT NOT NULL
+               CHECK(length(original_bytes_sha256)=64
+                 AND original_bytes_sha256 NOT GLOB '*[^0-9a-f]*'),
+             verification_receipt_bytes BLOB NOT NULL
+               CHECK(typeof(verification_receipt_bytes)='blob'),
+             verification_receipt_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(verification_receipt_sha256)=64
+                 AND verification_receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+             vacancy_source_identity TEXT NOT NULL UNIQUE,
+             reference_count INTEGER NOT NULL CHECK(reference_count>=0),
+             sealed INTEGER NOT NULL DEFAULT 0 CHECK(sealed IN (0,1)),
+             CHECK(
+               (
+                 admission_kind IN
+                   ('market_aligner_handoff_v1','base_v1_compatibility')
+                 AND application_id='app_' || logical_identity_sha256
+                 AND logical_identity_json IS NOT NULL
+                 AND profile_id IS NOT NULL AND length(trim(profile_id))>0
+                 AND profile_version IS NOT NULL AND length(trim(profile_version))>0
+                 AND producer_product='market-aligner'
+                 AND producer_commit_sha IS NOT NULL AND length(producer_commit_sha)=40
+                 AND handoff_root_sha256 IS NOT NULL
+                 AND length(handoff_root_sha256)=64
+                 AND handoff_root_sha256 NOT GLOB '*[^0-9a-f]*'
+                 AND payload_sha256 IS NOT NULL
+                 AND length(payload_sha256)=64
+                 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+                 AND vacancy_snapshot_sha256 IS NOT NULL
+                 AND length(vacancy_snapshot_sha256)=64
+                 AND vacancy_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'
+                 AND original_bytes_sha256=handoff_root_sha256
+                 AND vacancy_source_identity=
+                   'market-aligner-handoff:' || handoff_root_sha256
+                 AND reference_count>0
+                 AND (
+                   (trust_mode IN
+                      ('protected_local_outbox','authenticated_attestation')
+                    AND admission_context_bytes IS NOT NULL
+                    AND admission_context_sha256 IS NOT NULL
+                    AND context_authenticator_sha256 IS NOT NULL)
+                   OR (environment='synthetic' AND authority_scope='none'
+                       AND trust_mode='synthetic_direct'
+                       AND admission_context_bytes IS NULL
+                       AND admission_context_sha256 IS NULL
+                       AND context_authenticator_sha256 IS NULL)
+                 )
+                 AND ((admission_kind='market_aligner_handoff_v1'
+                       AND emission_profile='strict_v1'
+                       AND ((trust_mode='synthetic_direct' AND authority_scope='none')
+                            OR (trust_mode<>'synthetic_direct'
+                                AND authority_scope=environment)))
+                      OR (admission_kind='base_v1_compatibility'
+                          AND emission_profile='base_v1_compatibility'
+                          AND authority_scope='none'))
+               ) OR (
+                 admission_kind='legacy_scored_jsonl'
+                 AND application_id='legacy_' || original_bytes_sha256
+                 AND emission_profile IS NULL
+                 AND logical_identity_json IS NULL
+                 AND logical_identity_sha256 IS NULL
+                 AND environment='legacy' AND authority_scope='none'
+                 AND trust_mode='legacy_scored_jsonl'
+                 AND trust_root_id='legacy_scored_jsonl'
+                 AND admission_context_bytes IS NULL
+                 AND admission_context_sha256 IS NULL
+                 AND context_authenticator_sha256 IS NULL
+                 AND producer_product IS NULL AND producer_commit_sha IS NULL
+                 AND profile_id IS NULL AND profile_version IS NULL
+                 AND handoff_root_sha256 IS NULL AND payload_sha256 IS NULL
+                 AND vacancy_snapshot_sha256 IS NULL
+                 AND vacancy_source_identity=
+                   'legacy-scored-jsonl:' || original_bytes_sha256
+                 AND reference_count=0
+               )
+             )
+           )""",
+        """CREATE TABLE application_admission_references(
+             application_id TEXT NOT NULL
+               REFERENCES application_admissions(application_id)
+               ON DELETE RESTRICT,
+             reference_key TEXT NOT NULL CHECK(length(trim(reference_key))>0),
+             reference_kind TEXT NOT NULL CHECK(length(trim(reference_kind))>0),
+             referenced_sha256 TEXT NOT NULL
+               CHECK(length(referenced_sha256)=64
+                 AND referenced_sha256 NOT GLOB '*[^0-9a-f]*'),
+             resolved_bytes_sha256 TEXT NOT NULL
+               CHECK(length(resolved_bytes_sha256)=64
+                 AND resolved_bytes_sha256 NOT GLOB '*[^0-9a-f]*'),
+             byte_length INTEGER NOT NULL CHECK(byte_length>=0),
+             type_id TEXT NOT NULL CHECK(length(trim(type_id))>0),
+             schema_version TEXT NOT NULL CHECK(length(trim(schema_version))>0),
+             issuer_id TEXT NOT NULL CHECK(length(trim(issuer_id))>0),
+             subject_json TEXT NOT NULL,
+             issued_at TEXT NOT NULL CHECK(length(issued_at)=20),
+             valid_until TEXT CHECK(valid_until IS NULL OR length(valid_until)=20),
+             freshness_class TEXT NOT NULL CHECK(freshness_class IN
+               ('immutable','active_revision','valid_interval','policy_interval',
+                'vacancy_age','dossier_age')),
+             metadata_bytes BLOB NOT NULL CHECK(typeof(metadata_bytes)='blob'),
+             metadata_sha256 TEXT NOT NULL
+               CHECK(length(metadata_sha256)=64
+                 AND metadata_sha256 NOT GLOB '*[^0-9a-f]*'),
+             resolver_identity_sha256 TEXT NOT NULL
+               CHECK(length(resolver_identity_sha256)=64
+                 AND resolver_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+             trust_root_id TEXT NOT NULL CHECK(length(trim(trust_root_id))>0),
+             trust_proof_sha256 TEXT NOT NULL
+               CHECK(length(trust_proof_sha256)=64
+                 AND trust_proof_sha256 NOT GLOB '*[^0-9a-f]*'),
+             PRIMARY KEY(application_id,reference_key),
+             CHECK(referenced_sha256=resolved_bytes_sha256),
+             CHECK((freshness_class='immutable' AND valid_until IS NULL) OR
+                   (freshness_class<>'immutable' AND valid_until IS NOT NULL))
+           )""",
+        """CREATE TABLE application_forward_validations(
+             validation_sha256 TEXT PRIMARY KEY
+               CHECK(length(validation_sha256)=64
+                 AND validation_sha256 NOT GLOB '*[^0-9a-f]*'),
+             application_id TEXT NOT NULL
+               REFERENCES application_admissions(application_id) ON DELETE RESTRICT,
+             boundary TEXT NOT NULL CHECK(boundary IN
+               ('strategy','review','release_readiness','authority','executor')),
+             evaluated_at TEXT NOT NULL CHECK(length(evaluated_at)=20),
+             receipt_bytes BLOB NOT NULL CHECK(typeof(receipt_bytes)='blob'),
+             reference_count INTEGER NOT NULL CHECK(reference_count>0),
+             UNIQUE(application_id,boundary,evaluated_at)
+           )""",
+        """CREATE TRIGGER application_admission_reference_unsealed_insert
+             BEFORE INSERT ON application_admission_references
+             WHEN COALESCE((
+               SELECT sealed FROM application_admissions
+               WHERE application_id=NEW.application_id
+             ),1)<>0
+             BEGIN
+               SELECT RAISE(ABORT,'admission references require an unsealed admission');
+             END""",
+        """CREATE TRIGGER application_admission_seal_guard
+             BEFORE UPDATE ON application_admissions
+             WHEN NOT (
+               OLD.sealed=0 AND NEW.sealed=1
+               AND NEW.application_id=OLD.application_id
+               AND NEW.logical_identity_sha256 IS OLD.logical_identity_sha256
+               AND NEW.admission_kind=OLD.admission_kind
+               AND NEW.environment=OLD.environment
+               AND NEW.authority_scope=OLD.authority_scope
+               AND NEW.emission_profile IS OLD.emission_profile
+               AND NEW.logical_identity_json IS OLD.logical_identity_json
+               AND NEW.trust_mode=OLD.trust_mode
+               AND NEW.trust_root_id=OLD.trust_root_id
+               AND NEW.admission_context_bytes IS OLD.admission_context_bytes
+               AND NEW.admission_context_sha256 IS OLD.admission_context_sha256
+               AND NEW.context_authenticator_sha256 IS OLD.context_authenticator_sha256
+               AND NEW.admitted_at=OLD.admitted_at
+               AND NEW.producer_product IS OLD.producer_product
+               AND NEW.producer_commit_sha IS OLD.producer_commit_sha
+               AND NEW.profile_id IS OLD.profile_id
+               AND NEW.profile_version IS OLD.profile_version
+               AND NEW.job_key=OLD.job_key
+               AND NEW.handoff_root_sha256 IS OLD.handoff_root_sha256
+               AND NEW.payload_sha256 IS OLD.payload_sha256
+               AND NEW.vacancy_snapshot_sha256 IS OLD.vacancy_snapshot_sha256
+               AND NEW.original_bytes=OLD.original_bytes
+               AND NEW.original_bytes_sha256=OLD.original_bytes_sha256
+               AND NEW.verification_receipt_bytes=OLD.verification_receipt_bytes
+               AND NEW.verification_receipt_sha256=OLD.verification_receipt_sha256
+               AND NEW.vacancy_source_identity=OLD.vacancy_source_identity
+               AND NEW.reference_count=OLD.reference_count
+               AND NEW.reference_count=(
+                 SELECT COUNT(*) FROM application_admission_references
+                 WHERE application_id=OLD.application_id
+               )
+             )
+             BEGIN SELECT RAISE(ABORT,'application admission update is invalid'); END""",
+        """CREATE TRIGGER application_admission_immutable_delete
+             BEFORE DELETE ON application_admissions
+             BEGIN SELECT RAISE(ABORT,'application admissions are immutable'); END""",
+        """CREATE TRIGGER application_admission_reference_immutable_update
+             BEFORE UPDATE ON application_admission_references
+             BEGIN SELECT RAISE(ABORT,'admission references are immutable'); END""",
+        """CREATE TRIGGER application_admission_reference_immutable_delete
+             BEFORE DELETE ON application_admission_references
+             BEGIN SELECT RAISE(ABORT,'admission references are immutable'); END""",
+        """CREATE TRIGGER application_forward_validation_immutable_update
+             BEFORE UPDATE ON application_forward_validations
+             BEGIN SELECT RAISE(ABORT,'forward validations are immutable'); END""",
+        """CREATE TRIGGER application_forward_validation_immutable_delete
+             BEFORE DELETE ON application_forward_validations
+             BEGIN SELECT RAISE(ABORT,'forward validations are immutable'); END""",
+    ),
+)
+
+
+_JAA_OPERATIONAL_SUBMISSION_MIGRATION = Migration(
+    10,
+    "jaa_operational_exact_package_authority_and_events_v1",
+    (
+        """CREATE TABLE authenticated_time_evidence(
+             receipt_sha256 TEXT PRIMARY KEY
+               CHECK(length(receipt_sha256)=64
+                 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+             receipt_bytes BLOB NOT NULL CHECK(typeof(receipt_bytes)='blob'),
+             environment TEXT NOT NULL CHECK(environment IN ('synthetic','production')),
+             purpose TEXT NOT NULL CHECK(purpose IN
+               ('handoff_admission','forward_boundary','review_material',
+                'authority_grant','click_reservation','reconciliation',
+                'route_handoff','phase_event')),
+             subject_sha256 TEXT NOT NULL
+               CHECK(length(subject_sha256)=64
+                 AND subject_sha256 NOT GLOB '*[^0-9a-f]*'),
+             evaluated_at TEXT NOT NULL CHECK(length(evaluated_at)=20),
+             witness_identity_sha256 TEXT NOT NULL
+               CHECK(length(witness_identity_sha256)=64
+                 AND witness_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+             trust_root_id TEXT NOT NULL CHECK(length(trim(trust_root_id))>0),
+             consumer_kind TEXT NOT NULL CHECK(consumer_kind IN
+               ('admission','forward_validation','review_request',
+                'authority_grant','submission_attempt','reconciliation',
+                'route_handoff','phase_event')),
+             consumer_id TEXT NOT NULL CHECK(length(trim(consumer_id))>0),
+             UNIQUE(consumer_kind,consumer_id)
+           )""",
+        """CREATE TABLE exact_package_authority_grants(
+             authority_id TEXT PRIMARY KEY CHECK(length(trim(authority_id))>0),
+             grant_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(grant_sha256)=64 AND grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+             grant_bytes BLOB NOT NULL CHECK(typeof(grant_bytes)='blob'),
+             application_id TEXT NOT NULL
+               REFERENCES application_admissions(application_id) ON DELETE RESTRICT,
+             handoff_root_sha256 TEXT NOT NULL,
+             application_source_identity TEXT NOT NULL,
+             artifact_set_sha256 TEXT NOT NULL,
+             cv_pdf_sha256 TEXT NOT NULL,
+             cover_letter_pdf_sha256 TEXT NOT NULL,
+             form_answers_sha256 TEXT NOT NULL,
+             form_package_sha256 TEXT NOT NULL,
+             inventory_sha256 TEXT NOT NULL,
+             employer_assessment_receipt_sha256 TEXT NOT NULL,
+             operator_approval_receipt_sha256 TEXT NOT NULL,
+             legal_consent_receipt_sha256 TEXT NOT NULL,
+             issuer_trust_receipt_sha256 TEXT NOT NULL,
+             approval_subject_bytes BLOB NOT NULL
+               CHECK(typeof(approval_subject_bytes)='blob'),
+             approval_subject_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(approval_subject_sha256)=64
+                 AND approval_subject_sha256 NOT GLOB '*[^0-9a-f]*'),
+             employer_review_runtime_bytes BLOB NOT NULL
+               CHECK(typeof(employer_review_runtime_bytes)='blob'),
+             employer_review_runtime_sha256 TEXT NOT NULL
+               CHECK(length(employer_review_runtime_sha256)=64
+                 AND employer_review_runtime_sha256 NOT GLOB '*[^0-9a-f]*'),
+             environment TEXT NOT NULL CHECK(environment='synthetic'),
+             provider TEXT NOT NULL CHECK(provider='greenhouse'),
+             route_id TEXT NOT NULL CHECK(length(trim(route_id))>0),
+             route_origin TEXT NOT NULL CHECK(length(trim(route_origin))>0),
+             page_url TEXT NOT NULL CHECK(length(trim(page_url))>0),
+             form_action TEXT NOT NULL CHECK(length(trim(form_action))>0),
+             form_method TEXT NOT NULL CHECK(form_method='post'),
+             form_enctype TEXT NOT NULL CHECK(form_enctype='multipart/form-data'),
+             submit_control_fingerprint_sha256 TEXT NOT NULL
+               CHECK(length(submit_control_fingerprint_sha256)=64
+                 AND submit_control_fingerprint_sha256 NOT GLOB '*[^0-9a-f]*'),
+             browser_runtime_identity_sha256 TEXT NOT NULL
+               CHECK(length(browser_runtime_identity_sha256)=64
+                 AND browser_runtime_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+             grant_time_receipt_sha256 TEXT NOT NULL UNIQUE
+               REFERENCES authenticated_time_evidence(receipt_sha256) ON DELETE RESTRICT,
+             issued_at TEXT NOT NULL CHECK(length(issued_at)=20),
+             expires_at TEXT NOT NULL CHECK(length(expires_at)=20),
+             CHECK(expires_at>issued_at)
+           )""",
+        """CREATE TABLE exact_package_authority_uses(
+             authority_id TEXT PRIMARY KEY
+               REFERENCES exact_package_authority_grants(authority_id) ON DELETE RESTRICT,
+             grant_sha256 TEXT NOT NULL UNIQUE,
+             use_record_bytes BLOB NOT NULL CHECK(typeof(use_record_bytes)='blob'),
+             use_record_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(use_record_sha256)=64
+                 AND use_record_sha256 NOT GLOB '*[^0-9a-f]*'),
+             state TEXT NOT NULL CHECK(state IN
+               ('pending','click_intent_recorded','reconciled','revoked')),
+             version INTEGER NOT NULL CHECK(version IN (1,2,3)),
+             attempt_id TEXT UNIQUE,
+             click_intent_sha256 TEXT UNIQUE,
+             reconciliation_receipt_sha256 TEXT,
+             reconciliation_time_receipt_sha256 TEXT UNIQUE
+               REFERENCES authenticated_time_evidence(receipt_sha256) ON DELETE RESTRICT,
+             reconciliation_state TEXT CHECK(reconciliation_state IS NULL OR
+               reconciliation_state IN ('positive','ambiguous','negative','unknown')),
+             revocation_reason TEXT,
+             revoked_at TEXT,
+             updated_at TEXT NOT NULL CHECK(length(updated_at)=20),
+             CHECK(
+               (state='pending' AND version=1 AND attempt_id IS NULL
+                AND click_intent_sha256 IS NULL
+                AND reconciliation_receipt_sha256 IS NULL
+                AND reconciliation_time_receipt_sha256 IS NULL
+                AND reconciliation_state IS NULL
+                AND revocation_reason IS NULL AND revoked_at IS NULL)
+               OR
+               (state='click_intent_recorded' AND version=2
+                AND attempt_id IS NOT NULL AND click_intent_sha256 IS NOT NULL
+                AND reconciliation_receipt_sha256 IS NULL
+                AND reconciliation_time_receipt_sha256 IS NULL
+                AND reconciliation_state IS NULL
+                AND revocation_reason IS NULL AND revoked_at IS NULL)
+               OR
+               (state='reconciled' AND version=3
+                AND attempt_id IS NOT NULL AND click_intent_sha256 IS NOT NULL
+                AND reconciliation_receipt_sha256 IS NOT NULL
+                AND reconciliation_time_receipt_sha256 IS NOT NULL
+                AND reconciliation_state IS NOT NULL
+                AND revocation_reason IS NULL AND revoked_at IS NULL)
+               OR
+               (state='revoked' AND version=2 AND attempt_id IS NULL
+                AND click_intent_sha256 IS NULL
+                AND reconciliation_receipt_sha256 IS NULL
+                AND reconciliation_time_receipt_sha256 IS NULL
+                AND reconciliation_state IS NULL
+                AND revocation_reason IS NOT NULL AND revoked_at IS NOT NULL)
+             )
+           )""",
+        """CREATE TABLE submission_attempts(
+             attempt_id TEXT PRIMARY KEY CHECK(length(trim(attempt_id))>0),
+             authority_id TEXT NOT NULL
+               REFERENCES exact_package_authority_grants(authority_id) ON DELETE RESTRICT,
+             grant_sha256 TEXT NOT NULL UNIQUE,
+             authority_use_version INTEGER NOT NULL CHECK(authority_use_version=2),
+             click_intent_bytes BLOB NOT NULL CHECK(typeof(click_intent_bytes)='blob'),
+             click_intent_sha256 TEXT NOT NULL UNIQUE,
+             application_id TEXT NOT NULL,
+             handoff_root_sha256 TEXT NOT NULL,
+             artifact_set_sha256 TEXT NOT NULL,
+             form_answers_sha256 TEXT NOT NULL,
+             form_submission_bytes BLOB NOT NULL
+               CHECK(typeof(form_submission_bytes)='blob'),
+             form_submission_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(form_submission_sha256)=64
+                 AND form_submission_sha256 NOT GLOB '*[^0-9a-f]*'),
+             provider TEXT NOT NULL CHECK(provider='greenhouse'),
+             route_id TEXT NOT NULL,
+             route_origin TEXT NOT NULL,
+             environment TEXT NOT NULL CHECK(environment='synthetic'),
+             page_url TEXT NOT NULL,
+             form_action TEXT NOT NULL,
+             form_method TEXT NOT NULL CHECK(form_method='post'),
+             form_enctype TEXT NOT NULL CHECK(form_enctype='multipart/form-data'),
+             submit_control_fingerprint_sha256 TEXT NOT NULL,
+             browser_runtime_identity_sha256 TEXT NOT NULL,
+             time_receipt_sha256 TEXT NOT NULL UNIQUE
+               REFERENCES authenticated_time_evidence(receipt_sha256) ON DELETE RESTRICT,
+             recorded_at TEXT NOT NULL CHECK(length(recorded_at)=20)
+           )""",
+        """CREATE TABLE jaa_events(
+             event_id TEXT PRIMARY KEY CHECK(length(trim(event_id))>0),
+             application_id TEXT NOT NULL
+               REFERENCES application_admissions(application_id) ON DELETE RESTRICT,
+             handoff_root_sha256 TEXT NOT NULL,
+             event_type TEXT NOT NULL CHECK(event_type IN
+               ('strategy_started','artifacts_ready','release_blocked','release_ready',
+                'submission_authorized','submission_attempted','receipt_captured',
+                'status_changed','outcome_recorded')),
+             transition_sequence INTEGER NOT NULL CHECK(transition_sequence>0),
+             detail_bytes BLOB NOT NULL CHECK(typeof(detail_bytes)='blob'),
+             detail_sha256 TEXT NOT NULL,
+             envelope_bytes BLOB NOT NULL CHECK(typeof(envelope_bytes)='blob'),
+             envelope_root_sha256 TEXT NOT NULL UNIQUE,
+             occurred_at TEXT NOT NULL CHECK(length(occurred_at)=20),
+             UNIQUE(application_id,handoff_root_sha256,transition_sequence)
+           )""",
+        """CREATE TABLE jaa_event_receipts(
+             object_sha256 TEXT PRIMARY KEY
+               CHECK(length(object_sha256)=64
+                 AND object_sha256 NOT GLOB '*[^0-9a-f]*'),
+             exact_bytes BLOB NOT NULL CHECK(typeof(exact_bytes)='blob'),
+             event_id TEXT NOT NULL UNIQUE
+               REFERENCES jaa_events(event_id) ON DELETE RESTRICT,
+             environment TEXT NOT NULL CHECK(environment IN ('synthetic','production')),
+             reference_key TEXT NOT NULL CHECK(reference_key IN
+               ('event.state_receipt','event.outcome_receipt')),
+             type_id TEXT NOT NULL CHECK(type_id IN
+               ('provider_state_receipt','application_outcome_receipt')),
+             schema_version TEXT NOT NULL CHECK(schema_version IN
+               ('jaa.provider-state-receipt.v1','jaa.application-outcome-receipt.v1')),
+             subject_json TEXT NOT NULL CHECK(length(subject_json)>2),
+             issued_at TEXT NOT NULL CHECK(length(issued_at)=20),
+             valid_until TEXT CHECK(valid_until IS NULL),
+             issuer_id TEXT NOT NULL CHECK(length(trim(issuer_id))>0),
+             metadata_bytes BLOB NOT NULL CHECK(typeof(metadata_bytes)='blob'),
+             metadata_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(metadata_sha256)=64
+                 AND metadata_sha256 NOT GLOB '*[^0-9a-f]*'),
+             resolver_identity_sha256 TEXT NOT NULL
+               CHECK(length(resolver_identity_sha256)=64
+                 AND resolver_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+             trust_root_id TEXT NOT NULL CHECK(length(trim(trust_root_id))>0),
+             trust_proof_sha256 TEXT NOT NULL
+               CHECK(length(trust_proof_sha256)=64
+                 AND trust_proof_sha256 NOT GLOB '*[^0-9a-f]*'),
+             occurred_at TEXT NOT NULL CHECK(length(occurred_at)=20),
+             CHECK(issued_at<=occurred_at),
+             CHECK(
+               (reference_key='event.state_receipt'
+                AND type_id='provider_state_receipt'
+                AND schema_version='jaa.provider-state-receipt.v1')
+               OR
+               (reference_key='event.outcome_receipt'
+                AND type_id='application_outcome_receipt'
+                AND schema_version='jaa.application-outcome-receipt.v1')
+             )
+           )""",
+        """CREATE TABLE jaa_event_outbox(
+             event_id TEXT PRIMARY KEY
+               REFERENCES jaa_events(event_id) ON DELETE RESTRICT,
+             state TEXT NOT NULL CHECK(state IN ('pending','delivered')),
+             delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK(delivery_attempts>=0),
+             delivered_at TEXT,
+             CHECK((state='pending' AND delivered_at IS NULL) OR
+                   (state='delivered' AND delivered_at IS NOT NULL))
+           )""",
+        """CREATE TABLE unsupported_route_handoffs(
+             handoff_sha256 TEXT PRIMARY KEY
+               CHECK(length(handoff_sha256)=64
+                 AND handoff_sha256 NOT GLOB '*[^0-9a-f]*'),
+             handoff_bytes BLOB NOT NULL CHECK(typeof(handoff_bytes)='blob'),
+             application_id TEXT,
+             classification TEXT NOT NULL CHECK(classification IN
+               ('unsupported_provider_or_widget','login','mfa','captcha',
+                'terms_or_rate_limit','consent_missing_or_changed','dom_drift',
+                'post_click_reconciliation')),
+             browser_use_permitted INTEGER NOT NULL CHECK(browser_use_permitted IN (0,1)),
+             time_receipt_sha256 TEXT NOT NULL UNIQUE
+               REFERENCES authenticated_time_evidence(receipt_sha256) ON DELETE RESTRICT,
+             created_at TEXT NOT NULL CHECK(length(created_at)=20),
+             CHECK(browser_use_permitted=0 OR classification='unsupported_provider_or_widget')
+           )""",
+        """CREATE TRIGGER exact_package_grant_immutable_update
+             BEFORE UPDATE ON exact_package_authority_grants
+             BEGIN SELECT RAISE(ABORT,'exact-package grants are immutable'); END""",
+        """CREATE TRIGGER authenticated_time_evidence_immutable_update
+             BEFORE UPDATE ON authenticated_time_evidence
+             BEGIN SELECT RAISE(ABORT,'authenticated time evidence is immutable'); END""",
+        """CREATE TRIGGER authenticated_time_evidence_immutable_delete
+             BEFORE DELETE ON authenticated_time_evidence
+             BEGIN SELECT RAISE(ABORT,'authenticated time evidence is immutable'); END""",
+        """CREATE TRIGGER exact_package_grant_immutable_delete
+             BEFORE DELETE ON exact_package_authority_grants
+             BEGIN SELECT RAISE(ABORT,'exact-package grants are immutable'); END""",
+        """CREATE TRIGGER exact_package_use_transition_guard
+             BEFORE UPDATE ON exact_package_authority_uses
+             WHEN NOT (
+               NEW.authority_id=OLD.authority_id AND NEW.grant_sha256=OLD.grant_sha256
+               AND (
+                 (OLD.state='pending' AND OLD.version=1
+                  AND NEW.state='click_intent_recorded' AND NEW.version=2)
+                 OR
+                 (OLD.state='pending' AND OLD.version=1
+                  AND NEW.state='revoked' AND NEW.version=2)
+                 OR
+                 (OLD.state='click_intent_recorded' AND OLD.version=2
+                  AND NEW.state='reconciled' AND NEW.version=3)
+               )
+             )
+             BEGIN SELECT RAISE(ABORT,'authority use transition is invalid'); END""",
+        """CREATE TRIGGER exact_package_use_immutable_delete
+             BEFORE DELETE ON exact_package_authority_uses
+             BEGIN SELECT RAISE(ABORT,'authority use records cannot be deleted'); END""",
+        """CREATE TRIGGER submission_attempt_immutable_update
+             BEFORE UPDATE ON submission_attempts
+             BEGIN SELECT RAISE(ABORT,'submission attempts are immutable'); END""",
+        """CREATE TRIGGER submission_attempt_immutable_delete
+             BEFORE DELETE ON submission_attempts
+             BEGIN SELECT RAISE(ABORT,'submission attempts are immutable'); END""",
+        """CREATE TRIGGER jaa_event_immutable_update
+             BEFORE UPDATE ON jaa_events
+             BEGIN SELECT RAISE(ABORT,'JAA events are immutable'); END""",
+        """CREATE TRIGGER jaa_event_immutable_delete
+             BEFORE DELETE ON jaa_events
+             BEGIN SELECT RAISE(ABORT,'JAA events are immutable'); END""",
+        """CREATE TRIGGER jaa_event_receipt_immutable_update
+             BEFORE UPDATE ON jaa_event_receipts
+             BEGIN SELECT RAISE(ABORT,'JAA event receipts are immutable'); END""",
+        """CREATE TRIGGER jaa_event_receipt_immutable_delete
+             BEFORE DELETE ON jaa_event_receipts
+             BEGIN SELECT RAISE(ABORT,'JAA event receipts are immutable'); END""",
+        """CREATE TRIGGER unsupported_route_handoff_immutable_update
+             BEFORE UPDATE ON unsupported_route_handoffs
+             BEGIN SELECT RAISE(ABORT,'route handoffs are immutable'); END""",
+        """CREATE TRIGGER unsupported_route_handoff_immutable_delete
+             BEFORE DELETE ON unsupported_route_handoffs
+             BEGIN SELECT RAISE(ABORT,'route handoffs are immutable'); END""",
+    ),
+)
+
+
+_JAA_OPERATIONAL_ROLLOVER_MIGRATION = Migration(
+    11,
+    "jaa_operational_release_rollover_v1",
+    (
+        """CREATE TABLE release_rollover_operations(
+             operation_id TEXT PRIMARY KEY
+               CHECK(length(operation_id)=69
+                 AND substr(operation_id,1,5)='roll_'
+                 AND substr(operation_id,6) NOT GLOB '*[^0-9a-f]*'),
+             request_bytes BLOB NOT NULL CHECK(typeof(request_bytes)='blob'),
+             request_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(request_sha256)=64
+                 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
+             old_application_id TEXT NOT NULL
+               REFERENCES application_admissions(application_id) ON DELETE RESTRICT,
+             old_authority_id TEXT NOT NULL UNIQUE
+               REFERENCES exact_package_authority_grants(authority_id) ON DELETE RESTRICT,
+             old_grant_sha256 TEXT NOT NULL
+               CHECK(length(old_grant_sha256)=64
+                 AND old_grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+             old_archive_attempt_id TEXT NOT NULL CHECK(length(trim(old_archive_attempt_id))>0),
+             old_archive_receipt_sha256 TEXT NOT NULL
+               CHECK(length(old_archive_receipt_sha256)=64
+                 AND old_archive_receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+             fresh_archive_attempt_id TEXT NOT NULL UNIQUE
+               CHECK(length(trim(fresh_archive_attempt_id))>0),
+             requested_selection_sha256 TEXT NOT NULL
+               CHECK(length(requested_selection_sha256)=64
+                 AND requested_selection_sha256 NOT GLOB '*[^0-9a-f]*'),
+             builder_identity_sha256 TEXT NOT NULL
+               CHECK(length(builder_identity_sha256)=64
+                 AND builder_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+             route_id TEXT NOT NULL CHECK(length(trim(route_id))>0),
+             state TEXT NOT NULL CHECK(state IN
+               ('planned','candidate_built','built','grant_issued','reconciled')),
+             build_bytes BLOB,
+             build_sha256 TEXT UNIQUE,
+             fresh_application_id TEXT
+               REFERENCES application_admissions(application_id) ON DELETE RESTRICT,
+             review_validation_sha256 TEXT UNIQUE
+               REFERENCES application_forward_validations(validation_sha256)
+               ON DELETE RESTRICT,
+             fresh_archive_receipt_sha256 TEXT UNIQUE,
+             operator_approval_bytes BLOB,
+             operator_approval_sha256 TEXT UNIQUE,
+             fresh_authority_id TEXT UNIQUE
+               REFERENCES exact_package_authority_grants(authority_id) ON DELETE RESTRICT,
+             fresh_grant_sha256 TEXT UNIQUE,
+             submission_attempt_id TEXT UNIQUE,
+             external_receipt_sha256 TEXT UNIQUE,
+             reconciliation_state TEXT,
+             post_count INTEGER,
+             failure_count INTEGER NOT NULL DEFAULT 0 CHECK(failure_count>=0),
+             last_error_code TEXT CHECK(last_error_code IS NULL OR
+               (length(trim(last_error_code))>0 AND last_error_code=trim(last_error_code))),
+             CHECK(build_bytes IS NULL OR typeof(build_bytes)='blob'),
+             CHECK(build_sha256 IS NULL OR
+               (length(build_sha256)=64 AND build_sha256 NOT GLOB '*[^0-9a-f]*')),
+             CHECK(fresh_archive_receipt_sha256 IS NULL OR
+               (length(fresh_archive_receipt_sha256)=64
+                 AND fresh_archive_receipt_sha256 NOT GLOB '*[^0-9a-f]*')),
+             CHECK(operator_approval_bytes IS NULL OR
+               typeof(operator_approval_bytes)='blob'),
+             CHECK(operator_approval_sha256 IS NULL OR
+               (length(operator_approval_sha256)=64
+                 AND operator_approval_sha256 NOT GLOB '*[^0-9a-f]*')),
+             CHECK(fresh_grant_sha256 IS NULL OR
+               (length(fresh_grant_sha256)=64
+                 AND fresh_grant_sha256 NOT GLOB '*[^0-9a-f]*')),
+             CHECK(external_receipt_sha256 IS NULL OR
+               (length(external_receipt_sha256)=64
+                 AND external_receipt_sha256 NOT GLOB '*[^0-9a-f]*')),
+             CHECK(
+               (state='planned'
+                AND build_bytes IS NULL AND build_sha256 IS NULL
+                AND fresh_application_id IS NULL
+                AND review_validation_sha256 IS NULL
+                AND fresh_archive_receipt_sha256 IS NULL
+                AND operator_approval_bytes IS NULL
+                AND operator_approval_sha256 IS NULL
+                AND fresh_authority_id IS NULL AND fresh_grant_sha256 IS NULL
+                AND submission_attempt_id IS NULL AND external_receipt_sha256 IS NULL
+                AND reconciliation_state IS NULL AND post_count IS NULL)
+               OR
+               (state='candidate_built'
+                AND build_bytes IS NOT NULL AND build_sha256 IS NOT NULL
+                AND fresh_application_id IS NOT NULL
+                AND review_validation_sha256 IS NOT NULL
+                AND fresh_archive_receipt_sha256 IS NULL
+                AND operator_approval_bytes IS NULL
+                AND operator_approval_sha256 IS NULL
+                AND fresh_authority_id IS NULL AND fresh_grant_sha256 IS NULL
+                AND submission_attempt_id IS NULL AND external_receipt_sha256 IS NULL
+                AND reconciliation_state IS NULL AND post_count IS NULL)
+               OR
+               (state='built'
+                AND build_bytes IS NOT NULL AND build_sha256 IS NOT NULL
+                AND fresh_application_id IS NOT NULL
+                AND review_validation_sha256 IS NOT NULL
+                AND fresh_archive_receipt_sha256 IS NOT NULL
+                AND ((operator_approval_bytes IS NULL
+                      AND operator_approval_sha256 IS NULL)
+                     OR (operator_approval_bytes IS NOT NULL
+                         AND operator_approval_sha256 IS NOT NULL))
+                AND fresh_authority_id IS NULL AND fresh_grant_sha256 IS NULL
+                AND submission_attempt_id IS NULL AND external_receipt_sha256 IS NULL
+                AND reconciliation_state IS NULL AND post_count IS NULL)
+               OR
+               (state='grant_issued'
+                AND build_bytes IS NOT NULL AND build_sha256 IS NOT NULL
+                AND fresh_application_id IS NOT NULL
+                AND review_validation_sha256 IS NOT NULL
+                AND fresh_archive_receipt_sha256 IS NOT NULL
+                AND operator_approval_bytes IS NOT NULL
+                AND operator_approval_sha256 IS NOT NULL
+                AND fresh_authority_id IS NOT NULL AND fresh_grant_sha256 IS NOT NULL
+                AND submission_attempt_id IS NULL AND external_receipt_sha256 IS NULL
+                AND reconciliation_state IS NULL AND post_count IS NULL)
+               OR
+               (state='reconciled'
+                AND build_bytes IS NOT NULL AND build_sha256 IS NOT NULL
+                AND fresh_application_id IS NOT NULL
+                AND review_validation_sha256 IS NOT NULL
+                AND fresh_archive_receipt_sha256 IS NOT NULL
+                AND operator_approval_bytes IS NOT NULL
+                AND operator_approval_sha256 IS NOT NULL
+                AND fresh_authority_id IS NOT NULL AND fresh_grant_sha256 IS NOT NULL
+                AND submission_attempt_id IS NOT NULL
+                AND external_receipt_sha256 IS NOT NULL
+                AND reconciliation_state='positive' AND post_count=1)
+             ),
+             CHECK(state='planned' OR last_error_code IS NULL)
+           )""",
+        """CREATE INDEX release_rollover_by_state
+             ON release_rollover_operations(state,operation_id)""",
+        """CREATE TRIGGER release_rollover_initial_identity_immutable
+             BEFORE UPDATE ON release_rollover_operations
+             WHEN NEW.operation_id<>OLD.operation_id
+               OR NEW.request_bytes<>OLD.request_bytes
+               OR NEW.request_sha256<>OLD.request_sha256
+               OR NEW.old_application_id<>OLD.old_application_id
+               OR NEW.old_authority_id<>OLD.old_authority_id
+               OR NEW.old_grant_sha256<>OLD.old_grant_sha256
+               OR NEW.old_archive_attempt_id<>OLD.old_archive_attempt_id
+               OR NEW.old_archive_receipt_sha256<>OLD.old_archive_receipt_sha256
+               OR NEW.fresh_archive_attempt_id<>OLD.fresh_archive_attempt_id
+               OR NEW.requested_selection_sha256<>OLD.requested_selection_sha256
+               OR NEW.builder_identity_sha256<>OLD.builder_identity_sha256
+               OR NEW.route_id<>OLD.route_id
+             BEGIN SELECT RAISE(ABORT,'rollover request identity is immutable'); END""",
+        """CREATE TRIGGER release_rollover_evidence_immutable
+             BEFORE UPDATE ON release_rollover_operations
+             WHEN (OLD.build_bytes IS NOT NULL AND
+                    (NEW.build_bytes IS NOT OLD.build_bytes
+                     OR NEW.build_sha256 IS NOT OLD.build_sha256
+                     OR NEW.fresh_application_id IS NOT OLD.fresh_application_id
+                     OR NEW.review_validation_sha256 IS NOT
+                        OLD.review_validation_sha256))
+               OR (OLD.fresh_archive_receipt_sha256 IS NOT NULL AND
+                    NEW.fresh_archive_receipt_sha256 IS NOT
+                      OLD.fresh_archive_receipt_sha256)
+               OR (OLD.operator_approval_bytes IS NOT NULL AND
+                    (NEW.operator_approval_bytes IS NOT OLD.operator_approval_bytes
+                     OR NEW.operator_approval_sha256 IS NOT
+                        OLD.operator_approval_sha256))
+               OR (OLD.fresh_authority_id IS NOT NULL AND
+                    (NEW.fresh_authority_id IS NOT OLD.fresh_authority_id
+                     OR NEW.fresh_grant_sha256 IS NOT OLD.fresh_grant_sha256))
+               OR (OLD.submission_attempt_id IS NOT NULL AND
+                    (NEW.submission_attempt_id IS NOT OLD.submission_attempt_id
+                     OR NEW.external_receipt_sha256 IS NOT
+                        OLD.external_receipt_sha256
+                     OR NEW.reconciliation_state IS NOT OLD.reconciliation_state
+                     OR NEW.post_count IS NOT OLD.post_count))
+             BEGIN SELECT RAISE(ABORT,'rollover evidence is immutable once recorded'); END""",
+        """CREATE TRIGGER release_rollover_transition_guard
+             BEFORE UPDATE ON release_rollover_operations
+             WHEN NOT (
+               NEW.state=OLD.state
+               OR (OLD.state='planned' AND NEW.state='candidate_built')
+               OR (OLD.state='candidate_built' AND NEW.state='built')
+               OR (OLD.state='built' AND NEW.state='grant_issued')
+               OR (OLD.state='grant_issued' AND NEW.state='reconciled')
+             )
+               OR NEW.failure_count<OLD.failure_count
+               OR (NEW.failure_count<>OLD.failure_count AND NOT
+                    (OLD.state='planned' AND NEW.state='planned'))
+             BEGIN SELECT RAISE(ABORT,'rollover state transition is invalid'); END""",
+        """CREATE TRIGGER release_rollover_immutable_delete
+             BEFORE DELETE ON release_rollover_operations
+             BEGIN SELECT RAISE(ABORT,'rollover operations cannot be deleted'); END""",
+    ),
+)
+
+
+_JAA_OPERATIONAL_RECONCILIATION_MIGRATION = Migration(
+    12,
+    "jaa_operational_exact_reconciliation_receipts_v1",
+    (
+        """CREATE TABLE exact_package_reconciliation_receipts(
+             authority_id TEXT PRIMARY KEY
+               REFERENCES exact_package_authority_uses(authority_id) ON DELETE RESTRICT,
+             attempt_id TEXT NOT NULL UNIQUE
+               REFERENCES submission_attempts(attempt_id) ON DELETE RESTRICT,
+             grant_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(grant_sha256)=64
+                 AND grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+             receipt_bytes BLOB NOT NULL CHECK(typeof(receipt_bytes)='blob'),
+             receipt_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(receipt_sha256)=64
+                 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+             reconciliation_state TEXT NOT NULL CHECK(reconciliation_state IN
+               ('positive','ambiguous','negative','unknown')),
+             time_receipt_sha256 TEXT NOT NULL UNIQUE
+               REFERENCES authenticated_time_evidence(receipt_sha256) ON DELETE RESTRICT,
+             recorded_at TEXT NOT NULL CHECK(length(recorded_at)=20)
+           )""",
+        """CREATE TRIGGER exact_reconciliation_receipt_immutable_update
+             BEFORE UPDATE ON exact_package_reconciliation_receipts
+             BEGIN SELECT RAISE(ABORT,'reconciliation receipts are immutable'); END""",
+        """CREATE TRIGGER exact_reconciliation_receipt_immutable_delete
+             BEFORE DELETE ON exact_package_reconciliation_receipts
+             BEGIN SELECT RAISE(ABORT,'reconciliation receipts are immutable'); END""",
+    ),
+)
+
+
+_JAA_OPERATIONAL_REVIEW_RELEASE_JOIN_MIGRATION = Migration(
+    13,
+    "jaa_operational_employer_review_release_join_v1",
+    (
+        """ALTER TABLE exact_package_authority_grants
+             ADD COLUMN employer_review_release_verification_bytes BLOB""",
+        """ALTER TABLE exact_package_authority_grants
+             ADD COLUMN employer_review_release_verification_sha256 TEXT""",
+        """ALTER TABLE exact_package_authority_uses
+             ADD COLUMN employer_review_release_verification_sha256 TEXT""",
+        """ALTER TABLE submission_attempts
+             ADD COLUMN employer_review_release_verification_bytes BLOB""",
+        """ALTER TABLE submission_attempts
+             ADD COLUMN employer_review_release_verification_sha256 TEXT""",
+        """CREATE TRIGGER exact_package_review_grant_required_insert
+             BEFORE INSERT ON exact_package_authority_grants
+             WHEN typeof(NEW.employer_review_release_verification_bytes)<>'blob'
+               OR NEW.employer_review_release_verification_sha256 IS NULL
+               OR length(NEW.employer_review_release_verification_sha256)<>64
+               OR NEW.employer_review_release_verification_sha256
+                    GLOB '*[^0-9a-f]*'
+             BEGIN SELECT RAISE(ABORT,
+               'grant requires exact employer-review release verification'); END""",
+        """CREATE TRIGGER exact_package_review_use_required_insert
+             BEFORE INSERT ON exact_package_authority_uses
+             WHEN NOT (
+               (NEW.state IN ('pending','revoked')
+                AND NEW.employer_review_release_verification_sha256 IS NULL)
+               OR
+               (NEW.state IN ('click_intent_recorded','reconciled')
+                AND NEW.employer_review_release_verification_sha256 IS NOT NULL
+                AND length(NEW.employer_review_release_verification_sha256)=64
+                AND NEW.employer_review_release_verification_sha256
+                      NOT GLOB '*[^0-9a-f]*')
+             )
+             BEGIN SELECT RAISE(ABORT,
+               'authority use review-verification binding is invalid'); END""",
+        """CREATE TRIGGER exact_package_review_use_required_update
+             BEFORE UPDATE ON exact_package_authority_uses
+             WHEN NOT (
+               (OLD.state='pending' AND OLD.version=1
+                AND NEW.state='revoked' AND NEW.version=2
+                AND OLD.employer_review_release_verification_sha256 IS NULL
+                AND NEW.employer_review_release_verification_sha256 IS NULL)
+               OR
+               (OLD.state='pending' AND OLD.version=1
+                AND NEW.state='click_intent_recorded' AND NEW.version=2
+                AND OLD.employer_review_release_verification_sha256 IS NULL
+                AND NEW.employer_review_release_verification_sha256 IS NOT NULL
+                AND length(NEW.employer_review_release_verification_sha256)=64
+                AND NEW.employer_review_release_verification_sha256
+                      NOT GLOB '*[^0-9a-f]*')
+               OR
+               (OLD.state='click_intent_recorded' AND OLD.version=2
+                AND NEW.state='reconciled' AND NEW.version=3
+                AND OLD.employer_review_release_verification_sha256 IS NOT NULL
+                AND NEW.employer_review_release_verification_sha256
+                      =OLD.employer_review_release_verification_sha256)
+             )
+             BEGIN SELECT RAISE(ABORT,
+               'authority use review-verification binding is invalid'); END""",
+        """CREATE TRIGGER submission_attempt_review_verification_required_insert
+             BEFORE INSERT ON submission_attempts
+             WHEN typeof(NEW.employer_review_release_verification_bytes)<>'blob'
+               OR NEW.employer_review_release_verification_sha256 IS NULL
+               OR length(NEW.employer_review_release_verification_sha256)<>64
+               OR NEW.employer_review_release_verification_sha256
+                    GLOB '*[^0-9a-f]*'
+             BEGIN SELECT RAISE(ABORT,
+               'submission attempt requires fresh review verification'); END""",
+    ),
+)
+
+
 # Migration 2 was already allocated to JAA-02 before the independent JAA-01
 # review required an immutable score-import receipt. Public sets remain ordered
 # and checksummed while each slice applies only the schema it owns.
@@ -1419,6 +2425,14 @@ JAA_06_MIGRATIONS: tuple[Migration, ...] = (
 JAA_08_MIGRATIONS: tuple[Migration, ...] = (
     *JAA_06_MIGRATIONS,
     _JAA_08_RELEASE_GATE_MIGRATION,
+)
+JAA_OPERATIONAL_MIGRATIONS: tuple[Migration, ...] = (
+    *JAA_08_MIGRATIONS,
+    _JAA_OPERATIONAL_HANDOFF_MIGRATION,
+    _JAA_OPERATIONAL_SUBMISSION_MIGRATION,
+    _JAA_OPERATIONAL_ROLLOVER_MIGRATION,
+    _JAA_OPERATIONAL_RECONCILIATION_MIGRATION,
+    _JAA_OPERATIONAL_REVIEW_RELEASE_JOIN_MIGRATION,
 )
 
 
@@ -1458,4 +2472,16 @@ def apply_jaa_08_migrations(path: str | Path) -> tuple[int, ...]:
     applied = MigrationRunner(path).apply(JAA_08_MIGRATIONS)
     with sqlite3.connect(path) as connection:
         verify_jaa08_installed_schema(connection)
+    return applied
+
+
+def apply_jaa_operational_migrations(path: str | Path) -> tuple[int, ...]:
+    """Apply the complete JAA schema plus strict handoff-admission storage."""
+    applied = MigrationRunner(path).apply(JAA_OPERATIONAL_MIGRATIONS)
+    with sqlite3.connect(path) as connection:
+        verify_jaa08_installed_schema(connection)
+        verify_jaa_operational_installed_schema(connection)
+        verify_jaa_operational_submission_schema(connection)
+        verify_jaa_operational_rollover_schema(connection)
+        verify_jaa_operational_reconciliation_schema(connection)
     return applied
