@@ -12,17 +12,23 @@ import hashlib
 import ipaddress
 import json
 import os
-import tempfile
+import re
+import secrets
+import socket
+import sqlite3
+import stat
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 from urllib.parse import urlsplit
 
-from .models import ResearchClaim, ResearchDossier, ResearchTask, SourceCitation
+from .models import ClaimSupport, ResearchClaim, ResearchDossier, ResearchTask, SourceCitation
 
 
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_BYTE_SELECTOR = re.compile(r"^bytes:(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$")
 
 
 class PublicResearchError(ValueError):
@@ -43,11 +49,18 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _safe_public_url(value: str) -> str:
+def _safe_public_url(
+    value: str, *, resolver: Callable[..., Iterable[tuple[object, ...]]] | None = None
+) -> str:
     parts = urlsplit(value)
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise PublicResearchError("research source port is malformed") from exc
     if (
         parts.scheme != "https"
         or not parts.hostname
+        or port not in {None, 443}
         or parts.username is not None
         or parts.password is not None
         or parts.fragment
@@ -62,41 +75,149 @@ def _safe_public_url(value: str) -> str:
         address = None
     if address is not None and not address.is_global:
         raise PublicResearchError("research source cannot target a non-public address")
+    if resolver is not None:
+        try:
+            rows = tuple(resolver(host, 443, type=socket.SOCK_STREAM))
+        except OSError as exc:
+            raise PublicResearchError("research source DNS resolution failed") from exc
+        if not rows:
+            raise PublicResearchError("research source DNS resolution is empty")
+        for row in rows:
+            try:
+                resolved = ipaddress.ip_address(str(row[4][0]))
+            except (IndexError, TypeError, ValueError) as exc:
+                raise PublicResearchError("research source DNS result is malformed") from exc
+            if not resolved.is_global:
+                raise PublicResearchError("research source DNS targets a non-public address")
     return value
 
 
 def _private_external_root(path: Path, repository_root: Path) -> Path:
-    root = path.resolve()
+    absolute = path.absolute()
+    if not absolute.is_absolute() or ".." in absolute.parts:
+        raise PublicResearchError("research archive path is unsafe")
     repository = repository_root.resolve(strict=True)
+    root = absolute
     if root == repository or repository in root.parents:
         raise PublicResearchError("research archive must live outside the repository")
-    if root.exists() and root.is_symlink():
-        raise PublicResearchError("research archive cannot be a symlink")
-    root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in root.parts[1:]:
+            try:
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except OSError as exc:
+                raise PublicResearchError(
+                    "research archive path contains an unsafe component"
+                ) from exc
+            os.close(descriptor)
+            descriptor = child
+        details = os.fstat(descriptor)
+        if details.st_uid != os.geteuid():
+            raise PublicResearchError("research archive owner differs from runtime user")
+        os.fchmod(descriptor, 0o700)
+    finally:
+        os.close(descriptor)
     return root
 
 
-def _write_exact(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.is_symlink() or path.read_bytes() != value:
-            raise PublicResearchError("content-addressed research replay differs")
-        return
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def _secure_directory(root: Path, category: str) -> int:
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
+        try:
+            os.mkdir(category, 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        try:
+            directory_fd = os.open(
+                category, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd
+            )
+        except OSError as exc:
+            raise PublicResearchError("research archive component is unsafe") from exc
+    finally:
+        os.close(root_fd)
+    details = os.fstat(directory_fd)
+    if details.st_uid != os.geteuid():
+        os.close(directory_fd)
+        raise PublicResearchError("research archive component owner differs")
+    os.fchmod(directory_fd, 0o700)
+    return directory_fd
+
+
+def _read_existing_exact(directory_fd: int, name: str, value: bytes) -> bool:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PublicResearchError("research archive object is unsafe") from exc
+    try:
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.geteuid()
+            or details.st_nlink != 1
+            or details.st_mode & 0o077
+        ):
+            raise PublicResearchError("research archive object permissions are unsafe")
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            if handle.read() != value:
+                raise PublicResearchError("content-addressed research replay differs")
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _write_exact(root: Path, category: str, name: str, value: bytes) -> Path:
+    if "/" in name or name in {"", ".", ".."}:
+        raise PublicResearchError("research archive object name is unsafe")
+    directory_fd = _secure_directory(root, category)
+    temporary = f".{name}.{secrets.token_hex(16)}"
+    try:
+        if _read_existing_exact(directory_fd, name, value):
+            return root / category / name
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(value)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            if not _read_existing_exact(directory_fd, name, value):
+                raise PublicResearchError("research archive replay raced unsafely")
+        os.unlink(temporary, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        return root / category / name
     except BaseException:
         try:
-            os.unlink(temporary)
+            os.unlink(temporary, dir_fd=directory_fd)
         except FileNotFoundError:
             pass
         raise
+    finally:
+        os.close(directory_fd)
 
 
 @dataclass(frozen=True)
@@ -104,6 +225,16 @@ class PlannedCitation:
     citation_id: str
     url: str
     title: str
+    expected_content_sha256: str
+    expected_final_url: str
+    source_kind: str = "public_web"
+
+
+@dataclass(frozen=True)
+class PlannedSupport:
+    citation_id: str
+    selector: str
+    excerpt: str
 
 
 @dataclass(frozen=True)
@@ -111,6 +242,7 @@ class PlannedClaim:
     claim: str
     citation_ids: tuple[str, ...]
     confidence: float
+    supports: tuple[PlannedSupport, ...]
 
 
 @dataclass(frozen=True)
@@ -121,7 +253,12 @@ class PublicResearchPlan:
     role: str
     citations: tuple[PlannedCitation, ...]
     claims: tuple[PlannedClaim, ...]
+    source_content_sha256: str
+    vacancy_snapshot_sha256: str
+    promotion_receipt_sha256: str
     unknowns: tuple[str, ...] = ()
+    schema_version: str = "market-aligner.public-research-plan.v2"
+    production_authority: bool = True
 
 
 @dataclass(frozen=True)
@@ -132,6 +269,97 @@ class FetchedPublicSource:
     body: bytes
     content_type: str
     accessed_at: str
+    redirect_chain: tuple[str, ...] = ()
+    source_kind: str = "public_web"
+    authority_source_content_sha256: str | None = None
+
+
+class CanonicalCollectorVacancyLoader:
+    """Read the exact fetched vacancy row from the canonical collector database.
+
+    The collector's legacy ``content_hash`` remains the promotion authority.  The
+    archived object is a separate, unambiguous canonical envelope, so its SHA is
+    intentionally a different hash domain.
+    """
+
+    def __init__(self, database: Path) -> None:
+        self.database = database.absolute()
+
+    def __call__(self, task: ResearchTask) -> FetchedPublicSource:
+        try:
+            details = self.database.lstat()
+        except OSError as exc:
+            raise PublicResearchError("canonical collector database is unavailable") from exc
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.geteuid()
+            or details.st_mode & 0o022
+            or self.database.resolve(strict=True) != self.database
+        ):
+            raise PublicResearchError("canonical collector database is unsafe")
+        connection = sqlite3.connect(
+            f"file:{self.database.as_posix()}?mode=ro", uri=True, timeout=30
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            row = connection.execute(
+                """SELECT key,url,fetched_at,raw_text,raw_json,content_hash,fetch_status
+                   FROM postings WHERE key=?""",
+                (task.job_key,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise PublicResearchError("canonical collector database cannot be read") from exc
+        finally:
+            connection.close()
+        if row is None or row["fetch_status"] != "fetched":
+            raise PublicResearchError("canonical collector vacancy is not fetched")
+        if row["url"] != task.url:
+            raise PublicResearchError("canonical collector vacancy URL differs from task")
+        if (
+            not _SHA256.fullmatch(str(row["content_hash"] or ""))
+            or row["content_hash"] != task.source_content_sha256
+        ):
+            raise PublicResearchError("canonical collector source authority differs from task")
+        fetched_at = str(row["fetched_at"] or "")
+        try:
+            parsed_time = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise PublicResearchError("canonical collector fetched time is invalid") from exc
+        if (
+            parsed_time.tzinfo is None
+            or parsed_time.utcoffset() is None
+            or parsed_time.utcoffset().total_seconds() != 0
+        ):
+            raise PublicResearchError("canonical collector fetched time is not explicit UTC")
+        raw_json = None
+        if row["raw_json"] is not None:
+            try:
+                raw_json = json.loads(str(row["raw_json"]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise PublicResearchError("canonical collector raw JSON is invalid") from exc
+        if row["raw_text"] is None and raw_json is None:
+            raise PublicResearchError("canonical collector vacancy has no source content")
+        envelope = {
+            "authority_source_content_sha256": row["content_hash"],
+            "fetched_at": fetched_at,
+            "job_key": row["key"],
+            "raw_json": raw_json,
+            "raw_text": row["raw_text"],
+            "schema_version": "market-aligner.canonical-collector-vacancy.v1",
+            "url": row["url"],
+        }
+        return FetchedPublicSource(
+            requested_url=row["url"],
+            final_url=row["url"],
+            status=200,
+            body=_canonical_bytes(envelope),
+            content_type="application/vnd.market-aligner.canonical-vacancy+json",
+            accessed_at=fetched_at,
+            redirect_chain=(row["url"],),
+            source_kind="canonical_vacancy",
+            authority_source_content_sha256=row["content_hash"],
+        )
 
 
 @dataclass(frozen=True)
@@ -139,26 +367,44 @@ class MaterializedPublicResearch:
     dossier: ResearchDossier
     dossier_sha256: str
     receipt_path: Path
-    receipt_sha256: str
+    semantic_receipt_sha256: str
+    receipt_file_sha256: str
+    archive_root: Path
+
+    @property
+    def receipt_sha256(self) -> str:
+        """Compatibility alias; the v2 name makes the hash domain explicit."""
+        return self.semantic_receipt_sha256
 
 
 class ScraplingPublicSourceFetcher:
     """Fetch one public page with Scrapling's safe redirect handling."""
 
-    def __init__(self, *, timeout_seconds: int = 30) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int = 30,
+        resolver: Callable[..., Iterable[tuple[object, ...]]] = socket.getaddrinfo,
+    ) -> None:
         self.timeout_seconds = max(1, min(int(timeout_seconds), 60))
+        self.resolver = resolver
 
     def __call__(self, url: str) -> FetchedPublicSource:
         from scrapling.fetchers import Fetcher
 
-        requested = _safe_public_url(url)
+        requested = _safe_public_url(url, resolver=self.resolver)
         page = Fetcher.get(
             requested,
             timeout=self.timeout_seconds,
-            follow_redirects=True,
+            follow_redirects="safe",
             stealthy_headers=True,
         )
-        final_url = _safe_public_url(str(page.url))
+        chain = tuple(str(row.url) for row in (page.history or ())) + (str(page.url),)
+        if len(chain) > 6:
+            raise PublicResearchError("research source exceeded the redirect limit")
+        for hop in chain:
+            _safe_public_url(hop, resolver=self.resolver)
+        final_url = chain[-1]
         headers = dict(page.headers or {})
         content_type = str(headers.get("content-type", headers.get("Content-Type", "")))
         return FetchedPublicSource(
@@ -168,6 +414,8 @@ class ScraplingPublicSourceFetcher:
             body=bytes(page.body),
             content_type=content_type,
             accessed_at=datetime.now(timezone.utc).isoformat(),
+            redirect_chain=chain,
+            source_kind="public_web",
         )
 
 
@@ -181,10 +429,12 @@ class SourceBoundResearchProvider:
         repository_root: Path,
         archive_root: Path,
         fetcher: Callable[[str], FetchedPublicSource] | None = None,
+        canonical_vacancy_loader: CanonicalCollectorVacancyLoader | None = None,
     ) -> None:
         self.plan = plan
         self.root = _private_external_root(archive_root, repository_root)
         self.fetcher = fetcher or ScraplingPublicSourceFetcher()
+        self.canonical_vacancy_loader = canonical_vacancy_loader
         self.last_materialization: MaterializedPublicResearch | None = None
 
     def _validate_plan(self, task: ResearchTask) -> None:
@@ -195,30 +445,90 @@ class SourceBoundResearchProvider:
             or self.plan.role != task.title
         ):
             raise PublicResearchError("research plan differs from the leased task")
+        if self.plan.schema_version != "market-aligner.public-research-plan.v2":
+            raise PublicResearchError("research plan schema is unsupported")
+        bindings = (
+            (self.plan.source_content_sha256, task.source_content_sha256),
+            (self.plan.vacancy_snapshot_sha256, task.vacancy_snapshot_sha256),
+            (self.plan.promotion_receipt_sha256, task.promotion_receipt_sha256),
+        )
+        if any(
+            not _SHA256.fullmatch(planned) or planned != leased
+            for planned, leased in bindings
+        ):
+            raise PublicResearchError("research plan vacancy/promotion binding differs")
         ids = [row.citation_id for row in self.plan.citations]
         if not ids or len(ids) != len(set(ids)) or any(not value.strip() for value in ids):
             raise PublicResearchError("research citation identities are empty or duplicated")
         known = set(ids)
         for row in self.plan.citations:
             _safe_public_url(row.url)
+            _safe_public_url(row.expected_final_url)
             if not row.title.strip():
                 raise PublicResearchError("research citation title is empty")
+            if not _SHA256.fullmatch(row.expected_content_sha256):
+                raise PublicResearchError("research citation expected hash is invalid")
+            if row.source_kind not in {"canonical_vacancy", "public_web"}:
+                raise PublicResearchError("research citation source kind is unsupported")
         for claim in self.plan.claims:
-            if not claim.claim.strip() or not claim.citation_ids:
+            if not claim.claim.strip() or not claim.citation_ids or not claim.supports:
                 raise PublicResearchError("research claim is empty or uncited")
             if not set(claim.citation_ids) <= known:
                 raise PublicResearchError("research claim cites an unknown source")
+            if set(claim.citation_ids) != {row.citation_id for row in claim.supports}:
+                raise PublicResearchError("research claim support identities differ")
+            for support in claim.supports:
+                match = _BYTE_SELECTOR.fullmatch(support.selector)
+                if (
+                    support.citation_id not in known
+                    or match is None
+                    or int(match.group(1)) >= int(match.group(2))
+                    or not support.excerpt
+                ):
+                    raise PublicResearchError("research claim support selector is invalid")
             if not 0 <= float(claim.confidence) <= 1:
                 raise PublicResearchError("research confidence is outside [0,1]")
+        canonical = [
+            row for row in self.plan.citations if row.source_kind == "canonical_vacancy"
+        ]
+        if len(canonical) != 1:
+            raise PublicResearchError("research plan lacks the exact canonical vacancy source")
+        if self.plan.production_authority is not True or len(self.plan.citations) != 1:
+            raise PublicResearchError(
+                "v2 production research permits only canonical collector vacancy bytes"
+            )
+        if not isinstance(self.canonical_vacancy_loader, CanonicalCollectorVacancyLoader):
+            raise PublicResearchError(
+                "v2 production research requires the canonical collector loader"
+            )
 
     def materialize(self, task: ResearchTask) -> MaterializedPublicResearch:
         self._validate_plan(task)
         entries: list[dict[str, object]] = []
         citations: list[SourceCitation] = []
+        fetched_by_id: dict[str, FetchedPublicSource] = {}
         for planned in sorted(self.plan.citations, key=lambda row: row.citation_id):
-            fetched = self.fetcher(planned.url)
+            fetched = (
+                self.canonical_vacancy_loader(task)
+                if planned.source_kind == "canonical_vacancy"
+                else self.fetcher(planned.url)
+            )
+            if fetched is None:
+                raise PublicResearchError("canonical vacancy source was not supplied")
             if fetched.requested_url != planned.url:
                 raise PublicResearchError("fetcher substituted the requested source")
+            if fetched.final_url != planned.expected_final_url:
+                raise PublicResearchError("fetcher substituted the final source")
+            if fetched.source_kind != planned.source_kind:
+                raise PublicResearchError("fetcher substituted the source authority kind")
+            if (
+                fetched.source_kind == "canonical_vacancy"
+                and fetched.authority_source_content_sha256
+                != self.plan.source_content_sha256
+            ):
+                raise PublicResearchError(
+                    "canonical vacancy bytes differ from collector source authority"
+                )
             if fetched.status != 200 or not fetched.body:
                 raise PublicResearchError("research source did not return a non-empty HTTP 200")
             if len(fetched.body) > _MAX_SOURCE_BYTES:
@@ -227,6 +537,8 @@ class SourceBoundResearchProvider:
             if not fetched.accessed_at.endswith(("+00:00", "Z")):
                 raise PublicResearchError("research source time is not explicit UTC")
             object_sha = _sha256(fetched.body)
+            if object_sha != planned.expected_content_sha256:
+                raise PublicResearchError("research source differs from its reviewed content hash")
             metadata = {
                 "accessed_at": fetched.accessed_at,
                 "citation_id": planned.citation_id,
@@ -234,14 +546,16 @@ class SourceBoundResearchProvider:
                 "content_type": fetched.content_type,
                 "final_url": fetched.final_url,
                 "requested_url": fetched.requested_url,
-                "schema_version": "market-aligner.public-research-source.v1",
+                "redirect_chain": list(fetched.redirect_chain or (fetched.final_url,)),
+                "schema_version": "market-aligner.public-research-source.v2",
+                "source_kind": fetched.source_kind,
                 "status": fetched.status,
                 "title": planned.title,
             }
             metadata_bytes = _canonical_bytes(metadata)
             metadata_sha = _sha256(metadata_bytes)
-            _write_exact(self.root / "objects" / object_sha, fetched.body)
-            _write_exact(self.root / "metadata" / f"{metadata_sha}.json", metadata_bytes)
+            _write_exact(self.root, "objects", object_sha, fetched.body)
+            _write_exact(self.root, "metadata", f"{metadata_sha}.json", metadata_bytes)
             entries.append(
                 {
                     "citation_id": planned.citation_id,
@@ -256,39 +570,106 @@ class SourceBoundResearchProvider:
                     planned.title,
                     fetched.accessed_at,
                     object_sha,
+                    fetched.source_kind,
                 )
+            )
+            fetched_by_id[planned.citation_id] = fetched
+        claims: list[ResearchClaim] = []
+        for row in self.plan.claims:
+            supports: list[ClaimSupport] = []
+            for planned_support in row.supports:
+                body = fetched_by_id[planned_support.citation_id].body
+                match = _BYTE_SELECTOR.fullmatch(planned_support.selector)
+                assert match is not None
+                start, end = int(match.group(1)), int(match.group(2))
+                if end > len(body):
+                    raise PublicResearchError(
+                        "research support selector exceeds archived source"
+                    )
+                selected = body[start:end]
+                try:
+                    excerpt = selected.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise PublicResearchError(
+                        "research support is not exact UTF-8 text"
+                    ) from exc
+                if excerpt != planned_support.excerpt:
+                    raise PublicResearchError(
+                        "research claim is unsupported by archived bytes"
+                    )
+                if " ".join(row.claim.split()) != " ".join(excerpt.split()):
+                    raise PublicResearchError(
+                        "production research claims must be verbatim source excerpts"
+                    )
+                supports.append(
+                    ClaimSupport(
+                        planned_support.citation_id,
+                        planned_support.selector,
+                        excerpt,
+                        _sha256(selected),
+                    )
+                )
+            claims.append(
+                ResearchClaim(row.claim, row.citation_ids, row.confidence, tuple(supports))
             )
         dossier = ResearchDossier(
             task.profile_id,
             task.job_key,
             task.company,
             task.title,
-            tuple(
-                ResearchClaim(row.claim, row.citation_ids, row.confidence)
-                for row in self.plan.claims
-            ),
+            tuple(claims),
             tuple(citations),
             self.plan.unknowns,
+            self.plan.source_content_sha256,
+            self.plan.vacancy_snapshot_sha256,
+            self.plan.promotion_receipt_sha256,
+            next(
+                row.content_sha256
+                for row in citations
+                if row.source_kind == "canonical_vacancy"
+            ),
+            "market-aligner.employer-dossier.v2",
         )
         dossier.validate()
         dossier_payload = json.dumps(asdict(dossier), ensure_ascii=False, sort_keys=True)
         dossier_sha = _sha256(dossier_payload.encode("utf-8"))
         receipt_body = {
             "application_authority": False,
-            "claim_semantic_authority": "reviewed_plan_only",
+            "claim_semantic_authority": "verbatim_source_text_v2",
+            "canonical_vacancy_object_sha256": (
+                dossier.canonical_vacancy_object_sha256
+            ),
             "dossier_sha256": dossier_sha,
             "entries": entries,
             "job_key": task.job_key,
+            "promotion_receipt_sha256": self.plan.promotion_receipt_sha256,
             "profile_id": task.profile_id,
+            "production_authority": True,
             "release_authority": False,
-            "schema_version": "market-aligner.public-research-materialization.v1",
+            "schema_version": "market-aligner.public-research-materialization.v2",
+            "source_content_sha256": self.plan.source_content_sha256,
+            "vacancy_snapshot_sha256": self.plan.vacancy_snapshot_sha256,
         }
-        receipt_sha = _sha256(_canonical_bytes(receipt_body))
-        receipt = {**receipt_body, "receipt_sha256": receipt_sha}
-        receipt_path = self.root / "receipts" / f"{receipt_sha}.json"
-        _write_exact(receipt_path, _canonical_bytes(receipt))
+        semantic_receipt_sha = _sha256(_canonical_bytes(receipt_body))
+        receipt = {
+            **receipt_body,
+            "semantic_receipt_sha256": semantic_receipt_sha,
+        }
+        receipt_bytes = _canonical_bytes(receipt)
+        receipt_file_sha = _sha256(receipt_bytes)
+        receipt_path = _write_exact(
+            self.root,
+            "receipts",
+            f"{semantic_receipt_sha}.json",
+            receipt_bytes,
+        )
         result = MaterializedPublicResearch(
-            dossier, dossier_sha, receipt_path, receipt_sha
+            dossier,
+            dossier_sha,
+            receipt_path,
+            semantic_receipt_sha,
+            receipt_file_sha,
+            self.root,
         )
         self.last_materialization = result
         return result
@@ -301,9 +682,11 @@ class SourceBoundResearchProvider:
 
 __all__ = [
     "FetchedPublicSource",
+    "CanonicalCollectorVacancyLoader",
     "MaterializedPublicResearch",
     "PlannedCitation",
     "PlannedClaim",
+    "PlannedSupport",
     "PublicResearchError",
     "PublicResearchPlan",
     "ScraplingPublicSourceFetcher",

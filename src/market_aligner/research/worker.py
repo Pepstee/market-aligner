@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from .models import ResearchDossier, ResearchTask
+from .models import (
+    RESEARCH_ARCHIVE_ROOT_POLICY_SHA256,
+    ResearchDossier,
+    ResearchEvidenceBinding,
+    ResearchTask,
+)
 from .store import AssessmentStore
 
 
@@ -41,7 +46,38 @@ class ResearchWorker:
             dossier = self.provider.research(task)
             if dossier.profile_id != task.profile_id or dossier.job_key != task.job_key:
                 raise ValueError("research provider returned a dossier for a different task")
-            digest = self.store.complete_research(dossier, self.worker_id)
+            evidence = None
+            if dossier.schema_version == "market-aligner.employer-dossier.v2":
+                materialization = getattr(self.provider, "last_materialization", None)
+                if materialization is None:
+                    raise ValueError("v2 research provider returned no archive materialization")
+                relative = materialization.receipt_path.relative_to(
+                    materialization.archive_root
+                )
+                archive_identity = materialization.archive_root.relative_to(
+                    self.store.data_home
+                )
+                evidence = ResearchEvidenceBinding(
+                    dossier_sha256=materialization.dossier_sha256,
+                    source_content_sha256=dossier.source_content_sha256 or "",
+                    vacancy_snapshot_sha256=dossier.vacancy_snapshot_sha256 or "",
+                    promotion_receipt_sha256=dossier.promotion_receipt_sha256 or "",
+                    canonical_vacancy_object_sha256=(
+                        dossier.canonical_vacancy_object_sha256 or ""
+                    ),
+                    semantic_receipt_sha256=(
+                        materialization.semantic_receipt_sha256
+                    ),
+                    receipt_file_sha256=materialization.receipt_file_sha256,
+                    archive_root_identity=archive_identity.as_posix(),
+                    archive_root_policy_sha256=(
+                        RESEARCH_ARCHIVE_ROOT_POLICY_SHA256
+                    ),
+                    receipt_relative_path=relative.as_posix(),
+                )
+            digest = self.store.complete_research(
+                dossier, self.worker_id, evidence=evidence
+            )
             return ResearchRun("completed", task.profile_id, task.job_key, digest)
         except Exception as exc:
             self.store.fail_research(

@@ -14,7 +14,12 @@ from typing import Any, Iterator
 from market_aligner.assessment.scoring import ScoreResult
 from market_aligner.profiler.schema import validate_profile_id
 
-from .models import ResearchDossier, ResearchTask
+from .models import (
+    RESEARCH_ARCHIVE_ROOT_POLICY_SHA256,
+    ResearchDossier,
+    ResearchEvidenceBinding,
+    ResearchTask,
+)
 
 
 SCHEMA = """
@@ -85,6 +90,26 @@ CREATE TABLE IF NOT EXISTS employer_dossiers (
   FOREIGN KEY(profile_id,job_key) REFERENCES assessments(profile_id,job_key) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS employer_research_evidence (
+  profile_id TEXT NOT NULL,
+  job_key TEXT NOT NULL,
+  dossier_hash TEXT NOT NULL,
+  source_content_sha256 TEXT NOT NULL,
+  vacancy_snapshot_sha256 TEXT NOT NULL,
+  promotion_receipt_sha256 TEXT NOT NULL,
+  canonical_vacancy_object_sha256 TEXT NOT NULL,
+  semantic_receipt_sha256 TEXT NOT NULL,
+  receipt_file_sha256 TEXT NOT NULL,
+  archive_root_identity TEXT NOT NULL,
+  archive_root_policy_sha256 TEXT NOT NULL,
+  receipt_relative_path TEXT NOT NULL,
+  schema_version TEXT NOT NULL CHECK(schema_version='market-aligner.research-store-binding.v2'),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(profile_id,job_key),
+  FOREIGN KEY(profile_id,job_key) REFERENCES employer_dossiers(profile_id,job_key)
+    ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS assessment_promotions (
   profile_id TEXT NOT NULL,
   job_key TEXT NOT NULL,
@@ -116,6 +141,11 @@ END;
 class AssessmentStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self.data_home = (
+            self.path.parent.parent
+            if self.path.parent.name == "state"
+            else self.path.parent
+        ).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
             connection.executescript(SCHEMA)
@@ -490,9 +520,12 @@ class AssessmentStore:
         with self.transaction() as connection:
             row = connection.execute(
                 """SELECT q.profile_id,q.job_key,a.title,a.company,a.url,a.opportunity,
-                          q.priority,q.attempts
+                          q.priority,q.attempts,p.source_content_sha256,
+                          p.receipt_sha256 AS promotion_receipt_sha256
                    FROM employer_research_queue q JOIN assessments a
                      ON a.profile_id=q.profile_id AND a.job_key=q.job_key
+                   LEFT JOIN assessment_promotions p
+                     ON p.profile_id=q.profile_id AND p.job_key=q.job_key
                    WHERE (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
                       OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP)
                    ORDER BY q.priority DESC,a.opportunity DESC,q.queued_at LIMIT 1"""
@@ -505,12 +538,111 @@ class AssessmentStore:
                    WHERE profile_id=? AND job_key=?""",
                 (worker_id, lease_until.isoformat(), row["profile_id"], row["job_key"]),
             )
-            return ResearchTask(**dict(row))
+            values = dict(row)
+            values["vacancy_snapshot_sha256"] = (
+                None
+                if values["source_content_sha256"] is None
+                or values["promotion_receipt_sha256"] is None
+                else hashlib.sha256(
+                    json.dumps(
+                        {
+                        "company": values["company"],
+                        "job_key": values["job_key"],
+                        "promotion_receipt_sha256": values[
+                            "promotion_receipt_sha256"
+                        ],
+                        "schema_version": "market-aligner.research-vacancy-snapshot.v1",
+                        "source_content_sha256": values["source_content_sha256"],
+                        "title": values["title"],
+                        "url": values["url"],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+            return ResearchTask(**values)
 
-    def complete_research(self, dossier: ResearchDossier, worker_id: str) -> str:
+    def complete_research(
+        self,
+        dossier: ResearchDossier,
+        worker_id: str,
+        evidence: ResearchEvidenceBinding | None = None,
+    ) -> str:
         dossier.validate()
         payload = json.dumps(asdict(dossier), ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        receipt_bytes: bytes | None = None
+        if dossier.schema_version == "market-aligner.employer-dossier.v2":
+            if evidence is None:
+                raise ValueError("v2 research completion requires archive evidence")
+            evidence.validate()
+            if (
+                evidence.dossier_sha256 != digest
+                or evidence.source_content_sha256 != dossier.source_content_sha256
+                or evidence.vacancy_snapshot_sha256 != dossier.vacancy_snapshot_sha256
+                or evidence.promotion_receipt_sha256 != dossier.promotion_receipt_sha256
+                or evidence.canonical_vacancy_object_sha256
+                != dossier.canonical_vacancy_object_sha256
+            ):
+                raise ValueError("research archive evidence differs from dossier bindings")
+            if (
+                evidence.archive_root_policy_sha256
+                != RESEARCH_ARCHIVE_ROOT_POLICY_SHA256
+            ):
+                raise ValueError("research archive root policy differs")
+            root = (self.data_home / evidence.archive_root_identity).resolve()
+            if self.data_home not in root.parents:
+                raise ValueError("research archive root escapes protected data home")
+            receipt_path = root / evidence.receipt_relative_path
+            if root.is_symlink() or receipt_path.is_symlink() or not receipt_path.is_file():
+                raise ValueError("research archive receipt path is unsafe")
+            receipt_bytes = receipt_path.read_bytes()
+            if hashlib.sha256(receipt_bytes).hexdigest() != evidence.receipt_file_sha256:
+                raise ValueError("research archive exact receipt file differs")
+            try:
+                receipt = json.loads(receipt_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("research archive receipt is invalid JSON") from exc
+            body = dict(receipt) if isinstance(receipt, dict) else {}
+            semantic = body.pop("semantic_receipt_sha256", None)
+            semantic_digest = hashlib.sha256(
+                json.dumps(
+                    body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                receipt_bytes
+                != json.dumps(
+                    receipt,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                or semantic != evidence.semantic_receipt_sha256
+                or semantic_digest != semantic
+                or receipt.get("schema_version")
+                != "market-aligner.public-research-materialization.v2"
+                or receipt.get("dossier_sha256") != digest
+                or receipt.get("source_content_sha256")
+                != dossier.source_content_sha256
+                or receipt.get("vacancy_snapshot_sha256")
+                != dossier.vacancy_snapshot_sha256
+                or receipt.get("promotion_receipt_sha256")
+                != dossier.promotion_receipt_sha256
+                or receipt.get("canonical_vacancy_object_sha256")
+                != dossier.canonical_vacancy_object_sha256
+            ):
+                raise ValueError("research archive semantic receipt differs")
+        elif evidence is not None:
+            raise ValueError("legacy dossier cannot claim v2 archive evidence")
         with self.transaction() as connection:
             lease = connection.execute(
                 """SELECT lease_owner,status FROM employer_research_queue
@@ -526,6 +658,49 @@ class AssessmentStore:
                    worker_id=excluded.worker_id,created_at=CURRENT_TIMESTAMP""",
                 (dossier.profile_id, dossier.job_key, payload, digest, worker_id),
             )
+            if evidence is not None:
+                connection.execute(
+                    """INSERT INTO employer_research_evidence(
+                         profile_id,job_key,dossier_hash,source_content_sha256,
+                         vacancy_snapshot_sha256,promotion_receipt_sha256,
+                         canonical_vacancy_object_sha256,
+                         semantic_receipt_sha256,receipt_file_sha256,
+                         archive_root_identity,archive_root_policy_sha256,
+                         receipt_relative_path,schema_version
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,job_key)
+                       DO UPDATE SET dossier_hash=excluded.dossier_hash,
+                         source_content_sha256=excluded.source_content_sha256,
+                         vacancy_snapshot_sha256=excluded.vacancy_snapshot_sha256,
+                         promotion_receipt_sha256=excluded.promotion_receipt_sha256,
+                         canonical_vacancy_object_sha256=excluded.canonical_vacancy_object_sha256,
+                         semantic_receipt_sha256=excluded.semantic_receipt_sha256,
+                         receipt_file_sha256=excluded.receipt_file_sha256,
+                         archive_root_identity=excluded.archive_root_identity,
+                         archive_root_policy_sha256=excluded.archive_root_policy_sha256,
+                         receipt_relative_path=excluded.receipt_relative_path,
+                         schema_version=excluded.schema_version,
+                         created_at=CURRENT_TIMESTAMP""",
+                    (
+                        dossier.profile_id,
+                        dossier.job_key,
+                        digest,
+                        evidence.source_content_sha256,
+                        evidence.vacancy_snapshot_sha256,
+                        evidence.promotion_receipt_sha256,
+                        evidence.canonical_vacancy_object_sha256,
+                        evidence.semantic_receipt_sha256,
+                        evidence.receipt_file_sha256,
+                        evidence.archive_root_identity,
+                        evidence.archive_root_policy_sha256,
+                        evidence.receipt_relative_path,
+                        evidence.schema_version,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM employer_research_evidence WHERE profile_id=? AND job_key=?",
+                    (dossier.profile_id, dossier.job_key),
+                )
             connection.execute(
                 """UPDATE employer_research_queue SET status='completed',lease_owner=NULL,
                      lease_until=NULL,updated_at=CURRENT_TIMESTAMP
@@ -538,6 +713,22 @@ class AssessmentStore:
                 (dossier.profile_id, dossier.job_key),
             )
         return digest
+
+    def research_evidence(self, profile_id: str, job_key: str) -> sqlite3.Row:
+        """Return a v2 dossier and its reconciled archive binding only."""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                """SELECT d.dossier_json,d.dossier_hash,e.*
+                   FROM employer_dossiers d JOIN employer_research_evidence e
+                     ON e.profile_id=d.profile_id AND e.job_key=d.job_key
+                   WHERE d.profile_id=? AND d.job_key=?
+                     AND d.dossier_hash=e.dossier_hash""",
+                (profile_id, job_key),
+            ).fetchone()
+        if row is None:
+            raise KeyError((profile_id, job_key))
+        return row
 
     def fail_research(
         self,
