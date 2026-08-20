@@ -15,6 +15,9 @@ from career_automation.provider_observation_authority import (
     load_provider_observation_authority,
     verify_provider_observation_authority,
 )
+from career_automation.provider_observation_capture import (
+    exact_committed_source_identity,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -27,11 +30,20 @@ APPLICATION_URL = "https://job-boards.greenhouse.io/example/jobs/1234567"
 def _clone_authority_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
-    clone = tmp_path / "authority-repository"
+    identity = exact_committed_source_identity(ROOT)
+    checkout = tmp_path / "authority-repository"
     subprocess.run(
-        ["git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(clone)],
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            str(identity.repository_root),
+            str(checkout),
+        ],
         check=True,
     )
+    clone = checkout / identity.source_root.relative_to(identity.repository_root)
     fixtures = clone / "career_automation" / "fixtures"
     monkeypatch.setattr(authority_module, "_FIXTURE_ROOT", fixtures)
     monkeypatch.setattr(
