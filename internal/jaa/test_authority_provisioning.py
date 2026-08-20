@@ -162,6 +162,43 @@ def test_device_enrollment_is_signed_nonretroactive_and_stages_time_config(tmp_p
     assert enrollment["rotation"]["prior_key_id"] is None
     assert enrollment["revocation"]["revoked"] is False
     assert stat.S_IMODE(Path(result["enrollment_path"]).stat().st_mode) == 0o600
+    config_bytes = Path(result["current_time_configuration_path"]).read_bytes()
+    assert not config_bytes.endswith(b"\n")
+    assert config_bytes == canonical_json(json.loads(config_bytes)).encode("utf-8")
+    assert hashlib.sha256(config_bytes).hexdigest() == result["current_time_configuration_sha256"]
+    assert result["current_time_configuration_outcome"] == "created"
+
+
+def test_device_enrollment_migrates_only_exact_legacy_staged_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    root = _device_root(tmp_path, monkeypatch)
+    first = provisioning.provision_device_enrollment(
+        output_root=root,
+        repository_root=repository,
+        clock=lambda: datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
+    )
+    config_path = Path(first["current_time_configuration_path"])
+    canonical = config_path.read_bytes()
+    config_path.write_bytes(canonical + b"\n")
+    config_path.chmod(0o600)
+
+    migrated = provisioning.provision_device_enrollment(
+        output_root=root,
+        repository_root=repository,
+        clock=lambda: datetime(2026, 8, 11, 12, tzinfo=timezone.utc),
+    )
+    assert migrated["current_time_configuration_outcome"] == "upgraded-exact-prior"
+    assert config_path.read_bytes() == canonical
+
+    config_path.write_bytes(canonical + b" ")
+    config_path.chmod(0o600)
+    with pytest.raises(ValueError, match="replay differs"):
+        provisioning.provision_device_enrollment(
+            output_root=root,
+            repository_root=repository,
+            clock=lambda: datetime(2026, 8, 12, 12, tzinfo=timezone.utc),
+        )
 
 
 def test_existing_contact_is_adopted_only_when_exact_pdf_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

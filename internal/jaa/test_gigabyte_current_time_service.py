@@ -102,6 +102,32 @@ def test_unit_upgrade_accepts_only_exact_prior_bytes(tmp_path: Path) -> None:
         )
 
 
+def test_config_upgrade_is_bound_to_canonical_and_exact_legacy_bytes(tmp_path: Path) -> None:
+    assert installer.STAGED_CONFIG_SHA256 == "2ab67684897303a619283c94ecab166a840f4b9efbf1df90d7e67aab46ea31a7"
+    assert installer.LEGACY_CONFIG_SHA256 == "db98c0b1071fb7eb34681a9765a4c943deba7749597299a7de808e009f8a95bb"
+
+    target = tmp_path / "configuration.json"
+    canonical = b'{"canonical":"reviewed"}'
+    target.write_bytes(canonical + b"\n")
+    target.chmod(0o600)
+    assert installer._upgrade_exact(
+        target,
+        canonical,
+        previous=canonical + b"\n",
+        mode=0o600,
+        expected_uid=os.geteuid(),
+    ) == "upgraded-exact-prior"
+    target.write_bytes(canonical + b" ")
+    with pytest.raises(FileExistsError, match="unrecognized"):
+        installer._upgrade_exact(
+            target,
+            canonical,
+            previous=canonical + b"\n",
+            mode=0o600,
+            expected_uid=os.geteuid(),
+        )
+
+
 def _runtime_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     venv = tmp_path / "venv"
     bin_dir = venv / "bin"

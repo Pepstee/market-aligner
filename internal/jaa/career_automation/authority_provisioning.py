@@ -102,6 +102,48 @@ def _create_or_exact(path: Path, value: bytes) -> None:
         os.close(descriptor)
 
 
+def _upgrade_exact_local(path: Path, value: bytes, *, previous: bytes) -> str:
+    """Create/replay a protected object or migrate one exact reviewed prior form."""
+    if not path.exists() and not path.is_symlink():
+        _create_or_exact(path, value)
+        return "created"
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise ValueError("provisioned object path is unsafe")
+    current = path.read_bytes()
+    if current == value:
+        return "exact-replay"
+    if current != previous:
+        raise ValueError("provisioned object replay differs")
+    temporary = path.with_name(f".{path.name}.upgrade-{os.getpid()}")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        os.write(descriptor, value)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    return "upgraded-exact-prior"
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Gigabyte UTC clock returned a naive observation")
@@ -231,8 +273,8 @@ def provision_device_enrollment(
         "witness_identity_sha256": PRODUCTION_TIME_WITNESS_IDENTITY_SHA256,
     }
     config_path = root / "current-time-config.staged.json"
-    config_bytes = _bytes(staged_config)
-    _create_or_exact(config_path, config_bytes)
+    config_bytes = canonical_json(staged_config).encode("utf-8")
+    config_outcome = _upgrade_exact_local(config_path, config_bytes, previous=config_bytes + b"\n")
     return {
         "schema_version": DEVICE_ENROLLMENT_SCHEMA,
         "key_id": key_id,
@@ -242,6 +284,7 @@ def provision_device_enrollment(
         "enrollment_sha256": enrollment_sha256,
         "current_time_configuration_path": str(config_path),
         "current_time_configuration_sha256": _sha256(config_bytes),
+        "current_time_configuration_outcome": config_outcome,
         "current_time_deployed": False,
         "retroactive_evidence_authority": False,
     }

@@ -22,7 +22,8 @@ CONFIG_TARGET = Path("/etc/gigabyte/majaa/jaa-current-time-v1.json")
 SOCKET_TARGET = Path("/run/gigabyte/majaa/jaa-current-time-v1.sock")
 SERVICE_TARGET = Path("/usr/local/libexec/jaa-current-time-v1")
 UNIT_TARGET = Path("/etc/systemd/system/jaa-current-time-v1.service")
-STAGED_CONFIG_SHA256 = "db98c0b1071fb7eb34681a9765a4c943deba7749597299a7de808e009f8a95bb"
+STAGED_CONFIG_SHA256 = "2ab67684897303a619283c94ecab166a840f4b9efbf1df90d7e67aab46ea31a7"
+LEGACY_CONFIG_SHA256 = "db98c0b1071fb7eb34681a9765a4c943deba7749597299a7de808e009f8a95bb"
 PINNED_VENV_PYTHON = Path("/home/gutua/software-factory/.control/market-aligner-recovery-20260820/environments/jaa-integration/bin/python")
 PINNED_COMPONENT_ROOT = Path("/home/gutua")
 PINNED_RUNTIME = Path("/home/gutua/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12")
@@ -235,6 +236,9 @@ def install(
     config_bytes = staged_config.read_bytes()
     if hashlib.sha256(config_bytes).hexdigest() != STAGED_CONFIG_SHA256:
         raise ValueError("staged current-time configuration hash differs")
+    legacy_config_bytes = config_bytes + b"\n"
+    if hashlib.sha256(legacy_config_bytes).hexdigest() != LEGACY_CONFIG_SHA256:
+        raise ValueError("reviewed legacy current-time configuration hash differs")
     configuration = json.loads(config_bytes)
     if configuration.get("service_socket") != str(SOCKET_TARGET) or configuration.get("service_peer_uid") != 0:
         raise ValueError("staged current-time configuration weakens the socket pins")
@@ -249,7 +253,12 @@ def install(
         if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != mode:
             raise ValueError(f"root installation directory differs: {directory}")
     outcomes = {
-        "config": _exact_file(CONFIG_TARGET, config_bytes, 0o600),
+        "config": _upgrade_exact(
+            CONFIG_TARGET,
+            config_bytes,
+            previous=legacy_config_bytes,
+            mode=0o600,
+        ),
         "service": _exact_file(SERVICE_TARGET, service_source.read_bytes(), 0o755),
         "unit": _upgrade_exact(
             UNIT_TARGET,
