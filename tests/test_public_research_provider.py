@@ -400,6 +400,7 @@ def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
     refreshed_task = _task_and_reset(store)
     assert refreshed_task.source_content_sha256 == legacy_digest
     assert refreshed_task.refresh_event_id is not None
+    assert refreshed_task.refresh_bridge_sha256 == event["refresh_bridge_sha256"]
     assert refreshed_task.refresh_event_idempotency_key == (
         f"research-collection-refresh:{profile_id}:{JOB_KEY}:"
         f"{receipt['transition_sha256']}"
@@ -447,6 +448,7 @@ def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
     (
         ("refresh_event_id", None),
         ("refresh_event_id", 999999),
+        ("refresh_bridge_sha256", "0" * 64),
         ("refresh_event_idempotency_key", "substituted-event-key"),
         ("refresh_receipt_sha256", "9" * 64),
         ("refresh_receipt_file_sha256", "8" * 64),
@@ -587,7 +589,16 @@ def test_refresh_worker_bridge_rejects_canonical_event_substitution(
         collection_config_path=config,
     ) is True
     refreshed_task = _task_and_reset(store)
+    claimed_task = store.claim_research("immutable-bridge-probe")
+    assert claimed_task is not None
     with store.connection() as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                """UPDATE employer_research_queue
+                   SET refresh_event_id=NULL,refresh_bridge_sha256=NULL
+                   WHERE profile_id=? AND job_key=?""",
+                (profile_id, JOB_KEY),
+            )
         payload = json.loads(connection.execute(
             "SELECT payload_json FROM assessment_events WHERE id=?",
             (refreshed_task.refresh_event_id,),
@@ -615,7 +626,7 @@ def test_refresh_worker_bridge_rejects_canonical_event_substitution(
         bridge(refreshed_task)
 
 
-@pytest.mark.parametrize("swap", ("symlink", "replacement"))
+@pytest.mark.parametrize("swap", ("symlink", "replacement", "ancestor"))
 def test_refresh_worker_bridge_rejects_collector_inode_swap_after_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: str
 ) -> None:
@@ -645,12 +656,21 @@ def test_refresh_worker_bridge_rejects_collector_inode_swap_after_resolution(
 
     def resolve_then_swap(cls, *args, **kwargs):
         resolved = original_resolve(*args, **kwargs)
-        original = resolved.path.with_suffix(".pinned")
-        resolved.path.rename(original)
-        if swap == "symlink":
-            resolved.path.symlink_to(original)
+        if swap == "ancestor":
+            ancestor = resolved.path.parents[1]
+            renamed = ancestor.with_name(f"{ancestor.name}-pinned")
+            ancestor.rename(renamed)
+            resolved.path.parent.mkdir(parents=True)
+            shutil.copy2(
+                renamed / resolved.path.relative_to(ancestor), resolved.path
+            )
         else:
-            shutil.copy2(original, resolved.path)
+            original = resolved.path.with_suffix(".pinned")
+            resolved.path.rename(original)
+            if swap == "symlink":
+                resolved.path.symlink_to(original)
+            else:
+                shutil.copy2(original, resolved.path)
         return resolved
 
     monkeypatch.setattr(

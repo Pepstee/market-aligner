@@ -25,7 +25,14 @@ from urllib.parse import urlsplit
 
 from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
 
-from .models import ClaimSupport, ResearchClaim, ResearchDossier, ResearchTask, SourceCitation
+from .models import (
+    ClaimSupport,
+    ResearchClaim,
+    ResearchDossier,
+    ResearchTask,
+    SourceCitation,
+    research_refresh_bridge_sha256,
+)
 
 
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
@@ -367,6 +374,7 @@ class CanonicalCollectorVacancyLoader:
             "promotion_receipt_sha256": task.refresh_promotion_receipt_sha256,
             "source_content_sha256": task.source_content_sha256,
             "prior_dossier_hash": task.refresh_prior_dossier_sha256,
+            "refresh_bridge_sha256": task.refresh_bridge_sha256,
         }
         if (
             type(task.refresh_event_id) is not int
@@ -387,7 +395,8 @@ class CanonicalCollectorVacancyLoader:
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
             row = connection.execute(
-                """SELECT q.refresh_event_id,q.status,e.event_type,e.actor_kind,
+                """SELECT q.refresh_event_id,q.refresh_bridge_sha256,q.status,
+                          e.event_type,e.actor_kind,
                           e.payload_json,e.idempotency_key,d.dossier_hash,
                           d.dossier_json,
                           p.source_content_sha256,
@@ -412,6 +421,7 @@ class CanonicalCollectorVacancyLoader:
             expected = dict(required)
             if (
                 row["refresh_event_id"] != task.refresh_event_id
+                or row["refresh_bridge_sha256"] != task.refresh_bridge_sha256
                 or row["status"] not in {"queued", "leased"}
                 or row["event_type"]
                 != "employer_research_collection_refresh_queued"
@@ -429,6 +439,13 @@ class CanonicalCollectorVacancyLoader:
                     str(row["dossier_json"] or "").encode("utf-8")
                 ).hexdigest()
                 != row["dossier_hash"]
+                or research_refresh_bridge_sha256(
+                    event_type=str(row["event_type"]),
+                    actor_kind=str(row["actor_kind"]),
+                    idempotency_key=str(row["idempotency_key"]),
+                    payload=payload,
+                )
+                != task.refresh_bridge_sha256
                 or row["source_content_sha256"] != task.source_content_sha256
                 or row["promotion_receipt_sha256"]
                 != task.promotion_receipt_sha256
@@ -535,6 +552,7 @@ class CanonicalCollectorVacancyLoader:
     def __call__(self, task: ResearchTask) -> FetchedPublicSource:
         refresh_values = (
             task.refresh_event_id,
+            task.refresh_bridge_sha256,
             task.refresh_event_idempotency_key,
             task.refresh_receipt_sha256,
             task.refresh_receipt_file_sha256,

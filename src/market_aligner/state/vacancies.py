@@ -75,6 +75,7 @@ class ResolvedVacancyRefreshCollector:
     data_home: Path
     st_dev: int
     st_ino: int
+    directory_chain: tuple[tuple[Path, int, int], ...]
 
     def verify_open_connection(
         self, connection: sqlite3.Connection, *, schema: str = "main"
@@ -98,6 +99,22 @@ class ResolvedVacancyRefreshCollector:
             raise VacancyRefreshConflict(
                 "configured collector database inode differs from resolution"
             )
+        for directory, expected_dev, expected_ino in self.directory_chain:
+            try:
+                current = directory.lstat()
+            except OSError as exc:
+                raise VacancyRefreshConflict(
+                    "configured collector database ancestry is unavailable"
+                ) from exc
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or stat.S_ISLNK(current.st_mode)
+                or current.st_dev != expected_dev
+                or current.st_ino != expected_ino
+            ):
+                raise VacancyRefreshConflict(
+                    "configured collector database ancestry differs from resolution"
+                )
         paths = {
             str(row[1]): Path(str(row[2])).absolute()
             for row in connection.execute("PRAGMA database_list")
@@ -1164,7 +1181,19 @@ class JobDatabase:
             raise VacancyRefreshConflict(
                 "collection config adapter identity differs from refresh receipt"
             )
+        directory_chain: list[tuple[Path, int, int]] = []
         current = root
+        try:
+            root_metadata = current.lstat()
+        except OSError as exc:
+            raise VacancyRefreshConflict(
+                "external data home is unavailable"
+            ) from exc
+        if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
+            raise VacancyRefreshConflict("external data home is unsafe")
+        directory_chain.append(
+            (current, int(root_metadata.st_dev), int(root_metadata.st_ino))
+        )
         for component in relative.parts[:-1]:
             current = current / component
             try:
@@ -1177,6 +1206,9 @@ class JobDatabase:
                 raise VacancyRefreshConflict(
                     "configured collector database ancestor is unsafe"
                 )
+            directory_chain.append(
+                (current, int(metadata.st_dev), int(metadata.st_ino))
+            )
         try:
             metadata = database.lstat()
         except OSError as exc:
@@ -1198,6 +1230,7 @@ class JobDatabase:
             data_home=root,
             st_dev=int(metadata.st_dev),
             st_ino=int(metadata.st_ino),
+            directory_chain=tuple(directory_chain),
         )
 
     @staticmethod

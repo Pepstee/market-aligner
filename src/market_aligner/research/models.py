@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 from urllib.parse import urlsplit
 
@@ -11,6 +13,52 @@ _BYTE_SELECTOR = re.compile(r"^bytes:(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$")
 RESEARCH_ARCHIVE_ROOT_POLICY_SHA256 = (
     "209f1714c8b020971286b0e3fb33263d5a0c029524055bc74dbb8c1cc1282572"
 )
+
+RESEARCH_REFRESH_BRIDGE_FIELDS = (
+    "collection_context_sha256",
+    "collection_operation_id",
+    "collection_receipt_file_sha256",
+    "collection_receipt_sha256",
+    "collection_refresh_id",
+    "collection_transition_sha256",
+    "new_fetched_at",
+    "new_raw_object_sha256",
+    "old_canonical_content_sha256",
+    "old_collector_content_sha256",
+    "prior_dossier_hash",
+    "promotion_receipt_sha256",
+    "source_content_sha256",
+)
+
+
+def research_refresh_bridge_sha256(
+    *, event_type: str, actor_kind: str, idempotency_key: str, payload: dict[str, object]
+) -> str:
+    """Hash every semantic field carried across one refresh-worker lease."""
+
+    fields = {key: payload.get(key) for key in RESEARCH_REFRESH_BRIDGE_FIELDS}
+    allowed = set(RESEARCH_REFRESH_BRIDGE_FIELDS)
+    if set(payload) not in (
+        allowed,
+        allowed | {"refresh_bridge_sha256"},
+    ) or any(value is None for value in fields.values()):
+        raise ValueError("research refresh bridge payload is incomplete")
+    document = {
+        "actor_kind": actor_kind,
+        "event_type": event_type,
+        "fields": fields,
+        "idempotency_key": idempotency_key,
+        "schema_version": "market-aligner.research-refresh-bridge.v1",
+    }
+    return hashlib.sha256(
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -171,6 +219,7 @@ class ResearchTask:
     vacancy_snapshot_sha256: str | None = None
     promotion_receipt_sha256: str | None = None
     refresh_event_id: int | None = None
+    refresh_bridge_sha256: str | None = None
     refresh_event_idempotency_key: str | None = None
     refresh_receipt_sha256: str | None = None
     refresh_receipt_file_sha256: str | None = None

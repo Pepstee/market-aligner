@@ -24,6 +24,7 @@ from .models import (
     ResearchDossier,
     ResearchEvidenceBinding,
     ResearchTask,
+    research_refresh_bridge_sha256,
 )
 
 
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS employer_research_queue (
   lease_until TEXT,
   last_error TEXT,
   refresh_event_id INTEGER,
+  refresh_bridge_sha256 TEXT,
   queued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(profile_id,job_key),
@@ -187,6 +189,17 @@ BEGIN
 END;
 """
 
+_REFRESH_QUEUE_IMMUTABILITY_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS immutable_leased_refresh_bridge
+BEFORE UPDATE ON employer_research_queue
+WHEN OLD.status='leased' AND OLD.refresh_event_id IS NOT NULL
+ AND (NEW.refresh_event_id IS NOT OLD.refresh_event_id
+      OR NEW.refresh_bridge_sha256 IS NOT OLD.refresh_bridge_sha256)
+BEGIN
+  SELECT RAISE(ABORT, 'leased research refresh bridge is immutable');
+END;
+"""
+
 
 class AssessmentStore:
     def __init__(self, path: str | Path) -> None:
@@ -211,6 +224,12 @@ class AssessmentStore:
                     "refresh_event_id INTEGER REFERENCES assessment_events(id) "
                     "ON DELETE RESTRICT"
                 )
+            if "refresh_bridge_sha256" not in columns:
+                connection.execute(
+                    "ALTER TABLE employer_research_queue ADD COLUMN "
+                    "refresh_bridge_sha256 TEXT"
+                )
+            connection.executescript(_REFRESH_QUEUE_IMMUTABILITY_TRIGGER)
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -365,6 +384,7 @@ class AssessmentStore:
                     """INSERT INTO employer_research_queue(profile_id,job_key,priority)
                        VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
                        priority=excluded.priority,refresh_event_id=NULL,
+                       refresh_bridge_sha256=NULL,
                        updated_at=CURRENT_TIMESTAMP""",
                     (profile_id, job_key, priority),
                 )
@@ -495,6 +515,7 @@ class AssessmentStore:
                     """INSERT INTO employer_research_queue(profile_id,job_key,priority)
                        VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
                        priority=excluded.priority,refresh_event_id=NULL,
+                       refresh_bridge_sha256=NULL,
                        updated_at=CURRENT_TIMESTAMP""",
                     (profile_id, job_key, research_priority),
                 )
@@ -536,6 +557,7 @@ class AssessmentStore:
                 """INSERT INTO employer_research_queue(profile_id,job_key,priority)
                    VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
                    priority=excluded.priority,refresh_event_id=NULL,
+                   refresh_bridge_sha256=NULL,
                    updated_at=CURRENT_TIMESTAMP""",
                 (profile_id, job_key, research_priority),
             )
@@ -587,7 +609,8 @@ class AssessmentStore:
                 """SELECT q.profile_id,q.job_key,a.title,a.company,a.url,a.opportunity,
                           q.priority,q.attempts,p.source_content_sha256,
                           p.receipt_sha256 AS promotion_receipt_sha256,
-                          q.refresh_event_id,e.event_type AS refresh_event_type,
+                          q.refresh_event_id,q.refresh_bridge_sha256,
+                          e.event_type AS refresh_event_type,
                           e.actor_kind AS refresh_actor_kind,
                           e.payload_json AS refresh_payload_json,
                           e.idempotency_key AS refresh_event_idempotency_key,
@@ -662,6 +685,7 @@ class AssessmentStore:
                     "old_collector_content_sha256",
                     "prior_dossier_hash",
                     "promotion_receipt_sha256",
+                    "refresh_bridge_sha256",
                     "source_content_sha256",
                 }
                 if (
@@ -689,6 +713,15 @@ class AssessmentStore:
                         refresh_current_dossier_json.encode("utf-8")
                     ).hexdigest()
                     != refresh_current_dossier_hash
+                    or payload["refresh_bridge_sha256"]
+                    != values["refresh_bridge_sha256"]
+                    or research_refresh_bridge_sha256(
+                        event_type=str(refresh_event_type),
+                        actor_kind=str(refresh_actor_kind),
+                        idempotency_key=str(refresh_event_idempotency_key),
+                        payload=payload,
+                    )
+                    != values["refresh_bridge_sha256"]
                 ):
                     raise ValueError("research refresh event differs from promotion")
                 refresh_values.update(
@@ -1038,6 +1071,13 @@ class AssessmentStore:
                 "promotion_receipt_sha256": row["promotion_receipt_sha256"],
                 "source_content_sha256": promotion_source,
             }
+            bridge_sha256 = research_refresh_bridge_sha256(
+                event_type="employer_research_collection_refresh_queued",
+                actor_kind="deterministic",
+                idempotency_key=event_key,
+                payload=payload,
+            )
+            payload["refresh_bridge_sha256"] = bridge_sha256
             existing_event = connection.execute(
                 """SELECT id,event_type,actor_kind,payload_json
                    FROM assessment_events WHERE idempotency_key=?""",
@@ -1062,6 +1102,16 @@ class AssessmentStore:
                 )
                 replay_payload = dict(payload)
                 replay_payload["prior_dossier_hash"] = prior_hash
+                replay_payload["refresh_bridge_sha256"] = (
+                    research_refresh_bridge_sha256(
+                        event_type=(
+                            "employer_research_collection_refresh_queued"
+                        ),
+                        actor_kind="deterministic",
+                        idempotency_key=event_key,
+                        payload=replay_payload,
+                    )
+                )
                 if (
                     existing_event["event_type"]
                     != "employer_research_collection_refresh_queued"
@@ -1100,11 +1150,13 @@ class AssessmentStore:
             updated = connection.execute(
                 """UPDATE employer_research_queue SET status='queued',
                      available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,
-                     last_error=?,refresh_event_id=?,updated_at=CURRENT_TIMESTAMP
+                     last_error=?,refresh_event_id=?,refresh_bridge_sha256=?,
+                     updated_at=CURRENT_TIMESTAMP
                    WHERE profile_id=? AND job_key=? AND status='completed'""",
                 (
                     "canonical vacancy fetched_at changed under unchanged content",
                     refresh_event_id,
+                    bridge_sha256,
                     profile_id,
                     job_key,
                 ),
@@ -1222,6 +1274,7 @@ class AssessmentStore:
         with self.transaction() as connection:
             lease = connection.execute(
                 """SELECT q.lease_owner,q.status,q.refresh_event_id,
+                          q.refresh_bridge_sha256,
                           e.event_type,e.actor_kind,e.payload_json,e.idempotency_key,
                           d.dossier_hash AS current_dossier_hash,
                           d.dossier_json AS current_dossier_json,
@@ -1273,6 +1326,15 @@ class AssessmentStore:
                     != dossier.promotion_receipt_sha256
                     or lease["current_promotion_receipt_sha256"]
                     != dossier.promotion_receipt_sha256
+                    or refresh_payload.get("refresh_bridge_sha256")
+                    != lease["refresh_bridge_sha256"]
+                    or research_refresh_bridge_sha256(
+                        event_type=str(lease["event_type"]),
+                        actor_kind=str(lease["actor_kind"]),
+                        idempotency_key=str(lease["idempotency_key"]),
+                        payload=refresh_payload,
+                    )
+                    != lease["refresh_bridge_sha256"]
                 ):
                     raise ValueError(
                         "research completion refresh authority differs"
