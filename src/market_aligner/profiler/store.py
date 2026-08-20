@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -13,7 +14,13 @@ import yaml
 
 from market_aligner.config import ProductPaths
 
-from .schema import CandidateProfile, EvidenceItem, TrackProfile, validate_profile_id
+from .schema import (
+    CandidateProfile,
+    CanonicalProfileProjectionReceipt,
+    EvidenceItem,
+    TrackProfile,
+    validate_profile_id,
+)
 
 
 def _atomic_text(path: Path, content: str) -> None:
@@ -28,6 +35,23 @@ def _atomic_text(path: Path, content: str) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def _create_or_verify_text(path: Path, content: str) -> None:
+    """Create immutable projection output, or verify an exact replay."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"projection target is not a regular file: {path.name}")
+        if path.read_text(encoding="utf-8") != content:
+            raise ValueError(f"canonical profile projection drift: {path.name}")
+        return
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 class ProfileStore:
@@ -54,6 +78,55 @@ class ProfileStore:
             for item in sorted(evidence, key=lambda item: item.evidence_id)
         )
         _atomic_text(directory / "evidence.jsonl", ledger)
+
+    def save_projection(
+        self,
+        profile: CandidateProfile,
+        evidence: list[EvidenceItem],
+        receipt: CanonicalProfileProjectionReceipt,
+    ) -> None:
+        """Persist one canonical projection without permitting in-place drift."""
+        evidence_by_id = {item.evidence_id: item for item in evidence}
+        if len(evidence_by_id) != len(evidence):
+            raise ValueError("duplicate evidence_id")
+        profile.validate_evidence(evidence_by_id)
+        if receipt.profile_id != profile.profile_id:
+            raise ValueError("projection receipt targets another profile")
+        profile_sha256 = hashlib.sha256(
+            json.dumps(
+                asdict(profile),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        evidence_sha256 = hashlib.sha256(
+            json.dumps(
+                [asdict(item) for item in evidence],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        if (
+            receipt.profile_sha256 != profile_sha256
+            or receipt.evidence_ledger_sha256 != evidence_sha256
+        ):
+            raise ValueError("projection receipt differs from profile content")
+        directory = self.directory(profile.profile_id)
+        profile_text = yaml.safe_dump(
+            asdict(profile), sort_keys=False, allow_unicode=True, width=100
+        )
+        ledger_text = "".join(
+            json.dumps(asdict(item), ensure_ascii=False, sort_keys=True) + "\n"
+            for item in sorted(evidence, key=lambda item: item.evidence_id)
+        )
+        receipt_text = json.dumps(
+            receipt.document(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ) + "\n"
+        _create_or_verify_text(directory / "profile.yaml", profile_text)
+        _create_or_verify_text(directory / "evidence.jsonl", ledger_text)
+        _create_or_verify_text(directory / "projection-receipt.json", receipt_text)
 
     def load(self, profile_id: str) -> tuple[CandidateProfile, dict[str, EvidenceItem]]:
         directory = self.directory(profile_id)

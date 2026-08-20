@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import hashlib
+import json
 from pathlib import Path
 
 import yaml
 
-from market_aligner.profiler.importers import import_evidence_led, import_guided_profile
+from market_aligner.profiler.importers import (
+    import_evidence_led,
+    import_guided_profile,
+    project_canonical_authority,
+)
 from market_aligner.profiler.schema import CandidateProfile, EvidenceItem, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
 
@@ -121,6 +127,154 @@ class ProfileTests(unittest.TestCase):
         rendered = str(context)
         self.assertNotIn("Private label", rendered)
         self.assertNotIn("/private/path", rendered)
+
+    def _projection_sources(self, root: Path) -> tuple[Path, Path, Path]:
+        packet = root / "approved.json"
+        packet.write_text(
+            json.dumps(
+                {
+                    "schema_version": "jaa05.operator-approved-statements.v1",
+                    "statements": [
+                        {
+                            "id": "E-001",
+                            "kind": "portfolio_artifact",
+                            "proof_class": "portfolio_artifact",
+                            "statement": "Built a tested deterministic service.",
+                        }
+                    ],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        statement_sha256 = hashlib.sha256(
+            b"Built a tested deterministic service."
+        ).hexdigest()
+        packet_sha256 = hashlib.sha256(packet.read_bytes()).hexdigest()
+        authority = root / "authority.json"
+        authority.write_text(
+            json.dumps(
+                {
+                    "schema_version": "jaa.production-candidate-authority.v2",
+                    "candidate_projection": {
+                        "schema_version": "jaa.candidate-authority-projection.v1",
+                        "projection_sha256": "a" * 64,
+                        "source_hashes": {"approved_evidence": packet_sha256},
+                        "approved_evidence": [
+                            {
+                                "id": "E-001",
+                                "kind": "portfolio_artifact",
+                                "proof_class": "portfolio_artifact",
+                                "statement_sha256": statement_sha256,
+                            }
+                        ],
+                        "availability": {
+                            "remote_preference": "preferred",
+                            "sponsorship_required": False,
+                        },
+                    },
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        legacy = root / "legacy-v1.4.yaml"
+        legacy.write_text(
+            yaml.safe_dump(
+                {
+                    "meta": {"version": "v1.4", "subject": "Private candidate"},
+                    "career_tracks": {
+                        "automation": {
+                            "interest": 9,
+                            "skill": 7,
+                            "confidence": 0.8,
+                            "market_readiness": 6,
+                            "evidence": ["E-001", "E-999"],
+                            "rationale": "Legacy prose must not become authority.",
+                            "gaps": ["Legacy gap"],
+                        }
+                    },
+                    "evidence": [
+                        {
+                            "id": "E-001",
+                            "claim": "Built a tested deterministic service.",
+                        }
+                    ],
+                    "capabilities": {"summary": "Unbound legacy capability."},
+                    "constraints": {
+                        "remote_preference": "required",
+                        "legacy_only": True,
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return authority, packet, legacy
+
+    def test_canonical_projection_maps_exact_evidence_and_records_losses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authority, packet, legacy = self._projection_sources(root)
+            data_home = root / "external-data"
+            profile, evidence, receipt = project_canonical_authority(
+                authority_path=authority,
+                evidence_packet_path=packet,
+                legacy_profile_path=legacy,
+                data_home=data_home,
+            )
+
+            self.assertEqual(("E-001",), profile.tracks["automation"].evidence_ids)
+            self.assertEqual({}, profile.capabilities)
+            self.assertEqual("preferred", profile.constraints["remote_preference"])
+            self.assertEqual("Built a tested deterministic service.", evidence[0].claim)
+            self.assertFalse(receipt.release_authority)
+            self.assertTrue(any(item.reason_code == "absent_from_canonical_authority" for item in receipt.omissions))
+            self.assertTrue(any(item.reason_code == "unbound_legacy_capability_prose" for item in receipt.omissions))
+            self.assertTrue(any(item.reason_code == "legacy_constraint_differs_from_canonical_authority" for item in receipt.conflicts))
+            directory = data_home / "profiles" / profile.profile_id
+            self.assertTrue(directory.joinpath("profile.yaml").is_file())
+            self.assertTrue(directory.joinpath("evidence.jsonl").is_file())
+            self.assertTrue(directory.joinpath("projection-receipt.json").is_file())
+            self.assertNotIn("Private candidate", directory.joinpath("profile.yaml").read_text())
+
+            replay = project_canonical_authority(
+                authority_path=authority,
+                evidence_packet_path=packet,
+                legacy_profile_path=legacy,
+                data_home=data_home,
+            )
+            self.assertEqual((profile, evidence, receipt), replay)
+
+    def test_projection_rejects_source_and_destination_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authority, packet, legacy = self._projection_sources(root)
+            data_home = root / "external-data"
+            profile, _, _ = project_canonical_authority(
+                authority_path=authority,
+                evidence_packet_path=packet,
+                legacy_profile_path=legacy,
+                data_home=data_home,
+            )
+            receipt_path = data_home / "profiles" / profile.profile_id / "projection-receipt.json"
+            receipt_path.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "projection drift"):
+                project_canonical_authority(
+                    authority_path=authority,
+                    evidence_packet_path=packet,
+                    legacy_profile_path=legacy,
+                    data_home=data_home,
+                )
+
+            packet.write_text(packet.read_text() + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "does not bind"):
+                project_canonical_authority(
+                    authority_path=authority,
+                    evidence_packet_path=packet,
+                    legacy_profile_path=legacy,
+                    data_home=root / "other-data",
+                )
 
 
 if __name__ == "__main__":

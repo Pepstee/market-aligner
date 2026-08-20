@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import re
 import uuid
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
 
 PROFILE_SCHEMA_VERSION = "market-aligner.profile.v1"
+PROJECTION_SCHEMA_VERSION = "market-aligner.canonical-profile-projection.v1"
 PROFILE_ID_PATTERN = re.compile(r"^prf_[0-9a-f]{32}$")
 EVIDENCE_STATUSES = frozenset({"verified", "explicit", "inference", "unverified_current"})
 
@@ -178,3 +181,90 @@ class CandidateProfile:
         }
         assert_secret_free(context)
         return context
+
+
+@dataclass(frozen=True)
+class ProjectionDecision:
+    target: str
+    source: str
+    reason_code: str
+    evidence_ids: tuple[str, ...] = ()
+    authority_value_sha256: str | None = None
+    legacy_value_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.target.strip() or not self.source.strip() or not self.reason_code.strip():
+            raise ValueError("projection decision fields are required")
+        for value in (self.authority_value_sha256, self.legacy_value_sha256):
+            if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("projection decision value hash is invalid")
+        assert_secret_free(asdict(self))
+
+
+def _projection_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True)
+class CanonicalProfileProjectionReceipt:
+    profile_id: str
+    authority_sha256: str
+    authority_projection_sha256: str
+    evidence_packet_sha256: str
+    legacy_profile_sha256: str
+    profile_sha256: str
+    evidence_ledger_sha256: str
+    mappings: tuple[ProjectionDecision, ...]
+    omissions: tuple[ProjectionDecision, ...]
+    conflicts: tuple[ProjectionDecision, ...]
+    receipt_sha256: str
+    release_authority: bool = False
+    schema: str = PROJECTION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        validate_profile_id(self.profile_id)
+        if self.schema != PROJECTION_SCHEMA_VERSION:
+            raise ValueError("unsupported canonical profile projection receipt")
+        for value in (
+            self.authority_sha256,
+            self.authority_projection_sha256,
+            self.evidence_packet_sha256,
+            self.legacy_profile_sha256,
+            self.profile_sha256,
+            self.evidence_ledger_sha256,
+            self.receipt_sha256,
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("projection receipt hash is invalid")
+        for decision in (*self.mappings, *self.omissions, *self.conflicts):
+            decision.__post_init__()
+        if self.release_authority is not False:
+            raise ValueError("profile projection cannot grant release authority")
+        if self.receipt_sha256 != _projection_hash(self.document(include_identity=False)):
+            raise ValueError("projection receipt identity is invalid")
+        assert_secret_free(self.document())
+
+    def document(self, *, include_identity: bool = True) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "schema": self.schema,
+            "profile_id": self.profile_id,
+            "authority_sha256": self.authority_sha256,
+            "authority_projection_sha256": self.authority_projection_sha256,
+            "evidence_packet_sha256": self.evidence_packet_sha256,
+            "legacy_profile_sha256": self.legacy_profile_sha256,
+            "profile_sha256": self.profile_sha256,
+            "evidence_ledger_sha256": self.evidence_ledger_sha256,
+            "mappings": [asdict(item) for item in self.mappings],
+            "omissions": [asdict(item) for item in self.omissions],
+            "conflicts": [asdict(item) for item in self.conflicts],
+            "release_authority": False,
+        }
+        if include_identity:
+            value["receipt_sha256"] = self.receipt_sha256
+        return value
