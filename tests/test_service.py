@@ -168,6 +168,89 @@ def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_concurrent_board_scopes_have_isolated_deterministic_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, _ = _processing_fixture(root, jobs=0)
+            database = JobDatabase(root / "state" / "vacancies.sqlite3")
+            for board in ("workable", "workday"):
+                job = JobUrl(board, "1", f"https://jobs.example.test/{board}/1")
+                database.upsert_discovered(job)
+                database.store_raw(
+                    RawPosting(
+                        board=job.board,
+                        job_id=job.job_id,
+                        url=job.url,
+                        fetched_at="2026-08-20T00:00:00Z",
+                        raw_json={
+                            "title": f"Automation Engineer {board}",
+                            "company": "Example",
+                            "location": "Remote UK",
+                            "description": "Build reliable Python automation.",
+                        },
+                    )
+                )
+            configs = {}
+            for board in ("workable", "workday"):
+                path = root / f"{board}.yaml"
+                path.write_text(
+                    "processing:\n"
+                    "  shard_size: 10\n"
+                    "  lease_seconds: 60\n"
+                    f"  include_boards: [{board}]\n",
+                    encoding="utf-8",
+                )
+                configs[board] = path
+
+            def process(board: str, suffix: str):
+                return ProcessingService(root, FixtureSemanticWorker()).process(
+                    configs[board],
+                    profile_id=profile_id,
+                    track="automation",
+                    worker_id=f"{board}-{suffix}",
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {
+                    board: pool.submit(process, board, "concurrent")
+                    for board in configs
+                }
+                first = {board: future.result() for board, future in futures.items()}
+
+            workable_path = Path(first["workable"]["reports"]["ranked_json"])
+            workday_path = Path(first["workday"]["reports"]["ranked_json"])
+            self.assertNotEqual(workable_path.parent, workday_path.parent)
+            self.assertRegex(workable_path.parent.name, r"^scope_[0-9a-f]{64}$")
+            self.assertRegex(workday_path.parent.name, r"^scope_[0-9a-f]{64}$")
+            self.assertEqual(
+                {"workable:1"},
+                {
+                    row["job_key"]
+                    for row in json.loads(workable_path.read_text())["jobs"]
+                },
+            )
+            self.assertEqual(
+                {"workday:1"},
+                {
+                    row["job_key"]
+                    for row in json.loads(workday_path.read_text())["jobs"]
+                },
+            )
+
+            replay = {
+                board: process(board, "replay")
+                for board in ("workable", "workday")
+            }
+            for board in replay:
+                self.assertEqual(
+                    first[board]["report_namespace_sha256"],
+                    replay[board]["report_namespace_sha256"],
+                )
+                self.assertEqual(first[board]["reports"], replay[board]["reports"])
+                self.assertEqual(
+                    first[board]["report_hashes"], replay[board]["report_hashes"]
+                )
+
     def test_current_processing_result_promotes_atomically_and_rejects_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

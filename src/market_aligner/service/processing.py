@@ -297,6 +297,17 @@ class ProcessingService:
                 "opportunity_policy": asdict(self.opportunity_policy),
             }
         )
+        report_scope = {
+            "evidence_authority_sha256": authority_sha256,
+            "processing_config_sha256": config_sha256,
+            "profile_id": profile_id,
+            "schema_version": "market-aligner.processing-report-scope.v1",
+            "scope": scope,
+            "scope_sha256": scope_sha256,
+            "track": track,
+        }
+        report_namespace_sha256 = _sha256(report_scope)
+        report_namespace = f"scope_{report_namespace_sha256}"
         claimed = self.jobs.claim_fetched_for_processing(
             profile_id=profile_id,
             track=track,
@@ -479,7 +490,12 @@ class ProcessingService:
             max_total=processing["max_total"],
         ) as result_rows:
             ranked = _ranked(result_rows)
-            report_paths = write_reports(profile_id, ranked, self.paths.outputs / "reports")
+            report_paths = write_reports(
+                profile_id,
+                ranked,
+                self.paths.outputs / "reports",
+                namespace=report_namespace,
+            )
             report_hashes = {
                 name: hashlib.sha256(path.read_bytes()).hexdigest()
                 for name, path in asdict(report_paths).items()
@@ -514,6 +530,8 @@ class ProcessingService:
             "ranked_count": len(ranked),
             "rejected": rejected,
             "report_hashes": report_hashes,
+            "report_namespace_sha256": report_namespace_sha256,
+            "report_scope": report_scope,
             "schema_version": "market-aligner.processing-run-receipt.v1",
             "shard_claimed": len(claimed),
             "scope": scope,

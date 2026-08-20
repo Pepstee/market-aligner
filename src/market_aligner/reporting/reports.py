@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,11 +82,17 @@ def write_reports(
     profile_id: str,
     rows: Sequence[RankedVacancy],
     output_root: str | Path,
+    *,
+    namespace: str | None = None,
 ) -> ReportPaths:
     validate_profile_id(profile_id)
     if any(item.score.profile_id != profile_id for item in rows):
         raise ValueError("report cannot mix profile IDs")
+    if namespace is not None and not re.fullmatch(r"scope_[0-9a-f]{64}", namespace):
+        raise ValueError("report namespace must be a canonical scope digest")
     root = Path(output_root) / profile_id
+    if namespace is not None:
+        root = root / "processing-scopes" / namespace
     root.mkdir(parents=True, exist_ok=True)
     paths = ReportPaths(
         jobs_csv=root / "jobs_ranked.csv",

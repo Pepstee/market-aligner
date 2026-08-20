@@ -70,6 +70,25 @@ class ReportingTests(unittest.TestCase):
             preferred = json.loads(preferred_paths.ranked_json.read_text(encoding="utf-8"))
             self.assertEqual(["board:2", "board:1"], [job["job_key"] for job in preferred["jobs"]])
             self.assertEqual("uk_remote", preferred["jobs"][0]["preference_classification"])
+            namespace = "scope_" + "a" * 64
+            scoped_paths = write_reports(
+                profile.profile_id,
+                rows,
+                Path(temporary),
+                namespace=namespace,
+            )
+            self.assertEqual(namespace, scoped_paths.ranked_json.parent.name)
+            self.assertEqual(
+                Path(temporary) / profile.profile_id,
+                paths.ranked_json.parent,
+            )
+            with self.assertRaisesRegex(ValueError, "canonical scope digest"):
+                write_reports(
+                    profile.profile_id,
+                    rows,
+                    Path(temporary),
+                    namespace="../collision",
+                )
 
 
 def _inspect_png(payload: bytes) -> tuple[int, int, dict[str, str]]:
