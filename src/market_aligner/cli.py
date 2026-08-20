@@ -227,6 +227,18 @@ def _process_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _process_one_command(args: argparse.Namespace) -> int:
+    receipt = ProcessingService(args.data_home, _codex_gateway(args)).process(
+        args.config,
+        profile_id=args.profile_id,
+        track=args.track,
+        worker_id=args.worker_id,
+        job_key=args.job_key,
+    )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def _semantic_canary_command(args: argparse.Namespace) -> int:
     extraction, receipt = synthetic_extraction_canary(_codex_gateway(args))
     payload = {
@@ -353,6 +365,21 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--codex-binary", type=Path)
     _add_data_home(process)
     process.set_defaults(handler=_process_command)
+
+    process_one = commands.add_parser(
+        "process-one",
+        help="Process one exact fetched vacancy through the existing processing service.",
+    )
+    process_one.add_argument("--config", type=Path, required=True)
+    process_one.add_argument("--profile-id", required=True)
+    process_one.add_argument("--track", required=True)
+    process_one.add_argument("--worker-id", required=True)
+    process_one.add_argument("--job-key", required=True)
+    process_one.add_argument("--model", required=True, help="Explicit Codex model identity.")
+    process_one.add_argument("--semantic-timeout", type=float, default=120.0)
+    process_one.add_argument("--codex-binary", type=Path)
+    _add_data_home(process_one)
+    process_one.set_defaults(handler=_process_one_command)
 
     canary = commands.add_parser(
         "semantic-canary",

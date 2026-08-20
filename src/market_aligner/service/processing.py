@@ -243,9 +243,12 @@ class ProcessingService:
         profile_id: str,
         track: str,
         worker_id: str,
+        job_key: str | None = None,
     ) -> dict[str, object]:
         if not worker_id.strip():
             raise ValueError("processing worker ID is required")
+        if job_key is not None and (not job_key or ":" not in job_key):
+            raise ValueError("exact processing job key must be board-qualified")
         config = load_config(config_path)
         processing = _processing_config(config)
         collector_database, collector_database_relative = _collector_database(self.paths, config)
@@ -259,6 +262,7 @@ class ProcessingService:
         promotion_body = self.jobs.promote_fetched_from(
             collector_database,
             config_sha256=promotion_config_sha256,
+            job_key=job_key,
         )
         promotion_receipt_sha256 = _sha256(promotion_body)
         promotion = {**promotion_body, "receipt_sha256": promotion_receipt_sha256}
@@ -279,6 +283,8 @@ class ProcessingService:
             "include_boards": processing["include_boards"],
             "max_total": processing["max_total"],
         }
+        if job_key is not None:
+            scope["job_key"] = job_key
         scope_sha256 = _sha256(scope)
         profile, evidence = self.profiles.load(profile_id)
         if track not in profile.tracks:
@@ -319,6 +325,7 @@ class ProcessingService:
             include_boards=processing["include_boards"],
             exclude_boards=processing["exclude_boards"],
             max_total=processing["max_total"],
+            exact_job_key=job_key,
         )
         completed = rejected = parked = errors = 0
         extraction_reuses = alignment_reuses = 0
@@ -488,6 +495,7 @@ class ProcessingService:
             include_boards=processing["include_boards"],
             exclude_boards=processing["exclude_boards"],
             max_total=processing["max_total"],
+            exact_job_key=job_key,
         ) as result_rows:
             ranked = _ranked(result_rows)
             report_paths = write_reports(
@@ -509,6 +517,7 @@ class ProcessingService:
             include_boards=processing["include_boards"],
             exclude_boards=processing["exclude_boards"],
             max_total=processing["max_total"],
+            exact_job_key=job_key,
         )
         body: dict[str, object] = {
             "application_authority": False,

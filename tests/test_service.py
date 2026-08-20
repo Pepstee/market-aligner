@@ -17,6 +17,7 @@ from market_aligner.assessment.geography import (
     classify_geographic_preference,
 )
 from market_aligner.assessment.viability import FirstJobScopePolicy
+from market_aligner.cli import build_parser
 from market_aligner.domain.contracts import JobUrl, RawPosting
 from market_aligner.llm.contracts import (
     EvidenceAlignment,
@@ -168,6 +169,107 @@ def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_process_one_cli_requires_exact_job_key(self) -> None:
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "process-one",
+                    "--config", "config.yaml",
+                    "--profile-id", "prf_fixture",
+                    "--track", "automation",
+                    "--worker-id", "exact",
+                    "--model", "fixture",
+                ]
+            )
+        parsed = parser.parse_args(
+            [
+                "process-one",
+                "--config", "config.yaml",
+                "--profile-id", "prf_fixture",
+                "--track", "automation",
+                "--worker-id", "exact",
+                "--job-key", "workable:cogna:847CFBC5F4",
+                "--model", "gpt-5.6-sol",
+            ]
+        )
+        self.assertEqual("workable:cogna:847CFBC5F4", parsed.job_key)
+
+    def test_process_one_promotes_processes_and_reports_only_exact_job_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root, jobs=0)
+            source_path = root / "scraper" / "data_overnight" / "jobs.sqlite3"
+            source = JobDatabase(source_path)
+            for index in (1, 2):
+                job = JobUrl("fixture", str(index), f"https://jobs.example.test/{index}")
+                source.upsert_discovered(job)
+                source.store_raw(
+                    RawPosting(
+                        job.board,
+                        job.job_id,
+                        job.url,
+                        "2026-08-20T00:00:00Z",
+                        raw_json={
+                            "title": f"Automation Engineer {index}",
+                            "company": "Example",
+                            "location": "Remote UK",
+                            "description": "Build reliable Python automation.",
+                        },
+                    )
+                )
+            config.write_text(
+                "io:\n"
+                "  database: scraper/data_overnight/jobs.sqlite3\n"
+                "processing:\n"
+                "  shard_size: 10\n"
+                "  lease_seconds: 60\n",
+                encoding="utf-8",
+            )
+            worker = FixtureSemanticWorker()
+            first = ProcessingService(root, worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="exact-one",
+                job_key="fixture:2",
+            )
+            self.assertEqual(1, worker.extractions)
+            self.assertEqual(1, worker.alignments)
+            self.assertEqual(1, first["shard_claimed"])
+            self.assertEqual("fixture:2", first["scope"]["job_key"])
+            self.assertEqual("fixture:2", first["promotion"]["job_key"])
+            self.assertEqual(1, first["promotion"]["eligible_fetched"])
+            self.assertEqual(1, first["ranked_count"])
+            canonical_keys = [
+                f"{row['board']}:{row['job_id']}"
+                for row in JobDatabase(root / "state" / "vacancies.sqlite3")
+                .collection_state()["postings"]
+            ]
+            self.assertEqual(["fixture:2"], canonical_keys)
+
+            replay_worker = FixtureSemanticWorker()
+            replay = ProcessingService(root, replay_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="exact-replay",
+                job_key="fixture:2",
+            )
+            self.assertEqual(0, replay["shard_claimed"])
+            self.assertEqual(1, replay["ranked_count"])
+            self.assertEqual(0, replay_worker.extractions)
+            self.assertEqual(0, replay_worker.alignments)
+
+            with self.assertRaisesRegex(KeyError, "no exact vacancy"):
+                ProcessingService(root, FixtureSemanticWorker()).process(
+                    config,
+                    profile_id=profile_id,
+                    track="automation",
+                    worker_id="missing-exact",
+                    job_key="fixture:missing",
+                )
+
     def test_concurrent_board_scopes_have_isolated_deterministic_reports(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

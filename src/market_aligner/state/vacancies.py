@@ -399,6 +399,7 @@ class JobDatabase:
         source_path: str | Path,
         *,
         config_sha256: str,
+        job_key: str | None = None,
     ) -> dict[str, object]:
         """Atomically copy a verified collector snapshot into canonical processing state."""
 
@@ -406,6 +407,8 @@ class JobDatabase:
         target = self.path.expanduser().resolve()
         if len(config_sha256) != 64:
             raise ValueError("promotion config hash must be SHA-256")
+        if job_key is not None and (not job_key or ":" not in job_key):
+            raise ValueError("promotion job key must be board-qualified")
         if not source.is_file():
             raise FileNotFoundError(f"collector database does not exist: {source}")
 
@@ -429,10 +432,14 @@ class JobDatabase:
                     "WHERE sql IS NOT NULL ORDER BY type,name"
                 )
             ]
+            key_where = " WHERE key=?" if job_key is not None else ""
+            key_params: tuple[object, ...] = (job_key,) if job_key is not None else ()
             status_counts = {
                 str(row[0]): int(row[1])
                 for row in src.execute(
-                    "SELECT fetch_status,COUNT(*) FROM postings GROUP BY fetch_status"
+                    f"SELECT fetch_status,COUNT(*) FROM postings{key_where} "
+                    "GROUP BY fetch_status",
+                    key_params,
                 )
             }
             rows = [
@@ -453,9 +460,14 @@ class JobDatabase:
                     """SELECT key,board,job_id,url,posted_at,first_seen_at,last_seen_at,
                               fetched_at,raw_text,raw_json,content_hash
                        FROM postings WHERE fetch_status='fetched' AND content_hash IS NOT NULL
-                       ORDER BY key"""
+                       """ + (" AND key=?" if job_key is not None else "") + " ORDER BY key",
+                    key_params,
                 )
             ]
+            if job_key is not None and sum(status_counts.values()) != 1:
+                raise KeyError(f"collector database has no exact vacancy: {job_key}")
+            if job_key is not None and not rows:
+                raise ValueError(f"exact collector vacancy is not fetched: {job_key}")
             for row in rows:
                 if row["key"] != f"{row['board']}:{row['job_id']}":
                     raise ValueError(f"collector row has inconsistent identity: {row['key']}")
@@ -511,7 +523,7 @@ class JobDatabase:
                             row["content_hash"],
                         ),
                     )
-        return {
+        result: dict[str, object] = {
             "application_authority": False,
             "authority_scope": "state_promotion_only",
             "config_sha256": config_sha256,
@@ -528,6 +540,9 @@ class JobDatabase:
             "unchanged": unchanged,
             "updated": updated,
         }
+        if job_key is not None:
+            result["job_key"] = job_key
+        return result
 
     def claim_fetched_for_processing(
         self,
@@ -542,6 +557,7 @@ class JobDatabase:
         include_boards: Iterable[str] = (),
         exclude_boards: Iterable[str] = (),
         max_total: int | None = None,
+        exact_job_key: str | None = None,
     ) -> list[RawPosting]:
         """Atomically lease one shard of current fetched snapshots."""
 
@@ -553,6 +569,7 @@ class JobDatabase:
             include_boards=include_boards,
             exclude_boards=exclude_boards,
             max_total=max_total,
+            exact_job_key=exact_job_key,
         )
         claimed: list[RawPosting] = []
         with closing(self.connect()) as conn, conn:
@@ -690,11 +707,13 @@ class JobDatabase:
         include_boards: Iterable[str] = (),
         exclude_boards: Iterable[str] = (),
         max_total: int | None = None,
+        exact_job_key: str | None = None,
     ) -> list[dict[str, object]]:
         scope_sql, scope_params = _processing_scope_sql(
             include_boards=include_boards,
             exclude_boards=exclude_boards,
             max_total=max_total,
+            exact_job_key=exact_job_key,
         )
         with closing(self.connect()) as conn:
             rows = conn.execute(
@@ -723,6 +742,7 @@ class JobDatabase:
         include_boards: Iterable[str] = (),
         exclude_boards: Iterable[str] = (),
         max_total: int | None = None,
+        exact_job_key: str | None = None,
     ) -> dict[str, int]:
         """Return exact current-snapshot counts without changing excluded rows."""
 
@@ -732,6 +752,7 @@ class JobDatabase:
             include_boards=includes,
             exclude_boards=excludes,
             max_total=max_total,
+            exact_job_key=exact_job_key,
         )
         board_where, board_params = _processing_board_where(includes, excludes)
         now = time.time()
@@ -788,6 +809,7 @@ class JobDatabase:
         include_boards: Iterable[str] = (),
         exclude_boards: Iterable[str] = (),
         max_total: int | None = None,
+        exact_job_key: str | None = None,
     ) -> Iterator[list[dict[str, object]]]:
         """Serialize canonical report snapshots across concurrent processing shards."""
 
@@ -795,6 +817,7 @@ class JobDatabase:
             include_boards=include_boards,
             exclude_boards=exclude_boards,
             max_total=max_total,
+            exact_job_key=exact_job_key,
         )
         with closing(self.connect()) as conn:
             try:
@@ -852,7 +875,9 @@ class JobDatabase:
 
 
 def _processing_board_where(
-    include_boards: Iterable[str], exclude_boards: Iterable[str]
+    include_boards: Iterable[str],
+    exclude_boards: Iterable[str],
+    exact_job_key: str | None = None,
 ) -> tuple[str, tuple[object, ...]]:
     includes = tuple(sorted(set(include_boards)))
     excludes = tuple(sorted(set(exclude_boards)))
@@ -864,6 +889,11 @@ def _processing_board_where(
     if excludes:
         conditions.append(f"p.board NOT IN ({','.join('?' for _ in excludes)})")
         params.extend(excludes)
+    if exact_job_key is not None:
+        if not exact_job_key or ":" not in exact_job_key:
+            raise ValueError("exact processing job key must be board-qualified")
+        conditions.append("p.key=?")
+        params.append(exact_job_key)
     return " AND ".join(conditions), tuple(params)
 
 
@@ -872,10 +902,13 @@ def _processing_scope_sql(
     include_boards: Iterable[str],
     exclude_boards: Iterable[str],
     max_total: int | None,
+    exact_job_key: str | None = None,
 ) -> tuple[str, tuple[object, ...]]:
     if max_total is not None and max_total <= 0:
         raise ValueError("processing max_total must be positive when set")
-    where, params = _processing_board_where(include_boards, exclude_boards)
+    where, params = _processing_board_where(
+        include_boards, exclude_boards, exact_job_key
+    )
     return (
         f"SELECT p.* FROM postings p WHERE {where} ORDER BY p.key LIMIT ?",
         (*params, -1 if max_total is None else max_total),
