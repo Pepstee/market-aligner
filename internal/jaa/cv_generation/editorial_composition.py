@@ -126,11 +126,11 @@ _WORK_RIGHTS = (
 _WORK_RIGHTS_WORDS = re.compile(r"\b(?:visa|sponsorship)\b", re.IGNORECASE)
 _DOCUMENT_AUTHORSHIP_SUBJECT = (
     r"\b(?:this|my|the|our|your)\s+"
-    r"(?:cv|resume|cover letter|job application|application document|application|document)\b"
+    r"(?:cv|resume|cover letter|letter|job application|application document|application|document)\b"
 )
 _DIRECT_DOCUMENT_AUTHORSHIP_SUBJECT = re.compile(
     r"\b(?:this|my|our|your)\s+"
-    r"(?:cv|resume|cover letter|job application|application document|application|document)\b",
+    r"(?:cv|resume|cover letter|letter|job application|application document|application|document)\b",
     re.IGNORECASE,
 )
 _AI_AUTHOR = r"\b(?:ai|chatgpt|an?\s+llm|language model)\b"

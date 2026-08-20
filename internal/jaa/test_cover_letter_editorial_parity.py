@@ -478,6 +478,9 @@ def test_cover_letter_rejects_616_word_authorised_fact() -> None:
         "This cover letter had AI assistance.",
         "I used ChatGPT to write this CV.",
         "ChatGPT helped me write this cover letter.",
+        "This letter was prepared using ChatGPT.",
+        "AI prepared this letter.",
+        "ChatGPT prepared this letter.",
     ),
 )
 def test_global_bans_apply_to_approved_cover_letter_facts(
@@ -556,6 +559,102 @@ def test_opening_hook_must_name_exact_company_and_role_from_approved_fact() -> N
         ),
     )
     with pytest.raises(EditorialCompositionError, match="company and role hook"):
+        validate_cover_letter_editorial_draft(changed_request, changed)
+
+
+@pytest.mark.parametrize(
+    "disclosure",
+    (
+        "this letter was prepared using ChatGPT",
+        "AI prepared this letter",
+        "ChatGPT prepared this letter",
+    ),
+)
+def test_opening_company_role_hook_rejects_standalone_letter_authorship(
+    disclosure: str,
+) -> None:
+    _, request, claims, _, final = _fixture()
+    forbidden = _claim(
+        claims[2].claim_id,
+        (
+            "Example Systems is hiring an AI Automation Engineer and states that "
+            f"{disclosure}."
+        ),
+        "employer",
+        "Opening",
+    )
+    changed_request = build_cover_letter_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(*claims[:2], forbidden, *claims[3:]),
+    )
+    opening = final.sections[0]
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            replace(
+                opening,
+                atoms=(
+                    opening.atoms[0],
+                    opening.atoms[1],
+                    EditorialAtom(
+                        "approved_claim", forbidden.text, forbidden.claim_id
+                    ),
+                ),
+            ),
+            *final.sections[1:],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="AI-authorship"):
+        validate_cover_letter_editorial_draft(changed_request, changed)
+
+
+@pytest.mark.parametrize(
+    "disclosure",
+    (
+        "this letter was prepared using ChatGPT",
+        "AI prepared this letter",
+        "ChatGPT prepared this letter",
+    ),
+)
+def test_company_fit_rejects_standalone_letter_authorship(
+    disclosure: str,
+) -> None:
+    _, request, claims, _, final = _fixture()
+    forbidden = _claim(
+        claims[3].claim_id,
+        f"Example Systems states that {disclosure}.",
+        "employer",
+        "Company Fit",
+    )
+    changed_request = build_cover_letter_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(*claims[:3], forbidden, *claims[4:]),
+    )
+    company_fit = final.sections[2]
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            *final.sections[:2],
+            replace(
+                company_fit,
+                atoms=(
+                    company_fit.atoms[0],
+                    EditorialAtom(
+                        "approved_claim", forbidden.text, forbidden.claim_id
+                    ),
+                    company_fit.atoms[2],
+                ),
+            ),
+            final.sections[3],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="AI-authorship"):
         validate_cover_letter_editorial_draft(changed_request, changed)
 
 
