@@ -14,6 +14,18 @@ from .constraints import (
     policy_for_candidate,
     validate_generated_cv,
 )
+from .adversarial_rebuild import (
+    AdversarialRebuildError,
+    AppliedRecruiterImprovement,
+    EvidenceSafeRebuildResult,
+    FinalizedRebuiltCV,
+    RebuildRoadmapItem,
+    RecruiterImprovementBinding,
+    bind_recruiter_improvement,
+    finalize_rebuilt_cv,
+    rebuild_from_recruiter_assessment,
+    render_editorial_cv_text,
+)
 from .editorial_composition import (
     ApprovedCVClaim,
     CVEditorialDraft,
@@ -34,6 +46,8 @@ from .editorial_composition import (
 
 __all__ = [
     "ARTIOM_GUTU_CV_POLICY",
+    "AdversarialRebuildError",
+    "AppliedRecruiterImprovement",
     "ApprovedCVClaim",
     "BASE_CV_POLICY",
     "CVConstraintError",
@@ -48,11 +62,19 @@ __all__ = [
     "EditorialCompositionReceipt",
     "EditorialStageEvidence",
     "EditorialStageReceipt",
+    "EvidenceSafeRebuildResult",
+    "FinalizedRebuiltCV",
+    "RebuildRoadmapItem",
+    "RecruiterImprovementBinding",
     "admit_editorial_composition",
     "build_editorial_draft",
     "build_editorial_request",
+    "bind_recruiter_improvement",
+    "finalize_rebuilt_cv",
     "humanizer_request_sha256",
     "policy_for_candidate",
+    "rebuild_from_recruiter_assessment",
+    "render_editorial_cv_text",
     "validate_editorial_draft",
     "validate_generated_cv",
 ]
