@@ -66,6 +66,53 @@ def _exact_file(path: Path, value: bytes, mode: int) -> str:
     return "created"
 
 
+def _upgrade_exact(
+    path: Path,
+    value: bytes,
+    *,
+    previous: bytes,
+    mode: int,
+    expected_uid: int = 0,
+) -> str:
+    if not path.exists() and not path.is_symlink():
+        return _exact_file(path, value, mode)
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != expected_uid
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise FileExistsError(f"refusing to replace unsafe root target: {path}")
+    current = path.read_bytes()
+    if current == value:
+        return "exact-replay"
+    if current != previous:
+        raise FileExistsError(f"refusing to overwrite unrecognized root target: {path}")
+    temporary = path.with_name(f".{path.name}.upgrade-{os.getpid()}")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
+    try:
+        os.write(descriptor, value)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    return "upgraded-exact-prior"
+
+
 def _protected_path_components(path: Path) -> None:
     try:
         relative = path.relative_to(PINNED_COMPONENT_ROOT)
@@ -138,7 +185,7 @@ print(json.dumps({"cryptography_backend":str(backend),"cryptography_backend_sha2
     return python
 
 
-def _unit(*, python: Path, key: Path) -> bytes:
+def _legacy_unit(*, python: Path, key: Path) -> bytes:
     value = f"""[Unit]
 Description=Gigabyte JAA authenticated current-time service
 After=local-fs.target
@@ -161,6 +208,14 @@ UMask=0077
 WantedBy=multi-user.target
 """
     return value.encode("utf-8")
+
+
+def _unit(*, python: Path, key: Path) -> bytes:
+    legacy = _legacy_unit(python=python, key=key).decode("utf-8")
+    return legacy.replace(
+        "PrivateTmp=true\n",
+        "PrivateTmp=true\nRuntimeDirectory=gigabyte/majaa\nRuntimeDirectoryMode=0755\n",
+    ).encode("utf-8")
 
 
 def install(
@@ -196,7 +251,12 @@ def install(
     outcomes = {
         "config": _exact_file(CONFIG_TARGET, config_bytes, 0o600),
         "service": _exact_file(SERVICE_TARGET, service_source.read_bytes(), 0o755),
-        "unit": _exact_file(UNIT_TARGET, _unit(python=verified_python, key=device_key), 0o644),
+        "unit": _upgrade_exact(
+            UNIT_TARGET,
+            _unit(python=verified_python, key=device_key),
+            previous=_legacy_unit(python=verified_python, key=device_key),
+            mode=0o644,
+        ),
     }
     if not activate:
         return {"activated": False, "outcomes": outcomes}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +66,40 @@ def test_unit_preserves_root_service_and_exact_socket_contract(tmp_path) -> None
     assert f"ExecStart={tmp_path / 'python'} {SERVICE_TARGET}" in unit
     assert str(CONFIG_TARGET) == "/etc/gigabyte/majaa/jaa-current-time-v1.json"
     assert "UMask=0077" in unit
+    assert "RuntimeDirectory=gigabyte/majaa" in unit
+    assert "RuntimeDirectoryMode=0755" in unit
+
+
+def test_unit_upgrade_accepts_only_exact_prior_bytes(tmp_path: Path) -> None:
+    target = tmp_path / "service.unit"
+    previous = b"exact-prior-unit\n"
+    current = b"runtime-directory-unit\n"
+    target.write_bytes(previous)
+    target.chmod(0o644)
+    assert installer._upgrade_exact(
+        target,
+        current,
+        previous=previous,
+        mode=0o644,
+        expected_uid=os.geteuid(),
+    ) == "upgraded-exact-prior"
+    assert target.read_bytes() == current
+    assert installer._upgrade_exact(
+        target,
+        current,
+        previous=previous,
+        mode=0o644,
+        expected_uid=os.geteuid(),
+    ) == "exact-replay"
+    target.write_bytes(b"unrecognized-drift\n")
+    with pytest.raises(FileExistsError, match="unrecognized"):
+        installer._upgrade_exact(
+            target,
+            current,
+            previous=previous,
+            mode=0o644,
+            expected_uid=os.geteuid(),
+        )
 
 
 def _runtime_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
