@@ -8,6 +8,8 @@ import unittest
 import zlib
 from pathlib import Path
 
+from matplotlib import image as matplotlib_image
+
 from market_aligner.assessment.scoring import AssessmentAxes, score
 from market_aligner.domain.contracts import Vacancy
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
@@ -51,9 +53,12 @@ class ReportingTests(unittest.TestCase):
             self.assertIn("const points=", scatter)
             self.assertIn("fit is uncalibrated", scatter)
             png = paths.scatter_png.read_bytes()
-            width, height, rgb = _decode_png(png)
-            self.assertEqual((1200, 800), (width, height))
-            self.assertIn(bytes((245, 158, 11)), rgb)
+            width, height, metadata = _inspect_png(png)
+            self.assertEqual((1800, 1200), (width, height))
+            self.assertEqual("Fit vs Opportunity", metadata["Title"])
+            pixels = matplotlib_image.imread(paths.scatter_png)
+            self.assertEqual((1200, 1800), pixels.shape[:2])
+            self.assertGreater(float(pixels[:, :, :3].std()), 0.05)
             original_png = png
             reversed_paths = write_reports(profile.profile_id, list(reversed(rows)), Path(temporary))
             self.assertEqual(original_png, reversed_paths.scatter_png.read_bytes())
@@ -67,14 +72,15 @@ class ReportingTests(unittest.TestCase):
             self.assertEqual("uk_remote", preferred["jobs"][0]["preference_classification"])
 
 
-def _decode_png(payload: bytes) -> tuple[int, int, bytes]:
-    """Validate chunks/CRCs and decode the reporter's filter-free RGB image."""
+def _inspect_png(payload: bytes) -> tuple[int, int, dict[str, str]]:
+    """Validate the PNG container while the declared renderer validates raster decoding."""
     if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
         raise AssertionError("missing PNG signature")
     offset = 8
-    compressed = bytearray()
     width = height = 0
     saw_iend = False
+    saw_idat = False
+    metadata: dict[str, str] = {}
     while offset < len(payload):
         length = struct.unpack(">I", payload[offset : offset + 4])[0]
         kind = payload[offset + 4 : offset + 8]
@@ -84,20 +90,19 @@ def _decode_png(payload: bytes) -> tuple[int, int, bytes]:
             raise AssertionError(f"invalid {kind!r} CRC")
         if kind == b"IHDR":
             width, height, depth, color_type, _, _, _ = struct.unpack(">IIBBBBB", body)
-            if (depth, color_type) != (8, 2):
-                raise AssertionError("expected 8-bit RGB PNG")
+            if depth != 8 or color_type not in (2, 6):
+                raise AssertionError("expected 8-bit RGB/RGBA PNG")
         elif kind == b"IDAT":
-            compressed.extend(body)
+            saw_idat = True
+        elif kind == b"tEXt":
+            key, value = body.split(b"\0", 1)
+            metadata[key.decode("latin-1")] = value.decode("latin-1")
         elif kind == b"IEND":
             saw_iend = True
         offset += 12 + length
-    if not saw_iend:
-        raise AssertionError("missing IEND")
-    raw = zlib.decompress(compressed)
-    stride = width * 3 + 1
-    if len(raw) != stride * height or any(raw[row * stride] for row in range(height)):
-        raise AssertionError("unexpected raster or PNG filter")
-    return width, height, b"".join(raw[row * stride + 1 : (row + 1) * stride] for row in range(height))
+    if not saw_iend or not saw_idat:
+        raise AssertionError("missing PNG image chunks")
+    return width, height, metadata
 
 
 if __name__ == "__main__":
