@@ -27,7 +27,7 @@ from typing import Any, Mapping, Sequence
 from playwright._impl._driver import compute_driver_executable
 from playwright.sync_api import sync_playwright
 
-from tracked_source_revision import source_content_revision
+from .provider_observation_capture import exact_committed_source_identity
 
 from .application_artifacts import publish_application_artifacts
 from .application_compiler import CandidateContact, ProductionApplicationCompiler
@@ -166,7 +166,9 @@ DISCLOSURE = (
 FIXED_CORPUS = Path(
     os.environ.get(
         "JAA_CERTIFIED_CORPUS_ROOT",
-        "__JAA_CERTIFIED_CORPUS_ROOT_REQUIRED__",
+        "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
+        "runtime/.jaa04-corpus-v3-a4f4490-releases/"
+        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
     )
 )
 TRACKED_SEED_RELATIVE = Path(
@@ -299,30 +301,11 @@ def _read_canonical(path: Path, *, maximum: int) -> tuple[dict[str, Any], bytes]
 
 
 def _source_identity(repository: Path) -> SourceIdentity:
-    status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    if status.stdout:
-        raise NetworkWitnessedFixtureError("tracked source must be clean")
-    revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    tree = subprocess.run(
-        ["git", "rev-parse", "HEAD^{tree}"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return SourceIdentity(revision, tree, source_content_revision(repository))
+    try:
+        identity = exact_committed_source_identity(repository)
+    except ValueError as error:
+        raise NetworkWitnessedFixtureError(str(error)) from error
+    return SourceIdentity(identity.head, identity.tree, identity.content_revision)
 
 
 def _path_identity(path: Path) -> dict[str, object]:

@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -147,7 +148,7 @@ def accepted_integration(tmp_path_factory: pytest.TempPathFactory):
         receipt, witness, network_receipt = run_network_witnessed_fixture(
             repository_root=ROOT,
             execution_root=execution_root,
-            python_executable=ROOT / ".venv/bin/python",
+            python_executable=Path(sys.executable),
             chromium_executable=_chromium(),
             timeout_seconds=240,
         )

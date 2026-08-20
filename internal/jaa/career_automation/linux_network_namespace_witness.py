@@ -18,12 +18,11 @@ import stat
 import subprocess
 import sys
 import time
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from tracked_source_revision import source_content_revision
+from .provider_observation_capture import exact_committed_source_identity
 
 SCHEMA_VERSION_V1 = "jaa10.linux-network-namespace-witness.v1"
 RECEIPT_SCHEMA_VERSION_V1 = (
@@ -1088,67 +1087,15 @@ def _descendants(pid: int) -> list[int]:
     return sorted(descendants)
 
 
-def _read_git_ref(common: Path, reference: str) -> str:
-    loose = common / reference
-    if loose.is_file():
-        return loose.read_text(encoding="ascii").strip()
-    packed = common / "packed-refs"
-    if packed.is_file():
-        for line in packed.read_text(encoding="ascii").splitlines():
-            if not line or line.startswith(("#", "^")):
-                continue
-            revision, name = line.split(" ", 1)
-            if name == reference:
-                return revision
-    raise NetworkWitnessError("Git HEAD reference cannot be resolved")
-
-
 def _source_identity(repository_root: Path) -> SourceIdentity:
-    root = repository_root.resolve(strict=True)
-    dot_git = root / ".git"
-    if dot_git.is_file():
-        line = dot_git.read_text(encoding="utf-8").strip()
-        prefix = "gitdir: "
-        if not line.startswith(prefix):
-            raise NetworkWitnessError("worktree Git file is malformed")
-        git_dir = Path(line[len(prefix) :]).resolve(strict=True)
-    elif dot_git.is_dir():
-        git_dir = dot_git
-    else:
-        raise NetworkWitnessError("repository Git metadata is missing")
-    common_file = git_dir / "commondir"
-    common = (
-        (git_dir / common_file.read_text(encoding="ascii").strip()).resolve()
-        if common_file.is_file()
-        else git_dir
-    )
-    head_text = (git_dir / "HEAD").read_text(encoding="ascii").strip()
-    if head_text.startswith("ref: "):
-        revision = _read_git_ref(common, head_text[5:])
-    else:
-        revision = head_text
-    if not re.fullmatch(r"[0-9a-f]{40}", revision):
-        raise NetworkWitnessError("Git revision is invalid")
-    object_path = common / "objects" / revision[:2] / revision[2:]
     try:
-        raw_object = zlib.decompress(object_path.read_bytes())
-    except (OSError, zlib.error) as error:
-        raise NetworkWitnessError(
-            "Git commit is not available as an exact loose object"
-        ) from error
-    if hashlib.sha1(raw_object).hexdigest() != revision:
-        raise NetworkWitnessError("Git commit object hash is invalid")
-    header, separator, payload = raw_object.partition(b"\0")
-    if separator != b"\0" or header != f"commit {len(payload)}".encode():
-        raise NetworkWitnessError("Git commit object is malformed")
-    tree_line = payload.splitlines()[0]
-    if not tree_line.startswith(b"tree "):
-        raise NetworkWitnessError("Git commit tree is missing")
-    tree = tree_line[5:].decode("ascii")
+        identity = exact_committed_source_identity(repository_root)
+    except ValueError as error:
+        raise NetworkWitnessError(str(error)) from error
     return SourceIdentity(
-        revision,
-        tree,
-        source_content_revision(root),
+        identity.head,
+        identity.tree,
+        identity.content_revision,
     )
 
 

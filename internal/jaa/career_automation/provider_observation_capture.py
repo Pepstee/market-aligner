@@ -15,12 +15,13 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Mapping
 from urllib.parse import urlsplit
 
 from .application_archive import ApplicationArchive, VacancyArchiveIdentity
 from .evidence_matching import canonical_json
+from tracked_source_revision import source_content_revision
 
 
 COLLECTOR_IDENTITY = "jaa.playwright-greenhouse-read-only-observer.v4"
@@ -90,11 +91,80 @@ def exact_clean_head(repository_root: str | Path) -> str:
     return head
 
 
+@dataclass(frozen=True)
+class CommittedSourceIdentity:
+    repository_root: Path
+    source_root: Path
+    repository_prefix: str
+    head: str
+    tree: str
+    content_revision: str
+
+
+def exact_committed_source_identity(
+    source_root: str | Path,
+) -> CommittedSourceIdentity:
+    """Resolve a clean committed source subtree without assuming it owns `.git`."""
+    source = Path(source_root).resolve(strict=True)
+    if not source.is_dir():
+        raise ValueError("committed source root must be a directory")
+    head = exact_clean_head(source)
+    top_level_text = _git(source, "rev-parse", "--show-toplevel").decode().strip()
+    prefix = _git(source, "rev-parse", "--show-prefix").decode().strip()
+    try:
+        repository = Path(top_level_text).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("committed source repository root is unavailable") from exc
+    if repository != source and repository not in source.parents:
+        raise ValueError("committed source repository root escapes the source path")
+    pure_prefix = PurePosixPath(prefix)
+    if (
+        (prefix and not prefix.endswith("/"))
+        or pure_prefix.is_absolute()
+        or any(part in {"", ".", ".."} for part in pure_prefix.parts)
+    ):
+        raise ValueError("committed source repository prefix is unsafe")
+    projected = repository.joinpath(*pure_prefix.parts).resolve(strict=True)
+    if projected != source:
+        raise ValueError("committed source repository prefix is ambiguous")
+    markers = [
+        parent / ".git"
+        for parent in (source, *source.parents)
+        if (parent / ".git").exists() or (parent / ".git").is_symlink()
+    ]
+    if markers != [repository / ".git"]:
+        raise ValueError("nested or ambiguous Git repositories are forbidden")
+    marker = markers[0]
+    if marker.is_symlink() or not (marker.is_file() or marker.is_dir()):
+        raise ValueError("committed source Git metadata is unsafe")
+    tree = _git(source, "rev-parse", "HEAD^{tree}").decode("ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", tree):
+        raise ValueError("committed source tree identity is invalid")
+    return CommittedSourceIdentity(
+        repository,
+        source,
+        prefix,
+        head,
+        tree,
+        source_content_revision(source),
+    )
+
+
 def collector_source_identity(
     repository_root: str | Path, *, commit: str = "HEAD"
 ) -> tuple[bytes, str]:
     root = Path(repository_root).resolve(strict=True)
-    source = _git(root, "show", f"{commit}:{COLLECTOR_SOURCE_PATH}")
+    identity = exact_committed_source_identity(root)
+    selected = identity.head if commit == "HEAD" else commit
+    if selected != identity.head:
+        raise ValueError("provider observer source commit differs from exact HEAD")
+    source = _git(
+        root,
+        "show",
+        f"{selected}:{identity.repository_prefix}{COLLECTOR_SOURCE_PATH}",
+    )
+    if source != (root / COLLECTOR_SOURCE_PATH).read_bytes():
+        raise ValueError("provider observer source differs from exact clean HEAD")
     return source, _sha256(source)
 
 
@@ -686,9 +756,11 @@ if __name__ == "__main__":
 __all__ = [
     "COLLECTOR_IDENTITY",
     "COLLECTOR_SOURCE_PATH",
+    "CommittedSourceIdentity",
     "ProviderObservationCaptureReceipt",
     "ProviderObservationCaptureFailure",
     "capture_greenhouse_observation",
     "collector_source_identity",
     "exact_clean_head",
+    "exact_committed_source_identity",
 ]

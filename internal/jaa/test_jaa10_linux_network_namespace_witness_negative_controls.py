@@ -7,6 +7,7 @@ import hashlib
 import os
 import socket
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,6 +34,56 @@ def _synthetic_source() -> SourceIdentity:
         "b" * 40,
         "sha256:" + ("c" * 64),
     )
+
+
+def _git(repository: Path, *arguments: str) -> None:
+    subprocess.run(
+        ("git", "-C", str(repository), *arguments),
+        check=True,
+        capture_output=True,
+    )
+
+
+def _clean_repository(root: Path) -> Path:
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "fixture@example.test")
+    _git(root, "config", "user.name", "Fixture")
+    source = root / "internal/jaa"
+    source.mkdir(parents=True)
+    (source / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "fixture")
+    return source
+
+
+def test_source_identity_rejects_dirty_parent_repository(tmp_path: Path) -> None:
+    source = _clean_repository(tmp_path / "repository")
+    (source / "tracked.py").write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(NetworkWitnessError, match="clean HEAD"):
+        witness_module._source_identity(source)
+
+
+def test_source_identity_rejects_untracked_parent_repository(tmp_path: Path) -> None:
+    source = _clean_repository(tmp_path / "repository")
+    (source.parents[1] / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    with pytest.raises(NetworkWitnessError, match="clean HEAD"):
+        witness_module._source_identity(source)
+
+
+def test_source_identity_rejects_nested_repository(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    _clean_repository(outer)
+    nested = outer / "nested"
+    nested.mkdir()
+    _git(nested, "init", "-q")
+    _git(nested, "config", "user.email", "fixture@example.test")
+    _git(nested, "config", "user.name", "Fixture")
+    (nested / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(nested, "add", ".")
+    _git(nested, "commit", "-qm", "nested fixture")
+    with pytest.raises(NetworkWitnessError, match="nested or ambiguous"):
+        witness_module._source_identity(nested)
 
 
 @pytest.fixture(scope="module")
