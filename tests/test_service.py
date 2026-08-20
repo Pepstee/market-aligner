@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import tempfile
@@ -445,6 +446,124 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual(("eu_remote", 0), (reordered.category, reordered.rank))
         self.assertNotEqual(default.policy_hash, configured.policy_hash)
+
+    def test_collector_database_promotes_into_scoped_processing_and_replays_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root, jobs=0)
+            source_path = root / "scraper" / "data_overnight" / "jobs.sqlite3"
+            source = JobDatabase(source_path)
+            fetched = JobUrl("fixture", "1", "https://jobs.example.test/1")
+            discovered = JobUrl("fixture", "2", "https://jobs.example.test/2")
+            failed = JobUrl("fixture", "3", "https://jobs.example.test/3")
+            for row in (fetched, discovered, failed):
+                source.upsert_discovered(row)
+            source.store_raw(
+                RawPosting(
+                    fetched.board,
+                    fetched.job_id,
+                    fetched.url,
+                    "2026-08-20T00:00:00Z",
+                    raw_json={
+                        "title": "Automation Engineer",
+                        "company": "Example",
+                        "location": "Remote UK",
+                        "description": "Build reliable Python automation.",
+                    },
+                )
+            )
+            source.record_error(failed.key, "retry later")
+            config.write_text(
+                "io:\n"
+                "  database: scraper/data_overnight/jobs.sqlite3\n"
+                "processing:\n"
+                "  shard_size: 10\n"
+                "  lease_seconds: 60\n"
+                "  include_boards: [fixture]\n"
+                "  max_total: 2\n",
+                encoding="utf-8",
+            )
+            source_before = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            worker = FixtureSemanticWorker()
+            service = ProcessingService(root, worker)
+            first = service.process(
+                config, profile_id=profile_id, track="automation", worker_id="promote-a"
+            )
+            self.assertEqual((1, 1), (first["promotion"]["imported"], first["shard_claimed"]))
+            self.assertEqual(1, first["promotion"]["excluded_discovered"])
+            self.assertEqual(1, first["promotion"]["excluded_error"])
+            self.assertFalse(first["promotion"]["application_authority"])
+            self.assertTrue(Path(first["promotion_receipt_path"]).is_file())
+            self.assertEqual(first["promotion"]["receipt_sha256"], first["promotion_sha256"])
+            for name in (
+                "source_content_sha256", "source_db_sha256", "source_path_sha256",
+                "source_schema_sha256", "config_sha256",
+            ):
+                self.assertEqual(64, len(first["promotion"][name]))
+            self.assertEqual(source_before, hashlib.sha256(source_path.read_bytes()).hexdigest())
+            self.assertEqual((1, 1), (worker.extractions, worker.alignments))
+
+            second = service.process(
+                config, profile_id=profile_id, track="automation", worker_id="promote-b"
+            )
+            self.assertEqual((0, 0, 1), (
+                second["promotion"]["imported"],
+                second["promotion"]["updated"],
+                second["promotion"]["unchanged"],
+            ))
+            self.assertEqual(0, second["shard_claimed"])
+            self.assertEqual((1, 1), (worker.extractions, worker.alignments))
+
+            source.store_raw(
+                RawPosting(
+                    fetched.board,
+                    fetched.job_id,
+                    fetched.url,
+                    "2026-08-20T01:00:00Z",
+                    raw_json={
+                        "title": "Automation Engineer",
+                        "company": "Example",
+                        "location": "Remote UK",
+                        "description": "Updated complete Python automation evidence.",
+                    },
+                )
+            )
+            third = service.process(
+                config, profile_id=profile_id, track="automation", worker_id="promote-c"
+            )
+            self.assertEqual(1, third["promotion"]["updated"])
+            self.assertEqual(1, third["shard_claimed"])
+            self.assertEqual((2, 2), (worker.extractions, worker.alignments))
+
+    def test_concurrent_promotion_is_atomic_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = JobDatabase(root / "collector.sqlite3")
+            for index in range(2):
+                row = JobUrl("fixture", str(index), f"https://jobs.example.test/{index}")
+                source.upsert_discovered(row)
+                source.store_raw(
+                    RawPosting(
+                        row.board,
+                        row.job_id,
+                        row.url,
+                        "2026-08-20T00:00:00Z",
+                        raw_text=f"posting {index}",
+                    )
+                )
+            target = JobDatabase(root / "target.sqlite3")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(
+                    pool.map(
+                        lambda _: target.promote_fetched_from(
+                            source.path, config_sha256="d" * 64
+                        ),
+                        range(2),
+                    )
+                )
+            self.assertEqual(2, sum(int(result["imported"]) for result in results))
+            self.assertEqual(2, sum(int(result["unchanged"]) for result in results))
+            self.assertEqual(2, target.stats()["fetched"])
 
 
 if __name__ == "__main__":

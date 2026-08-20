@@ -118,6 +118,21 @@ def _board_filter(value: object, name: str) -> tuple[str, ...]:
     return normalized
 
 
+def _collector_database(paths: ProductPaths, config: dict[str, Any]) -> tuple[Path, str]:
+    io = config.get("io") or {}
+    if not isinstance(io, dict):
+        raise ValueError("io config must be an object")
+    relative = Path(str(io.get("database", "state/vacancies.sqlite3")))
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise ValueError("io.database must stay below the external data home")
+    source = (paths.root / relative).resolve()
+    try:
+        source.relative_to(paths.root)
+    except ValueError as exc:
+        raise ValueError("io.database must stay below the external data home") from exc
+    return source, relative.as_posix()
+
+
 def _ranked(result_rows: list[dict[str, object]]) -> list[RankedVacancy]:
     ranked: list[RankedVacancy] = []
     for result in result_rows:
@@ -180,6 +195,24 @@ class ProcessingService:
             raise ValueError("processing worker ID is required")
         config = load_config(config_path)
         processing = _processing_config(config)
+        collector_database, collector_database_relative = _collector_database(self.paths, config)
+        promotion_config_sha256 = _sha256(
+            {
+                "loaded_config": config,
+                "source_database": collector_database_relative,
+                "target_database": "state/vacancies.sqlite3",
+            }
+        )
+        promotion_body = self.jobs.promote_fetched_from(
+            collector_database,
+            config_sha256=promotion_config_sha256,
+        )
+        promotion_receipt_sha256 = _sha256(promotion_body)
+        promotion = {**promotion_body, "receipt_sha256": promotion_receipt_sha256}
+        promotion_receipt_path = (
+            self.paths.state / "promotion-receipts" / f"{promotion_receipt_sha256}.json"
+        )
+        _atomic_json(promotion_receipt_path, promotion)
         geographic_policy = GeographicPreferencePolicy.from_mapping(
             processing["geographic_preference"],
             default=self.geographic_policy,
@@ -202,8 +235,8 @@ class ProcessingService:
         config_sha256 = _sha256(
             {
                 "geographic_preference_policy": asdict(geographic_policy),
+                "loaded_config": config,
                 "opportunity_policy": asdict(self.opportunity_policy),
-                "processing": processing,
             }
         )
         claimed = self.jobs.claim_fetched_for_processing(
@@ -356,6 +389,9 @@ class ProcessingService:
             "job_specific_opportunity_axes": True,
             "opportunity_policy_sha256": self.opportunity_policy.policy_hash,
             "profile_id": profile_id,
+            "promotion": promotion,
+            "promotion_receipt_path": str(promotion_receipt_path),
+            "promotion_sha256": promotion_receipt_sha256,
             "ranked_count": len(ranked),
             "rejected": rejected,
             "report_hashes": report_hashes,

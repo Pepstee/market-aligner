@@ -60,6 +60,13 @@ CREATE INDEX IF NOT EXISTS processing_jobs_resume
 """
 
 
+def _canonical_hash(value: object) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class JobDatabase:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -227,6 +234,141 @@ class JobDatabase:
             "postings": postings,
             "schema_version": "market-aligner.collection-state.v1",
             "sources": sources,
+        }
+
+    def promote_fetched_from(
+        self,
+        source_path: str | Path,
+        *,
+        config_sha256: str,
+    ) -> dict[str, object]:
+        """Atomically copy a verified collector snapshot into canonical processing state."""
+
+        source = Path(source_path).expanduser().resolve()
+        target = self.path.expanduser().resolve()
+        if len(config_sha256) != 64:
+            raise ValueError("promotion config hash must be SHA-256")
+        if not source.is_file():
+            raise FileNotFoundError(f"collector database does not exist: {source}")
+
+        with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)) as src:
+            src.execute("PRAGMA query_only=ON")
+            src.execute("BEGIN")
+            columns = {str(row[1]) for row in src.execute("PRAGMA table_info(postings)")}
+            required = {
+                "key", "board", "job_id", "url", "posted_at", "first_seen_at",
+                "last_seen_at", "fetched_at", "raw_text", "raw_json", "content_hash",
+                "fetch_status", "fetch_error",
+            }
+            if not required <= columns:
+                raise ValueError(
+                    f"collector postings schema missing columns: {sorted(required - columns)}"
+                )
+            schema = [
+                {"name": row[1], "sql": row[3], "table": row[2], "type": row[0]}
+                for row in src.execute(
+                    "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                    "WHERE sql IS NOT NULL ORDER BY type,name"
+                )
+            ]
+            status_counts = {
+                str(row[0]): int(row[1])
+                for row in src.execute(
+                    "SELECT fetch_status,COUNT(*) FROM postings GROUP BY fetch_status"
+                )
+            }
+            rows = [
+                {
+                    "key": row[0],
+                    "board": row[1],
+                    "job_id": row[2],
+                    "url": row[3],
+                    "posted_at": row[4],
+                    "first_seen_at": row[5],
+                    "last_seen_at": row[6],
+                    "fetched_at": row[7],
+                    "raw_text": row[8],
+                    "raw_json": row[9],
+                    "content_hash": row[10],
+                }
+                for row in src.execute(
+                    """SELECT key,board,job_id,url,posted_at,first_seen_at,last_seen_at,
+                              fetched_at,raw_text,raw_json,content_hash
+                       FROM postings WHERE fetch_status='fetched' AND content_hash IS NOT NULL
+                       ORDER BY key"""
+                )
+            ]
+            for row in rows:
+                if row["key"] != f"{row['board']}:{row['job_id']}":
+                    raise ValueError(f"collector row has inconsistent identity: {row['key']}")
+                if row["raw_json"] is not None and not isinstance(json.loads(row["raw_json"]), dict):
+                    raise ValueError(f"collector raw JSON must be an object: {row['key']}")
+                material = str(row["raw_text"] or "") + str(row["raw_json"] or "")
+                digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+                if digest != row["content_hash"]:
+                    raise ValueError(f"collector content hash mismatch: {row['key']}")
+            src.commit()
+
+        schema_sha256 = _canonical_hash(schema)
+        content_sha256 = _canonical_hash(rows)
+        path_sha256 = hashlib.sha256(str(source).encode("utf-8")).hexdigest()
+        source_db_sha256 = _canonical_hash(
+            {
+                "content_sha256": content_sha256,
+                "path_sha256": path_sha256,
+                "schema_sha256": schema_sha256,
+            }
+        )
+        imported = updated = unchanged = 0
+        if source == target:
+            unchanged = len(rows)
+        else:
+            with closing(self.connect()) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for row in rows:
+                    existing = conn.execute(
+                        "SELECT content_hash FROM postings WHERE key=?", (row["key"],)
+                    ).fetchone()
+                    if existing is None:
+                        imported += 1
+                    elif existing[0] == row["content_hash"]:
+                        unchanged += 1
+                    else:
+                        updated += 1
+                    conn.execute(
+                        """INSERT INTO postings(
+                             key,board,job_id,url,posted_at,first_seen_at,last_seen_at,fetched_at,
+                             raw_text,raw_json,content_hash,fetch_status,fetch_error
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'fetched',NULL)
+                           ON CONFLICT(key) DO UPDATE SET
+                             board=excluded.board,job_id=excluded.job_id,url=excluded.url,
+                             posted_at=COALESCE(excluded.posted_at,postings.posted_at),
+                             last_seen_at=excluded.last_seen_at,fetched_at=excluded.fetched_at,
+                             raw_text=excluded.raw_text,raw_json=excluded.raw_json,
+                             content_hash=excluded.content_hash,fetch_status='fetched',fetch_error=NULL""",
+                        (
+                            row["key"], row["board"], row["job_id"], row["url"],
+                            row["posted_at"], row["first_seen_at"], row["last_seen_at"],
+                            row["fetched_at"], row["raw_text"], row["raw_json"],
+                            row["content_hash"],
+                        ),
+                    )
+        return {
+            "application_authority": False,
+            "authority_scope": "state_promotion_only",
+            "config_sha256": config_sha256,
+            "eligible_fetched": len(rows),
+            "excluded_discovered": status_counts.get("discovered", 0),
+            "excluded_error": status_counts.get("error", 0),
+            "imported": imported,
+            "schema_version": "market-aligner.collection-promotion.v1",
+            "source_content_sha256": content_sha256,
+            "source_db_sha256": source_db_sha256,
+            "source_path_sha256": path_sha256,
+            "source_schema_sha256": schema_sha256,
+            "source_total": sum(status_counts.values()),
+            "unchanged": unchanged,
+            "updated": updated,
         }
 
     def claim_fetched_for_processing(
