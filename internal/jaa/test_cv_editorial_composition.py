@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,12 +16,14 @@ from cv_generation.editorial_composition import (
     EditorialCompositionError,
     EditorialBackendResult,
     EditorialCompositionRuntime,
+    DetachedCodexEditorialAdapter,
     EditorialStageEvidence,
     admit_editorial_composition,
     build_editorial_draft,
     build_editorial_request,
     humanizer_request_sha256,
     run_editorial_composition_runtime,
+    probe_detached_codex_editorial_cli,
     validate_editorial_draft,
 )
 from career_automation.evidence_matching import canonical_json
@@ -182,6 +187,7 @@ class _ScriptedStageAdapter:
             transport_identity=self.transport_identity,
             request_sha256=hashlib.sha256(request_bytes).hexdigest(),
             response_sha256=hashlib.sha256(response).hexdigest(),
+            executable_sha256="e" * 64,
         )
 
 
@@ -301,6 +307,183 @@ def test_runtime_rejects_backend_with_history_access() -> None:
     )
     with pytest.raises(EditorialCompositionError, match="isolation is not fail-closed"):
         run_editorial_composition_runtime(request, runtime=runtime)
+
+
+def _detached_adapter(tmp_path, draft, *, stage="resume_writer"):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    binary = tmp_path / f"codex-{stage}"
+    binary.write_bytes(f"synthetic {stage} codex binary".encode())
+    binary.chmod(0o700)
+    return DetachedCodexEditorialAdapter(
+        stage=stage,
+        model="gpt-5.6-sol",
+        codex_binary=str(binary),
+        environment="synthetic",
+        process_environment={
+            "HOME": str(tmp_path),
+            "PATH": str(tmp_path),
+            "OPENAI_API_KEY": "must-not-cross",
+            "CANDIDATE_SECRET": "must-not-cross",
+        },
+    ), binary, draft
+
+
+def test_detached_codex_adapter_is_one_shot_hash_bound_and_scrubbed(
+    monkeypatch, tmp_path
+) -> None:
+    _, draft, _ = _fixture()
+    adapter, binary, draft = _detached_adapter(tmp_path, draft)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        request_root = Path(kwargs["cwd"])
+        assert sorted(path.name for path in request_root.iterdir()) == [
+            "request.prompt.json",
+            "response.schema.json",
+        ]
+        schema = json.loads((request_root / "response.schema.json").read_text())
+        assert "draft_sha256" not in schema["properties"]
+        headings = schema["properties"]["sections"]["items"]["properties"][
+            "heading"
+        ]["enum"]
+        assert headings == sorted(headings)
+        output = Path(command[command.index("--output-last-message") + 1])
+        response_document = draft.document()
+        response_document.pop("draft_sha256")
+        output.write_bytes(canonical_json(response_document).encode())
+        event = {"type": "item.completed", "item": {"type": "agent_message"}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(event), stderr="")
+
+    monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
+    request_bytes = canonical_json({"synthetic": "request"}).encode()
+    session = adapter.open_fresh_session(invocation_id="writer-invocation")
+    result = session.invoke(request_bytes=request_bytes)
+
+    assert len(calls) == 1
+    command, invocation = calls[0]
+    assert "--ephemeral" in command
+    assert "--ignore-user-config" in command
+    assert "--ignore-rules" in command
+    assert command[command.index("-s") + 1] == "read-only"
+    assert invocation["input"].encode() == request_bytes
+    assert invocation["env"]["CODEX_HOME"] == str(tmp_path / ".codex")
+    assert "OPENAI_API_KEY" not in invocation["env"]
+    assert "CANDIDATE_SECRET" not in invocation["env"]
+    assert result.request_sha256 == hashlib.sha256(request_bytes).hexdigest()
+    assert result.response_sha256 == hashlib.sha256(result.response_bytes).hexdigest()
+    assert result.executable_sha256 == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert result.call_count == 1
+    assert result.history_access is result.cache_access is result.tool_access is False
+    assert result.retrieval_access is result.filesystem_access is False
+    assert result.environment_access is False
+    assert result.network_access is result.project_document_access is False
+    with pytest.raises(EditorialCompositionError, match="single-use"):
+        session.invoke(request_bytes=request_bytes)
+
+
+@pytest.mark.parametrize(
+    ("event", "message"),
+    (
+        ("not-json", "malformed event"),
+        (json.dumps({"type": "unknown.event"}), "forbidden event"),
+        (
+            json.dumps(
+                {"type": "item.started", "item": {"type": "command_execution"}}
+            ),
+            "forbidden item",
+        ),
+    ),
+)
+def test_detached_codex_adapter_rejects_invalid_jsonl_event(
+    monkeypatch, tmp_path, event, message
+) -> None:
+    _, draft, _ = _fixture()
+    adapter, _, draft = _detached_adapter(tmp_path, draft)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        output = Path(command[command.index("--output-last-message") + 1])
+        response_document = draft.document()
+        response_document.pop("draft_sha256")
+        output.write_bytes(canonical_json(response_document).encode())
+        return SimpleNamespace(returncode=0, stdout=event, stderr="")
+
+    monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
+    with pytest.raises(EditorialCompositionError, match=message):
+        adapter.open_fresh_session(invocation_id="writer").invoke(
+            request_bytes=b"{}"
+        )
+    assert len(calls) == 1
+
+
+def test_detached_codex_adapter_rejects_executable_substitution(tmp_path) -> None:
+    _, draft, _ = _fixture()
+    adapter, binary, _ = _detached_adapter(tmp_path, draft)
+    binary.write_bytes(b"substituted executable")
+
+    with pytest.raises(EditorialCompositionError, match="executable changed"):
+        adapter.open_fresh_session(invocation_id="writer").invoke(request_bytes=b"{}")
+
+
+def test_detached_codex_adapter_rejects_model_supplied_draft_identity(
+    monkeypatch, tmp_path
+) -> None:
+    _, draft, _ = _fixture()
+    adapter, _, _ = _detached_adapter(tmp_path, draft)
+
+    def fake_run(command, **kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_bytes(canonical_json(draft.document()).encode())
+        event = {"type": "item.completed", "item": {"type": "agent_message"}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(event), stderr="")
+
+    monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
+    with pytest.raises(EditorialCompositionError, match="draft schema differs"):
+        adapter.open_fresh_session(invocation_id="writer").invoke(request_bytes=b"{}")
+
+
+def test_runtime_rejects_swapped_detached_stage_adapters(tmp_path) -> None:
+    _, writer, _ = _fixture()
+    humanizer, _, _ = _detached_adapter(tmp_path, writer, stage="humanizer")
+    writer_adapter, _, _ = _detached_adapter(
+        tmp_path / "second", writer, stage="resume_writer"
+    )
+
+    with pytest.raises(EditorialCompositionError, match="another stage"):
+        EditorialCompositionRuntime(
+            environment="synthetic",
+            writer=humanizer,
+            humanizer=writer_adapter,
+        )
+
+
+def test_installed_codex_cli_passes_no_provider_contract_probe() -> None:
+    binary = Path("/usr/bin/codex")
+    if not binary.is_file():
+        pytest.skip("Gigabyte Codex binary is not installed at /usr/bin/codex")
+
+    contract = probe_detached_codex_editorial_cli(str(binary))
+
+    assert contract.version.startswith("codex-cli ")
+    assert contract.executable_sha256 == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert len(contract.contract_sha256) == 64
+    writer = DetachedCodexEditorialAdapter(
+        stage="resume_writer",
+        model="gpt-5.6-sol",
+        codex_binary=str(binary),
+        environment="production",
+    )
+    humanizer = DetachedCodexEditorialAdapter(
+        stage="humanizer",
+        model="gpt-5.6-sol",
+        codex_binary=str(binary),
+        environment="production",
+    )
+    runtime = EditorialCompositionRuntime("production", writer, humanizer)
+    assert runtime.writer is not runtime.humanizer
+    assert writer.transport_identity != humanizer.transport_identity
 
 
 def test_admits_evidence_bound_writer_and_distinct_humanizer_sessions() -> None:
