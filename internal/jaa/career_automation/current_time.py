@@ -52,17 +52,16 @@ _COMPILED_PRODUCTION_TIME_SERVICE_SOCKET = Path(
 PRODUCTION_TIME_CONFIGURATION_PATH = _COMPILED_PRODUCTION_TIME_CONFIGURATION_PATH
 PRODUCTION_TIME_SERVICE_SOCKET = _COMPILED_PRODUCTION_TIME_SERVICE_SOCKET
 PRODUCTION_TIME_SERVICE_PEER_UID = 0
-# Deny-only verifier material: no matching private key is retained by JAA or
-# provisioned in this programme environment.  Deliberate deployment integration
-# must replace this pin and the false provisioning gate in one reviewed change.
+# Public verifier for the reviewed Gigabyte device-local signer.  The matching
+# private key remains outside the repository and behind the UID-0 Unix service.
 _COMPILED_PRODUCTION_TIME_VERIFIER_PUBLIC_KEY_B64 = (
-    "zwsKXT7/p/syxJBeGBfX4cJhGEV/6UxT4l+PjB/CcQc="
+    "anUwQGSnIDYYu5Q7vCb8E581X+Iher3dn6y2iy1giKA="
 )
 PRODUCTION_TIME_VERIFIER_PUBLIC_KEY_B64 = (
     _COMPILED_PRODUCTION_TIME_VERIFIER_PUBLIC_KEY_B64
 )
 PRODUCTION_TIME_VERIFIER_PUBLIC_KEY_SHA256 = (
-    "9967206d25e12a91890e1e07f47ba5138e8be61adcef2432f12b9faa89c9c9dd"
+    "31b02680db90773e2038e9f53d4f616dcaec5f6f4c07fd2e501a53d07e9e21ea"
 )
 _PRODUCTION_TIME_CONFIGURATION_PATH = PRODUCTION_TIME_CONFIGURATION_PATH
 _PRODUCTION_TIME_SERVICE_SOCKET = PRODUCTION_TIME_SERVICE_SOCKET
@@ -83,7 +82,7 @@ _PRODUCTION_TIME_VERIFIER = Ed25519PublicKey.from_public_bytes(
 
 
 def _require_external_service_provisioned(
-    provisioned_in_reviewed_build: bool = False,
+    provisioned_in_reviewed_build: bool = True,
 ) -> None:
     if not provisioned_in_reviewed_build:
         raise CurrentTimeWitnessError(
