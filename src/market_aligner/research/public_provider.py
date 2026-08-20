@@ -18,6 +18,7 @@ import socket
 import sqlite3
 import stat
 import subprocess
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,27 +141,139 @@ def _private_external_root(path: Path, repository_root: Path) -> Path:
     return root
 
 
-def _secure_directory(root: Path, category: str) -> int:
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _directory_identity(descriptor: int) -> tuple[int, int, int, int]:
+    details = os.fstat(descriptor)
+    if not stat.S_ISDIR(details.st_mode):
+        raise PublicResearchError("research archive ancestry is not a directory")
+    mode = stat.S_IMODE(details.st_mode)
+    if mode & 0o022 and not (details.st_uid == 0 and mode & stat.S_ISVTX):
+        raise PublicResearchError("research archive ancestry is writable by another user")
+    return details.st_dev, details.st_ino, details.st_uid, mode
+
+
+def _open_directory_chain(path: Path) -> tuple[list[int], list[tuple[int, int, int, int]]]:
+    absolute = path.absolute()
+    if not absolute.is_absolute() or ".." in absolute.parts:
+        raise PublicResearchError("research archive ancestry is unsafe")
+    descriptors = [os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    identities = [_directory_identity(descriptors[0])]
     try:
+        for component in absolute.parts[1:]:
+            descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptors[-1],
+            )
+            descriptors.append(descriptor)
+            identities.append(_directory_identity(descriptor))
+    except (OSError, PublicResearchError) as exc:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        if isinstance(exc, PublicResearchError):
+            raise
+        raise PublicResearchError("research archive ancestry is unavailable") from exc
+    return descriptors, identities
+
+
+def _verify_directory_chain(
+    path: Path,
+    descriptors: list[int],
+    identities: list[tuple[int, int, int, int]],
+) -> None:
+    if [_directory_identity(fd) for fd in descriptors] != identities:
+        raise PublicResearchError("open research archive ancestry changed")
+    check_descriptors, check_identities = _open_directory_chain(path)
+    try:
+        if check_identities != identities:
+            raise PublicResearchError("research archive path ancestry was replaced")
+    finally:
+        for descriptor in reversed(check_descriptors):
+            os.close(descriptor)
+
+
+def _directory_chain_snapshot(
+    path: Path,
+) -> tuple[tuple[int, int, int, int], ...]:
+    descriptors, identities = _open_directory_chain(path)
+    try:
+        return tuple(identities)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+@contextmanager
+def _pinned_directory(
+    path: Path,
+    expected_identities: tuple[tuple[int, int, int, int], ...] | None = None,
+):
+    descriptors, identities = _open_directory_chain(path)
+    if expected_identities is not None and tuple(identities) != expected_identities:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise PublicResearchError("research archive pinned ancestry was replaced")
+    try:
+        yield descriptors[-1]
+    finally:
         try:
-            os.mkdir(category, 0o700, dir_fd=root_fd)
-        except FileExistsError:
-            pass
+            _verify_directory_chain(path, descriptors, identities)
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+
+@contextmanager
+def _pinned_category(
+    root: Path,
+    category: str,
+    *,
+    create: bool,
+    expected_ancestry: tuple[tuple[int, int, int, int], ...] | None = None,
+):
+    if "/" in category or category in {"", ".", ".."}:
+        raise PublicResearchError("research archive category is unsafe")
+    with _pinned_directory(root, expected_ancestry) as root_fd:
+        if create:
+            try:
+                os.mkdir(category, 0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
         try:
             directory_fd = os.open(
-                category, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd
+                category,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
             )
         except OSError as exc:
             raise PublicResearchError("research archive component is unsafe") from exc
-    finally:
-        os.close(root_fd)
-    details = os.fstat(directory_fd)
-    if details.st_uid != os.geteuid():
-        os.close(directory_fd)
-        raise PublicResearchError("research archive component owner differs")
-    os.fchmod(directory_fd, 0o700)
-    return directory_fd
+        identity: tuple[int, int, int, int] | None = None
+        try:
+            identity = _directory_identity(directory_fd)
+            if identity[2] != os.geteuid() or identity[3] != 0o700:
+                raise PublicResearchError("research archive category is not private 0700")
+            yield directory_fd
+        finally:
+            try:
+                if identity is not None and _directory_identity(directory_fd) != identity:
+                    raise PublicResearchError("open research archive category changed")
+                if identity is not None:
+                    try:
+                        check_fd = os.open(
+                            category,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=root_fd,
+                        )
+                    except OSError as exc:
+                        raise PublicResearchError(
+                            "research archive category path changed"
+                        ) from exc
+                    try:
+                        if _directory_identity(check_fd) != identity:
+                            raise PublicResearchError("research archive category was replaced")
+                    finally:
+                        os.close(check_fd)
+            finally:
+                os.close(directory_fd)
 
 
 def _read_existing_exact(directory_fd: int, name: str, value: bytes) -> bool:
@@ -187,49 +300,56 @@ def _read_existing_exact(directory_fd: int, name: str, value: bytes) -> bool:
     return True
 
 
-def _write_exact(root: Path, category: str, name: str, value: bytes) -> Path:
+def _write_exact(
+    root: Path,
+    category: str,
+    name: str,
+    value: bytes,
+    *,
+    expected_ancestry: tuple[tuple[int, int, int, int], ...] | None = None,
+) -> Path:
     if "/" in name or name in {"", ".", ".."}:
         raise PublicResearchError("research archive object name is unsafe")
-    directory_fd = _secure_directory(root, category)
     temporary = f".{name}.{secrets.token_hex(16)}"
-    try:
-        if _read_existing_exact(directory_fd, name, value):
-            return root / category / name
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory_fd,
-        )
+    with _pinned_category(
+        root, category, create=True, expected_ancestry=expected_ancestry
+    ) as directory_fd:
         try:
-            with os.fdopen(descriptor, "wb", closefd=False) as handle:
-                handle.write(value)
-                handle.flush()
-                os.fsync(handle.fileno())
-        finally:
-            os.close(descriptor)
-        try:
-            os.link(
+            if _read_existing_exact(directory_fd, name, value):
+                return root / category / name
+            descriptor = os.open(
                 temporary,
-                name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-                follow_symlinks=False,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
             )
-        except FileExistsError:
-            if not _read_existing_exact(directory_fd, name, value):
-                raise PublicResearchError("research archive replay raced unsafely")
-        os.unlink(temporary, dir_fd=directory_fd)
-        os.fsync(directory_fd)
-        return root / category / name
-    except BaseException:
-        try:
+            try:
+                with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                    handle.write(value)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(
+                    temporary,
+                    name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                if not _read_existing_exact(directory_fd, name, value):
+                    raise PublicResearchError("research archive replay raced unsafely")
             os.unlink(temporary, dir_fd=directory_fd)
-        except FileNotFoundError:
-            pass
-        raise
-    finally:
-        os.close(directory_fd)
+            os.fsync(directory_fd)
+            return root / category / name
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            raise
 
 
 @dataclass(frozen=True)
@@ -956,27 +1076,58 @@ class SelectorOccurrenceReview:
     current_canonical_object_sha256: str
 
 
-def _private_exact_file(path: Path, parent: Path, *, label: str) -> bytes:
+def _private_exact_file(
+    path: Path,
+    root: Path,
+    category: str,
+    *,
+    label: str,
+    expected_ancestry: tuple[tuple[int, int, int, int], ...],
+) -> bytes:
     absolute = path.absolute()
+    parent = root / category
     if absolute.parent != parent.absolute() or absolute.name in {"", ".", ".."}:
         raise PublicResearchError(f"{label} is outside its fixed archive directory")
-    try:
-        descriptor = os.open(absolute, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise PublicResearchError(f"{label} is unavailable") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_nlink != 1
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-        ):
-            raise PublicResearchError(f"{label} is not a private regular 0600 file")
-        with os.fdopen(os.dup(descriptor), "rb") as handle:
-            value = handle.read()
-    finally:
-        os.close(descriptor)
+    with _pinned_category(
+        root,
+        category,
+        create=False,
+        expected_ancestry=expected_ancestry,
+    ) as directory_fd:
+        try:
+            descriptor = os.open(
+                absolute.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
+            )
+        except OSError as exc:
+            raise PublicResearchError(f"{label} is unavailable") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            identity = (metadata.st_dev, metadata.st_ino)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise PublicResearchError(
+                    f"{label} is not a private regular 0600 file"
+                )
+            with os.fdopen(os.dup(descriptor), "rb") as handle:
+                value = handle.read()
+            check = os.fstat(descriptor)
+            if (check.st_dev, check.st_ino) != identity:
+                raise PublicResearchError(f"open {label} changed")
+            check_fd = os.open(
+                absolute.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
+            )
+            try:
+                check_metadata = os.fstat(check_fd)
+                if (check_metadata.st_dev, check_metadata.st_ino) != identity:
+                    raise PublicResearchError(f"{label} was replaced")
+            finally:
+                os.close(check_fd)
+        finally:
+            os.close(descriptor)
     if len(value) > _MAX_SOURCE_BYTES:
         raise PublicResearchError(f"{label} exceeds the size limit")
     return value
@@ -1070,6 +1221,7 @@ class RefreshDerivedResearchProvider:
         self.store = store
         self.loader = canonical_vacancy_loader
         self.root = _private_external_root(archive_root, repository_root)
+        self._archive_ancestry = _directory_chain_snapshot(self.root)
         self.repository_root = repository_root.resolve(strict=True)
         self.last_materialization: MaterializedPublicResearch | None = None
         self.last_derivation: RefreshPlanDerivation | None = None
@@ -1231,11 +1383,19 @@ class RefreshDerivedResearchProvider:
         current = self.loader(task)
         prior, _prior_dossier_bytes, prior_digest = self._load_prior(task)
         prior_object = self._read_prior_object(prior)
-        input_root = self.root / "review-inputs"
-        input_directory_fd = _secure_directory(self.root, "review-inputs")
-        os.close(input_directory_fd)
+        with _pinned_category(
+            self.root,
+            "review-inputs",
+            create=True,
+            expected_ancestry=self._archive_ancestry,
+        ):
+            pass
         input_bytes = _private_exact_file(
-            input_path, input_root, label="selector review input"
+            input_path,
+            self.root,
+            "review-inputs",
+            label="selector review input",
+            expected_ancestry=self._archive_ancestry,
         )
         try:
             document = json.loads(input_bytes)
@@ -1254,7 +1414,11 @@ class RefreshDerivedResearchProvider:
         map_bytes = input_bytes
         map_sha = _sha256(map_bytes)
         map_path = _write_exact(
-            self.root, "selector-review-maps", f"{map_sha}.json", map_bytes
+            self.root,
+            "selector-review-maps",
+            f"{map_sha}.json",
+            map_bytes,
+            expected_ancestry=self._archive_ancestry,
         )
         identities = {
             **_repository_source_identity(self.repository_root),
@@ -1286,6 +1450,7 @@ class RefreshDerivedResearchProvider:
             "selector-review-receipts",
             f"{semantic_sha}.json",
             receipt_bytes,
+            expected_ancestry=self._archive_ancestry,
         )
         result = SelectorOccurrenceReview(
             map_sha, map_path, semantic_sha, _sha256(receipt_bytes), receipt_path,
@@ -1299,11 +1464,12 @@ class RefreshDerivedResearchProvider:
     ) -> dict[str, str] | None:
         if self.selector_review_receipt_path is None:
             return None
-        receipts = self.root / "selector-review-receipts"
         receipt_bytes = _private_exact_file(
             self.selector_review_receipt_path,
-            receipts,
+            self.root,
+            "selector-review-receipts",
             label="selector review admission receipt",
+            expected_ancestry=self._archive_ancestry,
         )
         try:
             receipt = json.loads(receipt_bytes)
@@ -1350,7 +1516,11 @@ class RefreshDerivedResearchProvider:
             raise PublicResearchError("selector review map identity is invalid")
         map_path = self.root / "selector-review-maps" / f"{map_sha}.json"
         map_bytes = _private_exact_file(
-            map_path, map_path.parent, label="admitted selector review map"
+            map_path,
+            self.root,
+            "selector-review-maps",
+            label="admitted selector review map",
+            expected_ancestry=self._archive_ancestry,
         )
         try:
             map_document = json.loads(map_bytes)

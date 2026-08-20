@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import market_aligner.research.public_provider as public_provider_module
+
 from market_aligner.assessment.opportunity import apply_gate
 from market_aligner.assessment.scoring import AssessmentAxes, score
 from market_aligner.cli import build_parser
@@ -1137,6 +1139,126 @@ def test_selector_review_rejects_current_object_drift_before_claim(
         ).fetchone()
     assert tuple(row)[0] == "queued"
     assert tuple(row)[2] is None
+
+
+@pytest.mark.parametrize(
+    "category", ("review-inputs", "selector-review-maps", "selector-review-receipts")
+)
+def test_selector_review_rejects_category_symlink_redirection(
+    tmp_path: Path, category: str,
+) -> None:
+    store, _profile_id, task, bridge, _config, archive, document = (
+        _selector_review_fixture(tmp_path)
+    )
+    provider = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+    )
+    input_path = _write_review_input(archive, document)
+    admitted = None
+    if category != "review-inputs":
+        admitted = provider.admit_selector_review(task, input_path)
+    target = archive / category
+    held = archive / f"{category}.held"
+    target.rename(held)
+    redirect = tmp_path / f"redirect-{category}"
+    redirect.mkdir(mode=0o700)
+    target.symlink_to(redirect, target_is_directory=True)
+    with pytest.raises(PublicResearchError):
+        if category == "review-inputs":
+            provider.admit_selector_review(task, input_path)
+        else:
+            receipt = admitted.receipt_path
+            consumer = RefreshDerivedResearchProvider(
+                store=store, canonical_vacancy_loader=bridge,
+                repository_root=Path(__file__).resolve().parents[1],
+                archive_root=archive,
+                selector_review_receipt_path=receipt,
+            )
+            consumer.preflight(task)
+
+
+def test_selector_review_rejects_same_path_archive_inode_replacement(
+    tmp_path: Path,
+) -> None:
+    store, _profile_id, task, bridge, _config, archive, document = (
+        _selector_review_fixture(tmp_path)
+    )
+    producer = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+    )
+    admitted = producer.admit_selector_review(
+        task, _write_review_input(archive, document)
+    )
+    consumer = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+        selector_review_receipt_path=admitted.receipt_path,
+    )
+    held = archive.with_name(f"{archive.name}.held")
+    archive.rename(held)
+    shutil.copytree(held, archive)
+    with pytest.raises(PublicResearchError, match="pinned ancestry"):
+        consumer.preflight(task)
+
+
+def test_selector_review_rejects_mid_read_category_inode_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _profile_id, task, bridge, _config, archive, document = (
+        _selector_review_fixture(tmp_path)
+    )
+    provider = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+    )
+    input_path = _write_review_input(archive, document)
+    original_open = public_provider_module.os.open
+    swapped = False
+
+    def replacing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == input_path.name and dir_fd is not None and not swapped:
+            swapped = True
+            category = archive / "review-inputs"
+            category.rename(archive / "review-inputs.held")
+            category.mkdir(mode=0o700)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(public_provider_module.os, "open", replacing_open)
+    with pytest.raises(PublicResearchError, match="category was replaced"):
+        provider.admit_selector_review(task, input_path)
+    assert swapped is True
+
+
+def test_selector_review_rejects_mid_write_category_inode_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _profile_id, task, bridge, _config, archive, document = (
+        _selector_review_fixture(tmp_path)
+    )
+    provider = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=Path(__file__).resolve().parents[1], archive_root=archive,
+    )
+    input_path = _write_review_input(archive, document)
+    original_read = public_provider_module._read_existing_exact
+    swapped = False
+
+    def replacing_read(directory_fd, name, value):
+        nonlocal swapped
+        if name.endswith(".json") and not swapped:
+            swapped = True
+            category = archive / "selector-review-maps"
+            category.rename(archive / "selector-review-maps.held")
+            category.mkdir(mode=0o700)
+        return original_read(directory_fd, name, value)
+
+    monkeypatch.setattr(public_provider_module, "_read_existing_exact", replacing_read)
+    with pytest.raises(PublicResearchError, match="category was replaced"):
+        provider.admit_selector_review(task, input_path)
+    assert swapped is True
 
 
 def test_refresh_plan_derivation_rejects_moved_identical_excerpt(
