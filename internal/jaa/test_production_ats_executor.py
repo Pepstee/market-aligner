@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import inspect
 import hashlib
+import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from playwright.sync_api import Route, sync_playwright
 
 import career_automation.production_ats_executor as production_module
+import career_automation.provider_observation_authority as observation_authority
 from career_automation.application_archive import (
     VacancyArchiveIdentity,
     selected_archive_object_bytes,
@@ -1212,3 +1214,95 @@ def test_greenhouse_authority_rejects_nonofficial_or_mismatched_routes(
                 ),
             )
         browser.close()
+
+
+def test_provider_authority_resolves_committed_sources_from_nested_subtree(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    subtree = repository / "internal" / "jaa"
+    policy = (
+        subtree
+        / "career_automation"
+        / "fixtures"
+        / "trusted-greenhouse-success-observations.json"
+    )
+    policy.parent.mkdir(parents=True)
+    policy_value = b'{"synthetic":"policy"}\n'
+    policy.write_bytes(policy_value)
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", repository, "config", "user.name", "Synthetic Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", repository, "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "commit", "-qm", "fixture"], check=True
+    )
+
+    head = observation_authority._verify_exact_head_policy(subtree, policy_value)
+    assert len(head) == 40
+    assert observation_authority._git_show(
+        subtree,
+        "HEAD",
+        "career_automation/fixtures/trusted-greenhouse-success-observations.json",
+    ) == policy_value
+
+
+def test_provider_authority_subtree_lookup_rejects_escape_and_dirty_head(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    subtree = repository / "internal" / "jaa"
+    policy = (
+        subtree
+        / "career_automation"
+        / "fixtures"
+        / "trusted-greenhouse-success-observations.json"
+    )
+    policy.parent.mkdir(parents=True)
+    policy_value = b'{"synthetic":"policy"}\n'
+    policy.write_bytes(policy_value)
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", repository, "config", "user.name", "Synthetic Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", repository, "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "commit", "-qm", "fixture"], check=True
+    )
+
+    with pytest.raises(ValueError, match="unsafe"):
+        observation_authority._git_show(subtree, "HEAD", "../outside")
+    legacy_policy = (
+        repository
+        / "career_automation"
+        / "fixtures"
+        / "trusted-greenhouse-success-observations.json"
+    )
+    legacy_policy.parent.mkdir(parents=True)
+    legacy_policy.write_bytes(b'{"different":"legacy-policy"}\n')
+    subprocess.run(["git", "-C", repository, "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "commit", "-qm", "ambiguous fixture"],
+        check=True,
+    )
+    with pytest.raises(ValueError, match="ambiguous"):
+        observation_authority._git_show(
+            subtree,
+            "HEAD",
+            "career_automation/fixtures/trusted-greenhouse-success-observations.json",
+            allow_legacy_root=True,
+        )
+    (repository / "untracked.txt").write_text("dirty", encoding="utf-8")
+    with pytest.raises(ValueError, match="exact clean HEAD"):
+        observation_authority._verify_exact_head_policy(subtree, policy_value)

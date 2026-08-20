@@ -26,7 +26,12 @@ _IMMUTABLE_LEGACY_COLLECTORS = frozenset(
             "jaa.playwright-greenhouse-read-only-observer.v3",
             "8b0868399733a33716c3f37818f58dab8cb204bf",
             "2d8859b69fcba66d2c0767fc8fe24a58f5b3c5ed01a3752280d8c6d00056220f",
-        )
+        ),
+        (
+            "jaa.repository-playwright-route-fixture.v1",
+            "cf4543f5906918c7e25143c18c344ddd6c6b602e",
+            "c87b0941bcd8df37d328724bead6a01c231cd85d7068a588491ed62cf843a463",
+        ),
     }
 )
 
@@ -47,21 +52,58 @@ def _canonical_document(value: bytes, label: str) -> dict[str, object]:
     return document
 
 
-def _git_show(repository_root: str | Path, revision_path: str) -> bytes:
+def _repository_prefix(repository_root: str | Path) -> str:
     completed = subprocess.run(
         [
             "git",
             "-C",
             str(Path(repository_root).resolve(strict=True)),
-            "show",
-            revision_path,
+            "rev-parse",
+            "--show-prefix",
         ],
         check=False,
         capture_output=True,
+        text=True,
     )
-    if completed.returncode != 0:
+    prefix = completed.stdout.strip()
+    if completed.returncode != 0 or (prefix and not prefix.endswith("/")):
+        raise ValueError("provider observation repository prefix is invalid")
+    return prefix
+
+
+def _git_show(
+    repository_root: str | Path,
+    revision: str,
+    relative_path: str,
+    *,
+    allow_legacy_root: bool = False,
+) -> bytes:
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != relative_path:
+        raise ValueError("provider observation source path is unsafe")
+    committed_path = f"{_repository_prefix(repository_root)}{relative_path}"
+    repository = str(Path(repository_root).resolve(strict=True))
+
+    def read_path(path: str) -> bytes | None:
+        completed = subprocess.run(
+            ["git", "-C", repository, "show", f"{revision}:{path}"],
+            check=False,
+            capture_output=True,
+        )
+        return completed.stdout if completed.returncode == 0 else None
+
+    committed = read_path(committed_path)
+    legacy = (
+        read_path(relative_path)
+        if allow_legacy_root and committed_path != relative_path
+        else None
+    )
+    if committed is not None and legacy is not None and committed != legacy:
+        raise ValueError("provider observation authority source path is ambiguous")
+    value = committed if committed is not None else legacy
+    if value is None:
         raise ValueError("provider observation authority source is absent from Git")
-    return completed.stdout
+    return value
 
 
 def _trusted_policy() -> tuple[dict[str, object], bytes, str]:
@@ -81,7 +123,8 @@ def _verify_exact_head_policy(repository_root: str | Path, policy_value: bytes) 
     head = exact_clean_head(repository_root)
     committed = _git_show(
         repository_root,
-        "HEAD:career_automation/fixtures/trusted-greenhouse-success-observations.json",
+        "HEAD",
+        "career_automation/fixtures/trusted-greenhouse-success-observations.json",
     )
     if committed != policy_value:
         raise ValueError("provider observation trust policy differs from exact HEAD")
@@ -286,10 +329,15 @@ def _verify_capture_manifest(
             raise ValueError(
                 "production provider capture transport evidence is invalid"
             )
-    source = _git_show(repository_root, f"{commit}:{source_path}")
+    source = _git_show(
+        repository_root,
+        commit,
+        source_path,
+        allow_legacy_root=True,
+    )
     if _sha256(source) != source_digest:
         raise ValueError("provider observation collector source identity differs")
-    current_source = _git_show(repository_root, f"HEAD:{source_path}")
+    current_source = _git_show(repository_root, "HEAD", source_path)
     legacy_identity = (collector_identity, commit, source_digest)
     if (
         current_source != source
