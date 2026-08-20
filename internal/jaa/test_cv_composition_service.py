@@ -488,7 +488,8 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
     candidate_bytes = b'{"synthetic":"candidate-authority"}\n'
     contact_bytes = b'{"synthetic":"contact-authority"}\n'
     candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
-    contact_sha = hashlib.sha256(contact_bytes).hexdigest()
+    contact_object_sha = hashlib.sha256(contact_bytes).hexdigest()
+    contact_sha = "e" * 64
     request = build_editorial_request(
         authority=replace(request.authority, source_sha256=candidate_sha),
         role_title=request.role_title,
@@ -559,8 +560,17 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
         "candidate_authority_sha256": candidate_sha,
         "contact_authority_bytes": contact_bytes,
         "contact_authority_sha256": contact_sha,
+        "contact_object_sha256": contact_object_sha,
         "orchestration_arguments": arguments,
     }
+    with pytest.raises(ValueError, match="contact authority exact bytes differ"):
+        prepare_admitted_market_application(
+            **{**inputs, "contact_object_sha256": "0" * 64}
+        )
+    with pytest.raises(ValueError, match="application source differs"):
+        prepare_admitted_market_application(
+            **{**inputs, "contact_authority_sha256": "1" * 64}
+        )
     first = prepare_admitted_market_application(**inputs)
     second = prepare_admitted_market_application(**inputs)
     assert first == second
@@ -582,7 +592,8 @@ def test_authority_runner_materializes_exact_admitted_inputs_without_provider(tm
     candidate_path.chmod(0o600)
     contact_path.chmod(0o600)
     candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
-    contact_sha = hashlib.sha256(contact_bytes).hexdigest()
+    contact_object_sha = hashlib.sha256(contact_bytes).hexdigest()
+    contact_sha = "f" * 64
     request = build_editorial_request(
         authority=replace(request.authority, source_sha256=candidate_sha),
         role_title=request.role_title,
@@ -675,6 +686,10 @@ def test_authority_runner_materializes_exact_admitted_inputs_without_provider(tm
     assert store.boundary_calls == 1
     assert assessor.calls == 1
     assert (result.path / "cv.pdf").is_file()
+    receipt = json.loads((result.path / "receipt.json").read_bytes())
+    assert receipt["contact_authority_sha256"] == contact_sha
+    assert receipt["contact_object_sha256"] == contact_object_sha
+    assert (result.path / "objects" / contact_object_sha).read_bytes() == contact_bytes
 
 
 def test_authority_runner_rejects_candidate_not_bound_to_handoff(tmp_path) -> None:

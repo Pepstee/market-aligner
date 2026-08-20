@@ -153,9 +153,7 @@ def prepare_admitted_market_application_from_authorities(
         repository_root=repository,
     )
     contact_bytes = _read_private(contact_path)
-    contact_sha256 = hashlib.sha256(contact_bytes).hexdigest()
-    if contact_authority.authority_sha256 != contact_sha256:
-        raise ValueError("loaded contact authority differs from exact file bytes")
+    contact_object_sha256 = hashlib.sha256(contact_bytes).hexdigest()
 
     verified = admission_store.for_boundary(application_id, "strategy")
     arguments = dict(
@@ -175,7 +173,8 @@ def prepare_admitted_market_application_from_authorities(
         candidate_authority_bytes=candidate_bytes,
         candidate_authority_sha256=candidate_sha256,
         contact_authority_bytes=contact_bytes,
-        contact_authority_sha256=contact_sha256,
+        contact_authority_sha256=contact_authority.authority_sha256,
+        contact_object_sha256=contact_object_sha256,
         orchestration_arguments=arguments,
     )
 
@@ -190,13 +189,15 @@ def prepare_admitted_market_application(
     candidate_authority_sha256: str,
     contact_authority_bytes: bytes,
     contact_authority_sha256: str,
+    contact_object_sha256: str | None = None,
     orchestration_arguments: Mapping[str, Any],
 ) -> MarketApplicationPreparation:
     """Prepare one admitted application; never authorize upload or submission."""
 
+    exact_contact_sha256 = contact_object_sha256 or contact_authority_sha256
     for label, value, digest in (
         ("candidate", candidate_authority_bytes, candidate_authority_sha256),
-        ("contact", contact_authority_bytes, contact_authority_sha256),
+        ("contact", contact_authority_bytes, exact_contact_sha256),
     ):
         if not value or hashlib.sha256(value).hexdigest() != digest:
             raise ValueError(f"{label} authority exact bytes differ from their digest")
@@ -232,6 +233,7 @@ def prepare_admitted_market_application(
         ),
         "candidate_authority_sha256": candidate_authority_sha256,
         "contact_authority_sha256": contact_authority_sha256,
+        "contact_object_sha256": exact_contact_sha256,
         "form_fields_sha256": content_hash(
             list(orchestration_arguments.get("form_fields", ()))
         ),
@@ -247,7 +249,7 @@ def prepare_admitted_market_application(
             None,
         ),
         "request_sha256": request.request_sha256,
-        "schema_version": "jaa.market-application-preparation-input.v1",
+        "schema_version": "jaa.market-application-preparation-input.v2",
         "writer_evidence_sha256": content_hash(
             _input_document(orchestration_arguments.get("writer_evidence"))
         ),
@@ -257,13 +259,26 @@ def prepare_admitted_market_application(
     root = _private_external_root(data_home, repository_root)
     destination = root / "preparations" / preparation_id
     receipt_path = destination / "receipt.json"
+    if not receipt_path.exists() and exact_contact_sha256 == contact_authority_sha256:
+        legacy_identity = dict(input_identity)
+        legacy_identity.pop("contact_object_sha256")
+        legacy_identity["schema_version"] = (
+            "jaa.market-application-preparation-input.v1"
+        )
+        legacy_preparation_id = content_hash(legacy_identity)
+        legacy_destination = root / "preparations" / legacy_preparation_id
+        if (legacy_destination / "receipt.json").exists():
+            preparation_id = legacy_preparation_id
+            destination = legacy_destination
+            receipt_path = destination / "receipt.json"
     if receipt_path.exists():
         receipt_bytes = _read_private(receipt_path)
         try:
             receipt = json.loads(receipt_bytes)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("stored preparation receipt is invalid JSON") from exc
-        if receipt_bytes != _json_bytes(receipt) or set(receipt) != {
+        schema_version = receipt.get("schema_version")
+        expected_keys = {
             "admission_receipt_sha256",
             "application_id",
             "candidate_authority_sha256",
@@ -276,7 +291,15 @@ def prepare_admitted_market_application(
             "preparation_id",
             "release_authority",
             "schema_version",
-        }:
+        }
+        if schema_version == "jaa.market-application-preparation.v2":
+            expected_keys.add("contact_object_sha256")
+        elif schema_version != "jaa.market-application-preparation.v1":
+            raise ValueError("stored preparation receipt schema differs")
+        stored_contact_object_sha256 = str(
+            receipt.get("contact_object_sha256", receipt.get("contact_authority_sha256"))
+        )
+        if receipt_bytes != _json_bytes(receipt) or set(receipt) != expected_keys:
             raise ValueError("stored preparation receipt schema differs")
         if (
             receipt.get("preparation_id") != preparation_id
@@ -285,8 +308,7 @@ def prepare_admitted_market_application(
             != candidate_authority_sha256
             or receipt.get("contact_authority_sha256") != contact_authority_sha256
             or receipt.get("release_authority") is not False
-            or receipt.get("schema_version")
-            != "jaa.market-application-preparation.v1"
+            or stored_contact_object_sha256 != exact_contact_sha256
             or hashlib.sha256(_read_private(destination / "cv.pdf")).hexdigest()
             != receipt.get("cv_pdf_sha256")
             or hashlib.sha256(
@@ -298,9 +320,9 @@ def prepare_admitted_market_application(
             ).hexdigest()
             != candidate_authority_sha256
             or hashlib.sha256(
-                _read_private(destination / "objects" / contact_authority_sha256)
+                _read_private(destination / "objects" / stored_contact_object_sha256)
             ).hexdigest()
-            != contact_authority_sha256
+            != stored_contact_object_sha256
         ):
             raise ValueError("stored preparation replay is invalid")
         return MarketApplicationPreparation(
@@ -340,7 +362,7 @@ def prepare_admitted_market_application(
             candidate_authority_bytes,
         )
         _write(
-            temporary / "objects" / contact_authority_sha256,
+            temporary / "objects" / exact_contact_sha256,
             contact_authority_bytes,
         )
         _write(temporary / "cv.pdf", result.final_artifacts.cv_pdf.pdf_bytes)
@@ -353,6 +375,7 @@ def prepare_admitted_market_application(
             "application_id": application_id,
             "candidate_authority_sha256": candidate_authority_sha256,
             "contact_authority_sha256": contact_authority_sha256,
+            "contact_object_sha256": exact_contact_sha256,
             "cv_pdf_sha256": result.final_artifacts.cv_pdf.pdf_sha256,
             "cover_letter_pdf_sha256": result.final_artifacts.cover_letter_pdf.pdf_sha256,
             "current_boundary_receipt_sha256": verified.current_boundary_receipt_sha256,
@@ -360,7 +383,7 @@ def prepare_admitted_market_application(
             "orchestration_sha256": result.orchestration_sha256,
             "preparation_id": preparation_id,
             "release_authority": False,
-            "schema_version": "jaa.market-application-preparation.v1",
+            "schema_version": "jaa.market-application-preparation.v2",
         }
         receipt_bytes = _json_bytes(receipt)
         _write(temporary / "receipt.json", receipt_bytes)
