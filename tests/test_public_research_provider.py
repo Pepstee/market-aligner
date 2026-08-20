@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -399,11 +400,16 @@ def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
     refreshed_task = _task_and_reset(store)
     assert refreshed_task.source_content_sha256 == legacy_digest
     assert refreshed_task.refresh_event_id is not None
+    assert refreshed_task.refresh_event_idempotency_key == (
+        f"research-collection-refresh:{profile_id}:{JOB_KEY}:"
+        f"{receipt['transition_sha256']}"
+    )
     assert refreshed_task.refresh_legacy_content_sha256 == legacy_digest
     assert refreshed_task.refresh_canonical_content_sha256 == canonical_digest
     assert refreshed_task.refresh_receipt_sha256 == receipt["receipt_sha256"]
     assert refreshed_task.refresh_transition_sha256 == receipt["transition_sha256"]
     assert refreshed_task.refresh_promotion_receipt_sha256 == PROMOTION
+    assert refreshed_task.refresh_prior_dossier_sha256 is not None
 
     bridge_loader = CanonicalCollectorVacancyLoader(
         data_home=tmp_path, collection_config_path=config
@@ -441,6 +447,7 @@ def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
     (
         ("refresh_event_id", None),
         ("refresh_event_id", 999999),
+        ("refresh_event_idempotency_key", "substituted-event-key"),
         ("refresh_receipt_sha256", "9" * 64),
         ("refresh_receipt_file_sha256", "8" * 64),
         ("refresh_transition_sha256", "7" * 64),
@@ -452,6 +459,7 @@ def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
         ("refresh_raw_object_sha256", "3" * 64),
         ("refresh_fetched_at", "2026-08-21T09:00:00+00:00"),
         ("refresh_promotion_receipt_sha256", "2" * 64),
+        ("refresh_prior_dossier_sha256", "1" * 64),
     ),
 )
 def test_refresh_worker_bridge_rejects_task_identity_substitution(
@@ -585,16 +593,138 @@ def test_refresh_worker_bridge_rejects_canonical_event_substitution(
             (refreshed_task.refresh_event_id,),
         ).fetchone()[0])
         payload["new_fetched_at"] = "2026-08-21T09:00:00+00:00"
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                "UPDATE assessment_events SET payload_json=? WHERE id=?",
+                (json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                 refreshed_task.refresh_event_id),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                "DELETE FROM assessment_events WHERE id=?",
+                (refreshed_task.refresh_event_id,),
+            )
         connection.execute(
-            "UPDATE assessment_events SET payload_json=? WHERE id=?",
-            (json.dumps(payload, sort_keys=True, separators=(",", ":")),
-             refreshed_task.refresh_event_id),
+            "UPDATE employer_dossiers SET dossier_hash=? WHERE profile_id=? AND job_key=?",
+            ("0" * 64, profile_id, JOB_KEY),
         )
     bridge = CanonicalCollectorVacancyLoader(
         data_home=tmp_path, collection_config_path=config
     )
     with pytest.raises(PublicResearchError, match="event differs"):
         bridge(refreshed_task)
+
+
+@pytest.mark.parametrize("swap", ("symlink", "replacement"))
+def test_refresh_worker_bridge_rejects_collector_inode_swap_after_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap: str
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    provider = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=tmp_path / "state" / "public-employer-research-v2",
+        canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, provider, "legacy-worker").run_one().status == "completed"
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    refreshed_task = _task_and_reset(store)
+    original_resolve = JobDatabase.resolve_vacancy_refresh_collector
+
+    def resolve_then_swap(cls, *args, **kwargs):
+        resolved = original_resolve(*args, **kwargs)
+        original = resolved.path.with_suffix(".pinned")
+        resolved.path.rename(original)
+        if swap == "symlink":
+            resolved.path.symlink_to(original)
+        else:
+            shutil.copy2(original, resolved.path)
+        return resolved
+
+    monkeypatch.setattr(
+        JobDatabase,
+        "resolve_vacancy_refresh_collector",
+        classmethod(resolve_then_swap),
+    )
+    bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    with pytest.raises(PublicResearchError, match="verification failed"):
+        bridge(refreshed_task)
+
+
+def test_refresh_completion_revalidates_prior_dossier_after_provider(
+    tmp_path: Path,
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    archive = tmp_path / "state" / "public-employer-research-v2"
+    initial_provider = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=archive, canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, initial_provider, "legacy-worker").run_one().status == (
+        "completed"
+    )
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    refreshed_task = _task_and_reset(store)
+    bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    refreshed_source = bridge(refreshed_task)
+    provider = SourceBoundResearchProvider(
+        plan=_plan(refreshed_task, refreshed_source), repository_root=repository,
+        archive_root=archive, canonical_vacancy_loader=bridge,
+    )
+
+    class DossierDriftAfterProvider:
+        @property
+        def last_materialization(self):
+            return provider.last_materialization
+
+        def research(self, claimed_task):
+            result = provider.research(claimed_task)
+            with store.connection() as connection:
+                connection.execute(
+                    """UPDATE employer_dossiers SET dossier_hash=?
+                       WHERE profile_id=? AND job_key=?""",
+                    ("0" * 64, profile_id, JOB_KEY),
+                )
+            return result
+
+    failed = ResearchWorker(
+        store, DossierDriftAfterProvider(), "completion-race-worker"
+    ).run_one()
+    assert failed.status == "retry_scheduled"
+    assert "refresh authority differs" in str(failed.error)
+    with store.connection() as connection:
+        assert connection.execute(
+            "SELECT status FROM employer_research_queue"
+        ).fetchone()[0] == "queued"
 
 
 def test_dual_identity_v3_rejects_relabelled_promotion_and_canonical_drift(

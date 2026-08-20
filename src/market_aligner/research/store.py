@@ -96,6 +96,21 @@ CREATE TABLE IF NOT EXISTS assessment_events (
   FOREIGN KEY(profile_id,job_key) REFERENCES assessments(profile_id,job_key) ON DELETE CASCADE
 );
 
+CREATE TRIGGER IF NOT EXISTS immutable_collection_refresh_event_update
+BEFORE UPDATE ON assessment_events
+WHEN OLD.event_type='employer_research_collection_refresh_queued'
+  OR NEW.event_type='employer_research_collection_refresh_queued'
+BEGIN
+  SELECT RAISE(ABORT, 'collection refresh assessment events are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS immutable_collection_refresh_event_delete
+BEFORE DELETE ON assessment_events
+WHEN OLD.event_type='employer_research_collection_refresh_queued'
+BEGIN
+  SELECT RAISE(ABORT, 'collection refresh assessment events are immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS employer_research_queue (
   profile_id TEXT NOT NULL,
   job_key TEXT NOT NULL,
@@ -574,7 +589,9 @@ class AssessmentStore:
                           p.receipt_sha256 AS promotion_receipt_sha256,
                           q.refresh_event_id,e.event_type AS refresh_event_type,
                           e.actor_kind AS refresh_actor_kind,
-                          e.payload_json AS refresh_payload_json
+                          e.payload_json AS refresh_payload_json,
+                          e.idempotency_key AS refresh_event_idempotency_key,
+                          d.dossier_hash AS refresh_current_dossier_hash
                    FROM employer_research_queue q JOIN assessments a
                      ON a.profile_id=q.profile_id AND a.job_key=q.job_key
                    LEFT JOIN assessment_promotions p
@@ -582,6 +599,8 @@ class AssessmentStore:
                    LEFT JOIN assessment_events e
                      ON e.id=q.refresh_event_id
                     AND e.profile_id=q.profile_id AND e.job_key=q.job_key
+                   LEFT JOIN employer_dossiers d
+                     ON d.profile_id=q.profile_id AND d.job_key=q.job_key
                    WHERE (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
                       OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP)
                    ORDER BY q.priority DESC,a.opportunity DESC,q.queued_at LIMIT 1"""
@@ -599,8 +618,15 @@ class AssessmentStore:
             refresh_event_type = values.pop("refresh_event_type")
             refresh_actor_kind = values.pop("refresh_actor_kind")
             refresh_payload_json = values.pop("refresh_payload_json")
+            refresh_event_idempotency_key = values.pop(
+                "refresh_event_idempotency_key"
+            )
+            refresh_current_dossier_hash = values.pop(
+                "refresh_current_dossier_hash"
+            )
             refresh_values = {
                 "refresh_event_id": refresh_event_id,
+                "refresh_event_idempotency_key": None,
                 "refresh_receipt_sha256": None,
                 "refresh_receipt_file_sha256": None,
                 "refresh_transition_sha256": None,
@@ -612,6 +638,7 @@ class AssessmentStore:
                 "refresh_raw_object_sha256": None,
                 "refresh_fetched_at": None,
                 "refresh_promotion_receipt_sha256": None,
+                "refresh_prior_dossier_sha256": None,
             }
             if refresh_event_id is not None:
                 try:
@@ -645,9 +672,18 @@ class AssessmentStore:
                     != values["source_content_sha256"]
                     or payload["promotion_receipt_sha256"]
                     != values["promotion_receipt_sha256"]
+                    or refresh_event_idempotency_key
+                    != (
+                        f"research-collection-refresh:{values['profile_id']}:"
+                        f"{values['job_key']}:"
+                        f"{payload['collection_transition_sha256']}"
+                    )
+                    or payload["prior_dossier_hash"]
+                    != refresh_current_dossier_hash
                 ):
                     raise ValueError("research refresh event differs from promotion")
                 refresh_values.update(
+                    refresh_event_idempotency_key=refresh_event_idempotency_key,
                     refresh_receipt_sha256=payload["collection_receipt_sha256"],
                     refresh_receipt_file_sha256=payload[
                         "collection_receipt_file_sha256"
@@ -669,6 +705,7 @@ class AssessmentStore:
                     refresh_promotion_receipt_sha256=payload[
                         "promotion_receipt_sha256"
                     ],
+                    refresh_prior_dossier_sha256=payload["prior_dossier_hash"],
                 )
             values["vacancy_snapshot_sha256"] = _vacancy_snapshot_sha256(values)
             values.update(refresh_values)
@@ -905,10 +942,11 @@ class AssessmentStore:
     ) -> bool:
         """Atomically bind a locked collector snapshot to the research requeue."""
 
-        collector_database = JobDatabase.resolve_vacancy_refresh_collector(
+        resolved_collector = JobDatabase.resolve_vacancy_refresh_collector(
             self.data_home, receipt_path, config_path
         )
-        expected_collector = collector_database.path.absolute()
+        collector_database = resolved_collector.database
+        expected_collector = resolved_collector.path
         supplied_collector = collector_database.path.absolute()
         if (
             collector_database.data_home != self.data_home.absolute()
@@ -929,6 +967,9 @@ class AssessmentStore:
             # databases.  No collector writer can change the row between exact
             # verification and the assessment-side commit.
             connection.execute("BEGIN IMMEDIATE")
+            resolved_collector.verify_open_connection(
+                connection, schema="collector"
+            )
             verified = collector_database.verify_vacancy_refresh_receipt(
                 receipt_path,
                 job_key=job_key,
@@ -1080,6 +1121,9 @@ class AssessmentStore:
             )
             if revalidated != verified:
                 raise ValueError("collector refresh changed during assessment admission")
+            resolved_collector.verify_open_connection(
+                connection, schema="collector"
+            )
             connection.commit()
             return True
         except Exception:
@@ -1168,12 +1212,56 @@ class AssessmentStore:
             raise ValueError("legacy dossier cannot claim v2 archive evidence")
         with self.transaction() as connection:
             lease = connection.execute(
-                """SELECT lease_owner,status FROM employer_research_queue
-                   WHERE profile_id=? AND job_key=?""",
+                """SELECT q.lease_owner,q.status,q.refresh_event_id,
+                          e.event_type,e.actor_kind,e.payload_json,e.idempotency_key,
+                          d.dossier_hash AS current_dossier_hash,
+                          p.source_content_sha256,
+                          p.receipt_sha256 AS current_promotion_receipt_sha256
+                   FROM employer_research_queue q
+                   LEFT JOIN assessment_events e
+                     ON e.id=q.refresh_event_id
+                    AND e.profile_id=q.profile_id AND e.job_key=q.job_key
+                   LEFT JOIN employer_dossiers d
+                     ON d.profile_id=q.profile_id AND d.job_key=q.job_key
+                   LEFT JOIN assessment_promotions p
+                     ON p.profile_id=q.profile_id AND p.job_key=q.job_key
+                   WHERE q.profile_id=? AND q.job_key=?""",
                 (dossier.profile_id, dossier.job_key),
             ).fetchone()
             if lease is None or lease["status"] != "leased" or lease["lease_owner"] != worker_id:
                 raise RuntimeError("research completion requires the active lease")
+            if lease["refresh_event_id"] is not None:
+                try:
+                    refresh_payload = json.loads(str(lease["payload_json"]))
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        "research completion refresh event is invalid"
+                    ) from exc
+                if (
+                    lease["event_type"]
+                    != "employer_research_collection_refresh_queued"
+                    or lease["actor_kind"] != "deterministic"
+                    or not isinstance(refresh_payload, dict)
+                    or lease["idempotency_key"]
+                    != (
+                        f"research-collection-refresh:{dossier.profile_id}:"
+                        f"{dossier.job_key}:"
+                        f"{refresh_payload.get('collection_transition_sha256')}"
+                    )
+                    or refresh_payload.get("prior_dossier_hash")
+                    != lease["current_dossier_hash"]
+                    or refresh_payload.get("source_content_sha256")
+                    != dossier.source_content_sha256
+                    or refresh_payload.get("old_collector_content_sha256")
+                    != lease["source_content_sha256"]
+                    or refresh_payload.get("promotion_receipt_sha256")
+                    != dossier.promotion_receipt_sha256
+                    or lease["current_promotion_receipt_sha256"]
+                    != dossier.promotion_receipt_sha256
+                ):
+                    raise ValueError(
+                        "research completion refresh authority differs"
+                    )
             connection.execute(
                 """INSERT INTO employer_dossiers(profile_id,job_key,dossier_json,dossier_hash,worker_id)
                    VALUES(?,?,?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET

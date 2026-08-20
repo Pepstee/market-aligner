@@ -67,6 +67,49 @@ class VerifiedVacancyRefreshReceipt:
 
 
 @dataclass(frozen=True)
+class ResolvedVacancyRefreshCollector:
+    """Receipt-bound collector path and the inode pinned during resolution."""
+
+    database: "JobDatabase"
+    path: Path
+    data_home: Path
+    st_dev: int
+    st_ino: int
+
+    def verify_open_connection(
+        self, connection: sqlite3.Connection, *, schema: str = "main"
+    ) -> None:
+        if schema not in {"main", "collector"}:
+            raise VacancyRefreshConflict("collector connection schema is unsupported")
+        try:
+            metadata = self.path.lstat()
+        except OSError as exc:
+            raise VacancyRefreshConflict(
+                "configured collector database identity is unavailable"
+            ) from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_dev != self.st_dev
+            or metadata.st_ino != self.st_ino
+            or self.path == self.data_home
+            or self.data_home not in self.path.parents
+        ):
+            raise VacancyRefreshConflict(
+                "configured collector database inode differs from resolution"
+            )
+        paths = {
+            str(row[1]): Path(str(row[2])).absolute()
+            for row in connection.execute("PRAGMA database_list")
+        }
+        opened = paths.get(schema)
+        if opened != self.path:
+            raise VacancyRefreshConflict(
+                "open collector connection path differs from configuration"
+            )
+
+
+@dataclass(frozen=True)
 class _LoadedVacancyRefreshReceipt:
     path: Path
     exact_bytes: bytes
@@ -1071,7 +1114,7 @@ class JobDatabase:
         data_home: str | Path,
         receipt_path: str | Path,
         config_path: str | Path,
-    ) -> "JobDatabase":
+    ) -> ResolvedVacancyRefreshCollector:
         """Resolve the collector DB only through the receipt-bound full config."""
 
         root = Path(data_home).absolute()
@@ -1148,7 +1191,14 @@ class JobDatabase:
             or stat.S_IMODE(metadata.st_mode) & 0o022
         ):
             raise VacancyRefreshConflict("configured collector database is unsafe")
-        return cls(database, data_home=root)
+        collector = cls(database, data_home=root)
+        return ResolvedVacancyRefreshCollector(
+            database=collector,
+            path=database,
+            data_home=root,
+            st_dev=int(metadata.st_dev),
+            st_ino=int(metadata.st_ino),
+        )
 
     @staticmethod
     def _validate_vacancy_refresh_rows(conn: sqlite3.Connection) -> None:

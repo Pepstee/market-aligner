@@ -171,6 +171,7 @@ class ResearchTask:
     vacancy_snapshot_sha256: str | None = None
     promotion_receipt_sha256: str | None = None
     refresh_event_id: int | None = None
+    refresh_event_idempotency_key: str | None = None
     refresh_receipt_sha256: str | None = None
     refresh_receipt_file_sha256: str | None = None
     refresh_transition_sha256: str | None = None
@@ -182,3 +183,4 @@ class ResearchTask:
     refresh_raw_object_sha256: str | None = None
     refresh_fetched_at: str | None = None
     refresh_promotion_receipt_sha256: str | None = None
+    refresh_prior_dossier_sha256: str | None = None

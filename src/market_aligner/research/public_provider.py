@@ -366,6 +366,7 @@ class CanonicalCollectorVacancyLoader:
             "old_collector_content_sha256": task.refresh_legacy_content_sha256,
             "promotion_receipt_sha256": task.refresh_promotion_receipt_sha256,
             "source_content_sha256": task.source_content_sha256,
+            "prior_dossier_hash": task.refresh_prior_dossier_sha256,
         }
         if (
             type(task.refresh_event_id) is not int
@@ -387,7 +388,8 @@ class CanonicalCollectorVacancyLoader:
             connection.execute("BEGIN")
             row = connection.execute(
                 """SELECT q.refresh_event_id,q.status,e.event_type,e.actor_kind,
-                          e.payload_json,p.source_content_sha256,
+                          e.payload_json,e.idempotency_key,d.dossier_hash,
+                          p.source_content_sha256,
                           p.receipt_sha256 AS promotion_receipt_sha256
                    FROM employer_research_queue q
                    JOIN assessment_events e
@@ -395,6 +397,8 @@ class CanonicalCollectorVacancyLoader:
                     AND e.profile_id=q.profile_id AND e.job_key=q.job_key
                    JOIN assessment_promotions p
                      ON p.profile_id=q.profile_id AND p.job_key=q.job_key
+                   JOIN employer_dossiers d
+                     ON d.profile_id=q.profile_id AND d.job_key=q.job_key
                    WHERE q.profile_id=? AND q.job_key=?""",
                 (task.profile_id, task.job_key),
             ).fetchone()
@@ -405,16 +409,21 @@ class CanonicalCollectorVacancyLoader:
             except (TypeError, json.JSONDecodeError) as exc:
                 raise PublicResearchError("research refresh event payload is invalid") from exc
             expected = dict(required)
-            if not isinstance(payload, dict) or "prior_dossier_hash" not in payload:
-                raise PublicResearchError("research refresh event payload is incomplete")
-            expected["prior_dossier_hash"] = payload["prior_dossier_hash"]
             if (
                 row["refresh_event_id"] != task.refresh_event_id
                 or row["status"] not in {"queued", "leased"}
                 or row["event_type"]
                 != "employer_research_collection_refresh_queued"
                 or row["actor_kind"] != "deterministic"
+                or row["idempotency_key"]
+                != task.refresh_event_idempotency_key
+                or task.refresh_event_idempotency_key
+                != (
+                    f"research-collection-refresh:{task.profile_id}:"
+                    f"{task.job_key}:{task.refresh_transition_sha256}"
+                )
                 or payload != expected
+                or row["dossier_hash"] != task.refresh_prior_dossier_sha256
                 or row["source_content_sha256"] != task.source_content_sha256
                 or row["promotion_receipt_sha256"]
                 != task.promotion_receipt_sha256
@@ -436,14 +445,16 @@ class CanonicalCollectorVacancyLoader:
             / f"{task.refresh_receipt_sha256}.json"
         )
         try:
-            collector = JobDatabase.resolve_vacancy_refresh_collector(
+            resolved_collector = JobDatabase.resolve_vacancy_refresh_collector(
                 self.data_home, receipt_path, self.collection_config_path
             )
+            collector = resolved_collector.database
             connection = collector.connect()
             connection.row_factory = sqlite3.Row
             try:
                 connection.execute("PRAGMA query_only=ON")
                 connection.execute("BEGIN")
+                resolved_collector.verify_open_connection(connection)
                 verified = collector.verify_vacancy_refresh_receipt(
                     receipt_path, job_key=task.job_key, connection=connection
                 )
@@ -475,6 +486,7 @@ class CanonicalCollectorVacancyLoader:
                     raise PublicResearchError(
                         "canonical refresh receipt or current vacancy differs from task"
                     )
+                resolved_collector.verify_open_connection(connection)
                 connection.commit()
             finally:
                 connection.close()
@@ -518,6 +530,7 @@ class CanonicalCollectorVacancyLoader:
     def __call__(self, task: ResearchTask) -> FetchedPublicSource:
         refresh_values = (
             task.refresh_event_id,
+            task.refresh_event_idempotency_key,
             task.refresh_receipt_sha256,
             task.refresh_receipt_file_sha256,
             task.refresh_transition_sha256,
@@ -529,6 +542,7 @@ class CanonicalCollectorVacancyLoader:
             task.refresh_raw_object_sha256,
             task.refresh_fetched_at,
             task.refresh_promotion_receipt_sha256,
+            task.refresh_prior_dossier_sha256,
         )
         if any(value is not None for value in refresh_values):
             if any(value is None for value in refresh_values):
