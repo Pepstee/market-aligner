@@ -16,6 +16,7 @@ from typing import Callable, Mapping
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pypdf import PdfReader
 
 from .candidate_contact_authority import (
     ATTESTATION,
@@ -23,9 +24,18 @@ from .candidate_contact_authority import (
     REGISTRY_ATTESTATION,
     REGISTRY_SCHEMA_VERSION,
     SCHEMA_VERSION,
+    PUBLIC_KEY_ENV,
+    REGISTRY_ENV,
+    load_candidate_contact_authority,
 )
 from .current_time import (
     AuthenticatedCurrentTimeWitness,
+    INSTALLED_PRODUCTION_TIME_SCHEMA,
+    PRODUCTION_TIME_PROVIDER_ID,
+    PRODUCTION_TIME_SERVICE_PEER_UID,
+    PRODUCTION_TIME_SERVICE_SOCKET,
+    PRODUCTION_TIME_TRUST_ROOT_ID,
+    PRODUCTION_TIME_WITNESS_IDENTITY_SHA256,
     installed_production_current_time_witness,
     obtain_current_time,
 )
@@ -35,8 +45,11 @@ from .provider_observation_capture import exact_committed_source_identity
 
 CONTACT_KEY_ENV = "JAA_OPERATOR_CONTACT_PRIVATE_KEY"
 CONTACT_SCHEMA = "jaa.gigabyte-contact-provisioning.v1"
+CONTACT_ADOPTION_SCHEMA = "jaa.gigabyte-existing-contact-adoption.v1"
+DEVICE_ENROLLMENT_SCHEMA = "jaa.gigabyte-device-trust-enrollment.v1"
 TIME_SCHEMA = "jaa.gigabyte-current-time-provisioning.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+GIGABYTE_DEVICE_PUBLIC_KEY_SHA256 = "31b02680db90773e2038e9f53d4f616dcaec5f6f4c07fd2e501a53d07e9e21ea"
 
 
 def _bytes(value: object) -> bytes:
@@ -143,6 +156,207 @@ def _private_key(repository: Path, configured: str | None) -> tuple[Ed25519Priva
     if identity != ENROLLED_OPERATOR_PUBLIC_KEY_SHA256:
         raise ValueError("contact signing key does not match enrolled trust root")
     return loaded, identity
+
+
+def _device_private_key(repository: Path, path: Path) -> tuple[Ed25519PrivateKey, str]:
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError("Gigabyte device signing key path is unsafe")
+    resolved = path.resolve(strict=True)
+    metadata = resolved.stat()
+    if (
+        not resolved.is_file()
+        or repository == resolved
+        or repository in resolved.parents
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise ValueError("Gigabyte device signing key is not protected local authority")
+    loaded = serialization.load_pem_private_key(resolved.read_bytes(), password=None)
+    if not isinstance(loaded, Ed25519PrivateKey):
+        raise ValueError("Gigabyte device signing key is not Ed25519")
+    public = loaded.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    identity = _sha256(public)
+    if identity != GIGABYTE_DEVICE_PUBLIC_KEY_SHA256:
+        raise ValueError("Gigabyte device signing key differs from reviewed enrollment")
+    return loaded, identity
+
+
+def provision_device_enrollment(
+    *,
+    output_root: Path,
+    repository_root: Path,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Persist reviewed public enrollment for an already-created device key."""
+    repository = repository_root.resolve(strict=True)
+    root = _protected_directory(output_root)
+    private_key, identity = _device_private_key(repository, root / "device-signing-key.pem")
+    public = private_key.public_key()
+    public_raw = public.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    public_path = root / "device-public-key.pem"
+    _create_or_exact(
+        public_path,
+        public.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo),
+    )
+    enrollment_path = root / "device-enrollment.json"
+    if enrollment_path.exists() and not enrollment_path.is_symlink():
+        existing = json.loads(enrollment_path.read_bytes())
+        issued = str(existing.get("created_at")) if isinstance(existing, dict) else ""
+    else:
+        issued = _utc(clock()).replace(microsecond=0).isoformat()
+    key_id = f"gigabyte-device-ed25519-{identity[:16]}"
+    payload: dict[str, object] = {
+        "schema_version": DEVICE_ENROLLMENT_SCHEMA,
+        "key_id": key_id,
+        "created_at": issued,
+        "device_scope": "gigabyte",
+        "public_key_base64": base64.b64encode(public_raw).decode("ascii"),
+        "public_key_sha256": identity,
+        "authority_scopes": ["contact_adoption_receipt", "current_time_service_candidate"],
+        "retroactive_evidence_authority": False,
+        "rotation": {"prior_key_id": None, "rotated_at": None},
+        "revocation": {"revoked": False, "revoked_at": None, "reason": None},
+        "signature_algorithm": "Ed25519",
+    }
+    enrollment, enrollment_sha256 = _signed(private_key, payload, "enrollment_sha256")
+    _create_or_exact(enrollment_path, _bytes(enrollment))
+    staged_config = {
+        "environment": "production",
+        "provider_id": PRODUCTION_TIME_PROVIDER_ID,
+        "schema_version": INSTALLED_PRODUCTION_TIME_SCHEMA,
+        "service_peer_uid": PRODUCTION_TIME_SERVICE_PEER_UID,
+        "service_socket": str(PRODUCTION_TIME_SERVICE_SOCKET),
+        "trust_root_id": PRODUCTION_TIME_TRUST_ROOT_ID,
+        "verifier_public_key_b64": base64.b64encode(public_raw).decode("ascii"),
+        "witness_identity_sha256": PRODUCTION_TIME_WITNESS_IDENTITY_SHA256,
+    }
+    config_path = root / "current-time-config.staged.json"
+    config_bytes = _bytes(staged_config)
+    _create_or_exact(config_path, config_bytes)
+    return {
+        "schema_version": DEVICE_ENROLLMENT_SCHEMA,
+        "key_id": key_id,
+        "public_key_path": str(public_path),
+        "public_key_sha256": identity,
+        "enrollment_path": str(enrollment_path),
+        "enrollment_sha256": enrollment_sha256,
+        "current_time_configuration_path": str(config_path),
+        "current_time_configuration_sha256": _sha256(config_bytes),
+        "current_time_deployed": False,
+        "retroactive_evidence_authority": False,
+    }
+
+
+def _verified_pdf_source(path: Path, expected_sha256: str) -> dict[str, object]:
+    raw = path.read_bytes()
+    if not _SHA256.fullmatch(expected_sha256) or _sha256(raw) != expected_sha256:
+        raise ValueError("operator-ratified contact source PDF hash differs")
+    try:
+        pages = PdfReader(path).pages
+        extracted = "\n".join(page.extract_text() or "" for page in pages).encode()
+    except Exception as exc:
+        raise ValueError("operator-ratified contact source PDF is unreadable") from exc
+    if not pages or not extracted.strip():
+        raise ValueError("operator-ratified contact source PDF has no extractable evidence")
+    return {"page_count": len(pages), "text_sha256": _sha256(extracted)}
+
+
+def _load_existing_contact(
+    *,
+    authority_path: Path,
+    public_key_path: Path,
+    registry_path: Path,
+    repository: Path,
+    verified_at: datetime,
+):
+    previous_public = os.environ.get(PUBLIC_KEY_ENV)
+    previous_registry = os.environ.get(REGISTRY_ENV)
+    os.environ[PUBLIC_KEY_ENV] = str(public_key_path.resolve(strict=True))
+    os.environ[REGISTRY_ENV] = str(registry_path.resolve(strict=True))
+    try:
+        return load_candidate_contact_authority(
+            authority_path,
+            repository_root=repository,
+            verified_at=verified_at,
+        )
+    finally:
+        if previous_public is None:
+            os.environ.pop(PUBLIC_KEY_ENV, None)
+        else:
+            os.environ[PUBLIC_KEY_ENV] = previous_public
+        if previous_registry is None:
+            os.environ.pop(REGISTRY_ENV, None)
+        else:
+            os.environ[REGISTRY_ENV] = previous_registry
+
+
+def adopt_existing_contact_authority(
+    *,
+    candidate_authority_path: Path,
+    candidate_authority_sha256: str,
+    source_pdf_path: Path,
+    source_pdf_sha256: str,
+    contact_authority_path: Path,
+    contact_public_key_path: Path,
+    contact_registry_path: Path,
+    device_key_path: Path,
+    output_root: Path,
+    repository_root: Path,
+    operator_ratified: bool,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    if operator_ratified is not True:
+        raise ValueError("explicit operator ratification is required")
+    repository = repository_root.resolve(strict=True)
+    candidate = candidate_authority_path.resolve(strict=True)
+    candidate_bytes = candidate.read_bytes()
+    if _sha256(candidate_bytes) != candidate_authority_sha256:
+        raise ValueError("approved candidate authority hash differs")
+    source = source_pdf_path.resolve(strict=True)
+    source_evidence = _verified_pdf_source(source, source_pdf_sha256)
+    authority = _load_existing_contact(
+        authority_path=contact_authority_path,
+        public_key_path=contact_public_key_path,
+        registry_path=contact_registry_path,
+        repository=repository,
+        verified_at=_utc(clock()),
+    )
+    root = _protected_directory(output_root)
+    private_key, signer_sha256 = _device_private_key(repository, device_key_path)
+    receipt_path = root / "existing-contact-adoption.json"
+    if receipt_path.exists() and not receipt_path.is_symlink():
+        existing = json.loads(receipt_path.read_bytes())
+        issued = str(existing.get("issued_at")) if isinstance(existing, dict) else ""
+    else:
+        issued = _utc(clock()).replace(microsecond=0).isoformat()
+    payload: dict[str, object] = {
+        "schema_version": CONTACT_ADOPTION_SCHEMA,
+        "candidate_authority_sha256": candidate_authority_sha256,
+        "candidate_authority_path": str(candidate),
+        "source_pdf_sha256": source_pdf_sha256,
+        "source_pdf_path": str(source),
+        "source_pdf_page_count": source_evidence["page_count"],
+        "source_pdf_text_sha256": source_evidence["text_sha256"],
+        "source_pdf_authority_scope": "provenance_only_not_contact_authority",
+        "contact_authority_sha256": authority.authority_sha256,
+        "contact_authority_path": str(authority.source_path),
+        "contact_registry_sha256": authority.registry_sha256,
+        "issued_at": issued,
+        "operator_ratification": "existing_contact_matches_exact_pdf_source",
+        "release_authority": False,
+        "scope": "preparation_contact_adoption_only",
+        "signer_public_key_sha256": signer_sha256,
+    }
+    receipt, receipt_sha256 = _signed(private_key, payload, "adoption_sha256")
+    _create_or_exact(receipt_path, _bytes(receipt))
+    return {
+        "schema_version": CONTACT_ADOPTION_SCHEMA,
+        "adoption_path": str(receipt_path),
+        "adoption_sha256": receipt_sha256,
+        "contact_authority_sha256": authority.authority_sha256,
+        "contact_registry_sha256": authority.registry_sha256,
+        "release_authority": False,
+    }
 
 
 def _signed(private_key: Ed25519PrivateKey, payload: dict[str, object], identity: str) -> tuple[dict[str, object], str]:
@@ -312,4 +526,10 @@ def provision_current_time(
     return {**manifest, "manifest_sha256": manifest_sha256, "manifest_path": str(manifest_path)}
 
 
-__all__ = ["CONTACT_KEY_ENV", "provision_contact_authority", "provision_current_time"]
+__all__ = [
+    "CONTACT_KEY_ENV",
+    "adopt_existing_contact_authority",
+    "provision_contact_authority",
+    "provision_current_time",
+    "provision_device_enrollment",
+]
