@@ -149,6 +149,19 @@ def test_builds_plain_vacancy_bound_documents_from_approved_atoms() -> None:
     ]
     assert employer_facts
     assert all(package.source.company_name in fact.text for fact in employer_facts)
+    opening = next(
+        section
+        for section in package.source.letter_sections
+        if section.heading == "Opening"
+    )
+    assert len(opening.sentence_ids) == 1
+    opening_fact = next(
+        fact
+        for fact in employer_facts
+        if fact.sentence_id == opening.sentence_ids[0]
+    )
+    assert package.source.role_title in opening_fact.text
+    assert package.source.company_name in opening_fact.text
     assert any(
         phrase in package.artifacts.editable.cover_letter_text
         for phrase in (

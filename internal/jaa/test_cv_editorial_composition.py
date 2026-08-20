@@ -8,6 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from career_automation.candidate_application_factory import (
+    CandidateApplicationMaterializationReceipt,
+)
 from cv_generation.editorial_composition import (
     ApprovedCVClaim,
     CVSection,
@@ -86,10 +89,7 @@ def _fixture():
     sections = (
         CVSection(
             "Professional Summary",
-            (
-                EditorialAtom("connective", "Relevant background:", None),
-                EditorialAtom("approved_claim", claims[0].text, "summary"),
-            ),
+            (EditorialAtom("approved_claim", claims[0].text, "summary"),),
         ),
         CVSection(
             "Core Capabilities",
@@ -109,20 +109,10 @@ def _fixture():
         candidate_city=authority.candidate_city,
         sections=sections,
     )
-    final_sections = (
-        replace(
-            sections[0],
-            atoms=(
-                EditorialAtom("connective", "Background relevant to the role:", None),
-                sections[0].atoms[1],
-            ),
-        ),
-        *sections[1:],
-    )
     final = build_editorial_draft(
         candidate_name=authority.candidate_name,
         candidate_city=authority.candidate_city,
-        sections=final_sections,
+        sections=sections,
     )
     return request, writer, final
 
@@ -237,6 +227,60 @@ def test_production_runtime_requires_exact_source_materialization() -> None:
             materialization_receipt=_DuckTypedReceipt(),
         )
     assert not runtime.writer.calls
+
+
+@pytest.mark.parametrize("receipt_kind", ("subclass", "invalid_exact"))
+def test_production_revalidates_exact_receipt_before_provider_availability(
+    receipt_kind: str,
+) -> None:
+    request, writer, final = _fixture()
+
+    class _AvailabilityProbe(_ScriptedStageAdapter):
+        availability_calls = 0
+
+        def available(self):
+            self.availability_calls += 1
+            return True
+
+    class _ForgedReceipt(CandidateApplicationMaterializationReceipt):
+        def __post_init__(self):
+            return None
+
+        def authorize_editorial_request(self, candidate_request):
+            del candidate_request
+            return None
+
+    receipt = object.__new__(
+        _ForgedReceipt
+        if receipt_kind == "subclass"
+        else CandidateApplicationMaterializationReceipt
+    )
+    writer_adapter = _AvailabilityProbe(
+        "production-writer", "writer-v2", writer, environment="production"
+    )
+    humanizer_adapter = _AvailabilityProbe(
+        "production-humanizer", "humanizer-v2", final, environment="production"
+    )
+    runtime = EditorialCompositionRuntime(
+        environment="production",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+    )
+
+    with pytest.raises(
+        EditorialCompositionError,
+        match="requires source materialization|differs from source materialization",
+    ):
+        run_editorial_composition_runtime(
+            request,
+            runtime=runtime,
+            materialization_receipt=receipt,
+        )
+
+    assert writer_adapter.availability_calls == 0
+    assert humanizer_adapter.availability_calls == 0
+    assert not writer_adapter.calls
+    assert not humanizer_adapter.calls
 
 
 def test_runtime_rejects_provider_identity_substitution() -> None:
@@ -701,13 +745,16 @@ def test_formats_and_datastores_are_not_capability_domains() -> None:
     (
         "I built 12 production systems.",
         "A pivotal contribution — with measurable value.",
+        "As a leader, I owned the delivery.",
+        "Written with ChatGPT.",
+        "Visa sponsorship is not required.",
     ),
 )
 def test_connectives_cannot_smuggle_claims_or_ai_prose(connective: str) -> None:
     request, writer, _ = _fixture()
     summary = replace(
         writer.sections[0],
-        atoms=(EditorialAtom("connective", connective), writer.sections[0].atoms[1]),
+        atoms=(EditorialAtom("connective", connective), writer.sections[0].atoms[0]),
     )
     draft = build_editorial_draft(
         candidate_name=writer.candidate_name,
@@ -718,15 +765,75 @@ def test_connectives_cannot_smuggle_claims_or_ai_prose(connective: str) -> None:
         validate_editorial_draft(request, draft)
 
 
+@pytest.mark.parametrize(
+    "forbidden_text",
+    (
+        "AI systems engineer — focused on reliable automation.",
+        "Visa sponsorship is not required.",
+        "This CV was written with ChatGPT.",
+    ),
+)
+def test_global_bans_apply_to_approved_cv_claims(forbidden_text: str) -> None:
+    request, writer, _ = _fixture()
+    forbidden = _claim("summary", forbidden_text, "summary")
+    changed_request = build_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(forbidden, *request.approved_claims[1:]),
+    )
+    summary = replace(
+        writer.sections[0],
+        atoms=(EditorialAtom("approved_claim", forbidden.text, forbidden.claim_id),),
+    )
+    changed = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(summary, *writer.sections[1:]),
+    )
+    with pytest.raises(
+        EditorialCompositionError,
+        match="forbidden em or en dash|work-rights|AI-authorship",
+    ):
+        validate_editorial_draft(changed_request, changed)
+
+
+def test_global_authorship_ban_does_not_reject_legitimate_ai_application_work() -> None:
+    request, writer, _ = _fixture()
+    legitimate = _claim(
+        "summary",
+        "Built AI application automation for employer workflows.",
+        "summary",
+    )
+    changed_request = build_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(legitimate, *request.approved_claims[1:]),
+    )
+    summary = replace(
+        writer.sections[0],
+        atoms=(
+            EditorialAtom("approved_claim", legitimate.text, legitimate.claim_id),
+        ),
+    )
+    changed = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=writer.candidate_city,
+        sections=(summary, *writer.sections[1:]),
+    )
+
+    validate_editorial_draft(changed_request, changed)
+
+
 def test_humanizer_cannot_change_claims_or_share_writer_session() -> None:
     request, writer, final = _fixture()
     summary = final.sections[0]
     altered = replace(
         summary,
-        atoms=(
-            summary.atoms[0],
-            EditorialAtom("approved_claim", "Humanizer invented this.", "summary"),
-        ),
+        atoms=(EditorialAtom("approved_claim", "Humanizer invented this.", "summary"),),
     )
     final = build_editorial_draft(
         candidate_name=final.candidate_name,
@@ -776,7 +883,7 @@ def test_connective_only_section_is_not_admitted() -> None:
     request, writer, _ = _fixture()
     summary = replace(
         writer.sections[0],
-        atoms=(EditorialAtom("connective", "Relevant background:"),),
+        atoms=(EditorialAtom("connective", "For this:"),),
     )
     draft = build_editorial_draft(
         candidate_name=writer.candidate_name,

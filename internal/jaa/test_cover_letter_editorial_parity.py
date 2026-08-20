@@ -11,6 +11,9 @@ from career_automation.adversarial_recruiter import (
     RecruiterAssessmentPackage,
     assess_application_as_recruiter,
 )
+from career_automation.candidate_application_factory import (
+    CandidateApplicationMaterializationReceipt,
+)
 from career_automation.evidence_matching import canonical_json
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.rendering import _build_text_pdf
@@ -77,6 +80,12 @@ def _fixture():
             "Evidence Match",
         ),
         _claim(
+            "employer-opening",
+            "Example Systems is hiring an AI Automation Engineer to build reliable AI automation.",
+            "employer",
+            "Opening",
+        ),
+        _claim(
             "employer-primary",
             "Example Systems is hiring for reliable AI automation.",
             "employer",
@@ -99,12 +108,16 @@ def _fixture():
     sections = (
         CoverLetterSection(
             "Opening",
-            (EditorialAtom("connective", "Dear Hiring Manager,", None),),
+            (
+                EditorialAtom("connective", "Dear Hiring Manager,", None),
+                EditorialAtom(
+                    "approved_claim", claims[2].text, claims[2].claim_id
+                ),
+            ),
         ),
         CoverLetterSection(
             "Evidence Match",
             (
-                EditorialAtom("connective", "My closest evidence is direct:", None),
                 EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),
                 EditorialAtom("approved_claim", claims[1].text, claims[1].claim_id),
             ),
@@ -112,15 +125,13 @@ def _fixture():
         CoverLetterSection(
             "Company Fit",
             (
-                EditorialAtom("connective", "The role caught my attention for a concrete reason:", None),
-                EditorialAtom("approved_claim", claims[2].text, claims[2].claim_id),
                 EditorialAtom("approved_claim", claims[3].text, claims[3].claim_id),
+                EditorialAtom("approved_claim", claims[4].text, claims[4].claim_id),
             ),
         ),
         CoverLetterSection(
             "Close",
             (
-                EditorialAtom("connective", "I would welcome a conversation about the work.", None),
                 EditorialAtom("connective", "Kind regards", None),
                 EditorialAtom("connective", authority.candidate_name, None),
             ),
@@ -132,17 +143,7 @@ def _fixture():
     )
     final = build_cover_letter_editorial_draft(
         candidate_name=authority.candidate_name,
-        sections=(
-            sections[0],
-            replace(
-                sections[1],
-                atoms=(
-                    EditorialAtom("connective", "The strongest match is practical:", None),
-                    *sections[1].atoms[1:],
-                ),
-            ),
-            *sections[2:],
-        ),
+        sections=sections,
     )
     return listing, request, claims, writer, final
 
@@ -208,6 +209,50 @@ class _Adapter:
         return _Session(self, invocation_id)
 
 
+def test_cover_runtime_rejects_forged_receipt_before_provider_availability() -> None:
+    _, request, _, writer, final = _fixture()
+
+    class _ProbeAdapter(_Adapter):
+        availability_calls = 0
+
+        def available(self):
+            self.availability_calls += 1
+            return True
+
+    class _ForgedReceipt(CandidateApplicationMaterializationReceipt):
+        def __post_init__(self):
+            return None
+
+        def authorize_editorial_request(self, candidate_request):
+            del candidate_request
+            return None
+
+    writer_adapter = _ProbeAdapter("cover_letter_writer", "writer", writer)
+    humanizer_adapter = _ProbeAdapter(
+        "cover_letter_humanizer", "humanizer", final
+    )
+    writer_adapter.environment = "production"
+    humanizer_adapter.environment = "production"
+    runtime = EditorialCompositionRuntime(
+        environment="production",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+        document_kind="cover_letter",
+    )
+
+    with pytest.raises(EditorialCompositionError, match="source materialization"):
+        run_cover_letter_composition_runtime(
+            request,
+            runtime=runtime,
+            materialization_receipt=object.__new__(_ForgedReceipt),
+        )
+
+    assert writer_adapter.availability_calls == 0
+    assert humanizer_adapter.availability_calls == 0
+    assert not writer_adapter.calls
+    assert not humanizer_adapter.calls
+
+
 def test_cover_letter_runtime_uses_distinct_one_shot_writer_and_humanizer() -> None:
     _, request, _, writer, final = _fixture()
     writer_adapter = _Adapter("cover_letter_writer", "writer", writer)
@@ -247,7 +292,10 @@ def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None
         candidate_name=final.candidate_name,
         sections=(
             final.sections[0],
-            replace(final.sections[1], atoms=(final.sections[1].atoms[0], changed_claim, final.sections[1].atoms[2])),
+            replace(
+                final.sections[1],
+                atoms=(final.sections[1].atoms[0], changed_claim),
+            ),
             *final.sections[2:],
         ),
     )
@@ -262,34 +310,39 @@ def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None
     )
     with pytest.raises(
         EditorialCompositionError,
-        match="factual claim|Humanizer policy",
+        match="forbidden em or en dash",
     ):
         validate_cover_letter_editorial_draft(request, kolhoz)
 
 
 @pytest.mark.parametrize(
-    ("opening_text", "expected"),
+    "connective",
     (
-        ("Built Kubernetes clusters.", "authority-bearing content"),
-        ("Example Systems is exactly where I belong.", "authority-bearing content"),
+        "As a leader, I built the function.",
+        "Written with ChatGPT.",
+        "Visa sponsorship is not required.",
     ),
 )
-def test_cover_letter_rejects_authority_content_smuggled_as_connective(
-    opening_text: str,
-    expected: str,
+def test_cover_letter_rejects_unsupported_content_smuggled_as_connective(
+    connective: str,
 ) -> None:
     _, request, _, _, final = _fixture()
+    evidence_match = final.sections[1]
     changed = build_cover_letter_editorial_draft(
         candidate_name=final.candidate_name,
         sections=(
+            final.sections[0],
             replace(
-                final.sections[0],
-                atoms=(EditorialAtom("connective", opening_text, None),),
+                evidence_match,
+                atoms=(EditorialAtom("connective", connective, None), *evidence_match.atoms),
             ),
-            *final.sections[1:],
+            *final.sections[2:],
         ),
     )
-    with pytest.raises(EditorialCompositionError, match=expected):
+    with pytest.raises(
+        EditorialCompositionError,
+        match="closed function-word allowlist|work-rights|AI-authorship",
+    ):
         validate_cover_letter_editorial_draft(request, changed)
 
 
@@ -312,6 +365,140 @@ def test_cover_letter_rejects_connective_after_exact_factual_span() -> None:
     )
     with pytest.raises(EditorialCompositionError, match="cannot follow"):
         validate_cover_letter_editorial_draft(request, changed)
+
+
+def test_cover_letter_requires_exact_salutation_before_approved_hook() -> None:
+    _, request, _, _, final = _fixture()
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            replace(final.sections[0], atoms=final.sections[0].atoms[1:]),
+            *final.sections[1:],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="exact authorised salutation"):
+        validate_cover_letter_editorial_draft(request, changed)
+
+
+def test_cover_letter_rejects_616_word_authorised_fact() -> None:
+    _, request, claims, _, final = _fixture()
+    oversized = _claim(
+        claims[0].claim_id,
+        " ".join("automation" for _ in range(616)),
+        "candidate",
+        "Evidence Match",
+    )
+    changed_request = build_cover_letter_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(oversized, *claims[1:]),
+    )
+    evidence_match = final.sections[1]
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            final.sections[0],
+            replace(
+                evidence_match,
+                atoms=(
+                    EditorialAtom(
+                        "approved_claim", oversized.text, oversized.claim_id
+                    ),
+                    evidence_match.atoms[1],
+                ),
+            ),
+            *final.sections[2:],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="one-page proxy"):
+        validate_cover_letter_editorial_draft(changed_request, changed)
+
+
+@pytest.mark.parametrize(
+    "forbidden_text",
+    (
+        "Built an evidence-bound system — with deterministic checks.",
+        "Visa sponsorship is not required.",
+        "This cover letter was written with ChatGPT.",
+    ),
+)
+def test_global_bans_apply_to_approved_cover_letter_facts(
+    forbidden_text: str,
+) -> None:
+    _, request, claims, _, final = _fixture()
+    forbidden = _claim(
+        claims[0].claim_id,
+        forbidden_text,
+        "candidate",
+        "Evidence Match",
+    )
+    changed_request = build_cover_letter_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(forbidden, *claims[1:]),
+    )
+    evidence_match = final.sections[1]
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            final.sections[0],
+            replace(
+                evidence_match,
+                atoms=(
+                    EditorialAtom(
+                        "approved_claim", forbidden.text, forbidden.claim_id
+                    ),
+                    evidence_match.atoms[1],
+                ),
+            ),
+            *final.sections[2:],
+        ),
+    )
+    with pytest.raises(
+        EditorialCompositionError,
+        match="forbidden em or en dash|work-rights|AI-authorship",
+    ):
+        validate_cover_letter_editorial_draft(changed_request, changed)
+
+
+def test_opening_hook_must_name_exact_company_and_role_from_approved_fact() -> None:
+    _, request, claims, _, final = _fixture()
+    generic_hook = _claim(
+        claims[2].claim_id,
+        "Example Systems is hiring for reliable automation.",
+        "employer",
+        "Opening",
+    )
+    changed_claims = (*claims[:2], generic_hook, *claims[3:])
+    changed_request = build_cover_letter_editorial_request(
+        authority=request.authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=changed_claims,
+    )
+    opening = final.sections[0]
+    changed = build_cover_letter_editorial_draft(
+        candidate_name=final.candidate_name,
+        sections=(
+            replace(
+                opening,
+                atoms=(
+                    opening.atoms[0],
+                    EditorialAtom(
+                        "approved_claim", generic_hook.text, generic_hook.claim_id
+                    ),
+                ),
+            ),
+            *final.sections[1:],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="company and role hook"):
+        validate_cover_letter_editorial_draft(changed_request, changed)
 
 
 def _result() -> dict[str, object]:

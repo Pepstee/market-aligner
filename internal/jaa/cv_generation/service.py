@@ -608,9 +608,15 @@ def run_cv_composition_orchestration(
                 "production requires typed cover-letter writer and Humanizer evidence"
             )
         try:
-            materialization_receipt.__post_init__()
-            materialization_receipt.authorize_editorial_request(request)
-            materialization_receipt.authorize_editorial_request(cover_letter_request)
+            CandidateApplicationMaterializationReceipt.__post_init__(
+                materialization_receipt
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, request
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, cover_letter_request
+            )
         except ValueError as exc:
             raise CVCompositionServiceError(
                 "production editorial request differs from materialization"

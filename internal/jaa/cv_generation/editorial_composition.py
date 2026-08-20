@@ -30,11 +30,11 @@ from career_automation.evidence_matching import canonical_json, content_hash
 
 REQUEST_SCHEMA = "jaa.cv-editorial-request.v1"
 DRAFT_SCHEMA = "jaa.cv-editorial-draft.v1"
-COVER_LETTER_REQUEST_SCHEMA = "jaa.cover-letter-editorial-request.v1"
-COVER_LETTER_DRAFT_SCHEMA = "jaa.cover-letter-editorial-draft.v1"
+COVER_LETTER_REQUEST_SCHEMA = "jaa.cover-letter-editorial-request.v2"
+COVER_LETTER_DRAFT_SCHEMA = "jaa.cover-letter-editorial-draft.v2"
 STAGE_RECEIPT_SCHEMA = "jaa.cv-editorial-stage-receipt.v3"
 COMPOSITION_RECEIPT_SCHEMA = "jaa.cv-editorial-composition-receipt.v1"
-COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA = "jaa.cover-letter-editorial-composition-receipt.v1"
+COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA = "jaa.cover-letter-editorial-composition-receipt.v2"
 EDITORIAL_PROVIDER_IDENTITY = "openai-codex-cli"
 _EDITORIAL_STAGES = frozenset({"resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"})
 
@@ -102,20 +102,56 @@ _DAY_MONTH_YEAR = re.compile(
     r"October|November|December)\s+20\d{2}\b",
     re.IGNORECASE,
 )
-_FACTUAL_CONNECTIVE = re.compile(
-    r"(?:\b\d[\d,./:%+-]*\b|[%£$€]|https?://|[^@\s]+@[^@\s]+|"
-    r"\b(?:I|we)\s+(?:am|are|have|had|hold|built|created|delivered|designed|"
-    r"developed|implemented|led|managed|provided|shipped|tested|validated|"
-    r"worked|studied|graduated)\b|"
-    r"\b(?:expert|expertise|proficient|qualified|track record|years? of)\b)",
-    re.IGNORECASE,
+_CONNECTIVE_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "being",
+        "but",
+        "by",
+        "for",
+        "from",
+        "has",
+        "have",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "our",
+        "that",
+        "the",
+        "their",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "through",
+        "to",
+        "was",
+        "were",
+        "which",
+        "who",
+        "with",
+        "within",
+        "without",
+        "you",
+        "your",
+    }
 )
-_COVER_LETTER_FACTUAL_CONNECTIVE = re.compile(
-    r"\b(?:built|created|delivered|designed|developed|implemented|led|managed|"
-    r"provided|shipped|tested|validated|worked|studied|graduated|certified|"
-    r"skilled|proficient|expertise|experience\s+(?:with|in))\b",
-    re.IGNORECASE,
-)
+_CONNECTIVE_CHARACTERS = re.compile(r"^[A-Za-z\s.,:;!?()'\"/&]+$")
+_CONNECTIVE_TOKEN = re.compile(r"[A-Za-z]+")
 _FORMAT_OR_DATASTORE = re.compile(
     r"\b(?:jsonl?|ya?ml|xml|csv|sqlite|sql)\b", re.IGNORECASE
 )
@@ -131,18 +167,21 @@ _WORK_RIGHTS = (
     "settled status",
     "pre-settled status",
 )
-_CONNECTIVE_AI_PATTERNS = (
-    "i am writing to express",
-    "i am applying",
-    "pivotal",
-    "showcase",
-    "tapestry",
-    "vibrant",
-    "here is",
-    "—",
-    "–",
-    " -- ",
+_WORK_RIGHTS_WORDS = re.compile(r"\b(?:visa|sponsorship)\b", re.IGNORECASE)
+_AUTHORSHIP_DISCLOSURE = re.compile(
+    r"(?:\bas an ai(?: assistant| language model)?\s*[,;:]|"
+    r"\b(?:cv|resume|cover letter|application|document)\b.{0,60}"
+    r"\b(?:wrote|written|authored|generated|drafted|produced|created)\b.{0,60}"
+    r"\b(?:ai|chatgpt|llm|language model)\b|"
+    r"\b(?:ai|chatgpt|llm|language model)\b.{0,60}"
+    r"\b(?:wrote|written|authored|generated|drafted|produced|created)\b.{0,60}"
+    r"\b(?:cv|resume|cover letter|application|document)\b)",
+    re.IGNORECASE,
 )
+COVER_LETTER_MAX_WORDS = 500
+COVER_LETTER_MAX_CHARACTERS = 3500
+COVER_LETTER_SALUTATION = "Dear Hiring Manager,"
+COVER_LETTER_SIGN_OFF = "Kind regards"
 _ALLOWED_HEADINGS = (
     "Professional Summary",
     "Core Capabilities",
@@ -512,13 +551,32 @@ def build_editorial_draft(
 
 
 def _validate_connective(text: str) -> None:
+    if (
+        len(text) > 80
+        or not _CONNECTIVE_CHARACTERS.fullmatch(text)
+        or not (tokens := _CONNECTIVE_TOKEN.findall(text))
+        or len(tokens) > 8
+        or any(token.casefold() not in _CONNECTIVE_WORDS for token in tokens)
+    ):
+        raise EditorialCompositionError(
+            "editorial connective is outside the closed function-word allowlist"
+        )
+
+
+def _validate_global_outward_policy(text: str, *, document_kind: str) -> None:
     folded = text.casefold()
-    if len(text.split()) > 30:
-        raise EditorialCompositionError("editorial connective is too long")
-    if _FACTUAL_CONNECTIVE.search(text):
-        raise EditorialCompositionError("editorial connective introduced a factual claim")
-    if any(pattern in folded for pattern in _CONNECTIVE_AI_PATTERNS):
-        raise EditorialCompositionError("editorial connective violates Humanizer policy")
+    if "—" in text or "–" in text:
+        raise EditorialCompositionError(
+            f"{document_kind} contains a forbidden em or en dash"
+        )
+    if any(value in folded for value in _WORK_RIGHTS) or _WORK_RIGHTS_WORDS.search(text):
+        raise EditorialCompositionError(
+            f"work-rights declarations are forbidden in {document_kind}s"
+        )
+    if _AUTHORSHIP_DISCLOSURE.search(text):
+        raise EditorialCompositionError(
+            f"{document_kind} contains forbidden AI-authorship disclosure"
+        )
 
 
 def _outward_text(draft: CVEditorialDraft) -> str:
@@ -577,11 +635,10 @@ def validate_editorial_draft(
         raise EditorialCompositionError("editorial draft repeats an approved claim")
 
     outward = _outward_text(draft)
+    _validate_global_outward_policy(outward, document_kind="CV")
     folded = outward.casefold()
     if "curriculum vitae" in folded or re.search(r"(?mi)^\s*cv\s*$", outward):
         raise EditorialCompositionError("CV document labels are forbidden")
-    if any(value in folded for value in _WORK_RIGHTS):
-        raise EditorialCompositionError("work-rights declarations are forbidden in CVs")
 
     education = "\n".join(
         atom.text
@@ -654,8 +711,14 @@ class ApprovedCoverLetterClaim:
             raise EditorialCompositionError("cover-letter claim lacks evidence identities")
         if len(set(self.evidence_ids)) != len(self.evidence_ids):
             raise EditorialCompositionError("cover-letter claim repeats evidence identities")
-        expected = {"candidate": "Evidence Match", "employer": "Company Fit"}
-        if self.fact_kind not in expected or self.section_heading != expected[self.fact_kind]:
+        expected = {
+            "candidate": {"Evidence Match"},
+            "employer": {"Opening", "Company Fit"},
+        }
+        if (
+            self.fact_kind not in expected
+            or self.section_heading not in expected[self.fact_kind]
+        ):
             raise EditorialCompositionError("cover-letter claim is assigned to the wrong section")
 
     def document(self) -> dict[str, object]:
@@ -813,34 +876,53 @@ def validate_cover_letter_editorial_draft(
     draft.__post_init__()
     if draft.candidate_name != request.authority.candidate_name:
         raise EditorialCompositionError("cover-letter candidate differs from authority")
+    outward = "\n".join(
+        atom.text for section in draft.sections for atom in section.atoms
+    )
+    _validate_global_outward_policy(outward, document_kind="cover letter")
+    if any("\n" in atom.text or "\r" in atom.text for section in draft.sections for atom in section.atoms):
+        raise EditorialCompositionError("cover-letter atoms cannot create extra paragraphs")
+    word_count = len(re.findall(r"[A-Za-z0-9]+(?:['’][A-Za-z]+)?", outward))
+    if word_count > COVER_LETTER_MAX_WORDS or len(outward) > COVER_LETTER_MAX_CHARACTERS:
+        raise EditorialCompositionError(
+            "cover letter exceeds the deterministic UK one-page proxy"
+        )
+
+    opening = draft.sections[0]
+    required_salutation = EditorialAtom(
+        "connective", COVER_LETTER_SALUTATION, None
+    )
+    if opening.atoms[0] != required_salutation:
+        raise EditorialCompositionError(
+            "cover letter lacks the exact authorised salutation"
+        )
+    close = draft.sections[-1]
+    required_close = (
+        EditorialAtom("connective", COVER_LETTER_SIGN_OFF, None),
+        EditorialAtom("connective", request.authority.candidate_name, None),
+    )
+    if close.atoms != required_close:
+        raise EditorialCompositionError(
+            "cover letter lacks the exact sign-off and candidate signature"
+        )
+
     approved = {claim.claim_id: claim for claim in request.approved_claims}
     used: list[str] = []
     for section in draft.sections:
         factual_span_seen = False
         for atom_index, atom in enumerate(section.atoms):
             if atom.source_kind == "connective":
-                _validate_connective(atom.text)
+                is_salutation = section.heading == "Opening" and atom_index == 0
+                is_close_structure = section.heading == "Close"
                 if factual_span_seen:
                     raise EditorialCompositionError(
                         "cover-letter connective cannot follow a factual span"
                     )
-                if atom.text == request.authority.candidate_name:
-                    if section.heading != "Close" or atom_index != len(section.atoms) - 1:
-                        raise EditorialCompositionError(
-                            "candidate signature is only permitted at the close"
-                        )
-                    continue
-                folded_connective = atom.text.casefold()
-                authority_terms = (
-                    request.authority.candidate_name,
-                    request.company_name,
-                    request.role_title,
-                )
-                if _COVER_LETTER_FACTUAL_CONNECTIVE.search(atom.text) or any(
-                    term.casefold() in folded_connective for term in authority_terms
-                ):
+                if not is_salutation and not is_close_structure:
+                    _validate_connective(atom.text)
+                if section.heading == "Opening" and not is_salutation:
                     raise EditorialCompositionError(
-                        "cover-letter connective introduced authority-bearing content"
+                        "cover-letter opening content must be an approved employer fact"
                     )
                 continue
             claim = approved.get(atom.claim_id or "")
@@ -853,22 +935,32 @@ def validate_cover_letter_editorial_draft(
     if len(set(used)) != len(used):
         raise EditorialCompositionError("cover-letter draft repeats an approved claim")
     used_claims = [approved[value] for value in used]
-    if not any(claim.fact_kind == "candidate" for claim in used_claims):
-        raise EditorialCompositionError("cover letter lacks candidate evidence")
-    employer_claims = [claim for claim in used_claims if claim.fact_kind == "employer"]
-    if not employer_claims or not any(
-        request.company_name.casefold() in claim.text.casefold() for claim in employer_claims
+    evidence_claims = [
+        claim for claim in used_claims if claim.section_heading == "Evidence Match"
+    ]
+    if not evidence_claims or any(
+        claim.fact_kind != "candidate" for claim in evidence_claims
     ):
-        raise EditorialCompositionError("cover letter lacks an exact company-specific fact")
-    close = draft.sections[-1]
-    if close.atoms[-1] != EditorialAtom("connective", request.authority.candidate_name, None):
-        raise EditorialCompositionError("cover-letter signature differs from candidate authority")
-    outward = "\n".join(atom.text for section in draft.sections for atom in section.atoms)
-    folded = outward.casefold()
-    if any(value in folded for value in _WORK_RIGHTS):
-        raise EditorialCompositionError("work-rights declarations are forbidden in cover letters")
-    if any(pattern in folded for pattern in ("curriculum vitae", "as an ai", "ai-generated", "generated by ai")):
-        raise EditorialCompositionError("cover letter contains forbidden employer-facing disclosure")
+        raise EditorialCompositionError("cover letter lacks candidate evidence")
+    opening_claims = [
+        claim for claim in used_claims if claim.section_heading == "Opening"
+    ]
+    if not opening_claims or not any(
+        claim.fact_kind == "employer"
+        and request.company_name.casefold() in claim.text.casefold()
+        and request.role_title.casefold() in claim.text.casefold()
+        for claim in opening_claims
+    ):
+        raise EditorialCompositionError(
+            "cover-letter opening lacks exact company and role hook evidence"
+        )
+    company_fit_claims = [
+        claim for claim in used_claims if claim.section_heading == "Company Fit"
+    ]
+    if not company_fit_claims or any(
+        claim.fact_kind != "employer" for claim in company_fit_claims
+    ):
+        raise EditorialCompositionError("cover letter lacks employer evidence in Company Fit")
 
 
 def _validate_cover_letter_humanizer_change(
@@ -1175,7 +1267,7 @@ def cover_letter_humanizer_request_sha256(
     return content_hash(
         {
             "request_sha256": request.request_sha256,
-            "schema_version": "jaa.cover-letter-humanizer-request.v1",
+            "schema_version": "jaa.cover-letter-humanizer-request.v2",
             "writer_draft_sha256": writer_draft.draft_sha256,
         }
     )
@@ -1882,15 +1974,17 @@ def run_editorial_composition_runtime(
             CandidateApplicationMaterializationReceipt,
         )
 
-        if not isinstance(
-            materialization_receipt, CandidateApplicationMaterializationReceipt
-        ):
+        if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
             raise EditorialCompositionError(
                 "production editorial composition requires source materialization"
             )
         try:
-            materialization_receipt.__post_init__()
-            materialization_receipt.authorize_editorial_request(request)
+            CandidateApplicationMaterializationReceipt.__post_init__(
+                materialization_receipt
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, request
+            )
         except (AttributeError, TypeError, ValueError) as exc:
             raise EditorialCompositionError(
                 "production editorial request differs from source materialization"
@@ -1903,8 +1997,9 @@ def run_editorial_composition_runtime(
             "instructions": [
                 "Return only one canonical JSON object matching the supplied response schema.",
                 "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
-                "Use connective atoms only for short non-factual transitions.",
+                "Omit connective atoms unless they contain only allowlisted function words and punctuation.",
                 "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
+                "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
                 "Keep formats and datastores out of Core Capabilities.",
             ],
             "schema_version": "jaa.cv-writer-runtime-request.v1",
@@ -2029,15 +2124,17 @@ def run_cover_letter_composition_runtime(
             CandidateApplicationMaterializationReceipt,
         )
 
-        if not isinstance(
-            materialization_receipt, CandidateApplicationMaterializationReceipt
-        ):
+        if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
             raise EditorialCompositionError(
                 "production cover-letter composition requires source materialization"
             )
         try:
-            materialization_receipt.__post_init__()
-            materialization_receipt.authorize_editorial_request(request)
+            CandidateApplicationMaterializationReceipt.__post_init__(
+                materialization_receipt
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, request
+            )
         except (AttributeError, TypeError, ValueError) as exc:
             raise EditorialCompositionError(
                 "production cover-letter request differs from source materialization"
@@ -2051,11 +2148,13 @@ def run_cover_letter_composition_runtime(
                 "Return only one canonical JSON object matching the response schema.",
                 "Write a specific UK cover letter under one page using the four supplied sections.",
                 "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
-                "Open directly; never write I am applying or I am writing to express interest.",
-                "Use a company-specific employer claim and the strongest supported candidate evidence.",
+                "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
+                "After the salutation, Opening must contain an approved employer claim naming the company and role.",
+                "Use the strongest supported candidate evidence and omit unrestricted connective prose.",
                 "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
+                "Use at most 500 words and 3500 characters; add no em or en dash.",
             ],
-            "schema_version": "jaa.cover-letter-writer-runtime-request.v1",
+            "schema_version": "jaa.cover-letter-writer-runtime-request.v2",
             "stage": "cover_letter_writer",
         }
     ).encode()
@@ -2089,10 +2188,11 @@ def run_cover_letter_composition_runtime(
             "instructions": [
                 "Return only one canonical JSON object matching the response schema.",
                 "Preserve every approved_claim atom and all four sections exactly.",
-                "Edit only connective atoms; remove AI phrasing, generic flattery, and filler.",
+                "Edit only non-structural connective atoms within the closed function-word allowlist.",
+                "Preserve the exact salutation, sign-off, signature and opening employer hook.",
                 "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
             ],
-            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v1",
+            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v2",
             "stage": "cover_letter_humanizer",
             "writer_draft": writer_draft.document(),
         }

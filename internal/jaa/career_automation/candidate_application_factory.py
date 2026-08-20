@@ -241,7 +241,7 @@ class CandidateApplicationMaterializationReceipt:
     style_bindings: tuple[Mapping[str, object], ...]
     source_policy_receipt: CandidateSourcePolicyReceipt
     receipt_sha256: str
-    schema_version: str = "jaa.candidate-application-materialization-receipt.v1"
+    schema_version: str = "jaa.candidate-application-materialization-receipt.v2"
     release_authority: bool = False
 
     def __post_init__(self) -> None:
@@ -945,6 +945,7 @@ def _build_candidate_application_source(
             employer_research_claim_id=str(vacancy_context_document["id"]),
             employer_fact_sha256=vacancy_fact_sha256,
         )
+
         vacancy_text = str(vacancy_context_document["text"])
         letter_employer.append(
             FactualSentence(
@@ -965,6 +966,36 @@ def _build_candidate_application_source(
                 canonical_json(vacancy_context_document),
             )
         )
+
+    opening_document = _employer_document(
+        f"vacancy-role-identity:{job_key}",
+        f"The {role_title} position is at {company_name}.",
+        source_identity=source_identity,
+    )
+    opening_fact_sha256 = content_hash(opening_document)
+    opening_text = str(opening_document["text"])
+    opening_employer = FactualSentence(
+        content_hash(
+            {
+                "contract": "jaa07.vacancy-role-factual-sentence.v1",
+                "employer_fact_sha256": opening_fact_sha256,
+                "text": opening_text,
+                "vacancy_sha256": vacancy_sha256,
+                "vacancy_source_identity": source_identity,
+            }
+        ),
+        opening_text,
+        opening_text,
+        "employer",
+        "cover_letter",
+        VacancyFactAuthority(
+            vacancy_source_identity=source_identity,
+            vacancy_sha256=vacancy_sha256,
+            employer_research_claim_id=str(opening_document["id"]),
+            employer_fact_sha256=opening_fact_sha256,
+        ),
+        canonical_json(opening_document),
+    )
 
     def profile_fact(evidence_id: str, document_kind: str) -> FactualSentence:
         evidence = statements.get(evidence_id)
@@ -1089,6 +1120,7 @@ def _build_candidate_application_source(
     facts = [
         *(row for section in cv_sections_by_heading.values() for row in section),
         *letter_candidate,
+        opening_employer,
         *letter_employer,
     ]
     source = compile_application_source(
@@ -1113,7 +1145,7 @@ def _build_candidate_application_source(
         letter_sections=(
             DocumentSection(
                 "Opening",
-                (),
+                (opening_employer.sentence_id,),
                 (letter_open.slot_id, letter_intent.slot_id),
             ),
             DocumentSection(
@@ -1437,7 +1469,7 @@ def materialize_candidate_application_source(
         "company_name": company_name,
         "source_url": source_url,
         "release_authority": False,
-        "schema_version": "jaa.candidate-application-materialization-receipt.v1",
+        "schema_version": "jaa.candidate-application-materialization-receipt.v2",
         "style_bindings": [dict(row) for row in style_bindings],
         "vacancy_sha256": vacancy_sha256,
     }
