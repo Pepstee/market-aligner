@@ -124,7 +124,7 @@ def _file_sha256(path: Path) -> str:
 
 def _value_sha256(value: Any) -> str:
     payload = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
     ).encode()
     return hashlib.sha256(payload).hexdigest()
 

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import hashlib
 import json
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -207,6 +208,7 @@ class ProfileTests(unittest.TestCase):
                     "constraints": {
                         "remote_preference": "required",
                         "legacy_only": True,
+                        "legacy_reviewed_on": date(2026, 7, 19),
                     },
                 },
                 sort_keys=False,
