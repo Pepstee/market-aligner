@@ -38,13 +38,22 @@ from .editorial_composition import (
     CVSection,
     EditorialAtom,
     EditorialCompositionReceipt,
+    ApprovedCoverLetterClaim,
+    CoverLetterEditorialCompositionReceipt,
+    CoverLetterEditorialDraft,
+    CoverLetterEditorialRequest,
+    CoverLetterSection,
     build_editorial_draft,
+    build_cover_letter_editorial_draft,
     validate_editorial_draft,
+    validate_cover_letter_editorial_draft,
 )
 
 
 BINDING_SCHEMA = "jaa.cv-recruiter-improvement-binding.v1"
 REBUILD_SCHEMA = "jaa.cv-evidence-safe-rebuild.v1"
+COVER_LETTER_BINDING_SCHEMA = "jaa.cover-letter-recruiter-improvement-binding.v1"
+COVER_LETTER_REBUILD_SCHEMA = "jaa.cover-letter-evidence-safe-rebuild.v1"
 FINALIZED_SCHEMA = "jaa.cv-finalized-rebuild.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -355,6 +364,7 @@ def rebuild_from_recruiter_assessment(
     recruiter_package: RecruiterAssessmentPackage,
     bindings: Sequence[RecruiterImprovementBinding],
     assessed_cv_text_sha256: str | None = None,
+    cover_letter_module_active: bool = False,
 ) -> EvidenceSafeRebuildResult:
     """Apply evidence-bound CV recommendations and route every gap to roadmap."""
 
@@ -411,6 +421,12 @@ def rebuild_from_recruiter_assessment(
             improvement.get("expected_effect"), "recruiter expected effect"
         )
         binding = binding_by_index.get(index)
+        if target == "cover_letter" and cover_letter_module_active:
+            if binding is not None:
+                raise AdversarialRebuildError(
+                    "cover-letter advice cannot receive a CV evidence binding"
+                )
+            continue
         if binding is None or target not in {"cv", "positioning"}:
             if binding is not None:
                 raise AdversarialRebuildError(
@@ -491,6 +507,253 @@ def rebuild_from_recruiter_assessment(
         applied=tuple(applied),
         roadmap=tuple(roadmap),
         rebuild_sha256=content_hash(values),
+    )
+
+
+@dataclass(frozen=True)
+class CoverLetterRecruiterImprovementBinding:
+    improvement_index: int
+    target_heading: str
+    claim_ids: tuple[str, ...]
+    authority_source_sha256: str
+    vacancy_sha256: str
+    model_result_sha256: str
+    binding_source_sha256: str
+    binding_sha256: str
+    schema_version: str = COVER_LETTER_BINDING_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != COVER_LETTER_BINDING_SCHEMA:
+            raise AdversarialRebuildError("cover-letter binding schema is unsupported")
+        if type(self.improvement_index) is not int or self.improvement_index < 0:
+            raise AdversarialRebuildError("cover-letter binding index is invalid")
+        if self.target_heading not in {"Evidence Match", "Company Fit"}:
+            raise AdversarialRebuildError("cover-letter binding target is unsupported")
+        if not self.claim_ids or len(set(self.claim_ids)) != len(self.claim_ids):
+            raise AdversarialRebuildError("cover-letter binding claims are invalid")
+        for claim_id in self.claim_ids:
+            _required(claim_id, "cover-letter binding claim ID")
+        for value, label in (
+            (self.authority_source_sha256, "cover-letter candidate authority hash"),
+            (self.vacancy_sha256, "cover-letter vacancy hash"),
+            (self.model_result_sha256, "cover-letter recruiter result hash"),
+            (self.binding_source_sha256, "cover-letter binding source hash"),
+            (self.binding_sha256, "cover-letter binding hash"),
+        ):
+            _digest(value, label)
+        if self.binding_sha256 != content_hash(self.document(include_identity=False)):
+            raise AdversarialRebuildError("cover-letter binding identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "authority_source_sha256": self.authority_source_sha256,
+            "binding_source_sha256": self.binding_source_sha256,
+            "claim_ids": list(self.claim_ids),
+            "improvement_index": self.improvement_index,
+            "model_result_sha256": self.model_result_sha256,
+            "schema_version": self.schema_version,
+            "target_heading": self.target_heading,
+            "vacancy_sha256": self.vacancy_sha256,
+        }
+        if include_identity:
+            value["binding_sha256"] = self.binding_sha256
+        return value
+
+
+def bind_cover_letter_recruiter_improvement(
+    *,
+    improvement_index: int,
+    target_heading: str,
+    claim_ids: Sequence[str],
+    authority_source_sha256: str,
+    vacancy_sha256: str,
+    model_result_sha256: str,
+    binding_source_sha256: str,
+) -> CoverLetterRecruiterImprovementBinding:
+    values = {
+        "authority_source_sha256": authority_source_sha256,
+        "binding_source_sha256": binding_source_sha256,
+        "claim_ids": list(claim_ids),
+        "improvement_index": improvement_index,
+        "model_result_sha256": model_result_sha256,
+        "schema_version": COVER_LETTER_BINDING_SCHEMA,
+        "target_heading": target_heading,
+        "vacancy_sha256": vacancy_sha256,
+    }
+    return CoverLetterRecruiterImprovementBinding(
+        improvement_index=improvement_index,
+        target_heading=target_heading,
+        claim_ids=tuple(claim_ids),
+        authority_source_sha256=authority_source_sha256,
+        vacancy_sha256=vacancy_sha256,
+        model_result_sha256=model_result_sha256,
+        binding_source_sha256=binding_source_sha256,
+        binding_sha256=content_hash(values),
+    )
+
+
+@dataclass(frozen=True)
+class CoverLetterEvidenceSafeRebuildResult:
+    recruiter_receipt_sha256: str
+    editorial_composition_receipt_sha256: str
+    original_draft_sha256: str
+    rebuilt_draft: CoverLetterEditorialDraft
+    applied: tuple[AppliedRecruiterImprovement, ...]
+    roadmap: tuple[RebuildRoadmapItem, ...]
+    rebuild_sha256: str
+    release_authority: bool = False
+    schema_version: str = COVER_LETTER_REBUILD_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != COVER_LETTER_REBUILD_SCHEMA:
+            raise AdversarialRebuildError("cover-letter rebuild schema is unsupported")
+        for value, label in (
+            (self.recruiter_receipt_sha256, "cover-letter recruiter receipt hash"),
+            (self.editorial_composition_receipt_sha256, "cover-letter composition receipt hash"),
+            (self.original_draft_sha256, "original cover-letter draft hash"),
+            (self.rebuild_sha256, "cover-letter rebuild hash"),
+        ):
+            _digest(value, label)
+        self.rebuilt_draft.__post_init__()
+        if self.release_authority is not False:
+            raise AdversarialRebuildError("cover-letter rebuild cannot grant release authority")
+        if self.rebuild_sha256 != content_hash(self.document(include_identity=False)):
+            raise AdversarialRebuildError("cover-letter rebuild identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "applied": [item.document() for item in self.applied],
+            "editorial_composition_receipt_sha256": self.editorial_composition_receipt_sha256,
+            "original_draft_sha256": self.original_draft_sha256,
+            "rebuilt_draft_sha256": self.rebuilt_draft.draft_sha256,
+            "recruiter_receipt_sha256": self.recruiter_receipt_sha256,
+            "release_authority": False,
+            "roadmap": [item.document() for item in self.roadmap],
+            "schema_version": self.schema_version,
+        }
+        if include_identity:
+            value["rebuild_sha256"] = self.rebuild_sha256
+        return value
+
+
+def _promote_cover_letter_claims(
+    draft: CoverLetterEditorialDraft,
+    *,
+    heading: str,
+    claims: Sequence[ApprovedCoverLetterClaim],
+) -> CoverLetterEditorialDraft:
+    sections = list(draft.sections)
+    index = next((i for i, section in enumerate(sections) if section.heading == heading), None)
+    if index is None:
+        raise AdversarialRebuildError("cover-letter binding targets an absent section")
+    target = sections[index]
+    selected_ids = tuple(claim.claim_id for claim in claims)
+    existing = {atom.claim_id: atom for atom in target.atoms if atom.source_kind == "approved_claim"}
+    if any(claim_id not in existing for claim_id in selected_ids):
+        raise AdversarialRebuildError("cover-letter binding cannot introduce an unused claim")
+    promoted = tuple(existing[claim_id] for claim_id in selected_ids)
+    remaining = tuple(
+        atom for atom in target.atoms
+        if atom.source_kind != "approved_claim" or atom.claim_id not in selected_ids
+    )
+    leading = tuple(atom for atom in remaining if atom.source_kind == "connective")
+    trailing = tuple(atom for atom in remaining if atom.source_kind == "approved_claim")
+    sections[index] = CoverLetterSection(heading, (*leading, *promoted, *trailing))
+    return build_cover_letter_editorial_draft(
+        candidate_name=draft.candidate_name, sections=sections
+    )
+
+
+def rebuild_cover_letter_from_recruiter_assessment(
+    *,
+    request: CoverLetterEditorialRequest,
+    admitted_draft: CoverLetterEditorialDraft,
+    editorial_receipt: CoverLetterEditorialCompositionReceipt,
+    recruiter_receipt: RecruiterAssessmentReceipt,
+    recruiter_package: RecruiterAssessmentPackage,
+    bindings: Sequence[CoverLetterRecruiterImprovementBinding],
+    assessed_cover_letter_text_sha256: str,
+) -> CoverLetterEvidenceSafeRebuildResult:
+    """Apply only exact authority-bound cover-letter recruiter advice."""
+    validate_cover_letter_editorial_draft(request, admitted_draft)
+    editorial_receipt.__post_init__()
+    if (
+        editorial_receipt.request_sha256 != request.request_sha256
+        or editorial_receipt.final_draft_sha256 != admitted_draft.draft_sha256
+    ):
+        raise AdversarialRebuildError("cover-letter draft lacks its admission receipt")
+    verify_recruiter_assessment_receipt(recruiter_receipt, recruiter_package)
+    if recruiter_receipt.package_hashes.get("cover_letter_text_sha256") != _digest(
+        assessed_cover_letter_text_sha256, "assessed cover-letter text hash"
+    ):
+        raise AdversarialRebuildError("recruiter did not inspect the admitted cover letter")
+    if (
+        recruiter_receipt.intended_vacancy.role_title != request.role_title
+        or recruiter_receipt.intended_vacancy.company_name != request.company_name
+        or recruiter_receipt.package_hashes.get("listing_text_sha256") != request.vacancy_sha256
+    ):
+        raise AdversarialRebuildError("cover-letter recruiter assessment targets another vacancy")
+    improvements = _application_improvements(recruiter_receipt)
+    binding_by_index: dict[int, CoverLetterRecruiterImprovementBinding] = {}
+    for binding in bindings:
+        binding.__post_init__()
+        if binding.improvement_index in binding_by_index or binding.improvement_index >= len(improvements):
+            raise AdversarialRebuildError("cover-letter binding index is duplicate or absent")
+        if (
+            binding.authority_source_sha256 != request.authority.source_sha256
+            or binding.vacancy_sha256 != request.vacancy_sha256
+            or binding.model_result_sha256 != recruiter_receipt.model_result_sha256
+            or improvements[binding.improvement_index].get("target") != "cover_letter"
+        ):
+            raise AdversarialRebuildError("cover-letter binding targets different authority or advice")
+        binding_by_index[binding.improvement_index] = binding
+    approved = {claim.claim_id: claim for claim in request.approved_claims}
+    rebuilt = admitted_draft
+    applied: list[AppliedRecruiterImprovement] = []
+    roadmap: list[RebuildRoadmapItem] = []
+    for index, improvement in enumerate(improvements):
+        if improvement.get("target") != "cover_letter":
+            continue
+        recommendation = _required(improvement.get("recommendation"), "cover-letter recommendation")
+        expected_effect = _required(improvement.get("expected_effect"), "cover-letter expected effect")
+        binding = binding_by_index.get(index)
+        if binding is None:
+            roadmap.append(RebuildRoadmapItem(
+                source="application_improvement", source_index=index,
+                category="cover_letter", recommendation=recommendation,
+                expected_effect=expected_effect, time_horizon=None,
+                reason_code="unsupported_by_candidate_or_vacancy_authority",
+            ))
+            continue
+        claims = []
+        for claim_id in binding.claim_ids:
+            claim = approved.get(claim_id)
+            if claim is None or claim.section_heading != binding.target_heading:
+                raise AdversarialRebuildError("cover-letter binding cites an unapproved claim")
+            claims.append(claim)
+        rebuilt = _promote_cover_letter_claims(rebuilt, heading=binding.target_heading, claims=claims)
+        validate_cover_letter_editorial_draft(request, rebuilt)
+        applied.append(AppliedRecruiterImprovement(
+            improvement_index=index, recommendation=recommendation,
+            target_heading=binding.target_heading, claim_ids=binding.claim_ids,
+            binding_sha256=binding.binding_sha256,
+        ))
+    values = {
+        "applied": [item.document() for item in applied],
+        "editorial_composition_receipt_sha256": editorial_receipt.receipt_sha256,
+        "original_draft_sha256": admitted_draft.draft_sha256,
+        "rebuilt_draft_sha256": rebuilt.draft_sha256,
+        "recruiter_receipt_sha256": recruiter_receipt.receipt_sha256,
+        "release_authority": False,
+        "roadmap": [item.document() for item in roadmap],
+        "schema_version": COVER_LETTER_REBUILD_SCHEMA,
+    }
+    return CoverLetterEvidenceSafeRebuildResult(
+        recruiter_receipt_sha256=recruiter_receipt.receipt_sha256,
+        editorial_composition_receipt_sha256=editorial_receipt.receipt_sha256,
+        original_draft_sha256=admitted_draft.draft_sha256,
+        rebuilt_draft=rebuilt,
+        applied=tuple(applied), roadmap=tuple(roadmap), rebuild_sha256=content_hash(values),
     )
 
 
@@ -604,12 +867,16 @@ def finalize_rebuilt_cv(
 __all__ = [
     "AdversarialRebuildError",
     "AppliedRecruiterImprovement",
+    "CoverLetterEvidenceSafeRebuildResult",
+    "CoverLetterRecruiterImprovementBinding",
     "EvidenceSafeRebuildResult",
     "FinalizedRebuiltCV",
     "RebuildRoadmapItem",
     "RecruiterImprovementBinding",
+    "bind_cover_letter_recruiter_improvement",
     "bind_recruiter_improvement",
     "finalize_rebuilt_cv",
+    "rebuild_cover_letter_from_recruiter_assessment",
     "rebuild_from_recruiter_assessment",
     "render_editorial_cv_text",
 ]

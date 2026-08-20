@@ -328,7 +328,7 @@ class CandidateApplicationMaterializationReceipt:
         return value
 
     def authorize_editorial_request(self, request: object) -> None:
-        """Fail closed unless a CV request is an exact projection of this receipt."""
+        """Fail closed unless an editorial request exactly projects this receipt."""
         if getattr(getattr(request, "authority", None), "source_sha256", None) != (
             self.candidate_authority_file_sha256
         ):
@@ -340,42 +340,67 @@ class CandidateApplicationMaterializationReceipt:
             or getattr(request, "company_name", None) != self.company_name
         ):
             raise ValueError("editorial request vacancy identity differs")
-        cv_bindings = {
+        document_kind = getattr(request, "document_kind", "cv")
+        if document_kind not in {"cv", "cover_letter"}:
+            raise ValueError("editorial request document kind is unsupported")
+        bindings = {
             str(row["sentence_id"]): row
             for row in self.fact_bindings
-            if row.get("document_kind") == "cv"
+            if row.get("document_kind") == document_kind
         }
         claims = getattr(request, "approved_claims", ())
         if not claims:
             raise ValueError("editorial request has no materialized claims")
-        request_rows = {
-            claim.claim_id: {
-                "category": claim.category,
-                "evidence_ids": tuple(claim.evidence_ids),
-                "text": claim.text,
-                "text_sha256": claim.text_sha256,
+        if document_kind == "cv":
+            request_rows = {
+                claim.claim_id: {
+                    "category": claim.category,
+                    "evidence_ids": tuple(claim.evidence_ids),
+                    "text": claim.text,
+                    "text_sha256": claim.text_sha256,
+                }
+                for claim in claims
             }
-            for claim in claims
-        }
-        expected_rows = {
-            sentence_id: {
-                "category": {
-                    "Professional Summary": "summary",
-                    "Core Capabilities": "capability_domain",
-                    "Projects": "project",
-                    "Experience": "experience",
-                    "Education": "education",
-                }[str(binding["section_heading"])],
-                "evidence_ids": tuple(binding["evidence_ids"]),
-                "text": binding["text"],
-                "text_sha256": binding["text_sha256"],
+            expected_rows = {
+                sentence_id: {
+                    "category": {
+                        "Professional Summary": "summary",
+                        "Core Capabilities": "capability_domain",
+                        "Projects": "project",
+                        "Experience": "experience",
+                        "Education": "education",
+                    }[str(binding["section_heading"])],
+                    "evidence_ids": tuple(binding["evidence_ids"]),
+                    "text": binding["text"],
+                    "text_sha256": binding["text_sha256"],
+                }
+                for sentence_id, binding in bindings.items()
             }
-            for sentence_id, binding in cv_bindings.items()
-        }
+        else:
+            request_rows = {
+                claim.claim_id: {
+                    "evidence_ids": tuple(claim.evidence_ids),
+                    "fact_kind": claim.fact_kind,
+                    "section_heading": claim.section_heading,
+                    "text": claim.text,
+                    "text_sha256": claim.text_sha256,
+                }
+                for claim in claims
+            }
+            expected_rows = {
+                sentence_id: {
+                    "evidence_ids": tuple(binding["evidence_ids"]),
+                    "fact_kind": binding["fact_kind"],
+                    "section_heading": binding["section_heading"],
+                    "text": binding["text"],
+                    "text_sha256": binding["text_sha256"],
+                }
+                for sentence_id, binding in bindings.items()
+            }
         if request_rows != expected_rows:
             raise ValueError("editorial request claim set differs from materialization")
         for claim in claims:
-            binding = cv_bindings.get(claim.claim_id)
+            binding = bindings.get(claim.claim_id)
             if (
                 binding is None
                 or binding["text_sha256"] != claim.text_sha256

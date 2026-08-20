@@ -30,9 +30,13 @@ from career_automation.evidence_matching import canonical_json, content_hash
 
 REQUEST_SCHEMA = "jaa.cv-editorial-request.v1"
 DRAFT_SCHEMA = "jaa.cv-editorial-draft.v1"
+COVER_LETTER_REQUEST_SCHEMA = "jaa.cover-letter-editorial-request.v1"
+COVER_LETTER_DRAFT_SCHEMA = "jaa.cover-letter-editorial-draft.v1"
 STAGE_RECEIPT_SCHEMA = "jaa.cv-editorial-stage-receipt.v3"
 COMPOSITION_RECEIPT_SCHEMA = "jaa.cv-editorial-composition-receipt.v1"
+COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA = "jaa.cover-letter-editorial-composition-receipt.v1"
 EDITORIAL_PROVIDER_IDENTITY = "openai-codex-cli"
+_EDITORIAL_STAGES = frozenset({"resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"})
 
 _ENV_ALLOWLIST = frozenset(
     {
@@ -104,6 +108,12 @@ _FACTUAL_CONNECTIVE = re.compile(
     r"developed|implemented|led|managed|provided|shipped|tested|validated|"
     r"worked|studied|graduated)\b|"
     r"\b(?:expert|expertise|proficient|qualified|track record|years? of)\b)",
+    re.IGNORECASE,
+)
+_COVER_LETTER_FACTUAL_CONNECTIVE = re.compile(
+    r"\b(?:built|created|delivered|designed|developed|implemented|led|managed|"
+    r"provided|shipped|tested|validated|worked|studied|graduated|certified|"
+    r"skilled|proficient|expertise|experience\s+(?:with|in))\b",
     re.IGNORECASE,
 )
 _FORMAT_OR_DATASTORE = re.compile(
@@ -183,6 +193,42 @@ _DRAFT_RESPONSE_SCHEMA: Mapping[str, object] = {
                                 "source_kind": {
                                     "enum": ["approved_claim", "connective"]
                                 },
+                                "text": {"type": "string", "minLength": 1},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+_COVER_LETTER_RESPONSE_SCHEMA: Mapping[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidate_name", "schema_version", "sections"],
+    "properties": {
+        "candidate_name": {"type": "string", "minLength": 1},
+        "schema_version": {"const": COVER_LETTER_DRAFT_SCHEMA},
+        "sections": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["atoms", "heading"],
+                "properties": {
+                    "heading": {"enum": ["Opening", "Evidence Match", "Company Fit", "Close"]},
+                    "atoms": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["claim_id", "source_kind", "text"],
+                            "properties": {
+                                "claim_id": {"type": ["string", "null"]},
+                                "source_kind": {"enum": ["approved_claim", "connective"]},
                                 "text": {"type": "string", "minLength": 1},
                             },
                         },
@@ -590,6 +636,301 @@ def _validate_humanizer_change(
 
 
 @dataclass(frozen=True)
+class ApprovedCoverLetterClaim:
+    claim_id: str
+    text: str
+    text_sha256: str
+    evidence_ids: tuple[str, ...]
+    fact_kind: str
+    section_heading: str
+
+    def __post_init__(self) -> None:
+        _required(self.claim_id, "cover-letter claim ID")
+        text = _required(self.text, "cover-letter claim text")
+        _digest(self.text_sha256, "cover-letter claim text hash")
+        if _text_sha256(text) != self.text_sha256:
+            raise EditorialCompositionError("cover-letter claim differs from its retained hash")
+        if not self.evidence_ids or any(not isinstance(value, str) or not value.strip() for value in self.evidence_ids):
+            raise EditorialCompositionError("cover-letter claim lacks evidence identities")
+        if len(set(self.evidence_ids)) != len(self.evidence_ids):
+            raise EditorialCompositionError("cover-letter claim repeats evidence identities")
+        expected = {"candidate": "Evidence Match", "employer": "Company Fit"}
+        if self.fact_kind not in expected or self.section_heading != expected[self.fact_kind]:
+            raise EditorialCompositionError("cover-letter claim is assigned to the wrong section")
+
+    def document(self) -> dict[str, object]:
+        return {
+            "claim_id": self.claim_id,
+            "evidence_ids": list(self.evidence_ids),
+            "fact_kind": self.fact_kind,
+            "section_heading": self.section_heading,
+            "text": self.text,
+            "text_sha256": self.text_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class CoverLetterEditorialRequest:
+    authority: CandidateEditorialAuthority
+    role_title: str
+    company_name: str
+    vacancy_sha256: str
+    approved_claims: tuple[ApprovedCoverLetterClaim, ...]
+    request_sha256: str
+    document_kind: str = "cover_letter"
+    schema_version: str = COVER_LETTER_REQUEST_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != COVER_LETTER_REQUEST_SCHEMA or self.document_kind != "cover_letter":
+            raise EditorialCompositionError("cover-letter editorial request schema is unsupported")
+        self.authority.__post_init__()
+        _required(self.role_title, "target role title")
+        _required(self.company_name, "target company name")
+        _digest(self.vacancy_sha256, "vacancy hash")
+        if not self.approved_claims:
+            raise EditorialCompositionError("cover-letter request has no approved claims")
+        for claim in self.approved_claims:
+            claim.__post_init__()
+        identifiers = tuple(claim.claim_id for claim in self.approved_claims)
+        if len(set(identifiers)) != len(identifiers):
+            raise EditorialCompositionError("cover-letter request repeats claim identities")
+        _digest(self.request_sha256, "cover-letter request hash")
+        if self.request_sha256 != content_hash(self.document(include_identity=False)):
+            raise EditorialCompositionError("cover-letter request identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "approved_claims": [claim.document() for claim in self.approved_claims],
+            "authority": self.authority.document(),
+            "company_name": self.company_name,
+            "document_kind": self.document_kind,
+            "role_title": self.role_title,
+            "schema_version": self.schema_version,
+            "vacancy_sha256": self.vacancy_sha256,
+        }
+        if include_identity:
+            value["request_sha256"] = self.request_sha256
+        return value
+
+
+def build_cover_letter_editorial_request(
+    *,
+    authority: CandidateEditorialAuthority,
+    role_title: str,
+    company_name: str,
+    vacancy_sha256: str,
+    approved_claims: Sequence[ApprovedCoverLetterClaim],
+) -> CoverLetterEditorialRequest:
+    values = {
+        "approved_claims": [claim.document() for claim in approved_claims],
+        "authority": authority.document(),
+        "company_name": company_name,
+        "document_kind": "cover_letter",
+        "role_title": role_title,
+        "schema_version": COVER_LETTER_REQUEST_SCHEMA,
+        "vacancy_sha256": vacancy_sha256,
+    }
+    return CoverLetterEditorialRequest(
+        authority=authority,
+        role_title=role_title,
+        company_name=company_name,
+        vacancy_sha256=vacancy_sha256,
+        approved_claims=tuple(approved_claims),
+        request_sha256=content_hash(values),
+    )
+
+
+@dataclass(frozen=True)
+class CoverLetterSection:
+    heading: str
+    atoms: tuple[EditorialAtom, ...]
+
+    def __post_init__(self) -> None:
+        if self.heading not in {"Opening", "Evidence Match", "Company Fit", "Close"}:
+            raise EditorialCompositionError("cover-letter section heading is unsupported")
+        if not self.atoms:
+            raise EditorialCompositionError("cover-letter section cannot be empty")
+        for atom in self.atoms:
+            atom.__post_init__()
+
+    def document(self) -> dict[str, object]:
+        return {"atoms": [atom.document() for atom in self.atoms], "heading": self.heading}
+
+
+@dataclass(frozen=True)
+class CoverLetterEditorialDraft:
+    candidate_name: str
+    sections: tuple[CoverLetterSection, ...]
+    draft_sha256: str
+    schema_version: str = COVER_LETTER_DRAFT_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != COVER_LETTER_DRAFT_SCHEMA:
+            raise EditorialCompositionError("cover-letter draft schema is unsupported")
+        _required(self.candidate_name, "cover-letter candidate name")
+        if tuple(section.heading for section in self.sections) != (
+            "Opening", "Evidence Match", "Company Fit", "Close"
+        ):
+            raise EditorialCompositionError("cover-letter sections are not canonical")
+        for section in self.sections:
+            section.__post_init__()
+        _digest(self.draft_sha256, "cover-letter draft hash")
+        if self.draft_sha256 != content_hash(self.document(include_identity=False)):
+            raise EditorialCompositionError("cover-letter draft identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "candidate_name": self.candidate_name,
+            "schema_version": self.schema_version,
+            "sections": [section.document() for section in self.sections],
+        }
+        if include_identity:
+            value["draft_sha256"] = self.draft_sha256
+        return value
+
+
+def build_cover_letter_editorial_draft(
+    *, candidate_name: str, sections: Sequence[CoverLetterSection]
+) -> CoverLetterEditorialDraft:
+    values = {
+        "candidate_name": candidate_name,
+        "schema_version": COVER_LETTER_DRAFT_SCHEMA,
+        "sections": [section.document() for section in sections],
+    }
+    return CoverLetterEditorialDraft(
+        candidate_name=candidate_name,
+        sections=tuple(sections),
+        draft_sha256=content_hash(values),
+    )
+
+
+def validate_cover_letter_editorial_draft(
+    request: CoverLetterEditorialRequest,
+    draft: CoverLetterEditorialDraft,
+) -> None:
+    """Reject unsupported, generic, or authority-changing cover-letter content."""
+    request.__post_init__()
+    draft.__post_init__()
+    if draft.candidate_name != request.authority.candidate_name:
+        raise EditorialCompositionError("cover-letter candidate differs from authority")
+    approved = {claim.claim_id: claim for claim in request.approved_claims}
+    used: list[str] = []
+    for section in draft.sections:
+        factual_span_seen = False
+        for atom_index, atom in enumerate(section.atoms):
+            if atom.source_kind == "connective":
+                _validate_connective(atom.text)
+                if factual_span_seen:
+                    raise EditorialCompositionError(
+                        "cover-letter connective cannot follow a factual span"
+                    )
+                if atom.text == request.authority.candidate_name:
+                    if section.heading != "Close" or atom_index != len(section.atoms) - 1:
+                        raise EditorialCompositionError(
+                            "candidate signature is only permitted at the close"
+                        )
+                    continue
+                folded_connective = atom.text.casefold()
+                authority_terms = (
+                    request.authority.candidate_name,
+                    request.company_name,
+                    request.role_title,
+                )
+                if _COVER_LETTER_FACTUAL_CONNECTIVE.search(atom.text) or any(
+                    term.casefold() in folded_connective for term in authority_terms
+                ):
+                    raise EditorialCompositionError(
+                        "cover-letter connective introduced authority-bearing content"
+                    )
+                continue
+            claim = approved.get(atom.claim_id or "")
+            if claim is None or atom.text != claim.text:
+                raise EditorialCompositionError("cover-letter draft changed or invented a claim")
+            if claim.section_heading != section.heading:
+                raise EditorialCompositionError("cover-letter claim is in the wrong section")
+            used.append(claim.claim_id)
+            factual_span_seen = True
+    if len(set(used)) != len(used):
+        raise EditorialCompositionError("cover-letter draft repeats an approved claim")
+    used_claims = [approved[value] for value in used]
+    if not any(claim.fact_kind == "candidate" for claim in used_claims):
+        raise EditorialCompositionError("cover letter lacks candidate evidence")
+    employer_claims = [claim for claim in used_claims if claim.fact_kind == "employer"]
+    if not employer_claims or not any(
+        request.company_name.casefold() in claim.text.casefold() for claim in employer_claims
+    ):
+        raise EditorialCompositionError("cover letter lacks an exact company-specific fact")
+    close = draft.sections[-1]
+    if close.atoms[-1] != EditorialAtom("connective", request.authority.candidate_name, None):
+        raise EditorialCompositionError("cover-letter signature differs from candidate authority")
+    outward = "\n".join(atom.text for section in draft.sections for atom in section.atoms)
+    folded = outward.casefold()
+    if any(value in folded for value in _WORK_RIGHTS):
+        raise EditorialCompositionError("work-rights declarations are forbidden in cover letters")
+    if any(pattern in folded for pattern in ("curriculum vitae", "as an ai", "ai-generated", "generated by ai")):
+        raise EditorialCompositionError("cover letter contains forbidden employer-facing disclosure")
+
+
+def _validate_cover_letter_humanizer_change(
+    writer_draft: CoverLetterEditorialDraft,
+    final_draft: CoverLetterEditorialDraft,
+) -> None:
+    if writer_draft.candidate_name != final_draft.candidate_name or len(writer_draft.sections) != len(final_draft.sections):
+        raise EditorialCompositionError("Humanizer changed cover-letter structure")
+    for writer_section, final_section in zip(writer_draft.sections, final_draft.sections, strict=True):
+        if writer_section.heading != final_section.heading or len(writer_section.atoms) != len(final_section.atoms):
+            raise EditorialCompositionError("Humanizer changed cover-letter structure")
+        for writer_atom, final_atom in zip(writer_section.atoms, final_section.atoms, strict=True):
+            if writer_atom.source_kind != final_atom.source_kind:
+                raise EditorialCompositionError("Humanizer changed cover-letter evidence structure")
+            if writer_atom.source_kind == "approved_claim" and writer_atom != final_atom:
+                raise EditorialCompositionError("Humanizer changed a cover-letter factual span")
+            if writer_atom.source_kind == "connective" and final_atom.claim_id is not None:
+                raise EditorialCompositionError("Humanizer connective claimed cover-letter evidence")
+
+
+@dataclass(frozen=True)
+class CoverLetterEditorialCompositionReceipt:
+    request_sha256: str
+    writer_draft_sha256: str
+    final_draft_sha256: str
+    writer_receipt_sha256: str
+    humanizer_receipt_sha256: str
+    receipt_sha256: str
+    release_authority: bool = False
+    schema_version: str = COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA:
+            raise EditorialCompositionError("cover-letter composition receipt schema is unsupported")
+        for value, label in (
+            (self.request_sha256, "cover-letter composition request hash"),
+            (self.writer_draft_sha256, "cover-letter writer-draft hash"),
+            (self.final_draft_sha256, "cover-letter final-draft hash"),
+            (self.writer_receipt_sha256, "cover-letter writer-receipt hash"),
+            (self.humanizer_receipt_sha256, "cover-letter Humanizer-receipt hash"),
+            (self.receipt_sha256, "cover-letter composition receipt hash"),
+        ):
+            _digest(value, label)
+        if self.release_authority is not False or self.receipt_sha256 != content_hash(self.document(include_identity=False)):
+            raise EditorialCompositionError("cover-letter composition receipt is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "final_draft_sha256": self.final_draft_sha256,
+            "humanizer_receipt_sha256": self.humanizer_receipt_sha256,
+            "release_authority": False,
+            "request_sha256": self.request_sha256,
+            "schema_version": self.schema_version,
+            "writer_draft_sha256": self.writer_draft_sha256,
+            "writer_receipt_sha256": self.writer_receipt_sha256,
+        }
+        if include_identity:
+            value["receipt_sha256"] = self.receipt_sha256
+        return value
+
+
+@dataclass(frozen=True)
 class EditorialStageEvidence:
     stage: str
     environment: str
@@ -604,7 +945,7 @@ class EditorialStageEvidence:
     executable_sha256: str | None = None
 
     def __post_init__(self) -> None:
-        if self.stage not in {"resume_writer", "humanizer"}:
+        if self.stage not in _EDITORIAL_STAGES:
             raise EditorialCompositionError("editorial stage is unsupported")
         if self.environment not in {"production", "synthetic"}:
             raise EditorialCompositionError("editorial stage environment is unsupported")
@@ -650,7 +991,7 @@ class EditorialStageReceipt:
     def __post_init__(self) -> None:
         if self.schema_version != STAGE_RECEIPT_SCHEMA:
             raise EditorialCompositionError("editorial stage receipt schema is unsupported")
-        if self.stage not in {"resume_writer", "humanizer"}:
+        if self.stage not in _EDITORIAL_STAGES:
             raise EditorialCompositionError("editorial stage receipt is unsupported")
         if self.environment not in {"production", "synthetic"}:
             raise EditorialCompositionError("editorial receipt environment is unsupported")
@@ -825,6 +1166,65 @@ def admit_editorial_composition(
         receipt_sha256=content_hash(values),
     )
     return writer_receipt, humanizer_receipt, composition_receipt
+
+
+def cover_letter_humanizer_request_sha256(
+    request: CoverLetterEditorialRequest,
+    writer_draft: CoverLetterEditorialDraft,
+) -> str:
+    return content_hash(
+        {
+            "request_sha256": request.request_sha256,
+            "schema_version": "jaa.cover-letter-humanizer-request.v1",
+            "writer_draft_sha256": writer_draft.draft_sha256,
+        }
+    )
+
+
+def admit_cover_letter_editorial_composition(
+    *,
+    request: CoverLetterEditorialRequest,
+    writer_draft: CoverLetterEditorialDraft,
+    final_draft: CoverLetterEditorialDraft,
+    writer_evidence: EditorialStageEvidence,
+    humanizer_evidence: EditorialStageEvidence,
+) -> tuple[EditorialStageReceipt, EditorialStageReceipt, CoverLetterEditorialCompositionReceipt]:
+    """Admit cover-letter writer and Humanizer outputs without release authority."""
+    validate_cover_letter_editorial_draft(request, writer_draft)
+    validate_cover_letter_editorial_draft(request, final_draft)
+    _validate_cover_letter_humanizer_change(writer_draft, final_draft)
+    writer_evidence.__post_init__()
+    humanizer_evidence.__post_init__()
+    if writer_evidence.stage != "cover_letter_writer" or humanizer_evidence.stage != "cover_letter_humanizer":
+        raise EditorialCompositionError("cover-letter editorial stages are out of order")
+    if writer_evidence.environment != humanizer_evidence.environment:
+        raise EditorialCompositionError("cover-letter stages used different environments")
+    if writer_evidence.invocation_id == humanizer_evidence.invocation_id:
+        raise EditorialCompositionError("cover-letter writer and Humanizer require distinct sessions")
+    if (
+        writer_evidence.request_sha256 != request.request_sha256
+        or writer_evidence.response_sha256 != writer_draft.draft_sha256
+        or humanizer_evidence.request_sha256
+        != cover_letter_humanizer_request_sha256(request, writer_draft)
+        or humanizer_evidence.response_sha256 != final_draft.draft_sha256
+    ):
+        raise EditorialCompositionError("cover-letter stage evidence is not bound to its input")
+    writer_receipt = _stage_receipt(writer_evidence)
+    humanizer_receipt = _stage_receipt(humanizer_evidence)
+    values = {
+        "final_draft_sha256": final_draft.draft_sha256,
+        "humanizer_receipt_sha256": humanizer_receipt.receipt_sha256,
+        "release_authority": False,
+        "request_sha256": request.request_sha256,
+        "schema_version": COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA,
+        "writer_draft_sha256": writer_draft.draft_sha256,
+        "writer_receipt_sha256": writer_receipt.receipt_sha256,
+    }
+    receipt = CoverLetterEditorialCompositionReceipt(
+        **values,
+        receipt_sha256=content_hash(values),
+    )
+    return writer_receipt, humanizer_receipt, receipt
 
 
 @dataclass(frozen=True)
@@ -1111,7 +1511,7 @@ class DetachedCodexEditorialAdapter:
         process_environment: Mapping[str, str] | None = None,
         timeout_seconds: float = 120.0,
     ) -> None:
-        if stage not in {"resume_writer", "humanizer"}:
+        if stage not in _EDITORIAL_STAGES:
             raise EditorialCompositionError("editorial Codex adapter stage is invalid")
         if environment not in {"production", "synthetic"}:
             raise EditorialCompositionError("editorial Codex environment is invalid")
@@ -1159,13 +1559,20 @@ class DetachedCodexEditorialAdapter:
                 "network_tools_enabled": False,
                 "project_doc_max_bytes": 0,
                 "provider": self.provider,
-                "response_schema_sha256": content_hash(_DRAFT_RESPONSE_SCHEMA),
+                "response_schema_sha256": content_hash(self._response_schema),
                 "sandbox": "read-only",
                 "single_attempt": True,
                 "stage": self.stage,
                 "timeout_seconds": self.timeout_seconds,
                 "output_path_policy": "fresh-response-directory-only",
             }
+        )
+
+    @property
+    def _response_schema(self) -> Mapping[str, object]:
+        return (
+            _COVER_LETTER_RESPONSE_SCHEMA
+            if self.stage.startswith("cover_letter_") else _DRAFT_RESPONSE_SCHEMA
         )
 
     def available(self) -> bool:
@@ -1213,7 +1620,7 @@ class DetachedCodexEditorialAdapter:
             output_path = Path(response_dir) / "last-message.json"
             request_path.write_bytes(request_bytes)
             schema_path.write_text(
-                canonical_json(_DRAFT_RESPONSE_SCHEMA), encoding="utf-8"
+                canonical_json(self._response_schema), encoding="utf-8"
             )
             command = [
                 self.codex_binary,
@@ -1267,7 +1674,7 @@ class DetachedCodexEditorialAdapter:
                     f"{diagnostic[:4000]}"
                 )
             _validate_codex_jsonl(completed.stdout or "")
-            expected_schema_bytes = canonical_json(_DRAFT_RESPONSE_SCHEMA).encode()
+            expected_schema_bytes = canonical_json(self._response_schema).encode()
             if (
                 request_path.read_bytes() != request_bytes
                 or schema_path.read_bytes() != expected_schema_bytes
@@ -1288,7 +1695,12 @@ class DetachedCodexEditorialAdapter:
                     "editorial Codex response directory contains unexpected material"
                 )
             response_bytes = output_path.read_bytes()
-            _draft_from_response(response_bytes, require_transport_shape=True)
+            if self.stage.startswith("cover_letter_"):
+                _cover_letter_draft_from_response(
+                    response_bytes, require_transport_shape=True
+                )
+            else:
+                _draft_from_response(response_bytes, require_transport_shape=True)
         return EditorialBackendResult(
             response_bytes=response_bytes,
             invocation_id=invocation_id,
@@ -1307,15 +1719,23 @@ class EditorialCompositionRuntime:
     environment: str
     writer: EditorialStageAdapter
     humanizer: EditorialStageAdapter
+    document_kind: str = "cv"
 
     def __post_init__(self) -> None:
         if self.environment not in {"production", "synthetic"}:
             raise EditorialCompositionError("editorial runtime environment is unsupported")
         if self.writer is self.humanizer:
             raise EditorialCompositionError("writer and Humanizer adapters must be distinct")
+        if self.document_kind not in {"cv", "cover_letter"}:
+            raise EditorialCompositionError("editorial runtime document kind is unsupported")
+        expected_stages = (
+            ("resume_writer", "humanizer")
+            if self.document_kind == "cv"
+            else ("cover_letter_writer", "cover_letter_humanizer")
+        )
         for adapter, label, expected_stage in (
-            (self.writer, "writer", "resume_writer"),
-            (self.humanizer, "Humanizer", "humanizer"),
+            (self.writer, "writer", expected_stages[0]),
+            (self.humanizer, "Humanizer", expected_stages[1]),
         ):
             _required(getattr(adapter, "provider", None), f"{label} provider")
             _required(getattr(adapter, "model", None), f"{label} model")
@@ -1385,6 +1805,58 @@ def _draft_from_response(
         raise EditorialCompositionError("editorial backend draft schema differs")
     if "draft_sha256" in document and document["draft_sha256"] != draft.draft_sha256:
         raise EditorialCompositionError("editorial backend draft identity is invalid")
+    return draft
+
+
+def _cover_letter_draft_from_response(
+    value: bytes,
+    *,
+    require_transport_shape: bool = False,
+) -> CoverLetterEditorialDraft:
+    try:
+        document = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EditorialCompositionError(
+            "cover-letter backend returned invalid JSON"
+        ) from exc
+    if not isinstance(document, dict) or value != canonical_json(document).encode():
+        raise EditorialCompositionError(
+            "cover-letter backend response is not canonical JSON"
+        )
+    transport_keys = {"candidate_name", "schema_version", "sections"}
+    actual_keys = set(document)
+    keys_are_valid = (
+        actual_keys == transport_keys
+        if require_transport_shape
+        else actual_keys in (transport_keys, transport_keys | {"draft_sha256"})
+    )
+    if not keys_are_valid or not isinstance(document["sections"], list):
+        raise EditorialCompositionError("cover-letter backend draft schema differs")
+    sections: list[CoverLetterSection] = []
+    for section in document["sections"]:
+        if not isinstance(section, dict) or set(section) != {"atoms", "heading"}:
+            raise EditorialCompositionError(
+                "cover-letter backend section schema differs"
+            )
+        if not isinstance(section["atoms"], list):
+            raise EditorialCompositionError("cover-letter backend atoms are malformed")
+        atoms: list[EditorialAtom] = []
+        for atom in section["atoms"]:
+            if not isinstance(atom, dict) or set(atom) != {
+                "claim_id", "source_kind", "text"
+            }:
+                raise EditorialCompositionError(
+                    "cover-letter backend atom schema differs"
+                )
+            atoms.append(EditorialAtom(**atom))
+        sections.append(CoverLetterSection(str(section["heading"]), tuple(atoms)))
+    draft = build_cover_letter_editorial_draft(
+        candidate_name=document["candidate_name"], sections=sections
+    )
+    if document["schema_version"] != COVER_LETTER_DRAFT_SCHEMA:
+        raise EditorialCompositionError("cover-letter backend draft schema differs")
+    if "draft_sha256" in document and document["draft_sha256"] != draft.draft_sha256:
+        raise EditorialCompositionError("cover-letter backend draft identity is invalid")
     return draft
 
 
@@ -1536,12 +2008,168 @@ def run_editorial_composition_runtime(
     return writer_draft, final_draft, writer_evidence, humanizer_evidence
 
 
+def run_cover_letter_composition_runtime(
+    request: CoverLetterEditorialRequest,
+    *,
+    runtime: EditorialCompositionRuntime,
+    materialization_receipt: object | None = None,
+) -> tuple[
+    CoverLetterEditorialDraft,
+    CoverLetterEditorialDraft,
+    EditorialStageEvidence,
+    EditorialStageEvidence,
+]:
+    """Invoke detached one-shot cover-letter writer and Humanizer sessions."""
+    request.__post_init__()
+    runtime.__post_init__()
+    if runtime.document_kind != "cover_letter":
+        raise EditorialCompositionError("cover-letter runtime has the wrong document kind")
+    if runtime.environment == "production":
+        from career_automation.candidate_application_factory import (
+            CandidateApplicationMaterializationReceipt,
+        )
+
+        if not isinstance(
+            materialization_receipt, CandidateApplicationMaterializationReceipt
+        ):
+            raise EditorialCompositionError(
+                "production cover-letter composition requires source materialization"
+            )
+        try:
+            materialization_receipt.__post_init__()
+            materialization_receipt.authorize_editorial_request(request)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise EditorialCompositionError(
+                "production cover-letter request differs from source materialization"
+            ) from exc
+    if runtime.writer.available() is not True or runtime.humanizer.available() is not True:
+        raise EditorialCompositionError("cover-letter runtime adapter is unavailable")
+    writer_request = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": [
+                "Return only one canonical JSON object matching the response schema.",
+                "Write a specific UK cover letter under one page using the four supplied sections.",
+                "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
+                "Open directly; never write I am applying or I am writing to express interest.",
+                "Use a company-specific employer claim and the strongest supported candidate evidence.",
+                "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
+            ],
+            "schema_version": "jaa.cover-letter-writer-runtime-request.v1",
+            "stage": "cover_letter_writer",
+        }
+    ).encode()
+    writer_invocation = secrets.token_hex(32)
+    writer_session = runtime.writer.open_fresh_session(invocation_id=writer_invocation)
+    if writer_session is runtime.writer or writer_session.invocation_id != writer_invocation:
+        raise EditorialCompositionError(
+            "cover-letter writer adapter did not open the requested session"
+        )
+    writer_result = writer_session.invoke(request_bytes=writer_request)
+    writer_result.__post_init__()
+    if (
+        writer_result.invocation_id != writer_invocation
+        or writer_result.environment != runtime.environment
+        or writer_result.provider != runtime.writer.provider
+        or writer_result.model != runtime.writer.model
+        or writer_result.transport_identity != runtime.writer.transport_identity
+        or writer_result.request_sha256 != hashlib.sha256(writer_request).hexdigest()
+    ):
+        raise EditorialCompositionError(
+            "cover-letter writer result differs from configured adapter"
+        )
+    writer_draft = _cover_letter_draft_from_response(writer_result.response_bytes)
+    validate_cover_letter_editorial_draft(request, writer_draft)
+
+    humanizer_request_sha = cover_letter_humanizer_request_sha256(request, writer_draft)
+    humanizer_request = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "humanizer_request_sha256": humanizer_request_sha,
+            "instructions": [
+                "Return only one canonical JSON object matching the response schema.",
+                "Preserve every approved_claim atom and all four sections exactly.",
+                "Edit only connective atoms; remove AI phrasing, generic flattery, and filler.",
+                "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
+            ],
+            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v1",
+            "stage": "cover_letter_humanizer",
+            "writer_draft": writer_draft.document(),
+        }
+    ).encode()
+    humanizer_invocation = secrets.token_hex(32)
+    humanizer_session = runtime.humanizer.open_fresh_session(
+        invocation_id=humanizer_invocation
+    )
+    if (
+        humanizer_session is runtime.humanizer
+        or humanizer_session is writer_session
+        or humanizer_session.invocation_id != humanizer_invocation
+    ):
+        raise EditorialCompositionError(
+            "cover-letter Humanizer did not open a distinct requested session"
+        )
+    humanizer_result = humanizer_session.invoke(request_bytes=humanizer_request)
+    humanizer_result.__post_init__()
+    if (
+        humanizer_result.invocation_id != humanizer_invocation
+        or humanizer_result.environment != runtime.environment
+        or humanizer_result.provider != runtime.humanizer.provider
+        or humanizer_result.model != runtime.humanizer.model
+        or humanizer_result.transport_identity != runtime.humanizer.transport_identity
+        or humanizer_result.request_sha256 != hashlib.sha256(humanizer_request).hexdigest()
+    ):
+        raise EditorialCompositionError(
+            "cover-letter Humanizer result differs from configured adapter"
+        )
+    final_draft = _cover_letter_draft_from_response(humanizer_result.response_bytes)
+    writer_evidence = EditorialStageEvidence(
+        stage="cover_letter_writer",
+        environment=runtime.environment,
+        provider=writer_result.provider,
+        model=writer_result.model,
+        invocation_id=writer_result.invocation_id,
+        request_sha256=request.request_sha256,
+        response_sha256=writer_draft.draft_sha256,
+        transport_identity=writer_result.transport_identity,
+        request_bytes_sha256=writer_result.request_sha256,
+        response_bytes_sha256=writer_result.response_sha256,
+        executable_sha256=writer_result.executable_sha256,
+    )
+    humanizer_evidence = EditorialStageEvidence(
+        stage="cover_letter_humanizer",
+        environment=runtime.environment,
+        provider=humanizer_result.provider,
+        model=humanizer_result.model,
+        invocation_id=humanizer_result.invocation_id,
+        request_sha256=humanizer_request_sha,
+        response_sha256=final_draft.draft_sha256,
+        transport_identity=humanizer_result.transport_identity,
+        request_bytes_sha256=humanizer_result.request_sha256,
+        response_bytes_sha256=humanizer_result.response_sha256,
+        executable_sha256=humanizer_result.executable_sha256,
+    )
+    admit_cover_letter_editorial_composition(
+        request=request,
+        writer_draft=writer_draft,
+        final_draft=final_draft,
+        writer_evidence=writer_evidence,
+        humanizer_evidence=humanizer_evidence,
+    )
+    return writer_draft, final_draft, writer_evidence, humanizer_evidence
+
+
 __all__ = [
+    "ApprovedCoverLetterClaim",
     "ApprovedCVClaim",
     "CVEditorialDraft",
     "CVEditorialRequest",
     "CVSection",
     "CandidateEditorialAuthority",
+    "CoverLetterEditorialCompositionReceipt",
+    "CoverLetterEditorialDraft",
+    "CoverLetterEditorialRequest",
+    "CoverLetterSection",
     "CodexCLIContract",
     "DetachedCodexEditorialAdapter",
     "EditorialAtom",
@@ -1554,11 +2182,17 @@ __all__ = [
     "EditorialStageSession",
     "EditorialStageEvidence",
     "EditorialStageReceipt",
+    "admit_cover_letter_editorial_composition",
     "admit_editorial_composition",
+    "build_cover_letter_editorial_draft",
+    "build_cover_letter_editorial_request",
     "build_editorial_draft",
     "build_editorial_request",
+    "cover_letter_humanizer_request_sha256",
     "humanizer_request_sha256",
     "probe_detached_codex_editorial_cli",
+    "run_cover_letter_composition_runtime",
     "run_editorial_composition_runtime",
+    "validate_cover_letter_editorial_draft",
     "validate_editorial_draft",
 ]

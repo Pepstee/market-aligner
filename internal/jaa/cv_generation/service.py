@@ -44,8 +44,11 @@ from career_automation.rendering import (
 )
 
 from .adversarial_rebuild import (
+    CoverLetterEvidenceSafeRebuildResult,
+    CoverLetterRecruiterImprovementBinding,
     EvidenceSafeRebuildResult,
     RecruiterImprovementBinding,
+    rebuild_cover_letter_from_recruiter_assessment,
     rebuild_from_recruiter_assessment,
 )
 from .constraints import (
@@ -64,14 +67,19 @@ from .benchmark_learning import (
 from .editorial_composition import (
     CVEditorialDraft,
     CVEditorialRequest,
+    CoverLetterEditorialCompositionReceipt,
+    CoverLetterEditorialDraft,
+    CoverLetterEditorialRequest,
     EditorialCompositionReceipt,
     EditorialStageEvidence,
+    admit_cover_letter_editorial_composition,
     admit_editorial_composition,
+    validate_cover_letter_editorial_draft,
     validate_editorial_draft,
 )
 
 
-ORCHESTRATION_SCHEMA = "jaa.cv-composition-orchestration.v2"
+ORCHESTRATION_SCHEMA = "jaa.cv-composition-orchestration.v3"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -91,6 +99,14 @@ class ImprovementBinder(Protocol):
         request: CVEditorialRequest,
         receipt: RecruiterAssessmentReceipt,
     ) -> Sequence[RecruiterImprovementBinding]: ...
+
+
+class CoverLetterImprovementBinder(Protocol):
+    def __call__(
+        self,
+        request: CoverLetterEditorialRequest,
+        receipt: RecruiterAssessmentReceipt,
+    ) -> Sequence[CoverLetterRecruiterImprovementBinding]: ...
 
 
 def _digest(value: object, label: str) -> str:
@@ -215,6 +231,91 @@ def _source_for_editorial_draft(
     return _reidentify_source(projected)
 
 
+def _source_for_cover_letter_draft(
+    *,
+    base_source: ApplicationSource,
+    request: CoverLetterEditorialRequest,
+    draft: CoverLetterEditorialDraft,
+) -> ApplicationSource:
+    """Project an admitted cover letter onto canonical evidence-backed atoms."""
+    verify_application_source(base_source)
+    validate_cover_letter_editorial_draft(request, draft)
+    if (
+        base_source.role_title != request.role_title
+        or base_source.company_name != request.company_name
+        or base_source.vacancy_sha256 != request.vacancy_sha256
+        or base_source.contact.full_name != draft.candidate_name
+    ):
+        raise CVCompositionServiceError("cover-letter source targets another vacancy or candidate")
+    facts_by_id = {
+        fact.sentence_id: fact
+        for fact in base_source.facts
+        if fact.document_kind == "cover_letter"
+    }
+    style_by_text = {
+        slot.text: slot
+        for slot in base_source.style_slots
+        if slot.document_kind == "cover_letter"
+    }
+    selected_facts: dict[str, FactualSentence] = {}
+    selected_slots: dict[str, StyleSlot] = {}
+    sections: list[DocumentSection] = []
+    for section in draft.sections:
+        sentence_ids: list[str] = []
+        slot_ids: list[str] = []
+        factual_span_seen = False
+        for atom in section.atoms:
+            if atom.source_kind == "connective":
+                if factual_span_seen:
+                    raise CVCompositionServiceError(
+                        "canonical renderer requires cover-letter connectives before claims"
+                    )
+                slot = style_by_text.get(atom.text)
+                if slot is None:
+                    slot = StyleSlot(
+                        content_hash(
+                            {
+                                "contract": "jaa.cover-letter-editorial-style-slot.v1",
+                                "document_kind": "cover_letter",
+                                "text": atom.text,
+                            }
+                        ),
+                        "cover_letter",
+                        atom.text,
+                    )
+                selected_slots[slot.slot_id] = slot
+                slot_ids.append(slot.slot_id)
+                continue
+            factual_span_seen = True
+            fact = facts_by_id.get(atom.claim_id or "")
+            if fact is None or fact.text != atom.text:
+                raise CVCompositionServiceError(
+                    "cover-letter claim has no canonical artifact fact"
+                )
+            selected_facts[fact.sentence_id] = fact
+            sentence_ids.append(fact.sentence_id)
+        sections.append(
+            DocumentSection(
+                heading=section.heading,
+                sentence_ids=tuple(sentence_ids),
+                style_slot_ids=tuple(slot_ids),
+            )
+        )
+    non_letter_facts = tuple(
+        fact for fact in base_source.facts if fact.document_kind != "cover_letter"
+    )
+    non_letter_slots = tuple(
+        slot for slot in base_source.style_slots if slot.document_kind != "cover_letter"
+    )
+    projected = replace(
+        base_source,
+        facts=(*non_letter_facts, *selected_facts.values()),
+        style_slots=(*non_letter_slots, *selected_slots.values()),
+        letter_sections=tuple(sections),
+    )
+    return _reidentify_source(projected)
+
+
 def _validate_artifact_cv(
     *,
     request: CVEditorialRequest,
@@ -295,6 +396,8 @@ class CVCompositionOrchestrationResult:
     recruiter_archive_root: str | None
     recruiter_archive_manifest_relative_path: str | None
     orchestration_sha256: str
+    cover_letter_editorial_receipt: CoverLetterEditorialCompositionReceipt | None = None
+    cover_letter_rebuild: CoverLetterEvidenceSafeRebuildResult | None = None
     release_authority: bool = False
     schema_version: str = ORCHESTRATION_SCHEMA
 
@@ -308,6 +411,17 @@ class CVCompositionOrchestrationResult:
         self.rebuild.__post_init__()
         self.final_constraint_receipt.__post_init__()
         self.final_quality_receipt.__post_init__()
+        if (self.cover_letter_editorial_receipt is None) != (self.cover_letter_rebuild is None):
+            raise CVCompositionServiceError("cover-letter orchestration evidence is incomplete")
+        if self.environment == "production" and self.cover_letter_rebuild is None:
+            raise CVCompositionServiceError(
+                "production orchestration lacks cover-letter editorial evidence"
+            )
+        if self.cover_letter_editorial_receipt is not None:
+            self.cover_letter_editorial_receipt.__post_init__()
+            self.cover_letter_rebuild.__post_init__()
+            if self.cover_letter_rebuild.editorial_composition_receipt_sha256 != self.cover_letter_editorial_receipt.receipt_sha256:
+                raise CVCompositionServiceError("cover-letter receipts are out of order")
         if self.environment not in {"production", "synthetic"}:
             raise CVCompositionServiceError("CV orchestration environment is unsupported")
         if (self.recruiter_transport_receipt is None) != (
@@ -413,6 +527,14 @@ class CVCompositionOrchestrationResult:
                 if self.initial_benchmark_receipt is not None else None
             ),
             "rebuild_sha256": self.rebuild.rebuild_sha256,
+            "cover_letter_editorial_receipt_sha256": (
+                self.cover_letter_editorial_receipt.receipt_sha256
+                if self.cover_letter_editorial_receipt is not None else None
+            ),
+            "cover_letter_rebuild_sha256": (
+                self.cover_letter_rebuild.rebuild_sha256
+                if self.cover_letter_rebuild is not None else None
+            ),
             "recruiter_receipt_sha256": self.recruiter_receipt.receipt_sha256,
             "recruiter_assessor_configuration_sha256": (
                 self.recruiter_assessor_configuration_sha256
@@ -459,6 +581,13 @@ def run_cv_composition_orchestration(
     improvement_binder: ImprovementBinder | None = None,
     benchmark_manifest: CVBenchmarkManifest | None = None,
     materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
+    cover_letter_request: CoverLetterEditorialRequest | None = None,
+    cover_letter_writer_draft: CoverLetterEditorialDraft | None = None,
+    cover_letter_humanized_draft: CoverLetterEditorialDraft | None = None,
+    cover_letter_writer_evidence: EditorialStageEvidence | None = None,
+    cover_letter_humanizer_evidence: EditorialStageEvidence | None = None,
+    cover_letter_bindings: Sequence[CoverLetterRecruiterImprovementBinding] = (),
+    cover_letter_improvement_binder: CoverLetterImprovementBinder | None = None,
 ) -> CVCompositionOrchestrationResult:
     """Run one offline-safe CV composition, assessment and rebuild cycle."""
 
@@ -467,9 +596,21 @@ def run_cv_composition_orchestration(
             raise CVCompositionServiceError(
                 "production requires exact candidate source materialization"
             )
+        cover_inputs = (
+            cover_letter_request,
+            cover_letter_writer_draft,
+            cover_letter_humanized_draft,
+            cover_letter_writer_evidence,
+            cover_letter_humanizer_evidence,
+        )
+        if any(value is None for value in cover_inputs):
+            raise CVCompositionServiceError(
+                "production requires typed cover-letter writer and Humanizer evidence"
+            )
         try:
             materialization_receipt.__post_init__()
             materialization_receipt.authorize_editorial_request(request)
+            materialization_receipt.authorize_editorial_request(cover_letter_request)
         except ValueError as exc:
             raise CVCompositionServiceError(
                 "production editorial request differs from materialization"
@@ -490,11 +631,32 @@ def run_cv_composition_orchestration(
             raise CVCompositionServiceError(
                 "synthetic requires exactly one injected assessor or receipt"
             )
+        cover_inputs = (
+            cover_letter_request,
+            cover_letter_writer_draft,
+            cover_letter_humanized_draft,
+            cover_letter_writer_evidence,
+            cover_letter_humanizer_evidence,
+        )
+        if any(value is not None for value in cover_inputs) and any(
+            value is None for value in cover_inputs
+        ):
+            raise CVCompositionServiceError("synthetic cover-letter evidence is incomplete")
     else:
         raise CVCompositionServiceError("CV orchestration environment is unsupported")
     if improvement_binder is not None and bindings:
         raise CVCompositionServiceError(
             "provide static bindings or one post-assessment binder, not both"
+        )
+    if cover_letter_improvement_binder is not None and cover_letter_bindings:
+        raise CVCompositionServiceError(
+            "provide static cover-letter bindings or one post-assessment binder, not both"
+        )
+    if cover_letter_request is None and (
+        cover_letter_improvement_binder is not None or cover_letter_bindings
+    ):
+        raise CVCompositionServiceError(
+            "cover-letter improvements require the cover-letter module"
         )
     listing_sha256 = hashlib.sha256(listing_text.encode()).hexdigest()
     if request.vacancy_sha256 != listing_sha256:
@@ -506,11 +668,50 @@ def run_cv_composition_orchestration(
         writer_evidence=writer_evidence,
         humanizer_evidence=humanizer_evidence,
     )
+    cover_letter_editorial_receipt: CoverLetterEditorialCompositionReceipt | None = None
+    if cover_letter_request is not None:
+        assert cover_letter_writer_draft is not None
+        assert cover_letter_humanized_draft is not None
+        assert cover_letter_writer_evidence is not None
+        assert cover_letter_humanizer_evidence is not None
+        if cover_letter_request.vacancy_sha256 != listing_sha256:
+            raise CVCompositionServiceError(
+                "job listing differs from cover-letter editorial request"
+            )
+        if environment == "production" and any(
+            value is None
+            for evidence in (
+                cover_letter_writer_evidence,
+                cover_letter_humanizer_evidence,
+            )
+            for value in (
+                evidence.transport_identity,
+                evidence.request_bytes_sha256,
+                evidence.response_bytes_sha256,
+                evidence.executable_sha256,
+            )
+        ):
+            raise CVCompositionServiceError(
+                "production cover-letter stages lack detached transport evidence"
+            )
+        _, _, cover_letter_editorial_receipt = admit_cover_letter_editorial_composition(
+            request=cover_letter_request,
+            writer_draft=cover_letter_writer_draft,
+            final_draft=cover_letter_humanized_draft,
+            writer_evidence=cover_letter_writer_evidence,
+            humanizer_evidence=cover_letter_humanizer_evidence,
+        )
     initial_source = _source_for_editorial_draft(
         base_source=base_source,
         request=request,
         draft=humanized_draft,
     )
+    if cover_letter_request is not None:
+        initial_source = _source_for_cover_letter_draft(
+            base_source=initial_source,
+            request=cover_letter_request,
+            draft=cover_letter_humanized_draft,
+        )
     initial_artifacts = render_pdf_artifacts(initial_source)
     initial_constraint = _validate_artifact_cv(
         request=request,
@@ -571,6 +772,17 @@ def run_cv_composition_orchestration(
     )
     if any(not isinstance(item, RecruiterImprovementBinding) for item in resolved_bindings):
         raise CVCompositionServiceError("improvement binder returned invalid bindings")
+    resolved_cover_letter_bindings = (
+        tuple(cover_letter_improvement_binder(cover_letter_request, assessed))
+        if cover_letter_improvement_binder is not None
+        and cover_letter_request is not None
+        else tuple(cover_letter_bindings)
+    )
+    if any(
+        not isinstance(item, CoverLetterRecruiterImprovementBinding)
+        for item in resolved_cover_letter_bindings
+    ):
+        raise CVCompositionServiceError("cover-letter binder returned invalid bindings")
     rebuild = rebuild_from_recruiter_assessment(
         request=request,
         admitted_draft=humanized_draft,
@@ -579,12 +791,34 @@ def run_cv_composition_orchestration(
         recruiter_package=package,
         bindings=resolved_bindings,
         assessed_cv_text_sha256=initial_artifacts.cv_pdf.extracted_text_sha256,
+        cover_letter_module_active=cover_letter_request is not None,
     )
+    cover_letter_rebuild: CoverLetterEvidenceSafeRebuildResult | None = None
+    if cover_letter_request is not None:
+        assert cover_letter_humanized_draft is not None
+        assert cover_letter_editorial_receipt is not None
+        cover_letter_rebuild = rebuild_cover_letter_from_recruiter_assessment(
+            request=cover_letter_request,
+            admitted_draft=cover_letter_humanized_draft,
+            editorial_receipt=cover_letter_editorial_receipt,
+            recruiter_receipt=assessed,
+            recruiter_package=package,
+            bindings=resolved_cover_letter_bindings,
+            assessed_cover_letter_text_sha256=(
+                initial_artifacts.cover_letter_pdf.extracted_text_sha256
+            ),
+        )
     final_source = _source_for_editorial_draft(
         base_source=base_source,
         request=request,
         draft=rebuild.rebuilt_draft,
     )
+    if cover_letter_request is not None:
+        final_source = _source_for_cover_letter_draft(
+            base_source=final_source,
+            request=cover_letter_request,
+            draft=cover_letter_rebuild.rebuilt_draft,
+        )
     final_artifacts = render_pdf_artifacts(final_source)
     final_constraint = _validate_artifact_cv(
         request=request,
@@ -615,6 +849,14 @@ def run_cv_composition_orchestration(
             initial_benchmark.receipt_sha256 if initial_benchmark is not None else None
         ),
         "rebuild_sha256": rebuild.rebuild_sha256,
+        "cover_letter_editorial_receipt_sha256": (
+            cover_letter_editorial_receipt.receipt_sha256
+            if cover_letter_editorial_receipt is not None else None
+        ),
+        "cover_letter_rebuild_sha256": (
+            cover_letter_rebuild.rebuild_sha256
+            if cover_letter_rebuild is not None else None
+        ),
         "recruiter_receipt_sha256": assessed.receipt_sha256,
         "recruiter_assessor_configuration_sha256": (
             production_assessment.assessor_configuration_sha256
@@ -676,6 +918,8 @@ def run_cv_composition_orchestration(
             if production_assessment is not None else None
         ),
         orchestration_sha256=content_hash(values),
+        cover_letter_editorial_receipt=cover_letter_editorial_receipt,
+        cover_letter_rebuild=cover_letter_rebuild,
     )
 
 __all__ = [
