@@ -141,6 +141,7 @@ class WorkableField:
 class WorkablePolicy:
     tenant: str
     vacancy_id: str
+    job_key: str
     fields: tuple[WorkableField, ...]
     submit_label: str = "Submit application"
     success_marker: str = "Your application has been submitted successfully."
@@ -149,6 +150,8 @@ class WorkablePolicy:
     def __post_init__(self) -> None:
         if SAFE_COMPONENT.fullmatch(self.tenant) is None or SAFE_COMPONENT.fullmatch(self.vacancy_id) is None:
             raise ValueError("Workable policy route identity is invalid")
+        if not self.job_key.strip() or "\x00" in self.job_key:
+            raise ValueError("Workable policy job identity is invalid")
         if not self.fields or len({row.name for row in self.fields}) != len(self.fields):
             raise ValueError("Workable policy field inventory is invalid")
         if not self.submit_label.strip() or not self.success_marker.strip():
@@ -167,6 +170,7 @@ class WorkablePolicy:
         return _content_hash(
             {
                 "application_url": self.application_url,
+                "job_key": self.job_key,
                 "inventory_sha256": self.inventory_sha256,
                 "submit_label": self.submit_label,
                 "success_marker_sha256": hashlib.sha256(self.success_marker.encode()).hexdigest(),
@@ -636,7 +640,10 @@ class WorkableLiveAdapter:
         authority: JAA08ReleaseAuthority,
     ) -> None:
         source = authority.source
-        expected_job_key = f"workable:{policy.tenant}:{policy.vacancy_id}"
+        expected_job_key = policy.job_key
+        cv_artifact = getattr(getattr(authority, "artifacts", None), "cv_pdf", None)
+        cv_sha256 = getattr(cv_artifact, "pdf_sha256", None)
+        upload = application.uploads.get("resume")
         document = application.package_document()
         if (
             document.get("schema_version")
@@ -649,6 +656,12 @@ class WorkableLiveAdapter:
             or document.get("application_source_sha256")
             != getattr(source, "content_sha256", None)
             or getattr(source, "job_key", None) != expected_job_key
+            or not isinstance(cv_sha256, str)
+            or document.get("cv_sha256") != cv_sha256
+            or upload is None
+            or upload.sha256 != cv_sha256
+            or not isinstance(document.get("cv_quality_receipt_sha256"), str)
+            or HEX_64.fullmatch(str(document.get("cv_quality_receipt_sha256"))) is None
         ):
             raise WorkableSchemaError(
                 "Workable package, vacancy, answers, and release source differ"

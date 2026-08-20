@@ -10,8 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
@@ -190,6 +195,204 @@ class CVConstraintReceipt:
         }
 
 
+@dataclass(frozen=True)
+class CVPopplerQualityReceipt:
+    """Immutable evidence that Poppler parsed and rendered the retained PDF."""
+
+    cv_pdf_sha256: str
+    extracted_text_sha256: str
+    rendered_page_sha256s: tuple[str, ...]
+    pdfinfo_sha256: str
+    pdftotext_sha256: str
+    pdftoppm_sha256: str
+    poppler_version: str
+    receipt_sha256: str
+    passed: bool = True
+    release_authority: bool = False
+
+    def __post_init__(self) -> None:
+        hashes = (
+            self.cv_pdf_sha256,
+            self.extracted_text_sha256,
+            self.pdfinfo_sha256,
+            self.pdftotext_sha256,
+            self.pdftoppm_sha256,
+            self.receipt_sha256,
+            *self.rendered_page_sha256s,
+        )
+        if not hashes or any(not _SHA256.fullmatch(value) for value in hashes):
+            raise ValueError("Poppler quality receipt hashes must be SHA-256")
+        if not self.rendered_page_sha256s:
+            raise ValueError("Poppler quality receipt requires rendered pages")
+        if not self.poppler_version.strip():
+            raise ValueError("Poppler quality receipt requires a version")
+        if self.passed is not True or self.release_authority is not False:
+            raise ValueError("Poppler quality receipts cannot grant release authority")
+        if self.receipt_sha256 != _digest(_canonical_json(self._body()).encode()):
+            raise ValueError("Poppler quality receipt does not match its contents")
+
+    @property
+    def page_count(self) -> int:
+        return len(self.rendered_page_sha256s)
+
+    def _body(self) -> dict[str, object]:
+        return {
+            "schema_version": "jaa.cv-poppler-quality-receipt.v1",
+            "cv_pdf_sha256": self.cv_pdf_sha256,
+            "extracted_text_sha256": self.extracted_text_sha256,
+            "rendered_page_sha256s": list(self.rendered_page_sha256s),
+            "page_count": len(self.rendered_page_sha256s),
+            "pdfinfo_sha256": self.pdfinfo_sha256,
+            "pdftotext_sha256": self.pdftotext_sha256,
+            "pdftoppm_sha256": self.pdftoppm_sha256,
+            "poppler_version": self.poppler_version,
+            "passed": True,
+            "release_authority": False,
+        }
+
+    def document(self) -> dict[str, object]:
+        return {**self._body(), "receipt_sha256": self.receipt_sha256}
+
+
+def _regular_file(path: Path, *, label: str) -> os.stat_result:
+    try:
+        result = path.lstat()
+    except OSError as exc:
+        raise CVConstraintError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(result.st_mode) or not stat.S_ISREG(result.st_mode):
+        raise CVConstraintError(f"{label} must be a regular non-symlink file")
+    return result
+
+
+def _stable_file_identity(path: Path, before: os.stat_result, *, label: str) -> None:
+    after = _regular_file(path, label=label)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise CVConstraintError(f"{label} changed during Poppler verification")
+
+
+def verify_poppler_cv_quality(
+    pdf_path: str | Path,
+    *,
+    expected_pdf_sha256: str,
+    expected_page_count: int,
+    required_text_markers: Sequence[str],
+    poppler_bin_dir: str | Path,
+    poppler_library_dir: str | Path | None = None,
+) -> CVPopplerQualityReceipt:
+    """Parse, extract and rasterise one retained CV using pinned Poppler tools."""
+    if not _SHA256.fullmatch(expected_pdf_sha256):
+        raise CVConstraintError("expected PDF identity must be SHA-256")
+    if expected_page_count < 1:
+        raise CVConstraintError("expected page count must be positive")
+    markers = tuple(marker.strip() for marker in required_text_markers)
+    if not markers or any(not marker for marker in markers):
+        raise CVConstraintError("Poppler verification requires non-empty text markers")
+
+    supplied_pdf = Path(pdf_path)
+    pdf_identity = _regular_file(supplied_pdf, label="CV PDF")
+    retained_pdf = supplied_pdf.resolve(strict=True)
+    pdf_bytes = retained_pdf.read_bytes()
+    if _digest(pdf_bytes) != expected_pdf_sha256:
+        raise CVConstraintError("retained CV PDF differs from its approved hash")
+
+    bin_dir = Path(poppler_bin_dir).resolve(strict=True)
+    executables = {
+        name: bin_dir / name for name in ("pdfinfo", "pdftotext", "pdftoppm")
+    }
+    executable_hashes: dict[str, str] = {}
+    for name, executable in executables.items():
+        _regular_file(executable, label=name)
+        executable_hashes[name] = _digest(executable.read_bytes())
+
+    environment = os.environ.copy()
+    if poppler_library_dir is not None:
+        library_dir = Path(poppler_library_dir).resolve(strict=True)
+        if not library_dir.is_dir():
+            raise CVConstraintError("Poppler library directory is unavailable")
+        environment["LD_LIBRARY_PATH"] = str(library_dir)
+
+    def run(arguments: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                list(arguments),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CVConstraintError("Poppler quality verification failed") from exc
+
+    version_result = run((str(executables["pdfinfo"]), "-v"))
+    version = (version_result.stderr or version_result.stdout).decode(
+        "utf-8", errors="strict"
+    ).splitlines()[0].strip()
+    info = run((str(executables["pdfinfo"]), str(retained_pdf))).stdout.decode(
+        "utf-8", errors="strict"
+    )
+    page_match = re.search(r"(?m)^Pages:\s*(\d+)\s*$", info)
+    if page_match is None or int(page_match.group(1)) != expected_page_count:
+        raise CVConstraintError("Poppler reported an unexpected CV page count")
+
+    text_bytes = run(
+        (str(executables["pdftotext"]), "-layout", str(retained_pdf), "-")
+    ).stdout
+    text = text_bytes.decode("utf-8", errors="strict")
+    if "\ufffd" in text or any(marker not in text for marker in markers):
+        raise CVConstraintError("Poppler extraction lost required CV text")
+
+    with tempfile.TemporaryDirectory(prefix="jaa-poppler-") as temp_dir:
+        prefix = Path(temp_dir) / "page"
+        run(
+            (
+                str(executables["pdftoppm"]),
+                "-png",
+                "-r",
+                "72",
+                str(retained_pdf),
+                str(prefix),
+            )
+        )
+        rendered = sorted(Path(temp_dir).glob("page-*.png"))
+        if len(rendered) != expected_page_count:
+            raise CVConstraintError("Poppler rendered an unexpected number of CV pages")
+        rendered_bytes = tuple(page.read_bytes() for page in rendered)
+        if any(not value.startswith(b"\x89PNG\r\n\x1a\n") for value in rendered_bytes):
+            raise CVConstraintError("Poppler produced an invalid CV page image")
+        rendered_hashes = tuple(_digest(value) for value in rendered_bytes)
+
+    _stable_file_identity(supplied_pdf, pdf_identity, label="CV PDF")
+    body = {
+        "schema_version": "jaa.cv-poppler-quality-receipt.v1",
+        "cv_pdf_sha256": expected_pdf_sha256,
+        "extracted_text_sha256": _digest(text_bytes),
+        "rendered_page_sha256s": list(rendered_hashes),
+        "page_count": len(rendered_hashes),
+        "pdfinfo_sha256": executable_hashes["pdfinfo"],
+        "pdftotext_sha256": executable_hashes["pdftotext"],
+        "pdftoppm_sha256": executable_hashes["pdftoppm"],
+        "poppler_version": version,
+        "passed": True,
+        "release_authority": False,
+    }
+    return CVPopplerQualityReceipt(
+        cv_pdf_sha256=expected_pdf_sha256,
+        extracted_text_sha256=_digest(text_bytes),
+        rendered_page_sha256s=rendered_hashes,
+        pdfinfo_sha256=executable_hashes["pdfinfo"],
+        pdftotext_sha256=executable_hashes["pdftotext"],
+        pdftoppm_sha256=executable_hashes["pdftoppm"],
+        poppler_version=version,
+        receipt_sha256=_digest(_canonical_json(body).encode()),
+    )
+
+
 def _section_text(
     sections: Mapping[str, Sequence[str]],
     heading: str,
@@ -308,7 +511,9 @@ __all__ = [
     "BASE_CV_POLICY",
     "CVConstraintError",
     "CVConstraintReceipt",
+    "CVPopplerQualityReceipt",
     "CVPolicy",
     "policy_for_candidate",
     "validate_generated_cv",
+    "verify_poppler_cv_quality",
 ]

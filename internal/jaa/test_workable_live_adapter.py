@@ -56,7 +56,9 @@ def _authority() -> tuple[JAA08ReleaseAuthority, FakeGate]:
                 vacancy_sha256=_sha(b"vacancy"),
                 content_sha256=_sha(b"application source"),
             ),  # type: ignore[arg-type]
-            artifacts=object(),  # type: ignore[arg-type]
+            artifacts=SimpleNamespace(
+                cv_pdf=SimpleNamespace(pdf_sha256=_sha(b"%PDF-1.4\nsynthetic approved resume\n"))
+            ),  # type: ignore[arg-type]
             contact=object(),  # type: ignore[arg-type]
             questions=None,
             artifact_root=Path("/synthetic/artifacts"),
@@ -73,6 +75,7 @@ def _policy() -> WorkablePolicy:
     return WorkablePolicy(
         tenant="synthetic",
         vacancy_id="ABC123",
+        job_key="workable:synthetic:ABC123",
         fields=(
             WorkableField("full_name", "text", True, "Full name"),
             WorkableField("email", "email", True, "Email"),
@@ -97,6 +100,8 @@ def _application(tmp_path: Path) -> WorkableApplication:
             {
                 "application_source_sha256": _sha(b"application source"),
                 "application_url": _policy().application_url,
+                "cv_quality_receipt_sha256": _sha(b"poppler quality receipt"),
+                "cv_sha256": _sha(resume.read_bytes()),
                 "form_answers_sha256": provisional.answers_sha256,
                 "job_key": "workable:synthetic:ABC123",
                 "schema_version": "jaa.workable-application-package.v1",

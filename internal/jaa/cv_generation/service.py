@@ -39,8 +39,10 @@ from .adversarial_rebuild import (
 )
 from .constraints import (
     CVConstraintReceipt,
+    CVPopplerQualityReceipt,
     policy_for_candidate,
     validate_generated_cv,
+    verify_poppler_cv_quality,
 )
 from .document_quality import DocumentQualityReceipt, verify_document_quality
 from .benchmark_learning import (
@@ -490,14 +492,15 @@ def run_cv_composition_orchestration(
         orchestration_sha256=content_hash(values),
     )
 
-
 __all__ = [
     "CVCompositionOrchestrationResult",
     "CVCompositionServiceError",
     "CandidateApplicationPackage",
+    "CVPopplerQualityReceipt",
     "GenerationRevisionWriter",
     "ImprovementBinder",
     "RecruiterAssessor",
     "build_candidate_application_package",
     "run_cv_composition_orchestration",
+    "verify_poppler_cv_quality",
 ]
