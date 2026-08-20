@@ -23,6 +23,26 @@ SOCKET_TARGET = Path("/run/gigabyte/majaa/jaa-current-time-v1.sock")
 SERVICE_TARGET = Path("/usr/local/libexec/jaa-current-time-v1")
 UNIT_TARGET = Path("/etc/systemd/system/jaa-current-time-v1.service")
 STAGED_CONFIG_SHA256 = "db98c0b1071fb7eb34681a9765a4c943deba7749597299a7de808e009f8a95bb"
+PINNED_VENV_PYTHON = Path("/home/gutua/software-factory/.control/market-aligner-recovery-20260820/environments/jaa-integration/bin/python")
+PINNED_COMPONENT_ROOT = Path("/home/gutua")
+PINNED_RUNTIME = Path("/home/gutua/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12")
+PINNED_RUNTIME_SHA256 = "d778d0b551287fb5f06c4464f78b616c086f8d42e94d8cfc209b12324cf937a1"
+PINNED_PYVENV_SHA256 = "4716ef98127b9f94992bc78ab4f48c317d5067567ade669a88c72ef2b1b605a5"
+PINNED_LINKS = {
+    PINNED_VENV_PYTHON: "python3.12",
+    PINNED_VENV_PYTHON.parent / "python3.12": "/home/gutua/.local/bin/python3.12",
+    Path("/home/gutua/.local/bin/python3.12"): "/home/gutua/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12",
+    Path("/home/gutua/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu"): "/home/gutua/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu",
+}
+PINNED_CRYPTOGRAPHY_IDENTITY = {
+    "cryptography_backend": "/home/gutua/software-factory/.control/market-aligner-recovery-20260820/environments/jaa-integration/lib/python3.12/site-packages/cryptography/hazmat/bindings/_rust.abi3.so",
+    "cryptography_backend_sha256": "b66d4b275b58149f1d3aeed25f1f6128c5fcc70f8896895407da6fea46be12df",
+    "cryptography_module": "/home/gutua/software-factory/.control/market-aligner-recovery-20260820/environments/jaa-integration/lib/python3.12/site-packages/cryptography/__init__.py",
+    "cryptography_module_sha256": "9ad86e52b4dde0544e0a9518ad322a863cfab3a4fd763019ad5ee7675a0c9b6a",
+    "cryptography_version": "49.0.0",
+    "ed25519_signature_bytes": 64,
+    "sys_executable": str(PINNED_VENV_PYTHON),
+}
 
 
 def _exact_file(path: Path, value: bytes, mode: int) -> str:
@@ -44,6 +64,78 @@ def _exact_file(path: Path, value: bytes, mode: int) -> str:
     finally:
         os.close(descriptor)
     return "created"
+
+
+def _protected_path_components(path: Path) -> None:
+    try:
+        relative = path.relative_to(PINNED_COMPONENT_ROOT)
+    except ValueError as exc:
+        raise ValueError("runtime path escapes the reviewed component root") from exc
+    current = PINNED_COMPONENT_ROOT
+    candidates = (current, *(current / Path(*relative.parts[:index]) for index in range(1, len(relative.parts))))
+    for current in candidates:
+        metadata = current.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise ValueError(f"runtime path component is writable or not a directory: {current}")
+
+
+def _verified_runtime_link(python: Path) -> Path:
+    if python != PINNED_VENV_PYTHON or not python.is_absolute():
+        raise ValueError("Python runtime link differs from the reviewed venv entry point")
+    for link, expected_target in PINNED_LINKS.items():
+        _protected_path_components(link)
+        metadata = link.lstat()
+        if not stat.S_ISLNK(metadata.st_mode) or os.readlink(link) != expected_target:
+            raise ValueError(f"Python runtime symlink retargeted: {link}")
+        target = Path(expected_target)
+        if not target.is_absolute():
+            lexical = Path(os.path.abspath(link.parent / target))
+            if lexical != link.parent and link.parent not in lexical.parents:
+                raise ValueError(f"relative Python runtime link escapes its directory: {link}")
+    resolved = python.resolve(strict=True)
+    _protected_path_components(resolved)
+    metadata = resolved.stat()
+    if (
+        resolved != PINNED_RUNTIME
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 1000
+        or stat.S_IMODE(metadata.st_mode) != 0o755
+        or hashlib.sha256(resolved.read_bytes()).hexdigest() != PINNED_RUNTIME_SHA256
+    ):
+        raise ValueError("resolved Python interpreter identity differs")
+    pyvenv = PINNED_VENV_PYTHON.parents[1] / "pyvenv.cfg"
+    _protected_path_components(pyvenv)
+    pyvenv_metadata = pyvenv.stat()
+    if (
+        pyvenv.is_symlink()
+        or not stat.S_ISREG(pyvenv_metadata.st_mode)
+        or pyvenv_metadata.st_uid != 1000
+        or stat.S_IMODE(pyvenv_metadata.st_mode) & 0o022
+        or hashlib.sha256(pyvenv.read_bytes()).hexdigest() != PINNED_PYVENV_SHA256
+    ):
+        raise ValueError("pyvenv.cfg identity differs")
+    probe = """import hashlib,json,sys
+from pathlib import Path
+import cryptography
+import cryptography.hazmat.bindings._rust as rust
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+module=Path(cryptography.__file__).resolve(strict=True)
+backend=Path(rust.__file__).resolve(strict=True)
+print(json.dumps({"cryptography_backend":str(backend),"cryptography_backend_sha256":hashlib.sha256(backend.read_bytes()).hexdigest(),"cryptography_module":str(module),"cryptography_module_sha256":hashlib.sha256(module.read_bytes()).hexdigest(),"cryptography_version":cryptography.__version__,"ed25519_signature_bytes":len(Ed25519PrivateKey.generate().sign(b"runtime-probe")),"sys_executable":sys.executable},sort_keys=True))"""
+    completed = subprocess.run(
+        [str(python), "-I", "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    try:
+        identity = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("cryptography runtime identity is not canonical JSON") from exc
+    if completed.stderr or identity != PINNED_CRYPTOGRAPHY_IDENTITY:
+        raise ValueError("cryptography import/runtime identity drifted")
+    return python
 
 
 def _unit(*, python: Path, key: Path) -> bytes:
@@ -81,9 +173,10 @@ def install(
 ) -> dict[str, object]:
     if os.geteuid() != 0:
         raise PermissionError("installer must run as UID 0")
-    for source, label in ((staged_config, "staged config"), (service_source, "service source"), (device_key, "device key"), (python, "Python runtime")):
+    for source, label in ((staged_config, "staged config"), (service_source, "service source"), (device_key, "device key")):
         if not source.is_absolute() or source.is_symlink() or not source.resolve(strict=True).is_file():
             raise ValueError(f"{label} is not an exact regular file")
+    verified_python = _verified_runtime_link(python)
     config_bytes = staged_config.read_bytes()
     if hashlib.sha256(config_bytes).hexdigest() != STAGED_CONFIG_SHA256:
         raise ValueError("staged current-time configuration hash differs")
@@ -103,7 +196,7 @@ def install(
     outcomes = {
         "config": _exact_file(CONFIG_TARGET, config_bytes, 0o600),
         "service": _exact_file(SERVICE_TARGET, service_source.read_bytes(), 0o755),
-        "unit": _exact_file(UNIT_TARGET, _unit(python=python, key=device_key), 0o644),
+        "unit": _exact_file(UNIT_TARGET, _unit(python=verified_python, key=device_key), 0o644),
     }
     if not activate:
         return {"activated": False, "outcomes": outcomes}
