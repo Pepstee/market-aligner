@@ -28,6 +28,111 @@ from .provider_observation_capture import exact_clean_head
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 SOURCE_PATHS = ("career_automation/workable_live_adapter.py",)
+WORKABLE_CONTROL_SELECTOR = "input:not([type=submit]), textarea, select"
+WORKABLE_INVENTORY_SCRIPT = r"""controls => controls.map((control, index) => {
+  const clean = value => String(value || '').trim().replace(/\s+/g, ' ');
+  const text = element => clean(element && (element.innerText || element.textContent));
+  const fieldType = control.tagName.toLowerCase() === 'textarea'
+    ? 'textarea'
+    : (control.tagName.toLowerCase() === 'select'
+      ? 'select' : clean(control.type || 'text').toLowerCase());
+  const style = getComputedStyle(control);
+  const hidden = fieldType === 'hidden'
+    || control.hidden
+    || control.disabled
+    || control.getAttribute('aria-hidden') === 'true'
+    || !control.getClientRects().length
+    || style.visibility === 'hidden'
+    || style.display === 'none';
+  const errors = [];
+  if (hidden) errors.push('hidden_or_disabled_control');
+  if (control.id && document.querySelectorAll(`#${CSS.escape(control.id)}`).length !== 1) {
+    errors.push('duplicate_control_id');
+  }
+
+  const labelledByIds = clean(control.getAttribute('aria-labelledby'))
+    .split(/\s+/).filter(Boolean);
+  const labelledBy = labelledByIds.map(id => {
+    const matches = document.querySelectorAll(`#${CSS.escape(id)}`);
+    return {id, count: matches.length, text: matches.length === 1 ? text(matches[0]) : ''};
+  });
+  if (labelledBy.some(row => row.count !== 1 || !row.text)) {
+    errors.push('invalid_aria_labelledby');
+  }
+
+  const nativeAriaLabel = clean(control.getAttribute('aria-label'));
+  const associatedLabels = Array.from(control.labels || [])
+    .map(label => text(label)).filter(Boolean);
+  const uniqueAssociated = [...new Set(associatedLabels)];
+  const fileToken = fieldType === 'file'
+    ? /^input_files_input_([A-Za-z0-9_-]+)$/.exec(control.id || '')
+    : null;
+  const expectedPrimaryIds = new Set([
+    ...(control.id ? [`${control.id}_label`] : []),
+    ...(fileToken ? [`${fileToken[1]}_label`] : []),
+  ]);
+
+  let label = '';
+  let labelSource = '';
+  let providerBound = false;
+  if (labelledBy.length && !errors.includes('invalid_aria_labelledby')) {
+    const primaries = labelledBy.filter(row => expectedPrimaryIds.has(row.id));
+    const secondary = labelledBy.filter(row => !expectedPrimaryIds.has(row.id));
+    const permittedSecondary = secondary.every(row => row.id.startsWith('description_'));
+    if (primaries.length === 1 && permittedSecondary) {
+      label = primaries[0].text;
+      labelSource = 'aria-labelledby';
+      providerBound = Boolean(fileToken && primaries[0].id === `${fileToken[1]}_label`);
+    } else if (labelledBy.length === 1) {
+      label = labelledBy[0].text;
+      labelSource = 'aria-labelledby';
+    } else {
+      errors.push('ambiguous_aria_labelledby');
+    }
+    if (nativeAriaLabel && label && nativeAriaLabel !== label) {
+      errors.push('conflicting_aria_names');
+    }
+  } else if (nativeAriaLabel) {
+    label = nativeAriaLabel;
+    labelSource = 'aria-label';
+  } else if (uniqueAssociated.length === 1) {
+    label = uniqueAssociated[0];
+    labelSource = 'associated-label';
+  } else if (uniqueAssociated.length > 1) {
+    errors.push('ambiguous_associated_labels');
+  } else if (fileToken) {
+    const providerLabelId = `${fileToken[1]}_label`;
+    const matches = document.querySelectorAll(`#${CSS.escape(providerLabelId)}`);
+    if (matches.length === 1 && text(matches[0])) {
+      label = text(matches[0]);
+      labelSource = 'workable-file-structure';
+      providerBound = true;
+    } else {
+      errors.push(matches.length > 1 ? 'ambiguous_provider_label' : 'unlabeled_control');
+    }
+  } else {
+    errors.push('unlabeled_control');
+  }
+
+  if (!label || label.length > 512 || /[\u0000-\u001f\u007f]/.test(label)) {
+    errors.push('invalid_accessible_name');
+  }
+  let name = clean(control.name);
+  if (!name && fieldType === 'file' && providerBound) {
+    name = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  }
+  if (!name) errors.push('missing_stable_field_identity');
+  return {
+    index,
+    name,
+    native_name: clean(control.name),
+    field_type: fieldType,
+    required: Boolean(control.required),
+    label,
+    label_source: labelSource,
+    errors: [...new Set(errors)],
+  };
+})"""
 
 
 class WorkableBoundaryError(RuntimeError):
@@ -503,24 +608,22 @@ class WorkableLiveAdapter:
 
     @staticmethod
     def inventory(page: Page) -> tuple[WorkableField, ...]:
-        rows = page.locator("input:not([type=submit]), textarea, select").evaluate_all(
-            """controls => controls.map(control => {
-              const label = control.id
-                ? document.querySelector(`label[for="${CSS.escape(control.id)}"]`)
-                : null;
-              return {
-                name: control.name || '',
-                field_type: control.tagName.toLowerCase() === 'textarea'
-                  ? 'textarea'
-                  : (control.tagName.toLowerCase() === 'select'
-                    ? 'select' : (control.type || 'text')),
-                required: Boolean(control.required),
-                label: label ? (label.innerText || '').trim().replace(/\\s+/g, ' ') : ''
-              };
-            })"""
+        rows = page.locator(WORKABLE_CONTROL_SELECTOR).evaluate_all(
+            WORKABLE_INVENTORY_SCRIPT
         )
         try:
-            return tuple(
+            if any(row["errors"] for row in rows):
+                reasons = sorted(
+                    {
+                        str(reason)
+                        for row in rows
+                        for reason in row["errors"]
+                    }
+                )
+                raise WorkableSchemaError(
+                    "Workable inventory rejected controls: " + ",".join(reasons)
+                )
+            fields = tuple(
                 WorkableField(
                     str(row["name"]),
                     str(row["field_type"]),
@@ -529,6 +632,13 @@ class WorkableLiveAdapter:
                 )
                 for row in rows
             )
+            if len({row.name for row in fields}) != len(fields):
+                raise WorkableSchemaError(
+                    "Workable inventory contains duplicate field identities"
+                )
+            return fields
+        except WorkableSchemaError:
+            raise
         except (KeyError, TypeError, ValueError) as exc:
             raise WorkableSchemaError("Workable inventory cannot be normalized") from exc
 
@@ -541,12 +651,13 @@ class WorkableLiveAdapter:
         if submit.count() != 1 or not submit.is_visible() or not submit.is_enabled():
             raise WorkableSchemaError("Workable submit control is not uniquely actionable")
 
-    @staticmethod
-    def _control(page: Page, name: str):
-        locator = page.locator(f'[name="{name}"]')
-        if locator.count() != 1:
+    @classmethod
+    def _control(cls, page: Page, field: WorkableField):
+        fields = cls.inventory(page)
+        indexes = [index for index, row in enumerate(fields) if row.name == field.name]
+        if len(indexes) != 1 or fields[indexes[0]] != field:
             raise WorkableSchemaError("Workable mapped control is not unique")
-        return locator
+        return page.locator(WORKABLE_CONTROL_SELECTOR).nth(indexes[0])
 
     @classmethod
     def _fill(cls, page: Page, policy: WorkablePolicy, application: WorkableApplication) -> None:
@@ -555,7 +666,7 @@ class WorkableLiveAdapter:
         if set(application.answers) != answer_fields or set(application.uploads) != upload_fields:
             raise WorkableSchemaError("Workable answers differ from the exact field contract")
         for row in policy.fields:
-            control = cls._control(page, row.name)
+            control = cls._control(page, row)
             if row.field_type == "file":
                 upload = application.uploads[row.name]
                 control.set_input_files(str(_regular_file(upload.path, upload.sha256)))
@@ -589,7 +700,7 @@ class WorkableLiveAdapter:
     ) -> None:
         """Revalidate browser-resident answers without writing to the page."""
         for row in policy.fields:
-            control = cls._control(page, row.name)
+            control = cls._control(page, row)
             if row.field_type == "file":
                 upload = application.uploads[row.name]
                 expected = _regular_file(upload.path, upload.sha256)

@@ -154,6 +154,163 @@ def _install(page, policy: WorkablePolicy, *, success: bool = True) -> None:
     page.goto(policy.application_url, wait_until="domcontentloaded")
 
 
+def _install_inventory_fixture(page, body: str) -> None:
+    def fulfill(route: Route) -> None:
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=f"<!doctype html><html><body><form>{body}</form></body></html>",
+        )
+
+    page.route("**/*", fulfill)
+    page.goto(_policy().application_url, wait_until="domcontentloaded")
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    (
+        (
+            '<label for="name-field">Full name</label>'
+            '<input id="name-field" name="full_name" type="text" required>',
+            WorkableField("full_name", "text", True, "Full name"),
+        ),
+        (
+            '<label>Phone number<input name="phone" type="tel"></label>',
+            WorkableField("phone", "tel", False, "Phone number"),
+        ),
+        (
+            '<input name="portfolio" type="url" aria-label="Portfolio URL">',
+            WorkableField("portfolio", "url", False, "Portfolio URL"),
+        ),
+        (
+            '<span id="motivation_label">Motivation</span>'
+            '<textarea name="motivation" aria-labelledby="motivation_label"></textarea>',
+            WorkableField("motivation", "textarea", False, "Motivation"),
+        ),
+        (
+            '<span id="TOKEN_label">Resume</span>'
+            '<input id="input_files_input_TOKEN" type="file" required>',
+            WorkableField("resume", "file", True, "Resume"),
+        ),
+        (
+            '<span id="TOKEN_label">Resume</span>'
+            '<span id="description_input_TOKEN">Choose file</span>'
+            '<label for="input_files_input_TOKEN">Decorative upload icon</label>'
+            '<label for="input_files_input_TOKEN">Choose file</label>'
+            '<input id="input_files_input_TOKEN" type="file" required '
+            'aria-labelledby="TOKEN_label description_input_TOKEN">',
+            WorkableField("resume", "file", True, "Resume"),
+        ),
+    ),
+)
+def test_inventory_accepts_one_unambiguous_accessible_name_source(
+    body: str, expected: WorkableField
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_inventory_fixture(page, body)
+        assert WorkableLiveAdapter.inventory(page) == (expected,)
+        assert WorkableLiveAdapter._control(page, expected).count() == 1
+        assert page.locator("input, textarea, select").input_value() == ""
+        browser.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        (
+            '<label for="field">First label</label><label for="field">Second label</label>'
+            '<input id="field" name="field" type="text">',
+            "ambiguous_associated_labels",
+        ),
+        (
+            '<span id="field_label">Primary label</span>'
+            '<input id="field" name="field" type="text" '
+            'aria-labelledby="field_label" aria-label="Conflicting label">',
+            "conflicting_aria_names",
+        ),
+        (
+            '<span id="duplicate">One</span><span id="duplicate">Two</span>'
+            '<input name="field" type="text" aria-labelledby="duplicate">',
+            "invalid_aria_labelledby",
+        ),
+        ('<input name="field" type="text">', "unlabeled_control"),
+        (
+            '<label>Visible<input name="visible" type="text"></label>'
+            '<label>Trap<input name="trap" type="text" hidden></label>',
+            "hidden_or_disabled_control",
+        ),
+        (
+            '<label for="duplicate-id">One</label>'
+            '<input id="duplicate-id" name="one" type="text">'
+            '<label for="duplicate-id">Two</label>'
+            '<input id="duplicate-id" name="two" type="text">',
+            "duplicate_control_id",
+        ),
+        (
+            '<span id="TOKEN_label">Resume</span>'
+            '<span id="TOKEN_label">Other document</span>'
+            '<input id="input_files_input_TOKEN" type="file">',
+            "ambiguous_provider_label",
+        ),
+        (
+            '<label for="nameless">Nameless</label>'
+            '<input id="nameless" type="text">',
+            "missing_stable_field_identity",
+        ),
+    ),
+)
+def test_inventory_rejects_ambiguous_unlabelled_or_hidden_controls(
+    body: str, reason: str
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_inventory_fixture(page, body)
+        with pytest.raises(WorkableSchemaError, match=reason):
+            WorkableLiveAdapter.inventory(page)
+        browser.close()
+
+
+def test_inventory_rejects_duplicate_normalized_field_identity() -> None:
+    body = (
+        '<label>First<input name="duplicate" type="text"></label>'
+        '<label>Second<input name="duplicate" type="text"></label>'
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_inventory_fixture(page, body)
+        with pytest.raises(WorkableSchemaError, match="duplicate field identities"):
+            WorkableLiveAdapter.inventory(page)
+        browser.close()
+
+
+def test_accessible_name_drift_rejects_against_reviewed_policy() -> None:
+    policy = WorkablePolicy(
+        tenant="synthetic",
+        vacancy_id="ABC123",
+        job_key="workable:synthetic:ABC123",
+        fields=(WorkableField("full_name", "text", True, "Full name"),),
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_inventory_fixture(
+            page,
+            '<label for="name-field">Full name</label>'
+            '<input id="name-field" name="full_name" type="text" required>'
+            '<button type="submit">Submit application</button>',
+        )
+        page.locator('label[for="name-field"]').evaluate(
+            "label => label.textContent = 'Changed name'"
+        )
+        with pytest.raises(WorkableSchemaError, match="inventory differs"):
+            WorkableLiveAdapter._assert_schema(page, policy)
+        browser.close()
+
+
 @pytest.fixture
 def stable_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
