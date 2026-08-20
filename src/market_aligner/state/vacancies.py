@@ -29,6 +29,10 @@ class VacancyRefreshConflict(RuntimeError):
     """The exact fetched vacancy changed before a guarded refresh committed."""
 
 
+class VacancyRefreshIndeterminate(VacancyRefreshConflict):
+    """An official fetch may have occurred but no exact response was persisted."""
+
+
 def raw_posting_content_sha256(row: RawPosting) -> str:
     """Return the existing collector content identity for a raw posting."""
 
@@ -58,7 +62,10 @@ def raw_posting_from_bytes(value: bytes) -> RawPosting:
         raise ValueError("raw response object is not valid UTF-8 JSON") from exc
     if not isinstance(payload, dict):
         raise ValueError("raw response object must be a JSON object")
-    row = from_dict(RawPosting, payload)
+    try:
+        row = from_dict(RawPosting, payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("raw response object does not satisfy the collector schema") from exc
     if raw_posting_bytes(row) != value:
         raise ValueError("raw response object is not in canonical collector encoding")
     return row
@@ -93,9 +100,12 @@ CREATE TABLE IF NOT EXISTS vacancy_refreshes (
   refresh_id TEXT PRIMARY KEY,
   operation_id TEXT NOT NULL UNIQUE,
   context_sha256 TEXT NOT NULL,
+  context_json TEXT NOT NULL,
   job_key TEXT NOT NULL,
   expected_content_sha256 TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('intent','fetched','object_ready','committed')),
+  status TEXT NOT NULL CHECK(status IN (
+    'intent','fetch_started','indeterminate','fetched','object_ready','committed'
+  )),
   started_at TEXT NOT NULL,
   old_content_sha256 TEXT NOT NULL,
   old_fetched_at TEXT NOT NULL,
@@ -106,6 +116,8 @@ CREATE TABLE IF NOT EXISTS vacancy_refreshes (
   new_raw_bytes BLOB,
   new_object_sha256 TEXT,
   receipt_basis_json TEXT,
+  receipt_basis_sha256 TEXT,
+  transition_sha256 TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE RESTRICT
@@ -137,6 +149,195 @@ def _canonical_hash(value: object) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+_REFRESH_SELECT = """refresh_id,operation_id,context_sha256,context_json,job_key,
+expected_content_sha256,status,started_at,old_content_sha256,old_fetched_at,
+old_raw_bytes,old_object_sha256,new_content_sha256,new_fetched_at,new_raw_bytes,
+new_object_sha256,receipt_basis_json,receipt_basis_sha256,transition_sha256"""
+
+
+def _refresh_transition_document(value: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "context_sha256": value["context_sha256"],
+        "expected_content_sha256": value["expected_content_sha256"],
+        "job_key": value["job_key"],
+        "new_content_sha256": value["new_content_sha256"],
+        "new_fetched_at": value["new_fetched_at"],
+        "new_raw_object_sha256": value["new_object_sha256"],
+        "old_content_sha256": value["old_content_sha256"],
+        "old_fetched_at": value["old_fetched_at"],
+        "old_raw_object_sha256": value["old_object_sha256"],
+        "operation_id": value["operation_id"],
+        "receipt_basis_sha256": value["receipt_basis_sha256"],
+        "refresh_id": value["refresh_id"],
+        "schema_version": "market-aligner.vacancy-refresh-transition.v1",
+        "started_at": value["started_at"],
+        "status": value["status"],
+    }
+
+
+def _refresh_transition_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
+    try:
+        context = json.loads(str(row[3]))
+        receipt_basis = None if row[16] is None else json.loads(str(row[16]))
+    except json.JSONDecodeError as exc:
+        raise VacancyRefreshConflict("refresh journal JSON is invalid") from exc
+    value: dict[str, object] = {
+        "refresh_id": str(row[0]),
+        "operation_id": str(row[1]),
+        "context_sha256": str(row[2]),
+        "context": context,
+        "job_key": str(row[4]),
+        "expected_content_sha256": str(row[5]),
+        "status": str(row[6]),
+        "started_at": str(row[7]),
+        "old_content_sha256": str(row[8]),
+        "old_fetched_at": str(row[9]),
+        "old_raw_bytes": bytes(row[10]),
+        "old_object_sha256": str(row[11]),
+        "new_content_sha256": None if row[12] is None else str(row[12]),
+        "new_fetched_at": None if row[13] is None else str(row[13]),
+        "new_raw_bytes": None if row[14] is None else bytes(row[14]),
+        "new_object_sha256": None if row[15] is None else str(row[15]),
+        "receipt_basis": receipt_basis,
+        "receipt_basis_sha256": None if row[17] is None else str(row[17]),
+        "transition_sha256": None if row[18] is None else str(row[18]),
+    }
+    _validate_refresh_transition(value)
+    return value
+
+
+def _validate_refresh_transition(value: Mapping[str, object]) -> None:
+    context = value["context"]
+    if not isinstance(context, dict):
+        raise VacancyRefreshConflict("refresh operation context is not an object")
+    if _canonical_hash(context) != value["context_sha256"]:
+        raise VacancyRefreshConflict("refresh operation context identity differs")
+    exact_context_fields = {
+        "expected_content_sha256": value["expected_content_sha256"],
+        "job_key": value["job_key"],
+        "operation_id": value["operation_id"],
+        "schema_version": "market-aligner.vacancy-refresh-context.v1",
+    }
+    if any(context.get(key) != expected for key, expected in exact_context_fields.items()):
+        raise VacancyRefreshConflict("refresh operation context differs from journal")
+    for key in ("config_sha256", "source_sha256"):
+        identity = context.get(key)
+        if not isinstance(identity, str) or len(identity) != 64 or any(
+            character not in "0123456789abcdef" for character in identity
+        ):
+            raise VacancyRefreshConflict(f"refresh operation {key} is not a SHA-256")
+    expected_refresh_id = _canonical_hash(
+        {
+            "context_sha256": value["context_sha256"],
+            "schema_version": "market-aligner.vacancy-refresh-id.v1",
+        }
+    )
+    if value["refresh_id"] != expected_refresh_id:
+        raise VacancyRefreshConflict("refresh identity differs from operation context")
+    old_bytes = bytes(value["old_raw_bytes"])
+    try:
+        old_raw = raw_posting_from_bytes(old_bytes)
+    except ValueError as exc:
+        raise VacancyRefreshConflict("journalled old response bytes are invalid") from exc
+    if old_raw.key != value["job_key"]:
+        raise VacancyRefreshConflict("journalled old response has another vacancy identity")
+    if hashlib.sha256(old_bytes).hexdigest() != value["old_object_sha256"]:
+        raise VacancyRefreshConflict("journalled old response object hash differs")
+    if (
+        raw_posting_content_sha256(old_raw) != value["old_content_sha256"]
+        or value["old_content_sha256"] != value["expected_content_sha256"]
+        or old_raw.fetched_at != value["old_fetched_at"]
+    ):
+        raise VacancyRefreshConflict("journalled old response content identity differs")
+
+    status = str(value["status"])
+    empty_new = ("intent", "fetch_started", "indeterminate")
+    complete_new = ("fetched", "object_ready", "committed")
+    if status not in (*empty_new, *complete_new):
+        raise VacancyRefreshConflict("refresh journal has an invalid status")
+    new_fields = (
+        value["new_content_sha256"],
+        value["new_fetched_at"],
+        value["new_raw_bytes"],
+        value["new_object_sha256"],
+    )
+    if status in empty_new and any(item is not None for item in new_fields):
+        raise VacancyRefreshConflict("pre-fetch refresh journal contains response material")
+    if status in complete_new:
+        if any(item is None for item in new_fields):
+            raise VacancyRefreshConflict("post-fetch refresh journal lacks response material")
+        new_bytes = bytes(value["new_raw_bytes"])
+        try:
+            new_raw = raw_posting_from_bytes(new_bytes)
+        except ValueError as exc:
+            raise VacancyRefreshConflict("journalled new response bytes are invalid") from exc
+        if new_raw.key != value["job_key"]:
+            raise VacancyRefreshConflict("journalled new response has another vacancy identity")
+        if hashlib.sha256(new_bytes).hexdigest() != value["new_object_sha256"]:
+            raise VacancyRefreshConflict("journalled new response object hash differs")
+        if (
+            raw_posting_content_sha256(new_raw) != value["new_content_sha256"]
+            or new_raw.fetched_at != value["new_fetched_at"]
+        ):
+            raise VacancyRefreshConflict("journalled new response content identity differs")
+
+    receipt_fields = (
+        value["receipt_basis"],
+        value["receipt_basis_sha256"],
+        value["transition_sha256"],
+    )
+    if status != "committed" and any(item is not None for item in receipt_fields):
+        raise VacancyRefreshConflict("uncommitted refresh journal contains receipt authority")
+    if status == "committed":
+        if any(item is None for item in receipt_fields):
+            raise VacancyRefreshConflict("committed refresh journal lacks receipt authority")
+        receipt = value["receipt_basis"]
+        if not isinstance(receipt, dict):
+            raise VacancyRefreshConflict("sealed receipt basis is not an object")
+        unsealed = dict(receipt)
+        stored_basis_sha256 = unsealed.pop("receipt_basis_sha256", None)
+        stored_transition_sha256 = unsealed.pop("transition_sha256", None)
+        recomputed_basis_sha256 = _canonical_hash(unsealed)
+        if (
+            stored_basis_sha256 != recomputed_basis_sha256
+            or value["receipt_basis_sha256"] != recomputed_basis_sha256
+        ):
+            raise VacancyRefreshConflict("sealed receipt-basis identity differs")
+        transition_value = {**value, "receipt_basis_sha256": recomputed_basis_sha256}
+        recomputed_transition_sha256 = _canonical_hash(
+            _refresh_transition_document(transition_value)
+        )
+        if (
+            stored_transition_sha256 != recomputed_transition_sha256
+            or value["transition_sha256"] != recomputed_transition_sha256
+        ):
+            raise VacancyRefreshConflict("sealed refresh transition identity differs")
+        exact_receipt_fields = {
+            "adapter": str(value["job_key"]).split(":", 1)[0],
+            "application_authority": False,
+            "authority_scope": "collection_only",
+            "config_sha256": context["config_sha256"],
+            "context_sha256": value["context_sha256"],
+            "expected_old_content_sha256": value["expected_content_sha256"],
+            "job_key": value["job_key"],
+            "new_content_sha256": value["new_content_sha256"],
+            "new_fetched_at": value["new_fetched_at"],
+            "new_raw_object_sha256": value["new_object_sha256"],
+            "old_content_sha256": value["old_content_sha256"],
+            "old_fetched_at": value["old_fetched_at"],
+            "old_raw_object_sha256": value["old_object_sha256"],
+            "operation_id": value["operation_id"],
+            "official_fetch_count": 1,
+            "raw_cache_file_sha256": value["new_object_sha256"],
+            "refresh_id": value["refresh_id"],
+            "schema_version": "market-aligner.vacancy-refresh-receipt.v2",
+            "source_sha256": context["source_sha256"],
+            "started_at": value["started_at"],
+        }
+        if any(receipt.get(key) != expected for key, expected in exact_receipt_fields.items()):
+            raise VacancyRefreshConflict("sealed receipt basis differs from journal authorities")
 
 
 class JobDatabase:
@@ -271,38 +472,14 @@ class JobDatabase:
 
         with closing(self.connect()) as conn:
             row = conn.execute(
-                """SELECT refresh_id,operation_id,context_sha256,job_key,
-                          expected_content_sha256,status,started_at,
-                          old_content_sha256,old_fetched_at,old_raw_bytes,
-                          old_object_sha256,new_content_sha256,new_fetched_at,
-                          new_raw_bytes,new_object_sha256,receipt_basis_json
-                   FROM vacancy_refreshes WHERE operation_id=?""",
+                f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE operation_id=?",
                 (operation_id,),
             ).fetchone()
         if row is None:
             return None
         if row[2] != context_sha256:
             raise ValueError("refresh operation ID is already bound to another context")
-        return {
-            "refresh_id": str(row[0]),
-            "operation_id": str(row[1]),
-            "context_sha256": str(row[2]),
-            "job_key": str(row[3]),
-            "expected_content_sha256": str(row[4]),
-            "status": str(row[5]),
-            "started_at": str(row[6]),
-            "old_content_sha256": str(row[7]),
-            "old_fetched_at": str(row[8]),
-            "old_raw_bytes": bytes(row[9]),
-            "old_object_sha256": str(row[10]),
-            "new_content_sha256": None if row[11] is None else str(row[11]),
-            "new_fetched_at": None if row[12] is None else str(row[12]),
-            "new_raw_bytes": None if row[13] is None else bytes(row[13]),
-            "new_object_sha256": None if row[14] is None else str(row[14]),
-            "receipt_basis": (
-                None if row[15] is None else json.loads(str(row[15]))
-            ),
-        }
+        return _refresh_transition_from_row(row)
 
     def begin_vacancy_refresh(
         self,
@@ -310,6 +487,7 @@ class JobDatabase:
         refresh_id: str,
         operation_id: str,
         context_sha256: str,
+        context_document: Mapping[str, object],
         job_key: str,
         expected_content_sha256: str,
         started_at: str,
@@ -325,6 +503,15 @@ class JobDatabase:
             if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
                 raise ValueError(f"{label} identity must be lowercase SHA-256")
         old_raw = raw_posting_from_bytes(old_raw_bytes)
+        canonical_context = json.loads(json.dumps(
+            dict(context_document),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ))
+        if _canonical_hash(canonical_context) != context_sha256:
+            raise ValueError("refresh operation context bytes differ from its identity")
         if old_raw.key != job_key:
             raise ValueError("old raw-cache response differs from refresh vacancy")
         old_object_sha256 = hashlib.sha256(old_raw_bytes).hexdigest()
@@ -343,6 +530,25 @@ class JobDatabase:
                 )
                 assert loaded is not None
                 return loaded
+            blocked = conn.execute(
+                """SELECT operation_id,status FROM vacancy_refreshes
+                   WHERE job_key=? AND expected_content_sha256=?
+                     AND status IN (
+                       'intent','fetch_started','indeterminate','fetched','object_ready'
+                     )
+                   ORDER BY created_at,operation_id LIMIT 1""",
+                (job_key, expected_content_sha256),
+            ).fetchone()
+            if blocked is not None:
+                conn.rollback()
+                if blocked[1] in ("fetch_started", "indeterminate"):
+                    raise VacancyRefreshIndeterminate(
+                        "a prior official fetch is indeterminate and requires explicit "
+                        f"reconciliation: {blocked[0]}"
+                    )
+                raise VacancyRefreshConflict(
+                    f"a prior vacancy refresh is still active: {blocked[0]}"
+                )
             current = conn.execute(
                 """SELECT content_hash,fetched_at,fetch_status
                    FROM postings WHERE key=?""",
@@ -361,15 +567,17 @@ class JobDatabase:
                 raise ValueError("old raw-cache response differs from SQLite content identity")
             conn.execute(
                 """INSERT INTO vacancy_refreshes(
-                     refresh_id,operation_id,context_sha256,job_key,
+                     refresh_id,operation_id,context_sha256,context_json,job_key,
                      expected_content_sha256,status,started_at,
                      old_content_sha256,old_fetched_at,old_raw_bytes,
                      old_object_sha256
-                   ) VALUES(?,?,?,?,?,'intent',?,?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,'intent',?,?,?,?,?)""",
                 (
                     refresh_id,
                     operation_id,
                     context_sha256,
+                    json.dumps(canonical_context, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"), allow_nan=False),
                     job_key,
                     expected_content_sha256,
                     started_at,
@@ -384,6 +592,50 @@ class JobDatabase:
         assert loaded is not None
         return loaded
 
+    def start_vacancy_refresh_fetch(self, refresh_id: str) -> None:
+        """Durably enter the irreducible official-fetch window before I/O."""
+
+        with closing(self.connect()) as conn, conn:
+            row = conn.execute(
+                f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
+                (refresh_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown vacancy refresh: {refresh_id}")
+            transition = _refresh_transition_from_row(row)
+            if transition["status"] != "intent":
+                raise VacancyRefreshConflict("refresh fetch window was already entered")
+            cursor = conn.execute(
+                """UPDATE vacancy_refreshes SET status='fetch_started',
+                     updated_at=CURRENT_TIMESTAMP
+                   WHERE refresh_id=? AND status='intent'""",
+                (refresh_id,),
+            )
+            if cursor.rowcount != 1:
+                raise VacancyRefreshConflict("refresh fetch window was claimed concurrently")
+
+    def mark_vacancy_refresh_indeterminate(self, refresh_id: str) -> None:
+        """Seal an unresolved fetch window so it can never auto-refetch."""
+
+        with closing(self.connect()) as conn, conn:
+            row = conn.execute(
+                f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
+                (refresh_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown vacancy refresh: {refresh_id}")
+            transition = _refresh_transition_from_row(row)
+            if transition["status"] == "indeterminate":
+                return
+            if transition["status"] != "fetch_started":
+                raise VacancyRefreshConflict("only an unresolved fetch can be indeterminate")
+            conn.execute(
+                """UPDATE vacancy_refreshes SET status='indeterminate',
+                     updated_at=CURRENT_TIMESTAMP
+                   WHERE refresh_id=? AND status='fetch_started'""",
+                (refresh_id,),
+            )
+
     def record_vacancy_refresh_fetch(
         self,
         refresh_id: str,
@@ -397,23 +649,26 @@ class JobDatabase:
         new_object_sha256 = hashlib.sha256(new_raw_bytes).hexdigest()
         with closing(self.connect()) as conn, conn:
             current = conn.execute(
-                """SELECT job_key,status,new_raw_bytes,new_object_sha256
-                   FROM vacancy_refreshes WHERE refresh_id=?""",
+                f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),
             ).fetchone()
             if current is None:
                 raise KeyError(f"unknown vacancy refresh: {refresh_id}")
-            if str(current[0]) != new_raw.key:
+            transition = _refresh_transition_from_row(current)
+            if transition["job_key"] != new_raw.key:
                 raise ValueError("fetched response differs from refresh vacancy")
-            if current[1] != "intent":
-                if current[2] != new_raw_bytes or current[3] != new_object_sha256:
+            if transition["status"] != "fetch_started":
+                if (
+                    transition["new_raw_bytes"] != new_raw_bytes
+                    or transition["new_object_sha256"] != new_object_sha256
+                ):
                     raise VacancyRefreshConflict("refresh fetch bytes were substituted")
                 return
             conn.execute(
                 """UPDATE vacancy_refreshes SET status='fetched',
                      new_content_sha256=?,new_fetched_at=?,new_raw_bytes=?,
                      new_object_sha256=?,updated_at=CURRENT_TIMESTAMP
-                   WHERE refresh_id=? AND status='intent'""",
+                   WHERE refresh_id=? AND status='fetch_started'""",
                 (
                     new_content_sha256,
                     new_raw.fetched_at,
@@ -433,16 +688,17 @@ class JobDatabase:
 
         with closing(self.connect()) as conn, conn:
             row = conn.execute(
-                "SELECT status,new_object_sha256 FROM vacancy_refreshes WHERE refresh_id=?",
+                f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown vacancy refresh: {refresh_id}")
-            if row[1] != object_sha256:
+            transition = _refresh_transition_from_row(row)
+            if transition["new_object_sha256"] != object_sha256:
                 raise VacancyRefreshConflict("refresh object identity was substituted")
-            if row[0] in ("object_ready", "committed"):
+            if transition["status"] in ("object_ready", "committed"):
                 return
-            if row[0] != "fetched":
+            if transition["status"] != "fetched":
                 raise VacancyRefreshConflict("refresh object cannot precede fetched bytes")
             conn.execute(
                 """UPDATE vacancy_refreshes SET status='object_ready',
@@ -462,31 +718,35 @@ class JobDatabase:
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                """SELECT job_key,expected_content_sha256,status,old_content_sha256,
-                          old_fetched_at,old_object_sha256,new_content_sha256,
-                          new_fetched_at,new_raw_bytes,new_object_sha256,receipt_basis_json
-                   FROM vacancy_refreshes WHERE refresh_id=?""",
+                f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes WHERE refresh_id=?",
                 (refresh_id,),
             ).fetchone()
             if row is None:
                 conn.rollback()
                 raise KeyError(f"unknown vacancy refresh: {refresh_id}")
-            if row[2] == "committed":
+            transition = _refresh_transition_from_row(row)
+            if transition["status"] == "committed":
                 conn.rollback()
-                return json.loads(str(row[10]))
-            if row[2] != "object_ready" or row[8] is None:
+                receipt = transition["receipt_basis"]
+                assert isinstance(receipt, dict)
+                return receipt
+            if transition["status"] != "object_ready":
                 conn.rollback()
                 raise VacancyRefreshConflict("refresh object is not ready for CAS")
-            new_raw_bytes = bytes(row[8])
+            new_raw_bytes = bytes(transition["new_raw_bytes"])
             new_raw = raw_posting_from_bytes(new_raw_bytes)
             current = conn.execute(
                 "SELECT content_hash,fetch_status FROM postings WHERE key=?",
-                (row[0],),
+                (transition["job_key"],),
             ).fetchone()
-            if current is None or current[1] != "fetched" or current[0] != row[1]:
+            if (
+                current is None
+                or current[1] != "fetched"
+                or current[0] != transition["expected_content_sha256"]
+            ):
                 conn.rollback()
                 raise VacancyRefreshConflict(
-                    f"vacancy changed before refresh commit: {row[0]}"
+                    f"vacancy changed before refresh commit: {transition['job_key']}"
                 )
             raw_json = (
                 json.dumps(new_raw.raw_json, ensure_ascii=False)
@@ -502,29 +762,45 @@ class JobDatabase:
                     new_raw.fetched_at,
                     new_raw.raw_text,
                     raw_json,
-                    row[6],
-                    row[0],
-                    row[1],
+                    transition["new_content_sha256"],
+                    transition["job_key"],
+                    transition["expected_content_sha256"],
                 ),
             )
             if cursor.rowcount != 1:
                 conn.rollback()
                 raise VacancyRefreshConflict(
-                    f"vacancy changed before refresh commit: {row[0]}"
+                    f"vacancy changed before refresh commit: {transition['job_key']}"
                 )
             state = self._collection_state_from_connection(conn)
             basis = {
                 **dict(receipt_basis),
-                "changed": row[6] != row[3],
-                "new_content_sha256": str(row[6]),
-                "new_fetched_at": str(row[7]),
-                "new_raw_object_sha256": str(row[9]),
-                "old_content_sha256": str(row[3]),
-                "old_fetched_at": str(row[4]),
-                "old_raw_object_sha256": str(row[5]),
+                "changed": (
+                    transition["new_content_sha256"]
+                    != transition["old_content_sha256"]
+                ),
+                "new_content_sha256": transition["new_content_sha256"],
+                "new_fetched_at": transition["new_fetched_at"],
+                "new_raw_object_sha256": transition["new_object_sha256"],
+                "old_content_sha256": transition["old_content_sha256"],
+                "old_fetched_at": transition["old_fetched_at"],
+                "old_raw_object_sha256": transition["old_object_sha256"],
                 "state_sha256": _canonical_hash(state),
             }
-            basis["transition_sha256"] = _canonical_hash(basis)
+            receipt_basis_sha256 = _canonical_hash(basis)
+            transition_value = {
+                **transition,
+                "receipt_basis_sha256": receipt_basis_sha256,
+                "status": "committed",
+            }
+            transition_sha256 = _canonical_hash(
+                _refresh_transition_document(transition_value)
+            )
+            basis = {
+                **basis,
+                "receipt_basis_sha256": receipt_basis_sha256,
+                "transition_sha256": transition_sha256,
+            }
             encoded = json.dumps(
                 basis,
                 ensure_ascii=False,
@@ -533,10 +809,19 @@ class JobDatabase:
             )
             conn.execute(
                 """UPDATE vacancy_refreshes SET status='committed',
-                     receipt_basis_json=?,updated_at=CURRENT_TIMESTAMP
+                     receipt_basis_json=?,receipt_basis_sha256=?,transition_sha256=?,
+                     updated_at=CURRENT_TIMESTAMP
                    WHERE refresh_id=? AND status='object_ready'""",
-                (encoded, refresh_id),
+                (encoded, receipt_basis_sha256, transition_sha256, refresh_id),
             )
+            committed = {
+                **transition,
+                "status": "committed",
+                "receipt_basis": basis,
+                "receipt_basis_sha256": receipt_basis_sha256,
+                "transition_sha256": transition_sha256,
+            }
+            _validate_refresh_transition(committed)
             conn.commit()
         return basis
 

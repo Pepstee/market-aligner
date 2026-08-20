@@ -247,6 +247,7 @@ class CollectionService:
             operation_id=operation_id,
             refresh_id=refresh_id,
             context_sha256=context_sha256,
+            operation_context=refresh_context,
             started_at=started_at,
             receipt_context=receipt_context,
             finished_at=lambda: self.now().astimezone(timezone.utc).strftime(

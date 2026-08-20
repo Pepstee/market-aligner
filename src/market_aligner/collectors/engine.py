@@ -18,6 +18,7 @@ from market_aligner.collectors.adapters.base import SourceUnavailable, load_adap
 from market_aligner.state.vacancies import (
     JobDatabase,
     VacancyRefreshConflict,
+    VacancyRefreshIndeterminate,
     raw_posting_bytes,
     raw_posting_content_sha256,
     raw_posting_from_bytes,
@@ -49,7 +50,7 @@ def _write_durable_bytes(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if path.read_bytes() != value:
-            raise ValueError(f"content-addressed object differs at {path}")
+            raise VacancyRefreshConflict(f"content-addressed object differs at {path}")
         return
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary)
@@ -93,6 +94,42 @@ def _fsync_directory_chain(path: Path) -> None:
             os.close(descriptor)
         if directory == directory.parent:
             break
+
+
+def _verify_refresh_objects(root: Path, transition: Mapping[str, object]) -> None:
+    """Verify journal bytes, content-address filenames, and sealed path claims."""
+
+    old_sha = str(transition["old_object_sha256"])
+    old_path = root / "state" / "collection-refresh-objects" / old_sha[:2] / old_sha
+    if old_path.name != old_sha or not old_path.is_file():
+        raise VacancyRefreshConflict("journalled old response object is unavailable")
+    old_bytes = old_path.read_bytes()
+    if old_bytes != transition["old_raw_bytes"] or hashlib.sha256(old_bytes).hexdigest() != old_sha:
+        raise VacancyRefreshConflict("journalled old response object bytes differ")
+
+    if transition["status"] in ("object_ready", "committed"):
+        new_sha = str(transition["new_object_sha256"])
+        new_path = root / "state" / "collection-refresh-objects" / new_sha[:2] / new_sha
+        if new_path.name != new_sha or not new_path.is_file():
+            raise VacancyRefreshConflict("journalled new response object is unavailable")
+        new_bytes = new_path.read_bytes()
+        if (
+            new_bytes != transition["new_raw_bytes"]
+            or hashlib.sha256(new_bytes).hexdigest() != new_sha
+        ):
+            raise VacancyRefreshConflict("journalled new response object bytes differ")
+    if transition["status"] == "committed":
+        receipt = transition["receipt_basis"]
+        if not isinstance(receipt, dict):
+            raise VacancyRefreshConflict("committed refresh lacks a receipt basis")
+        if receipt.get("old_raw_object_path") != str(old_path.relative_to(root)):
+            raise VacancyRefreshConflict("sealed old response object path differs")
+        new_sha = str(transition["new_object_sha256"])
+        expected_new = str(
+            Path("state") / "collection-refresh-objects" / new_sha[:2] / new_sha
+        )
+        if receipt.get("new_raw_object_path") != expected_new:
+            raise VacancyRefreshConflict("sealed new response object path differs")
 
 
 class Collector:
@@ -205,6 +242,7 @@ class Collector:
         operation_id: str,
         refresh_id: str,
         context_sha256: str,
+        operation_context: Mapping[str, object],
         started_at: str,
         receipt_context: Mapping[str, object],
         finished_at: Callable[[], str],
@@ -243,6 +281,7 @@ class Collector:
                 refresh_id=refresh_id,
                 operation_id=operation_id,
                 context_sha256=context_sha256,
+                context_document=operation_context,
                 job_key=job_key,
                 expected_content_sha256=expected_content_sha256,
                 started_at=started_at,
@@ -255,7 +294,9 @@ class Collector:
             / old_object_sha256[:2] / old_object_sha256
         )
         _write_durable_bytes(old_object_path, bytes(transition["old_raw_bytes"]))
+        _verify_refresh_objects(self.root, transition)
 
+        fetch_claimed = False
         if transition["status"] == "intent":
             old_raw = raw_posting_from_bytes(bytes(transition["old_raw_bytes"]))
             job = JobUrl(old_raw.board, old_raw.job_id, old_raw.url)
@@ -271,8 +312,30 @@ class Collector:
                 raise ValueError(
                     f"configured adapter does not own exact vacancy key: {job_key}"
                 )
-            raw = adapter.fetch(job, True)
+            self.db.start_vacancy_refresh_fetch(refresh_id)
+            transition = self.db.refresh_transition(
+                operation_id, context_sha256=context_sha256
+            )
+            assert transition is not None and transition["status"] == "fetch_started"
+            _verify_refresh_objects(self.root, transition)
+            fetch_claimed = True
+
+        if transition["status"] == "fetch_started":
+            if not fetch_claimed:
+                self.db.mark_vacancy_refresh_indeterminate(refresh_id)
+                raise VacancyRefreshIndeterminate(
+                    "official fetch outcome is indeterminate; automatic refetch is forbidden"
+                )
+            try:
+                raw = adapter.fetch(job, True)
+            except BaseException:
+                self.db.mark_vacancy_refresh_indeterminate(refresh_id)
+                raise
+            # External I/O and SQLite cannot share one atomic transaction. A
+            # crash here leaves fetch_started, and replay must fail closed.
+            self.crash_injector("after_fetch_before_persist")
             if raw.key != job_key or raw.board != job.board or raw.job_id != job.job_id:
+                self.db.mark_vacancy_refresh_indeterminate(refresh_id)
                 raise ValueError(f"adapter returned a different vacancy identity: {raw.key}")
             self.db.record_vacancy_refresh_fetch(
                 refresh_id,
@@ -282,6 +345,12 @@ class Collector:
                 operation_id, context_sha256=context_sha256
             )
             assert transition is not None
+            _verify_refresh_objects(self.root, transition)
+
+        if transition["status"] == "indeterminate":
+            raise VacancyRefreshIndeterminate(
+                "official fetch outcome is indeterminate; automatic refetch is forbidden"
+            )
 
         if transition["status"] == "fetched":
             self.crash_injector("before_object")
@@ -300,8 +369,10 @@ class Collector:
                 operation_id, context_sha256=context_sha256
             )
             assert transition is not None
+            _verify_refresh_objects(self.root, transition)
 
         if transition["status"] == "object_ready":
+            _verify_refresh_objects(self.root, transition)
             self.crash_injector("after_object_pre_cas")
             new_object_sha256 = str(transition["new_object_sha256"])
             journalled_new = raw_posting_from_bytes(bytes(transition["new_raw_bytes"]))
@@ -329,12 +400,14 @@ class Collector:
                 operation_id, context_sha256=context_sha256
             )
             assert transition is not None and transition["status"] == "committed"
+            _verify_refresh_objects(self.root, transition)
             self.crash_injector("after_cas_pre_cache")
         else:
             sealed_value = transition.get("receipt_basis")
             if transition["status"] != "committed" or not isinstance(sealed_value, dict):
                 raise VacancyRefreshConflict("refresh journal has no recoverable terminal state")
             sealed = sealed_value
+            _verify_refresh_objects(self.root, transition)
 
         new_raw_bytes = bytes(transition["new_raw_bytes"])
         new_raw = raw_posting_from_bytes(new_raw_bytes)
@@ -345,6 +418,8 @@ class Collector:
         ):
             raise VacancyRefreshConflict("committed refresh has been superseded")
         raw_path = _raw_path(self.raw_cache, new_raw)
+        if sealed.get("raw_cache_path") != str(raw_path.relative_to(self.root)):
+            raise VacancyRefreshConflict("sealed raw-cache path differs from vacancy identity")
         _replace_durable_bytes(raw_path, new_raw_bytes)
         self.crash_injector("after_cache_pre_receipt")
         return {**sealed, "raw_cache_path_absolute": str(raw_path)}

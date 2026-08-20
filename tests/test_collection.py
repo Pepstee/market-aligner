@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -18,7 +19,11 @@ from market_aligner.collectors.adapters.workable import WorkableAdapter
 from market_aligner.collectors.engine import Collector
 from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
 from market_aligner.service.api import CollectionService
-from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
+from market_aligner.state.vacancies import (
+    JobDatabase,
+    VacancyRefreshConflict,
+    VacancyRefreshIndeterminate,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -409,6 +414,179 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(1, calls["fetch"])
             self.assertEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
             self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
+
+    def test_exact_refresh_never_refetches_an_unresolved_fetch_window(self) -> None:
+        class ReturnedAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, job, live=False):
+                self.calls["fetch"] += 1
+                return RawPosting(
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T03:30:00Z",
+                    raw_text="response returned before process loss",
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            adapter = ReturnedAdapter()
+            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+
+            def crash_factory(loaded_config, data_home, log=print):
+                collector = factory(loaded_config, data_home, log=log)
+
+                def inject(point):
+                    if point == "after_fetch_before_persist":
+                        raise RuntimeError("lost-after-official-return")
+
+                collector.crash_injector = inject
+                return collector
+
+            with self.assertRaisesRegex(RuntimeError, "lost-after-official-return"):
+                CollectionService(root, collector_factory=crash_factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id="irreducible-window",
+                    log=lambda _message: None,
+                )
+            self.assertEqual(1, calls["fetch"])
+            with sqlite3.connect(root / "state" / "vacancies.sqlite3") as conn:
+                status = conn.execute(
+                    "SELECT status FROM vacancy_refreshes WHERE operation_id=?",
+                    ("irreducible-window",),
+                ).fetchone()[0]
+            self.assertEqual("fetch_started", status)
+
+            with self.assertRaisesRegex(VacancyRefreshIndeterminate, "indeterminate"):
+                CollectionService(root, collector_factory=factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id="irreducible-window",
+                    log=lambda _message: None,
+                )
+            self.assertEqual(1, calls["fetch"])
+            with sqlite3.connect(root / "state" / "vacancies.sqlite3") as conn:
+                status = conn.execute(
+                    "SELECT status FROM vacancy_refreshes WHERE operation_id=?",
+                    ("irreducible-window",),
+                ).fetchone()[0]
+            self.assertEqual("indeterminate", status)
+
+            with self.assertRaisesRegex(VacancyRefreshIndeterminate, "reconciliation"):
+                CollectionService(root, collector_factory=factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id="new-operation-is-still-blocked",
+                    log=lambda _message: None,
+                )
+            self.assertEqual(1, calls["fetch"])
+            self.assertEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
+            self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
+
+    def test_exact_refresh_replay_rejects_journal_and_object_tampering(self) -> None:
+        class StableAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, job, live=False):
+                self.calls["fetch"] += 1
+                return RawPosting(
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T03:45:00Z",
+                    raw_text="sealed exact official response",
+                )
+
+        database_mutations = {
+            "context": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET context_json=? WHERE operation_id=?",
+                (json.dumps({"substituted": True}), "tamper-refresh"),
+            ),
+            "old-bytes": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET old_raw_bytes=? WHERE operation_id=?",
+                (b'{"substituted":true}\n', "tamper-refresh"),
+            ),
+            "old-object-hash": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET old_object_sha256=? WHERE operation_id=?",
+                ("a" * 64, "tamper-refresh"),
+            ),
+            "new-bytes": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET new_raw_bytes=? WHERE operation_id=?",
+                (b'{"substituted":true}\n', "tamper-refresh"),
+            ),
+            "new-content-hash": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET new_content_sha256=? WHERE operation_id=?",
+                ("b" * 64, "tamper-refresh"),
+            ),
+            "new-object-hash": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET new_object_sha256=? WHERE operation_id=?",
+                ("f" * 64, "tamper-refresh"),
+            ),
+            "basis-hash": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET receipt_basis_sha256=? WHERE operation_id=?",
+                ("e" * 64, "tamper-refresh"),
+            ),
+            "transition-hash": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET transition_sha256=? WHERE operation_id=?",
+                ("d" * 64, "tamper-refresh"),
+            ),
+            "status": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET status='fetched' WHERE operation_id=?",
+                ("tamper-refresh",),
+            ),
+            "receipt-basis": lambda conn, _receipt, _root: conn.execute(
+                "UPDATE vacancy_refreshes SET receipt_basis_json=json_set(receipt_basis_json, '$.state_sha256', ?) WHERE operation_id=?",
+                ("c" * 64, "tamper-refresh"),
+            ),
+        }
+
+        def corrupt_object(_conn, receipt, root):
+            (root / receipt["new_raw_object_path"]).write_bytes(b"substituted object bytes")
+
+        mutations = {**database_mutations, "object-bytes": corrupt_object}
+        for label, mutate in mutations.items():
+            with self.subTest(tamper=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                adapter = StableAdapter()
+                config, _database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                service = CollectionService(root, collector_factory=factory)
+                receipt = service.refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id="tamper-refresh",
+                    log=lambda _message: None,
+                )
+                receipt_path = Path(receipt["receipt_path"])
+                receipt_before = receipt_path.read_bytes()
+                cache_path = root / receipt["raw_cache_path"]
+                cache_before = cache_path.read_bytes()
+                with sqlite3.connect(root / "state" / "vacancies.sqlite3") as conn:
+                    mutate(conn, receipt, root)
+                    conn.commit()
+
+                with self.assertRaises(VacancyRefreshConflict):
+                    service.refresh_vacancy(
+                        config,
+                        job_key="injected:tenant:1",
+                        expected_content_sha256=old_hash,
+                        operation_id="tamper-refresh",
+                        log=lambda _message: None,
+                    )
+                self.assertEqual(1, calls["fetch"])
+                self.assertEqual(receipt_before, receipt_path.read_bytes())
+                self.assertEqual(cache_before, cache_path.read_bytes())
 
     def test_exact_refresh_recovers_every_crash_boundary_without_refetch(self) -> None:
         class RecoverableAdapter:
