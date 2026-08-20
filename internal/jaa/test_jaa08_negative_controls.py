@@ -25,12 +25,35 @@ from test_jaa08_independent_acceptance import (
     _authorized_release_inputs,
     _binding,
     _compilation_inputs,
+    _cv_constraint_arguments,
     _fixture_date,
     _fixture_now,
     _issued_release_inputs,
     _release_gate,
     _validations,
 )
+
+
+@pytest.fixture(autouse=True)
+def _supply_exact_cv_constraint_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep each legacy negative focused on its named post-CV boundary."""
+    original = ReleaseGateStore.evaluate_and_issue
+
+    def evaluate_with_cv_receipt(self, **arguments):
+        if "cv_constraint_receipt" not in arguments:
+            arguments.update(
+                _cv_constraint_arguments(
+                    arguments["source"],
+                    arguments["artifacts"],
+                )
+            )
+        return original(self, **arguments)
+
+    monkeypatch.setattr(
+        ReleaseGateStore,
+        "evaluate_and_issue",
+        evaluate_with_cv_receipt,
+    )
 
 
 @pytest.mark.parametrize(

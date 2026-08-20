@@ -551,6 +551,8 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
             jurisdiction="GB",
             contract_type="employee",
             evaluated_at=today,
+            cv_constraint_receipt=receipt.document(),
+            expected_cv_policy_sha256=receipt.policy_sha256,
         )
 
     with pytest.raises(ValueError, match="constraint receipt"):

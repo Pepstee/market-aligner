@@ -8,6 +8,8 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from career_automation.application_artifacts import publish_application_artifacts
 from career_automation.application_compiler import (
     CandidateContact,
@@ -15,6 +17,7 @@ from career_automation.application_compiler import (
 )
 from career_automation.application_strategy import ApplicationStrategyStore
 from career_automation.candidate_graph import CandidateGraph
+from career_automation.evidence_matching import content_hash
 from career_automation.migrations import (
     JAA08_INSTALLED_SCHEMA_SHA256,
     JAA_08_MIGRATIONS,
@@ -89,6 +92,9 @@ def _binding(**overrides: object) -> ReleaseBinding:
         "artifact_set_sha256": hashlib.sha256(b"artifacts").hexdigest(),
         "artifact_receipt_sha256": hashlib.sha256(
             b"artifact-receipt"
+        ).hexdigest(),
+        "cv_constraint_binding_sha256": hashlib.sha256(
+            b"cv-constraint-binding"
         ).hexdigest(),
         "deterministic_writer_policy_sha256": hashlib.sha256(
             b"writer-policy"
@@ -216,6 +222,24 @@ def _compilation_inputs(tmp_path: Path):
     )
 
 
+def _cv_constraint_arguments(source, artifacts) -> dict[str, object]:
+    body = {
+        "schema_version": "jaa.cv-constraint-receipt.v1",
+        "source_id": source.source_id,
+        "cv_sha256": artifacts.editable.cv_sha256,
+        "policy_sha256": DIGEST,
+        "passed": True,
+        "release_authority": False,
+    }
+    return {
+        "cv_constraint_receipt": {
+            **body,
+            "receipt_sha256": content_hash(body),
+        },
+        "expected_cv_policy_sha256": DIGEST,
+    }
+
+
 def _authorized_release_inputs(
     tmp_path: Path,
     *,
@@ -326,6 +350,7 @@ def _issued_release_inputs(tmp_path: Path, **route_options):
         jurisdiction="GB",
         contract_type="employee",
         evaluated_at=strategy.as_of,
+        **_cv_constraint_arguments(source, artifacts),
     )
     return (*values, issued)
 
@@ -465,6 +490,7 @@ def test_release_gate_reresolves_authority_and_issues_hash_only_token_atomically
         jurisdiction="GB",
         contract_type="employee",
         evaluated_at=_fixture_date(database),
+        **_cv_constraint_arguments(source, artifacts),
     )
     assert isinstance(issued, IssuedRelease)
     verify_release_manifest(issued.manifest)
@@ -503,6 +529,66 @@ def test_release_gate_reresolves_authority_and_issues_hash_only_token_atomically
     assert tuple(stored) == (issued.token_sha256, None)
     assert validation_count == len(REQUIRED_VALIDATORS)
     assert issued.release_token not in all_text
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "tampered", "wrong-source", "wrong-cv", "wrong-policy", "non-passing"),
+)
+def test_release_gate_rejects_invalid_cv_constraint_receipt(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    values = _authorized_release_inputs(tmp_path)
+    (
+        database,
+        strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _publication,
+        compilation,
+        gate,
+        _route,
+    ) = values
+    arguments = _cv_constraint_arguments(source, artifacts)
+    receipt = dict(arguments["cv_constraint_receipt"])
+    if mutation == "missing":
+        receipt_value = None
+    else:
+        if mutation == "tampered":
+            receipt["receipt_sha256"] = "f" * 64
+        elif mutation == "wrong-source":
+            receipt["source_id"] = "e" * 64
+        elif mutation == "wrong-cv":
+            receipt["cv_sha256"] = "d" * 64
+        elif mutation == "wrong-policy":
+            receipt["policy_sha256"] = "c" * 64
+        else:
+            receipt["passed"] = False
+        if mutation not in {"tampered", "non-passing"}:
+            body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+            receipt["receipt_sha256"] = content_hash(body)
+        receipt_value = receipt
+    with pytest.raises((TypeError, ValueError)):
+        gate.evaluate_and_issue(
+            compilation_id=compilation.compilation_id,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            evaluated_at=strategy.as_of,
+            cv_constraint_receipt=receipt_value,
+            expected_cv_policy_sha256=DIGEST,
+        )
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM release_tokens").fetchone()[0] == 0
 
 
 def test_release_token_consumes_once_only_after_exact_authority_replay(

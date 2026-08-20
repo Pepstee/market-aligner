@@ -277,6 +277,9 @@ def _release_lineage(source, employer_evidence):
         application_source_sha256=source.content_sha256,
         artifact_set_sha256=publication.artifact_set_sha256,
         artifact_receipt_sha256=publication.receipt_sha256,
+        cv_constraint_binding_sha256=hashlib.sha256(
+            b"cv-constraint-binding"
+        ).hexdigest(),
         deterministic_writer_policy_sha256=hashlib.sha256(
             b"writer-policy"
         ).hexdigest(),

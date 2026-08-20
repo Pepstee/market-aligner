@@ -14,7 +14,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from .application_artifacts import (
     PublishedArtifactReceipt,
@@ -63,10 +63,75 @@ def _required(value: str, label: str) -> str:
     return clean
 
 
-def _digest(value: str, label: str) -> str:
-    if not HEX_64.fullmatch(value):
+def _digest(value: object, label: str) -> str:
+    if not isinstance(value, str) or not HEX_64.fullmatch(value):
         raise ValueError(f"{label} must be a lowercase SHA-256 digest")
     return value
+
+
+def cv_constraint_release_binding(
+    *,
+    receipt_document: Mapping[str, object],
+    expected_policy_sha256: str,
+    source: ApplicationSource,
+    artifacts: ApplicationArtifacts,
+) -> str:
+    """Verify a primitive CV receipt and bind it to final release artifacts.
+
+    The release layer intentionally knows only the receipt wire contract. It
+    does not import CV-generation policy or rendering implementations.
+    """
+    _digest(expected_policy_sha256, "expected CV policy hash")
+    expected_keys = {
+        "schema_version",
+        "source_id",
+        "cv_sha256",
+        "policy_sha256",
+        "passed",
+        "release_authority",
+        "receipt_sha256",
+    }
+    if type(receipt_document) is not dict or set(receipt_document) != expected_keys:
+        raise ValueError("CV constraint receipt has an invalid schema")
+    if receipt_document.get("schema_version") != "jaa.cv-constraint-receipt.v1":
+        raise ValueError("CV constraint receipt has an unsupported schema")
+    source_id = str(receipt_document.get("source_id"))
+    cv_sha256 = str(receipt_document.get("cv_sha256"))
+    policy_sha256 = str(receipt_document.get("policy_sha256"))
+    receipt_sha256 = str(receipt_document.get("receipt_sha256"))
+    for value, label in (
+        (source_id, "CV receipt source hash"),
+        (cv_sha256, "CV receipt document hash"),
+        (policy_sha256, "CV receipt policy hash"),
+        (receipt_sha256, "CV receipt identity"),
+    ):
+        _digest(value, label)
+    if (
+        receipt_document.get("passed") is not True
+        or receipt_document.get("release_authority") is not False
+    ):
+        raise ValueError("CV constraint receipt is not a passing quality receipt")
+    body = {key: receipt_document[key] for key in expected_keys - {"receipt_sha256"}}
+    if content_hash(body) != receipt_sha256:
+        raise ValueError("CV constraint receipt differs from its exact content")
+    if source_id != source.source_id or artifacts.source_id != source.source_id:
+        raise ValueError("CV constraint receipt cites a different application source")
+    if cv_sha256 != artifacts.editable.cv_sha256:
+        raise ValueError("CV constraint receipt cites a different final CV")
+    if policy_sha256 != expected_policy_sha256:
+        raise ValueError("CV constraint receipt cites a different policy")
+    return content_hash(
+        {
+            "schema_version": "jaa08.cv-constraint-release-binding.v1",
+            "application_source_sha256": source.content_sha256,
+            "artifact_set_sha256": artifacts.artifact_set_sha256,
+            "cv_constraint_receipt_sha256": receipt_sha256,
+            "cv_pdf_sha256": artifacts.cv_pdf.pdf_sha256,
+            "cv_sha256": cv_sha256,
+            "policy_sha256": policy_sha256,
+            "source_id": source_id,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -159,6 +224,7 @@ class ReleaseBinding:
     application_source_sha256: str
     artifact_set_sha256: str
     artifact_receipt_sha256: str
+    cv_constraint_binding_sha256: str
     deterministic_writer_policy_sha256: str
     model_receipt_sha256s: tuple[str, ...]
     work_right: WorkRightBinding
@@ -179,6 +245,7 @@ class ReleaseBinding:
             (self.application_source_sha256, "application source hash"),
             (self.artifact_set_sha256, "artifact-set hash"),
             (self.artifact_receipt_sha256, "artifact receipt hash"),
+            (self.cv_constraint_binding_sha256, "CV constraint binding hash"),
             (
                 self.deterministic_writer_policy_sha256,
                 "deterministic writer policy hash",
@@ -209,6 +276,7 @@ class ReleaseBinding:
             "application_source_sha256": self.application_source_sha256,
             "artifact_set_sha256": self.artifact_set_sha256,
             "artifact_receipt_sha256": self.artifact_receipt_sha256,
+            "cv_constraint_binding_sha256": self.cv_constraint_binding_sha256,
             "deterministic_writer_policy_sha256": (
                 self.deterministic_writer_policy_sha256
             ),
@@ -1070,6 +1138,7 @@ class ReleaseGateStore:
         jurisdiction: str,
         contract_type: str,
         evaluated_at: date,
+        cv_constraint_binding_sha256: str,
         expected_state: PipelineState = PipelineState.APPLICATION_COMPILED,
     ) -> ReleaseBinding:
         row = self._compilation_row(connection, compilation.compilation_id)
@@ -1129,6 +1198,7 @@ class ReleaseGateStore:
             compilation.application_source_sha256,
             compilation.artifact_set_sha256,
             compilation.artifact_receipt_sha256,
+            _digest(cv_constraint_binding_sha256, "CV constraint binding hash"),
             self.WRITER_POLICY_SHA256,
             (),
             work_right,
@@ -1461,11 +1531,19 @@ class ReleaseGateStore:
         jurisdiction: str,
         contract_type: str,
         evaluated_at: date,
+        cv_constraint_receipt: Mapping[str, object] | None = None,
+        expected_cv_policy_sha256: str | None = None,
     ) -> IssuedRelease:
         """Issue one token; never invoke or expose any consequential action."""
         trusted_now = self._require_current_utc_date(
             evaluated_at,
             label="release evaluation",
+        )
+        cv_constraint_binding_sha256 = cv_constraint_release_binding(
+            receipt_document=cv_constraint_receipt,
+            expected_policy_sha256=expected_cv_policy_sha256,
+            source=source,
+            artifacts=artifacts,
         )
         try:
             compilation = self.compilations.register(
@@ -1537,6 +1615,7 @@ class ReleaseGateStore:
                 jurisdiction=jurisdiction,
                 contract_type=contract_type,
                 evaluated_at=evaluated_at,
+                cv_constraint_binding_sha256=cv_constraint_binding_sha256,
             )
             self._require_monotonic_release_time(
                 connection,
@@ -1900,6 +1979,10 @@ class ReleaseGateStore:
             jurisdiction=jurisdiction,
             contract_type=contract_type,
             evaluated_at=consumed_utc.date(),
+            cv_constraint_binding_sha256=_digest(
+                str(binding_document.get("cv_constraint_binding_sha256")),
+                "stored CV constraint binding hash",
+            ),
             expected_state=PipelineState.RELEASED,
         )
         if current_binding.prior_application_count != 1:
