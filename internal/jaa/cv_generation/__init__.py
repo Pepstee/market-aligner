@@ -50,6 +50,15 @@ from .service import (
     RecruiterAssessor,
     run_cv_composition_orchestration,
 )
+from .document_quality import (
+    DocumentQualityError,
+    DocumentQualityReceipt,
+    PdfQualityResult,
+    PopplerRuntime,
+    QUALITY_POLICY_SHA256,
+    resolve_poppler_runtime,
+    verify_document_quality,
+)
 
 __all__ = [
     "ARTIOM_GUTU_CV_POLICY",
@@ -73,7 +82,12 @@ __all__ = [
     "EditorialStageReceipt",
     "EvidenceSafeRebuildResult",
     "FinalizedRebuiltCV",
+    "DocumentQualityError",
+    "DocumentQualityReceipt",
     "ImprovementBinder",
+    "PdfQualityResult",
+    "PopplerRuntime",
+    "QUALITY_POLICY_SHA256",
     "RebuildRoadmapItem",
     "RecruiterImprovementBinding",
     "RecruiterAssessor",
@@ -86,7 +100,9 @@ __all__ = [
     "policy_for_candidate",
     "rebuild_from_recruiter_assessment",
     "render_editorial_cv_text",
+    "resolve_poppler_runtime",
     "run_cv_composition_orchestration",
     "validate_editorial_draft",
     "validate_generated_cv",
+    "verify_document_quality",
 ]

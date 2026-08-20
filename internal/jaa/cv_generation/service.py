@@ -42,6 +42,7 @@ from .constraints import (
     policy_for_candidate,
     validate_generated_cv,
 )
+from .document_quality import DocumentQualityReceipt, verify_document_quality
 from .editorial_composition import (
     CVEditorialDraft,
     CVEditorialRequest,
@@ -235,10 +236,12 @@ class CVCompositionOrchestrationResult:
     editorial_receipt: EditorialCompositionReceipt
     initial_constraint_receipt: CVConstraintReceipt
     initial_artifacts: ApplicationArtifacts
+    initial_quality_receipt: DocumentQualityReceipt
     recruiter_receipt: RecruiterAssessmentReceipt
     rebuild: EvidenceSafeRebuildResult
     final_constraint_receipt: CVConstraintReceipt
     final_artifacts: ApplicationArtifacts
+    final_quality_receipt: DocumentQualityReceipt
     orchestration_sha256: str
     release_authority: bool = False
     schema_version: str = ORCHESTRATION_SCHEMA
@@ -248,9 +251,11 @@ class CVCompositionOrchestrationResult:
             raise CVCompositionServiceError("CV orchestration schema is unsupported")
         self.editorial_receipt.__post_init__()
         self.initial_constraint_receipt.__post_init__()
+        self.initial_quality_receipt.__post_init__()
         self.recruiter_receipt.__post_init__()
         self.rebuild.__post_init__()
         self.final_constraint_receipt.__post_init__()
+        self.final_quality_receipt.__post_init__()
         verify_application_artifacts(self.initial_artifacts)
         verify_application_artifacts(self.final_artifacts)
         _digest(self.orchestration_sha256, "CV orchestration hash")
@@ -263,6 +268,10 @@ class CVCompositionOrchestrationResult:
             or self.final_constraint_receipt.source_id != self.final_artifacts.source_id
             or self.final_constraint_receipt.cv_sha256
             != self.final_artifacts.editable.cv_sha256
+            or self.initial_quality_receipt.artifact_set_sha256
+            != self.initial_artifacts.artifact_set_sha256
+            or self.final_quality_receipt.artifact_set_sha256
+            != self.final_artifacts.artifact_set_sha256
             or self.recruiter_receipt.package_hashes.get("cv_pdf_sha256")
             != self.initial_artifacts.cv_pdf.pdf_sha256
             or self.recruiter_receipt.package_hashes.get("cover_letter_pdf_sha256")
@@ -285,10 +294,12 @@ class CVCompositionOrchestrationResult:
             "final_constraint_receipt_sha256": (
                 self.final_constraint_receipt.receipt_sha256
             ),
+            "final_quality_receipt_sha256": self.final_quality_receipt.receipt_sha256,
             "initial_artifact_set_sha256": self.initial_artifacts.artifact_set_sha256,
             "initial_constraint_receipt_sha256": (
                 self.initial_constraint_receipt.receipt_sha256
             ),
+            "initial_quality_receipt_sha256": self.initial_quality_receipt.receipt_sha256,
             "rebuild_sha256": self.rebuild.rebuild_sha256,
             "recruiter_receipt_sha256": self.recruiter_receipt.receipt_sha256,
             "release_authority": False,
@@ -346,6 +357,7 @@ def run_cv_composition_orchestration(
         source=initial_source,
         artifacts=initial_artifacts,
     )
+    initial_quality = verify_document_quality(initial_artifacts)
     package = RecruiterAssessmentPackage(
         listing_text=listing_text,
         listing_text_sha256=listing_sha256,
@@ -394,12 +406,15 @@ def run_cv_composition_orchestration(
         source=final_source,
         artifacts=final_artifacts,
     )
+    final_quality = verify_document_quality(final_artifacts)
     values = {
         "editorial_receipt_sha256": editorial_receipt.receipt_sha256,
         "final_artifact_set_sha256": final_artifacts.artifact_set_sha256,
         "final_constraint_receipt_sha256": final_constraint.receipt_sha256,
+        "final_quality_receipt_sha256": final_quality.receipt_sha256,
         "initial_artifact_set_sha256": initial_artifacts.artifact_set_sha256,
         "initial_constraint_receipt_sha256": initial_constraint.receipt_sha256,
+        "initial_quality_receipt_sha256": initial_quality.receipt_sha256,
         "rebuild_sha256": rebuild.rebuild_sha256,
         "recruiter_receipt_sha256": assessed.receipt_sha256,
         "release_authority": False,
@@ -409,10 +424,12 @@ def run_cv_composition_orchestration(
         editorial_receipt=editorial_receipt,
         initial_constraint_receipt=initial_constraint,
         initial_artifacts=initial_artifacts,
+        initial_quality_receipt=initial_quality,
         recruiter_receipt=assessed,
         rebuild=rebuild,
         final_constraint_receipt=final_constraint,
         final_artifacts=final_artifacts,
+        final_quality_receipt=final_quality,
         orchestration_sha256=content_hash(values),
     )
 

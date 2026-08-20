@@ -11,6 +11,7 @@ from career_automation.adversarial_recruiter import (
     RecruiterAssessmentReceipt,
     assess_application_as_recruiter,
 )
+from career_automation.application_compiler import DocumentSection, StyleSlot
 from career_automation.evidence_matching import content_hash
 from cv_generation.adversarial_rebuild import bind_recruiter_improvement
 from cv_generation.constraints import CVConstraintReceipt
@@ -26,6 +27,7 @@ from cv_generation.editorial_composition import (
 )
 from cv_generation.service import (
     CVCompositionServiceError,
+    _reidentify_source,
     run_cv_composition_orchestration,
 )
 from llm.client import Backend, LLMClient, LLMResponse
@@ -122,6 +124,53 @@ def _claim(claim_id: str, category: str) -> ApprovedCVClaim:
 
 def _fixture(tmp_path):
     base_source, _ = _source()
+    capability_text = "Designed deterministic workflow automation with bounded authority."
+    cv_fact = next(row for row in base_source.facts if row.document_kind == "cv")
+    capability_fact = replace(
+        cv_fact,
+        sentence_id=content_hash(
+            {
+                "fixture": "service-capability",
+                "text": capability_text,
+                "document_kind": "cv",
+            }
+        ),
+        text=capability_text,
+        approved_source_text=capability_text,
+    )
+    company_fit = StyleSlot(
+        content_hash(
+            {
+                "document_kind": "cover_letter",
+                "text": "The documented service focus matches my delivery priorities.",
+            }
+        ),
+        "cover_letter",
+        "The documented service focus matches my delivery priorities.",
+    )
+    close = StyleSlot(
+        content_hash(
+            {
+                "document_kind": "cover_letter",
+                "text": "I would welcome a conversation about the engineering challenges.",
+            }
+        ),
+        "cover_letter",
+        "I would welcome a conversation about the engineering challenges.",
+    )
+    base_source = _reidentify_source(
+        replace(
+            base_source,
+            facts=(*base_source.facts, capability_fact),
+            style_slots=(*base_source.style_slots, company_fit, close),
+            letter_sections=(
+                base_source.letter_sections[0],
+                base_source.letter_sections[1],
+                DocumentSection("Company Fit", (), (company_fit.slot_id,)),
+                DocumentSection("Close", (), (close.slot_id,)),
+            ),
+        )
+    )
     listing = "Deliver reliable services for Example Ltd."
     authority = CandidateEditorialAuthority(
         candidate_name="Alex Example",
@@ -131,7 +180,13 @@ def _fixture(tmp_path):
         source_sha256="a" * 64,
     )
     summary = _claim("summary", "summary")
-    capability = _claim("capability", "capability_domain")
+    capability = ApprovedCVClaim(
+        claim_id="capability",
+        text=capability_text,
+        text_sha256=hashlib.sha256(capability_text.encode()).hexdigest(),
+        evidence_ids=("evidence:capability",),
+        category="capability_domain",
+    )
     request = build_editorial_request(
         authority=authority,
         role_title=base_source.role_title,
