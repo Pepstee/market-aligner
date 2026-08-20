@@ -6,7 +6,7 @@ import csv
 import html
 import json
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -28,6 +28,7 @@ class RankedVacancy:
 @dataclass(frozen=True)
 class ReportPaths:
     jobs_csv: Path
+    ranked_json: Path
     requirements_csv: Path
     scatter_html: Path
 
@@ -85,14 +86,41 @@ def write_reports(
     root.mkdir(parents=True, exist_ok=True)
     paths = ReportPaths(
         jobs_csv=root / "jobs_ranked.csv",
+        ranked_json=root / "fit_opportunity_ranked.json",
         requirements_csv=root / "requirements_ranked.csv",
         scatter_html=root / "opportunity_fit.html",
     )
     ranked = sorted(rows, key=lambda item: item.score.final, reverse=True)
     _write_jobs(ranked, paths.jobs_csv)
+    _write_ranked_json(profile_id, ranked, paths.ranked_json)
     _write_requirements(ranked, paths.requirements_csv)
     _write_scatter(profile_id, ranked, paths.scatter_html)
     return paths
+
+
+def _write_ranked_json(profile_id: str, rows: Sequence[RankedVacancy], path: Path) -> None:
+    payload = {
+        "fit_status": "uncalibrated",
+        "jobs": [
+            {
+                "company": item.vacancy.company,
+                "final": item.score.final,
+                "fit": item.score.fit,
+                "job_key": item.vacancy.key,
+                "opportunity": item.score.opportunity,
+                "title": item.vacancy.title,
+                "track": item.score.track,
+                "url": item.vacancy.url,
+            }
+            for item in rows
+        ],
+        "profile_id": profile_id,
+        "schema_version": "market-aligner.fit-opportunity-ranked.v1",
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
 
 def _write_jobs(rows: Sequence[RankedVacancy], path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from dataclasses import asdict
@@ -15,6 +16,7 @@ from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_p
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.assessment.scoring import AssessmentAxes
 from market_aligner.service.api import AssessmentRequest, CollectionService, MarketAlignerService
+from market_aligner.service.processing import ProcessingService
 
 
 def _add_data_home(parser: argparse.ArgumentParser) -> None:
@@ -134,6 +136,33 @@ def _collect_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _semantic_worker(specification: str, *, config: Path, data_home: Path | None):
+    module_name, separator, attribute_name = specification.partition(":")
+    if not separator or not module_name or not attribute_name:
+        raise ValueError("semantic worker must use module:factory syntax")
+    factory = getattr(importlib.import_module(module_name), attribute_name)
+    worker = factory(config_path=config, data_home=data_home)
+    if not callable(getattr(worker, "extract_vacancy", None)) or not callable(
+        getattr(worker, "align_evidence", None)
+    ):
+        raise ValueError("semantic worker factory returned an incompatible object")
+    return worker
+
+
+def _process_command(args: argparse.Namespace) -> int:
+    worker = _semantic_worker(
+        args.semantic_worker, config=args.config, data_home=args.data_home
+    )
+    receipt = ProcessingService(args.data_home, worker).process(
+        args.config,
+        profile_id=args.profile_id,
+        track=args.track,
+        worker_id=args.worker_id,
+    )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="market-aligner")
     parser.add_argument("--version", action="version", version=__version__)
@@ -195,6 +224,22 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--poll-minutes", type=float, default=15.0)
     _add_data_home(collect)
     collect.set_defaults(handler=_collect_command)
+
+    process = commands.add_parser(
+        "process",
+        help="Process one resumable shard of fetched vacancies into current ranked reports.",
+    )
+    process.add_argument("--config", type=Path, required=True)
+    process.add_argument("--profile-id", required=True)
+    process.add_argument("--track", required=True)
+    process.add_argument("--worker-id", required=True)
+    process.add_argument(
+        "--semantic-worker",
+        required=True,
+        help="Explicit module:factory implementing the receipt-bound LLM gateway protocol.",
+    )
+    _add_data_home(process)
+    process.set_defaults(handler=_process_command)
     return parser
 
 

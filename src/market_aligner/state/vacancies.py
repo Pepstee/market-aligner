@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from contextlib import closing
+import time
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from market_aligner.domain.contracts import JobUrl, RawPosting, read_jsonl, write_jsonl
 from market_aligner.state.importers import iter_raw_cache_roots
@@ -39,6 +40,23 @@ CREATE TABLE IF NOT EXISTS collection_runs (
   finished_at TEXT, discovered INTEGER NOT NULL DEFAULT 0, fetched INTEGER NOT NULL DEFAULT 0,
   errors INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS processing_jobs (
+  profile_id TEXT NOT NULL,
+  track TEXT NOT NULL,
+  job_key TEXT NOT NULL,
+  authority_sha256 TEXT NOT NULL,
+  source_content_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('leased','completed','failed')),
+  lease_owner TEXT,
+  lease_until REAL,
+  result_json TEXT,
+  error TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(profile_id,track,job_key,authority_sha256,source_content_sha256),
+  FOREIGN KEY(job_key) REFERENCES postings(key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS processing_jobs_resume
+  ON processing_jobs(profile_id,track,authority_sha256,status,lease_until);
 """
 
 
@@ -210,3 +228,168 @@ class JobDatabase:
             "schema_version": "market-aligner.collection-state.v1",
             "sources": sources,
         }
+
+    def claim_fetched_for_processing(
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        authority_sha256: str,
+        worker_id: str,
+        limit: int,
+        lease_seconds: int = 900,
+    ) -> list[RawPosting]:
+        """Atomically lease one shard of current fetched snapshots."""
+
+        if limit <= 0 or lease_seconds <= 0:
+            raise ValueError("processing shard and lease must be positive")
+        now = time.time()
+        lease_until = now + lease_seconds
+        claimed: list[RawPosting] = []
+        with closing(self.connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """SELECT p.key,p.board,p.job_id,p.url,p.fetched_at,p.raw_text,
+                          p.raw_json,p.content_hash
+                   FROM postings p
+                   LEFT JOIN processing_jobs q
+                     ON q.profile_id=? AND q.track=? AND q.job_key=p.key
+                    AND q.authority_sha256=? AND q.source_content_sha256=p.content_hash
+                   WHERE p.fetch_status='fetched' AND p.content_hash IS NOT NULL
+                     AND (q.status IS NULL OR q.status='failed'
+                          OR (q.status='leased' AND q.lease_until<?))
+                   ORDER BY p.key LIMIT ?""",
+                (profile_id, track, authority_sha256, now, limit),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """INSERT INTO processing_jobs(
+                         profile_id,track,job_key,authority_sha256,source_content_sha256,
+                         status,lease_owner,lease_until,result_json,error
+                       ) VALUES(?,?,?,?,?,'leased',?,?,NULL,NULL)
+                       ON CONFLICT(profile_id,track,job_key,authority_sha256,source_content_sha256)
+                       DO UPDATE SET status='leased',lease_owner=excluded.lease_owner,
+                         lease_until=excluded.lease_until,result_json=NULL,error=NULL,
+                         updated_at=CURRENT_TIMESTAMP""",
+                    (
+                        profile_id,
+                        track,
+                        row[0],
+                        authority_sha256,
+                        row[7],
+                        worker_id,
+                        lease_until,
+                    ),
+                )
+                claimed.append(
+                    RawPosting(
+                        board=row[1],
+                        job_id=row[2],
+                        url=row[3],
+                        fetched_at=row[4] or "",
+                        raw_text=row[5],
+                        raw_json=json.loads(row[6]) if row[6] else None,
+                        content_sha256=row[7],
+                    )
+                )
+        return claimed
+
+    def complete_processing(
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        job_key: str,
+        authority_sha256: str,
+        source_content_sha256: str,
+        worker_id: str,
+        result: dict[str, object],
+    ) -> None:
+        payload = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE processing_jobs SET status='completed',lease_owner=NULL,
+                     lease_until=NULL,result_json=?,error=NULL,updated_at=CURRENT_TIMESTAMP
+                   WHERE profile_id=? AND track=? AND job_key=? AND authority_sha256=?
+                     AND source_content_sha256=? AND status='leased' AND lease_owner=?""",
+                (
+                    payload,
+                    profile_id,
+                    track,
+                    job_key,
+                    authority_sha256,
+                    source_content_sha256,
+                    worker_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("processing completion requires the active shard lease")
+
+    def fail_processing(
+        self,
+        *,
+        profile_id: str,
+        track: str,
+        job_key: str,
+        authority_sha256: str,
+        source_content_sha256: str,
+        worker_id: str,
+        error: str,
+    ) -> None:
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE processing_jobs SET status='failed',lease_owner=NULL,
+                     lease_until=NULL,result_json=NULL,error=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE profile_id=? AND track=? AND job_key=? AND authority_sha256=?
+                     AND source_content_sha256=? AND status='leased' AND lease_owner=?""",
+                (
+                    error[:2000],
+                    profile_id,
+                    track,
+                    job_key,
+                    authority_sha256,
+                    source_content_sha256,
+                    worker_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("processing failure requires the active shard lease")
+
+    def completed_processing(
+        self, *, profile_id: str, track: str, authority_sha256: str
+    ) -> list[dict[str, object]]:
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                """SELECT q.result_json FROM processing_jobs q
+                   JOIN postings p ON p.key=q.job_key
+                    AND p.content_hash=q.source_content_sha256
+                   WHERE q.profile_id=? AND q.track=? AND q.authority_sha256=?
+                     AND q.status='completed' AND q.result_json IS NOT NULL
+                   ORDER BY q.job_key""",
+                (profile_id, track, authority_sha256),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    @contextmanager
+    def processing_report_snapshot(
+        self, *, profile_id: str, track: str, authority_sha256: str
+    ) -> Iterator[list[dict[str, object]]]:
+        """Serialize canonical report snapshots across concurrent processing shards."""
+
+        with closing(self.connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    """SELECT q.result_json FROM processing_jobs q
+                       JOIN postings p ON p.key=q.job_key
+                        AND p.content_hash=q.source_content_sha256
+                       WHERE q.profile_id=? AND q.track=? AND q.authority_sha256=?
+                         AND q.status='completed' AND q.result_json IS NOT NULL
+                       ORDER BY q.job_key""",
+                    (profile_id, track, authority_sha256),
+                ).fetchall()
+                yield [json.loads(row[0]) for row in rows]
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
