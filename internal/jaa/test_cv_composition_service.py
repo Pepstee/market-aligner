@@ -13,10 +13,15 @@ from career_automation.adversarial_recruiter import (
     assess_application_as_recruiter,
 )
 from career_automation.application_compiler import DocumentSection, StyleSlot
-from career_automation.handoff_admission import VerifiedApplicationInput
+from career_automation.handoff_admission import (
+    HandoffAdmissionError,
+    VerifiedApplicationInput,
+)
 from career_automation.market_aligner_preparation import (
     prepare_admitted_market_application,
+    prepare_admitted_market_application_from_authorities,
 )
+from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.evidence_matching import content_hash
 from cv_generation.adversarial_rebuild import bind_recruiter_improvement
 from cv_generation.constraints import CVConstraintReceipt
@@ -564,3 +569,133 @@ def test_admitted_market_preparation_runs_real_cv_orchestration_and_replays(tmp_
     assert assessor.calls == 1
     assert (first.path / "cv.pdf").is_file()
     assert (first.path / "cover-letter.pdf").is_file()
+
+
+def test_authority_runner_materializes_exact_admitted_inputs_without_provider(tmp_path) -> None:
+    base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
+    candidate_path = tmp_path / "candidate-authority.yaml"
+    contact_path = tmp_path / "contact-authority.json"
+    candidate_bytes = b"schema: market-aligner.profile.v1\nprofile_id: synthetic\n"
+    contact_bytes = b'{"synthetic":"signed-contact-authority"}\n'
+    candidate_path.write_bytes(candidate_bytes)
+    contact_path.write_bytes(contact_bytes)
+    candidate_path.chmod(0o600)
+    contact_path.chmod(0o600)
+    candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
+    contact_sha = hashlib.sha256(contact_bytes).hexdigest()
+    request = build_editorial_request(
+        authority=replace(request.authority, source_sha256=candidate_sha),
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=request.approved_claims,
+    )
+    writer = replace(writer, request_sha256=request.request_sha256)
+    humanizer = replace(
+        humanizer, request_sha256=humanizer_request_sha256(request, draft)
+    )
+    contact = replace(base.contact, provenance_sha256=contact_sha)
+    base = _reidentify_source(replace(base, contact=contact))
+    verified = VerifiedApplicationInput(
+        application_id="app_" + "7" * 64,
+        admission_kind="market_aligner_handoff_v1",
+        environment="synthetic",
+        authority_scope="none",
+        handoff_root_sha256="8" * 64,
+        vacancy_source_identity=base.vacancy_source_identity,
+        profile_id="prf_" + "9" * 32,
+        profile_version="synthetic-v1",
+        job_key=base.job_key,
+        vacancy_snapshot_sha256=base.vacancy_sha256,
+        raw_listing_sha256=hashlib.sha256(listing.encode()).hexdigest(),
+        raw_listing_bytes=listing.encode(),
+        requirements_sha256="a" * 64,
+        requirements_bytes=b"synthetic requirements",
+        canonical_url="https://jobs.example.test/42",
+        company_name=base.company_name,
+        role_title=base.role_title,
+        location={},
+        admission_receipt_sha256="b" * 64,
+        current_boundary="strategy",
+        current_boundary_receipt_sha256="c" * 64,
+    )
+
+    class _Store:
+        boundary_calls = 0
+
+        def reference_sha256(self, application_id, reference_key):
+            assert application_id == verified.application_id
+            assert reference_key == "candidate_intent.authority_source"
+            return candidate_sha
+
+        def for_boundary(self, application_id, boundary):
+            assert application_id == verified.application_id
+            assert boundary == "strategy"
+            self.boundary_calls += 1
+            return verified
+
+    authority = CandidateContactAuthority(
+        contact=contact,
+        issued_at="2026-08-21T00:00:00Z",
+        authority_sha256=contact_sha,
+        registry_sha256="d" * 64,
+        source_path=contact_path,
+    )
+
+    def materialize(admitted, authority_sha256, loaded_contact):
+        assert admitted == verified
+        assert authority_sha256 == candidate_sha
+        assert loaded_contact == authority
+        return {
+            "request": request,
+            "writer_draft": draft,
+            "humanized_draft": draft,
+            "writer_evidence": writer,
+            "humanizer_evidence": humanizer,
+            "base_source": base,
+            "listing_text": listing,
+            "form_fields": (),
+            "bindings": (),
+            "recruiter_assessor": assessor,
+            "improvement_binder": lambda req, receipt: (_binding(req, receipt),),
+        }
+
+    store = _Store()
+    result = prepare_admitted_market_application_from_authorities(
+        admission_store=store,
+        application_id=verified.application_id,
+        repository_root=Path(__file__).resolve().parents[1],
+        data_home=tmp_path / "external-data-home",
+        candidate_authority_path=candidate_path,
+        contact_authority_path=contact_path,
+        input_materializer=materialize,
+        contact_authority_loader=lambda *args, **kwargs: authority,
+    )
+    assert result.release_authority is False
+    assert store.boundary_calls == 1
+    assert assessor.calls == 1
+    assert (result.path / "cv.pdf").is_file()
+
+
+def test_authority_runner_rejects_candidate_not_bound_to_handoff(tmp_path) -> None:
+    candidate_path = tmp_path / "candidate-authority.yaml"
+    contact_path = tmp_path / "contact-authority.json"
+    candidate_path.write_bytes(b"candidate\n")
+    contact_path.write_bytes(b"contact\n")
+    candidate_path.chmod(0o600)
+    contact_path.chmod(0o600)
+
+    class _Store:
+        def reference_sha256(self, application_id, reference_key):
+            return "0" * 64
+
+    with pytest.raises(HandoffAdmissionError, match="candidate authority differs"):
+        prepare_admitted_market_application_from_authorities(
+            admission_store=_Store(),
+            application_id="app_" + "1" * 64,
+            repository_root=Path(__file__).resolve().parents[1],
+            data_home=tmp_path / "external-data-home",
+            candidate_authority_path=candidate_path,
+            contact_authority_path=contact_path,
+            input_materializer=lambda *args: {},
+        )

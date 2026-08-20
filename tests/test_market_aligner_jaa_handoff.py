@@ -162,6 +162,18 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
     assert replay.verification_receipt_sha256 == admission.verification_receipt_sha256
     assert admission.created is True
     assert replay.created is False
+    admitted_candidate_sha256 = store.reference_sha256(
+        admission.application_id, "candidate_intent.authority_source"
+    )
+    expected_candidate_sha256 = next(
+        row["metadata"]["object_sha256"]
+        for row in document["reference_bundle"]["value"]["entries"]
+        if row["metadata"]["reference_key"]
+        == "candidate_intent.authority_source"
+    )
+    assert admitted_candidate_sha256 == expected_candidate_sha256
+    with pytest.raises(HandoffAdmissionError, match="unsupported"):
+        store.reference_sha256(admission.application_id, "candidate.claims")
 
 
 def test_protected_outbox_bundle_authenticates_and_replays_idempotently(tmp_path) -> None:

@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Protocol
 
 from cv_generation.service import (
     CVCompositionOrchestrationResult,
@@ -22,7 +22,15 @@ from cv_generation.service import (
 )
 
 from .evidence_matching import canonical_json, content_hash
-from .handoff_admission import HandoffAdmissionError, HandoffAdmissionStore
+from .candidate_contact_authority import (
+    CandidateContactAuthority,
+    load_candidate_contact_authority,
+)
+from .handoff_admission import (
+    HandoffAdmissionError,
+    HandoffAdmissionStore,
+    VerifiedApplicationInput,
+)
 
 
 def _json_bytes(value: object) -> bytes:
@@ -77,6 +85,99 @@ class MarketApplicationPreparation:
     receipt_sha256: str
     orchestration_sha256: str
     release_authority: bool = False
+
+
+class PreparationInputMaterializer(Protocol):
+    """Build typed CV inputs from an exact admitted job and exact authorities."""
+
+    def __call__(
+        self,
+        verified: VerifiedApplicationInput,
+        candidate_authority_sha256: str,
+        contact_authority: CandidateContactAuthority,
+    ) -> Mapping[str, Any]: ...
+
+
+class _VerifiedBoundary:
+    """Carry one freshly verified boundary into the canonical preparation service."""
+
+    def __init__(self, verified: VerifiedApplicationInput) -> None:
+        self.verified = verified
+
+    def for_boundary(self, application_id: str, boundary: str) -> VerifiedApplicationInput:
+        if application_id != self.verified.application_id or boundary != "strategy":
+            raise HandoffAdmissionError(
+                "preparation_boundary", "prepared input requested another boundary"
+            )
+        return self.verified
+
+
+def prepare_admitted_market_application_from_authorities(
+    *,
+    admission_store: HandoffAdmissionStore,
+    application_id: str,
+    repository_root: Path,
+    data_home: Path,
+    candidate_authority_path: Path,
+    contact_authority_path: Path,
+    input_materializer: PreparationInputMaterializer,
+    contact_authority_loader: Callable[..., CandidateContactAuthority] = (
+        load_candidate_contact_authority
+    ),
+) -> MarketApplicationPreparation:
+    """Materialize one real preparation from admitted and operator authority.
+
+    Provider-backed writing remains outside this function.  The injected
+    materializer must return the already typed, evidence-bound editorial
+    request/drafts and recruiter assessor used by the existing orchestration.
+    """
+
+    repository = repository_root.resolve(strict=True)
+    candidate_path = candidate_authority_path.resolve(strict=True)
+    contact_path = contact_authority_path.resolve(strict=True)
+    for label, path in (("candidate", candidate_path), ("contact", contact_path)):
+        if repository == path or repository in path.parents:
+            raise ValueError(f"{label} authority must be outside the repository")
+    candidate_bytes = _read_private(candidate_path)
+    candidate_sha256 = hashlib.sha256(candidate_bytes).hexdigest()
+    admitted_candidate_sha256 = admission_store.reference_sha256(
+        application_id, "candidate_intent.authority_source"
+    )
+    if candidate_sha256 != admitted_candidate_sha256:
+        raise HandoffAdmissionError(
+            "preparation_candidate_authority",
+            "candidate authority differs from admitted handoff",
+        )
+    contact_authority = contact_authority_loader(
+        contact_path,
+        repository_root=repository,
+    )
+    contact_bytes = _read_private(contact_path)
+    contact_sha256 = hashlib.sha256(contact_bytes).hexdigest()
+    if contact_authority.authority_sha256 != contact_sha256:
+        raise ValueError("loaded contact authority differs from exact file bytes")
+
+    verified = admission_store.for_boundary(application_id, "strategy")
+    arguments = dict(
+        input_materializer(verified, candidate_sha256, contact_authority)
+    )
+    source = arguments.get("base_source")
+    request = arguments.get("request")
+    if source is None or source.contact != contact_authority.contact:
+        raise ValueError("materialized application contact differs from operator authority")
+    if request is None or request.authority.source_sha256 != candidate_sha256:
+        raise ValueError("materialized editorial request differs from candidate authority")
+    return prepare_admitted_market_application(
+        admission_store=_VerifiedBoundary(verified),
+        application_id=application_id,
+        repository_root=repository,
+        data_home=data_home,
+        candidate_authority_bytes=candidate_bytes,
+        candidate_authority_sha256=candidate_sha256,
+        contact_authority_bytes=contact_bytes,
+        contact_authority_sha256=contact_sha256,
+        orchestration_arguments=arguments,
+    )
 
 
 def prepare_admitted_market_application(
@@ -277,4 +378,9 @@ def prepare_admitted_market_application(
     )
 
 
-__all__ = ["MarketApplicationPreparation", "prepare_admitted_market_application"]
+__all__ = [
+    "MarketApplicationPreparation",
+    "PreparationInputMaterializer",
+    "prepare_admitted_market_application",
+    "prepare_admitted_market_application_from_authorities",
+]

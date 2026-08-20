@@ -1567,6 +1567,29 @@ class HandoffAdmissionStore:
             raise HandoffAdmissionError("admission_missing", "application admission does not exist")
         return self._stored_result(row, created=False)
 
+    def reference_sha256(self, application_id: str, reference_key: str) -> str:
+        """Return one sealed admitted reference identity without exposing its bytes."""
+
+        if reference_key not in REFERENCE_REGISTRY:
+            raise HandoffAdmissionError(
+                "reference_unknown", "admitted reference key is unsupported"
+            )
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT reference.referenced_sha256
+                   FROM application_admission_references reference
+                   JOIN application_admissions admission
+                     ON admission.application_id=reference.application_id
+                   WHERE reference.application_id=? AND reference.reference_key=?
+                     AND admission.admission_kind=? AND admission.sealed=1""",
+                (application_id, reference_key, ADMISSION_KIND_V1),
+            ).fetchall()
+        if len(rows) != 1:
+            raise HandoffAdmissionError(
+                "reference_missing", "sealed admitted reference is unavailable"
+            )
+        return _digest(rows[0]["referenced_sha256"], "admitted reference")
+
     def verify_stored(self, application_id: str) -> HandoffAdmission:
         connection = self._connect()
         try:
