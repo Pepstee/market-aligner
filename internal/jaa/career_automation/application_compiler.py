@@ -17,6 +17,8 @@ from datetime import date
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from jaa_core.contracts import CandidateContact
+
 from .application_strategy import (
     ApplicationStrategy,
     ApplicationStrategyStore,
@@ -26,7 +28,6 @@ from .evidence_matching import canonical_json, content_hash
 
 
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
-EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 FACT_TOKEN = re.compile(r"(?:\b\d[\d,./:-]*\b|[%£$€]|https?://|[^@\s]+@[^@\s]+)")
 WORD_FACT_TOKEN = re.compile(
     r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
@@ -219,47 +220,6 @@ def _safe_plain_text(value: str, label: str) -> str:
     if "\x00" in clean or "\r" in clean:
         raise ValueError(f"{label} must be normalized plain text")
     return clean
-
-
-@dataclass(frozen=True)
-class CandidateContact:
-    """Versioned contact projection; no street address or sensitive fields."""
-
-    full_name: str
-    email: str
-    phone: str | None
-    city: str
-    record_id: str
-    record_version: int
-    provenance_sha256: str
-
-    def __post_init__(self) -> None:
-        for value, label in (
-            (self.full_name, "candidate name"),
-            (self.city, "candidate city"),
-            (self.record_id, "contact record ID"),
-        ):
-            _safe_plain_text(value, label)
-        if self.phone is not None:
-            _safe_plain_text(self.phone, "candidate phone")
-        if not EMAIL.fullmatch(self.email):
-            raise ValueError("candidate email is invalid")
-        if self.record_version < 1:
-            raise ValueError("contact record version must be positive")
-        _digest(self.provenance_sha256, "contact provenance hash")
-        if "\n" in self.city or "," in self.city:
-            raise ValueError("contact location must be city only")
-
-    def document(self) -> dict[str, object]:
-        return {
-            "full_name": self.full_name,
-            "email": self.email,
-            "phone": self.phone,
-            "city": self.city,
-            "record_id": self.record_id,
-            "record_version": self.record_version,
-            "provenance_sha256": self.provenance_sha256,
-        }
 
 
 @dataclass(frozen=True)

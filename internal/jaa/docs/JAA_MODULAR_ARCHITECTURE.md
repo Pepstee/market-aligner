@@ -14,6 +14,9 @@ form_filling  ->  cv_generation  ->  jaa_core
 Owns candidate evidence, opportunity requirements, eligibility, application
 state, durable identities, and receipts. It must not know how a CV is laid out
 or how a website field is operated.
+`CandidateContact` is defined here because it is a versioned candidate identity
+projection consumed by both document generation and form filling; the legacy
+application compiler re-exports the same class during migration.
 
 ## `cv_generation`
 
@@ -38,9 +41,16 @@ content.
 
 ## Migration state
 
+The internal distribution is `job-application-automation`, requires CPython
+3.12, and treats the pinned Playwright Python package as a runtime dependency.
+Market Aligner retains the `market-aligner` distribution and CLI names. Browser
+installation remains a separate environment bootstrap step because Python
+package installation does not download a browser binary.
+
 The new packages are the public boundaries. Existing implementations remain in
 `career_automation` behind compatibility services for this first working
-increment. `jaa_core.module_boundaries` records one owner for each consequential
-legacy file and checks that the new public modules cannot reverse the dependency
-direction. Subsequent increments can move owner groups physically, one at a
-time, while the compatibility imports keep existing runtime entry points green.
+increment. `jaa_core.module_boundaries` records explicit owners for the
+consequential candidate, composition, provider, and execution capabilities and
+checks that the new public modules cannot reverse the dependency direction.
+Subsequent increments can move owner groups physically, one at a time, while the
+compatibility imports keep existing runtime entry points green.

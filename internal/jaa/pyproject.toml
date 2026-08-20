@@ -3,14 +3,15 @@ requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "market-aligner"
+name = "job-application-automation"
 version = "1.0.0"
-description = "Evidence-led, configurable UK AI/IT vacancy matcher."
+description = "Job Application Automation control plane and audited ATS executor."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 license = { text = "Proprietary" }
 dependencies = [
     "cryptography==49.0.0",
+    "playwright==1.62.0",
     "pyyaml==6.0.3",
     "requests==2.32.5",
     "openpyxl==3.1.5",
@@ -18,12 +19,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Playwright boards (jobkorea, notefolio) + the Fit/Opportunity scatter.
-full = ["playwright>=1.40", "matplotlib>=3.8", "jsonschema>=4.20"]
+# Optional reporting and LLM-schema helpers. The supported browser runtime is core.
+full = ["matplotlib==3.10.5", "jsonschema==4.25.0"]
 
 [project.scripts]
-market-aligner = "skeleton.run:main"
-uk-job-matcher = "skeleton.run:main"
+# Market Aligner owns its own CLI. JAA exposes only JAA-owned commands.
 jaa-baseline = "baseline_adoption.cli:main"
 jaa-lifecycle = "career_automation.cli:main"
 jaa-official-cohort = "career_automation.official_cohort:main"
