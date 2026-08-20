@@ -6,31 +6,28 @@ import base64
 import hashlib
 import json
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from playwright.sync_api import sync_playwright
 
 import career_automation.workable_live_adapter as workable_module
+import test_jaa06_independent_acceptance as jaa06_module
 from career_automation.ashby_live_adapter import JAA08ReleaseAuthority
+from career_automation.candidate_graph import CandidateGraph
 from career_automation.current_time import configured_hmac_current_time_witness
 from career_automation.handoff_admission import HandoffAdmissionStore, ResolvedReference
 from career_automation.market_aligner_handoff import (
     HandoffContractError,
     canonical_json_bytes,
+    canonical_sha256,
     parse_handoff,
 )
 from career_automation.release_gate import (
-    REQUIRED_VALIDATORS,
+    ApplicationCompilationStore,
     OfficialRouteBinding,
-    ReleaseBinding,
-    ValidationReceipt,
-    WorkRightBinding,
-    compile_release_manifest,
-    verify_release_manifest,
 )
 from career_automation.workable_live_adapter import (
     WorkableApplication,
@@ -38,12 +35,19 @@ from career_automation.workable_live_adapter import (
     WorkableLiveAdapter,
     WorkableOneUseCircuit,
     WorkablePolicy,
-    WorkableSchemaError,
     WorkableUpload,
 )
-from cv_generation.constraints import CVConstraintError, verify_poppler_cv_quality
-from cv_generation.service import build_candidate_application_package
-from test_candidate_application_factory import _inputs as candidate_inputs
+from cv_generation.constraints import (
+    CVConstraintError,
+    validate_generated_cv,
+    verify_poppler_cv_quality,
+)
+from test_jaa08_independent_acceptance import (
+    DIGEST,
+    ROOT,
+    _compilation_inputs,
+    _release_gate,
+)
 from test_workable_live_adapter import _install
 
 
@@ -55,6 +59,52 @@ ADMISSION_TIME = datetime(2026, 8, 10, 10, 5, tzinfo=timezone.utc)
 
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _market_vacancy_references(
+    job_key: str,
+    company_name: str,
+    role_title: str,
+) -> dict[str, bytes]:
+    fixture = json.loads(
+        files("career_automation").joinpath(
+            "fixtures/market-aligner-v1-vectors.json"
+        ).read_bytes()
+    )
+    original = {
+        entry["metadata"]["reference_key"]: json.loads(
+            base64.b64decode(entry["object_base64"], validate=True)
+        )
+        for entry in fixture["reference_bundle"]["value"]["entries"]
+        if entry["metadata"]["reference_key"].startswith("vacancy.")
+    }
+    location = original["vacancy.location.facts"]
+    location["job_key"] = job_key
+    raw_listing = original["vacancy.raw_listing"]
+    raw_listing.update(
+        adapter="jaa06-synthetic",
+        canonical_url="https://jobs.example.test/strategy-job",
+        job_key=job_key,
+        source_job_id="strategy-job",
+    )
+    requirements = original["vacancy.requirements"]
+    requirements["job_key"] = job_key
+    result = {
+        "vacancy.location.facts": canonical_json_bytes(location),
+        "vacancy.raw_listing": canonical_json_bytes(raw_listing),
+        "vacancy.requirements": canonical_json_bytes(requirements),
+    }
+    snapshot = original["vacancy.snapshot"]
+    snapshot.update(
+        company_name=company_name,
+        job_key=job_key,
+        location_facts_sha256=_sha(result["vacancy.location.facts"]),
+        raw_listing_sha256=_sha(result["vacancy.raw_listing"]),
+        requirements_sha256=_sha(result["vacancy.requirements"]),
+        role_title=role_title,
+    )
+    result["vacancy.snapshot"] = canonical_json_bytes(snapshot)
+    return result
 
 
 class _ContextAuthenticator:
@@ -90,14 +140,80 @@ class _Resolver:
         assert (exact_bytes, metadata_bytes) == expected
 
 
-def _admit(tmp_path: Path):
+def _handoff_for_source(
+    source,
+    vacancy_snapshot_bytes: bytes,
+) -> tuple[dict[str, object], bytes]:
     fixture_bytes = files("career_automation").joinpath(
         "fixtures/market-aligner-v1-vectors.json"
     ).read_bytes()
     document = json.loads(fixture_bytes)
-    handoff_bytes = base64.b64decode(
-        document["handoff"]["canonical_base64"], validate=True
+    envelope = json.loads(
+        base64.b64decode(document["handoff"]["canonical_base64"], validate=True)
     )
+    payload = envelope["payload"]
+    payload["job_key"] = source.job_key
+    references = _market_vacancy_references(
+        source.job_key,
+        source.company_name,
+        source.role_title,
+    )
+    assert _sha(vacancy_snapshot_bytes) == source.vacancy_sha256
+    references["vacancy.snapshot"] = vacancy_snapshot_bytes
+    payload["vacancy"].update(
+        company_name=source.company_name,
+        raw_listing_sha256=_sha(references["vacancy.raw_listing"]),
+        requirements_sha256=_sha(references["vacancy.requirements"]),
+        role_title=source.role_title,
+        vacancy_snapshot_sha256=source.vacancy_sha256,
+    )
+    payload["vacancy"]["location"]["facts_sha256"] = _sha(
+        references["vacancy.location.facts"]
+    )
+    payload["vacancy"]["provenance"].update(
+        adapter="jaa06-synthetic",
+        canonical_url="https://jobs.example.test/strategy-job",
+        source_job_id="strategy-job",
+    )
+    expected_job_key = "job_" + canonical_sha256(
+        {
+            "adapter": "jaa06-synthetic",
+            "canonical_url": "https://jobs.example.test/strategy-job",
+            "source_job_id": "strategy-job",
+        }
+    )
+    assert source.job_key == expected_job_key
+    for entry in document["reference_bundle"]["value"]["entries"]:
+        reference_key = entry["metadata"]["reference_key"]
+        if reference_key in references:
+            exact_bytes = references[reference_key]
+            entry["object_base64"] = base64.b64encode(exact_bytes).decode()
+            entry["metadata"]["object_sha256"] = _sha(exact_bytes)
+        subject = entry["metadata"]["subject"]
+        if "job_key" in subject:
+            subject["job_key"] = source.job_key
+        if "vacancy_snapshot_sha256" in subject:
+            subject["vacancy_snapshot_sha256"] = source.vacancy_sha256
+    envelope["payload_sha256"] = canonical_sha256(payload)
+    handoff_bytes = canonical_json_bytes(envelope)
+    return document, handoff_bytes
+
+
+def _admit(
+    tmp_path: Path,
+    *,
+    document: dict[str, object] | None = None,
+    handoff_bytes: bytes | None = None,
+):
+    fixture_bytes = files("career_automation").joinpath(
+        "fixtures/market-aligner-v1-vectors.json"
+    ).read_bytes()
+    if document is None:
+        document = json.loads(fixture_bytes)
+    if handoff_bytes is None:
+        handoff_bytes = base64.b64decode(
+            document["handoff"]["canonical_base64"], validate=True
+        )
     parsed = parse_handoff(handoff_bytes)
     context = canonical_json_bytes(
         {
@@ -129,88 +245,41 @@ def _admit(tmp_path: Path):
     return admission, parsed, handoff_bytes, context
 
 
-class _ManifestGate:
-    def __init__(self, manifest, token: str, quality_receipt_sha256: str) -> None:
-        self.manifest = manifest
-        self.token = token
-        self.quality_receipt_sha256 = quality_receipt_sha256
-        self.calls = 0
-
-    def consume_release_token(self, **kwargs: object) -> object:
-        if self.calls or kwargs["release_token"] != self.token:
-            raise ValueError("JAA-08 release token is invalid or already consumed")
-        verify_release_manifest(self.manifest)
-        source = kwargs["source"]
-        artifacts = kwargs["artifacts"]
-        binding = self.manifest.binding
-        if (
-            source.job_key != binding.job_key
-            or source.content_sha256 != binding.application_source_sha256
-            or binding.artifact_receipt_sha256
-            != _sha((artifacts.cv_pdf.pdf_sha256 + self.quality_receipt_sha256).encode())
-        ):
-            raise ValueError("JAA-08 inputs differ from the release manifest")
-        self.calls += 1
-        return SimpleNamespace(
-            release_manifest_sha256=self.manifest.release_manifest_sha256,
-            token_sha256=_sha(self.token.encode()),
-        )
-
-
-def _release_manifest(package, policy: WorkablePolicy, quality):
-    cv_hash = package.artifacts.cv_pdf.pdf_sha256
-    binding = ReleaseBinding(
-        job_key=package.source.job_key,
-        candidate_identity_sha256=_sha(package.source.contact.record_id.encode()),
-        vacancy_sha256=package.source.vacancy_sha256,
-        vacancy_observed_at=date(2026, 8, 10),
-        vacancy_valid_until=date(2026, 8, 30),
-        dossier_sha256=_sha(b"synthetic employer dossier"),
-        candidate_profile_sha256=_sha(b"approved candidate projection"),
-        strategy_id=_sha(b"workable walking skeleton strategy"),
-        strategy_document_sha256=_sha(policy.policy_sha256.encode()),
-        application_source_id=package.source.source_id,
-        application_source_sha256=package.source.content_sha256,
-        artifact_set_sha256=_sha(
-            (cv_hash + package.artifacts.cover_letter_pdf.pdf_sha256).encode()
-        ),
-        artifact_receipt_sha256=_sha((cv_hash + quality.receipt_sha256).encode()),
-        deterministic_writer_policy_sha256=_sha(b"candidate-application-factory-v1"),
-        model_receipt_sha256s=(),
-        work_right=WorkRightBinding(
-            "GB", "employee", "synthetic-work-right", 1, _sha(b"work-right"),
-            date(2026, 1, 1), date(2027, 1, 1), True,
-        ),
-        official_route=OfficialRouteBinding(
-            "workable-synthetic", "workable", policy.version,
-            policy.application_url, policy.policy_sha256,
-            date(2026, 8, 10), date(2026, 8, 30), True,
-        ),
-        evaluated_at=date(2026, 8, 20),
-        prior_application_count=0,
-    )
-    receipts = tuple(
-        ValidationReceipt(
-            validator_id=name,
-            validator_version="walking-skeleton-v1",
-            validator_impl_sha256=_sha(f"{name}-implementation".encode()),
-            input_sha256=binding.input_sha256,
-            artifact_set_sha256=binding.artifact_set_sha256,
-            decision="pass",
-        )
-        for name in REQUIRED_VALIDATORS
-    )
-    return compile_release_manifest(binding, receipts)
-
-
 def test_authenticated_market_to_one_use_workable_receipt_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    admission, parsed, _, _ = _admit(tmp_path)
+    original_scored_job = jaa06_module.scored_job_from_payload
+
+    def market_aligner_scored_job(payload: dict[str, object]):
+        job = original_scored_job(payload)
+        market_job_key = "job_" + canonical_sha256(
+            {
+                "adapter": payload["board"],
+                "canonical_url": payload["url"],
+                "source_job_id": payload["job_id"],
+            }
+        )
+        return replace(job, key=market_job_key)
+
+    monkeypatch.setattr(
+        jaa06_module,
+        "scored_job_from_payload",
+        market_aligner_scored_job,
+    )
+    (
+        database,
+        strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _,
+    ) = _compilation_inputs(tmp_path)
     policy = WorkablePolicy(
         tenant="synthetic",
         vacancy_id="ABC123",
-        job_key=admission.job_key,
+        job_key=source.job_key,
         fields=(
             WorkableField("full_name", "text", True, "Full name"),
             WorkableField("email", "email", True, "Email"),
@@ -218,84 +287,164 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
             WorkableField("terms", "checkbox", True, "I confirm"),
         ),
     )
-    arguments = candidate_inputs()
-    decision = json.loads(json.dumps(arguments["decision_receipt"]))
-    vacancy = parsed.payload["vacancy"]
-    decision.update(
-        job_key=admission.job_key,
-        vacancy_sha256=vacancy["vacancy_snapshot_sha256"],
-        role_title=vacancy["role_title"],
-        company_name=vacancy["company_name"],
-        source_url=policy.application_url,
+    with database.connection() as connection:
+        vacancy_snapshot_bytes = str(
+            connection.execute(
+                "SELECT payload_json FROM pipeline_jobs WHERE job_key=?",
+                (source.job_key,),
+            ).fetchone()[0]
+        ).encode()
+    handoff_document, handoff_bytes = _handoff_for_source(
+        source,
+        vacancy_snapshot_bytes,
     )
-    arguments.update(
-        decision_receipt=decision,
-        job_key=admission.job_key,
-        vacancy_sha256=vacancy["vacancy_snapshot_sha256"],
-        role_title=vacancy["role_title"],
-        company_name=vacancy["company_name"],
-        source_url=policy.application_url,
+    admission, parsed, _, _ = _admit(
+        tmp_path,
+        document=handoff_document,
+        handoff_bytes=handoff_bytes,
     )
-    package = build_candidate_application_package(**arguments)
+    assert admission.job_key == source.job_key == policy.job_key
+    assert parsed.payload["vacancy"]["vacancy_snapshot_sha256"] == source.vacancy_sha256
+
+    cv_facts = {row.sentence_id: row.text for row in source.facts}
+    constraint = validate_generated_cv(
+        source_id=source.source_id,
+        candidate_name=contact.full_name,
+        candidate_city=contact.city,
+        cv_text=artifacts.editable.cv_text,
+        cv_sha256=artifacts.editable.cv_sha256,
+        sections={
+            section.heading: tuple(cv_facts[value] for value in section.sentence_ids)
+            for section in source.cv_sections
+        },
+        rendered_pages=artifacts.cv_pdf.rendered_lines,
+    )
     cv_path = tmp_path / "approved-cv.pdf"
-    cv_path.write_bytes(package.artifacts.cv_pdf.pdf_bytes)
+    cv_path.write_bytes(artifacts.cv_pdf.pdf_bytes)
     quality = verify_poppler_cv_quality(
         cv_path,
-        expected_pdf_sha256=package.artifacts.cv_pdf.pdf_sha256,
-        expected_page_count=package.artifacts.cv_pdf.page_count,
-        required_text_markers=(package.source.contact.full_name, "Core Capabilities"),
+        expected_pdf_sha256=artifacts.cv_pdf.pdf_sha256,
+        expected_page_count=artifacts.cv_pdf.page_count,
+        required_text_markers=(contact.full_name, "Professional Summary"),
         poppler_bin_dir=POPPLER_BIN,
         poppler_library_dir=POPPLER_LIB,
     )
     assert quality.release_authority is False
-    assert quality.cv_pdf_sha256 == package.artifacts.cv_pdf.pdf_sha256
+    assert quality.cv_pdf_sha256 == artifacts.cv_pdf.pdf_sha256
+    assert constraint.cv_sha256 == artifacts.editable.cv_sha256
 
-    manifest = _release_manifest(package, policy, quality)
-    verify_release_manifest(manifest)
-    token = f"jaa08.{manifest.release_manifest_sha256}.walking-skeleton-token"
-    gate = _ManifestGate(manifest, token, quality.receipt_sha256)
+    today = strategy.as_of
+    graph = CandidateGraph(database.path)
+    graph.add_record(
+        "work-right-gb",
+        kind="work_right",
+        subject="permission",
+        value={"permitted": True},
+        state="fact",
+        source_identity="test:operator-work-right",
+        jurisdiction="GB",
+        contract_type="employee",
+        valid_from=today.replace(year=today.year - 1).isoformat(),
+        valid_until=today.replace(year=today.year + 1).isoformat(),
+    )
+    graph.verify_record(
+        "work-right-gb",
+        1,
+        decision="approved",
+        verifier_kind="configured",
+        policy_id="test.work-right",
+        policy_version="1",
+        policy_hash=DIGEST,
+        reason="operator-verified work-right authority",
+        source_identity="test:work-right-verifier",
+    )
+    compilation = ApplicationCompilationStore(database.path).register(
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        as_of=today,
+    )
+    gate = _release_gate(database)
+    gate.register_official_route(
+        job_key=source.job_key,
+        route=OfficialRouteBinding(
+            "route:workable-synthetic",
+            "workable",
+            policy.version,
+            policy.application_url,
+            policy.policy_sha256,
+            today,
+            today.replace(year=today.year + 1),
+            True,
+        ),
+    )
+    issued = gate.evaluate_and_issue(
+        compilation_id=compilation.compilation_id,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        evaluated_at=today,
+    )
+    consumed_at = datetime(today.year, today.month, today.day, 12, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="release token"):
+        gate.consume_release_token(
+            release_token=issued.release_token + "tampered",
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            consumed_at=consumed_at,
+        )
+
     authority = JAA08ReleaseAuthority(
-        gate=gate, release_token=token, source=package.source,
-        artifacts=package.artifacts, contact=package.source.contact, questions=None,
-        artifact_root=tmp_path, repository_root=Path("/synthetic/repository"),
+        gate=gate, release_token=issued.release_token, source=source,
+        artifacts=artifacts, contact=contact, questions=questions,
+        artifact_root=artifact_root, repository_root=ROOT,
         jurisdiction="GB", contract_type="employee",
-        consumed_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        consumed_at=consumed_at,
     )
     answers = {
-        "full_name": package.source.contact.full_name,
-        "email": package.source.contact.email,
+        "full_name": contact.full_name,
+        "email": contact.email,
         "terms": True,
     }
     upload = WorkableUpload(cv_path, quality.cv_pdf_sha256)
     provisional = WorkableApplication(b"placeholder", answers, {"resume": upload})
     application_document = {
         "admission_receipt_sha256": admission.verification_receipt_sha256,
-        "application_source_sha256": package.source.content_sha256,
+        "application_source_sha256": source.content_sha256,
         "application_url": policy.application_url,
         "cv_quality_receipt_sha256": quality.receipt_sha256,
         "cv_sha256": quality.cv_pdf_sha256,
         "form_answers_sha256": provisional.answers_sha256,
         "handoff_root_sha256": admission.handoff_root_sha256,
-        "job_key": admission.job_key,
+        "job_key": source.job_key,
         "schema_version": "jaa.workable-application-package.v1",
-        "vacancy_sha256": package.source.vacancy_sha256,
+        "vacancy_sha256": source.vacancy_sha256,
     }
     application = WorkableApplication(
         (workable_module._canonical_json(application_document) + "\n").encode(),
         answers,
         {"resume": upload},
     )
-    monkeypatch.setattr(
-        workable_module,
-        "_source_identity",
-        lambda _root: ("a" * 40, (("career_automation/workable_live_adapter.py", "b" * 64),)),
-    )
     circuit = WorkableOneUseCircuit(tmp_path / "workable.sqlite3")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         _install(page, policy)
-        adapter = WorkableLiveAdapter(circuit, Path("/synthetic"))
+        adapter = WorkableLiveAdapter(circuit, ROOT)
         review = adapter.prepare_review(page, policy=policy, application=application)
         assert review.consequential_click_authority is False
         receipt = adapter.submit(
@@ -304,14 +453,39 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
         assert page.evaluate("window.submitClicks") == 1
         browser.close()
 
-    assert gate.calls == 1
     assert circuit.snapshot()["state"] == "succeeded"
     transitions = tuple(row["to_state"] for row in circuit.journal())
     assert transitions == (
         "prepared", "release_consumption_started", "release_consumed",
         "click_started", "succeeded",
     )
-    assert receipt.document["release_manifest_sha256"] == manifest.release_manifest_sha256
+    assert receipt.document["release_manifest_sha256"] == issued.manifest.release_manifest_sha256
+    consumed = gate.verify_consumed_release_token(
+        release_token=issued.release_token,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
+        consumed_at=consumed_at,
+    )
+    assert consumed.release_manifest_sha256 == issued.manifest.release_manifest_sha256
+    with pytest.raises(ValueError, match="already consumed"):
+        gate.consume_release_token(
+            release_token=issued.release_token,
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            jurisdiction="GB",
+            contract_type="employee",
+            consumed_at=consumed_at,
+        )
     assert application.package_document()["handoff_root_sha256"] == admission.handoff_root_sha256
     assert application.package_document()["cv_quality_receipt_sha256"] == quality.receipt_sha256
 
@@ -340,17 +514,9 @@ def test_workable_policy_rejects_derived_or_tampered_market_job_key() -> None:
         )
 
 
-def test_tampered_handoff_and_release_token_are_rejected(tmp_path: Path) -> None:
+def test_tampered_handoff_is_rejected(tmp_path: Path) -> None:
     _, _, handoff_bytes, _ = _admit(tmp_path)
     changed = bytearray(handoff_bytes)
     changed[changed.index(b"Synthetic Systems Limited")] ^= 1
     with pytest.raises(HandoffContractError):
         parse_handoff(bytes(changed))
-
-    manifest = SimpleNamespace(release_manifest_sha256=_sha(b"manifest"))
-    expected = f"jaa08.{manifest.release_manifest_sha256}.expected-token"
-    gate = _ManifestGate(manifest, expected, _sha(b"quality"))
-    with pytest.raises(ValueError, match="invalid or already consumed"):
-        gate.consume_release_token(
-            release_token=f"jaa08.{manifest.release_manifest_sha256}.tampered-token"
-        )
