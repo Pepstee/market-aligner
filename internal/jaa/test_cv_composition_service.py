@@ -15,6 +15,11 @@ from career_automation.application_compiler import DocumentSection, StyleSlot
 from career_automation.evidence_matching import content_hash
 from cv_generation.adversarial_rebuild import bind_recruiter_improvement
 from cv_generation.constraints import CVConstraintReceipt
+from cv_generation.benchmark_learning import (
+    CVBenchmarkEntry,
+    CVBenchmarkFeatures,
+    build_benchmark_manifest,
+)
 from cv_generation.editorial_composition import (
     ApprovedCVClaim,
     CVSection,
@@ -245,6 +250,21 @@ def _binding(request, recruiter_receipt: RecruiterAssessmentReceipt):
     )
 
 
+def _benchmark_manifest():
+    features = CVBenchmarkFeatures(10_000, 10_000, 7_500, 8_000, 10_000, 10_000, 6_000)
+    entry = CVBenchmarkEntry(
+        exemplar_id="fixture-licensed-uk-1",
+        source_sha256="1" * 64,
+        source_uri_sha256="2" * 64,
+        license_id="fixture-permission",
+        provenance_sha256="3" * 64,
+        outcome_kind="expert_review",
+        outcome_sha256="4" * 64,
+        features=features,
+    )
+    return build_benchmark_manifest((entry,))
+
+
 def test_offline_injected_service_runs_the_complete_cv_cycle(tmp_path) -> None:
     base, listing, request, draft, writer, humanizer, assessor = _fixture(tmp_path)
 
@@ -262,6 +282,7 @@ def test_offline_injected_service_runs_the_complete_cv_cycle(tmp_path) -> None:
         improvement_binder=lambda current_request, receipt: (
             _binding(current_request, receipt),
         ),
+        benchmark_manifest=_benchmark_manifest(),
     )
 
     assert assessor.calls == 1
@@ -277,6 +298,9 @@ def test_offline_injected_service_runs_the_complete_cv_cycle(tmp_path) -> None:
     assert first.final_artifacts.cv_pdf.pdf_bytes.startswith(b"%PDF-1.4\n")
     assert first.final_artifacts.cover_letter_pdf.pdf_bytes.startswith(b"%PDF-1.4\n")
     assert first.release_authority is False
+    assert first.initial_benchmark_receipt.release_authority is False
+    assert first.final_benchmark_receipt.factual_authority == "candidate_evidence_only"
+    assert first.initial_benchmark_receipt.manifest_sha256 == first.final_benchmark_receipt.manifest_sha256
 
 
 def test_precomputed_receipt_path_applies_only_bound_claims(tmp_path) -> None:

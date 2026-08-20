@@ -52,6 +52,17 @@ from .document_quality import (
     resolve_poppler_runtime,
     verify_document_quality,
 )
+from .benchmark_learning import (
+    CVBenchmarkDiagnosticReceipt,
+    CVBenchmarkEntry,
+    CVBenchmarkError,
+    CVBenchmarkFeatures,
+    CVBenchmarkManifest,
+    build_benchmark_manifest,
+    evaluate_cv_benchmark,
+    extract_cv_features,
+    load_benchmark_manifest,
+)
 
 
 _SERVICE_EXPORTS = frozenset(
@@ -94,6 +105,11 @@ __all__ = [
     "BASE_CV_POLICY",
     "CVConstraintError",
     "CVConstraintReceipt",
+    "CVBenchmarkDiagnosticReceipt",
+    "CVBenchmarkEntry",
+    "CVBenchmarkError",
+    "CVBenchmarkFeatures",
+    "CVBenchmarkManifest",
     "CVCompositionOrchestrationResult",
     "CVCompositionServiceError",
     "CVEditorialDraft",
@@ -119,10 +135,14 @@ __all__ = [
     "RecruiterAssessor",
     "admit_editorial_composition",
     "build_editorial_draft",
+    "build_benchmark_manifest",
     "build_editorial_request",
     "bind_recruiter_improvement",
     "finalize_rebuilt_cv",
     "humanizer_request_sha256",
+    "evaluate_cv_benchmark",
+    "extract_cv_features",
+    "load_benchmark_manifest",
     "policy_for_candidate",
     "rebuild_from_recruiter_assessment",
     "render_editorial_cv_text",

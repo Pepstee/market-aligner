@@ -43,6 +43,11 @@ from .constraints import (
     validate_generated_cv,
 )
 from .document_quality import DocumentQualityReceipt, verify_document_quality
+from .benchmark_learning import (
+    CVBenchmarkDiagnosticReceipt,
+    CVBenchmarkManifest,
+    evaluate_cv_benchmark,
+)
 from .editorial_composition import (
     CVEditorialDraft,
     CVEditorialRequest,
@@ -237,11 +242,13 @@ class CVCompositionOrchestrationResult:
     initial_constraint_receipt: CVConstraintReceipt
     initial_artifacts: ApplicationArtifacts
     initial_quality_receipt: DocumentQualityReceipt
+    initial_benchmark_receipt: CVBenchmarkDiagnosticReceipt | None
     recruiter_receipt: RecruiterAssessmentReceipt
     rebuild: EvidenceSafeRebuildResult
     final_constraint_receipt: CVConstraintReceipt
     final_artifacts: ApplicationArtifacts
     final_quality_receipt: DocumentQualityReceipt
+    final_benchmark_receipt: CVBenchmarkDiagnosticReceipt | None
     orchestration_sha256: str
     release_authority: bool = False
     schema_version: str = ORCHESTRATION_SCHEMA
@@ -256,6 +263,11 @@ class CVCompositionOrchestrationResult:
         self.rebuild.__post_init__()
         self.final_constraint_receipt.__post_init__()
         self.final_quality_receipt.__post_init__()
+        if (self.initial_benchmark_receipt is None) != (self.final_benchmark_receipt is None):
+            raise CVCompositionServiceError("CV benchmark diagnostics are incomplete")
+        if self.initial_benchmark_receipt is not None:
+            self.initial_benchmark_receipt.__post_init__()
+            self.final_benchmark_receipt.__post_init__()
         verify_application_artifacts(self.initial_artifacts)
         verify_application_artifacts(self.final_artifacts)
         _digest(self.orchestration_sha256, "CV orchestration hash")
@@ -282,6 +294,15 @@ class CVCompositionOrchestrationResult:
             != self.editorial_receipt.receipt_sha256
         ):
             raise CVCompositionServiceError("CV orchestration receipts are out of order")
+        if self.initial_benchmark_receipt is not None and (
+            self.initial_benchmark_receipt.draft_sha256
+            != self.editorial_receipt.final_draft_sha256
+            or self.final_benchmark_receipt.draft_sha256
+            != self.rebuild.rebuilt_draft.draft_sha256
+            or self.initial_benchmark_receipt.manifest_sha256
+            != self.final_benchmark_receipt.manifest_sha256
+        ):
+            raise CVCompositionServiceError("CV benchmark receipts are out of order")
         if self.orchestration_sha256 != content_hash(
             self.document(include_identity=False)
         ):
@@ -300,8 +321,16 @@ class CVCompositionOrchestrationResult:
                 self.initial_constraint_receipt.receipt_sha256
             ),
             "initial_quality_receipt_sha256": self.initial_quality_receipt.receipt_sha256,
+            "initial_benchmark_receipt_sha256": (
+                self.initial_benchmark_receipt.receipt_sha256
+                if self.initial_benchmark_receipt is not None else None
+            ),
             "rebuild_sha256": self.rebuild.rebuild_sha256,
             "recruiter_receipt_sha256": self.recruiter_receipt.receipt_sha256,
+            "final_benchmark_receipt_sha256": (
+                self.final_benchmark_receipt.receipt_sha256
+                if self.final_benchmark_receipt is not None else None
+            ),
             "release_authority": False,
             "schema_version": self.schema_version,
         }
@@ -324,6 +353,7 @@ def run_cv_composition_orchestration(
     recruiter_assessor: RecruiterAssessor | None = None,
     recruiter_receipt: RecruiterAssessmentReceipt | None = None,
     improvement_binder: ImprovementBinder | None = None,
+    benchmark_manifest: CVBenchmarkManifest | None = None,
 ) -> CVCompositionOrchestrationResult:
     """Run one offline-safe CV composition, assessment and rebuild cycle."""
 
@@ -358,6 +388,15 @@ def run_cv_composition_orchestration(
         artifacts=initial_artifacts,
     )
     initial_quality = verify_document_quality(initial_artifacts)
+    initial_benchmark = (
+        evaluate_cv_benchmark(
+            draft=humanized_draft,
+            listing_text=listing_text,
+            vacancy_sha256=request.vacancy_sha256,
+            manifest=benchmark_manifest,
+        )
+        if benchmark_manifest is not None else None
+    )
     package = RecruiterAssessmentPackage(
         listing_text=listing_text,
         listing_text_sha256=listing_sha256,
@@ -407,6 +446,15 @@ def run_cv_composition_orchestration(
         artifacts=final_artifacts,
     )
     final_quality = verify_document_quality(final_artifacts)
+    final_benchmark = (
+        evaluate_cv_benchmark(
+            draft=rebuild.rebuilt_draft,
+            listing_text=listing_text,
+            vacancy_sha256=request.vacancy_sha256,
+            manifest=benchmark_manifest,
+        )
+        if benchmark_manifest is not None else None
+    )
     values = {
         "editorial_receipt_sha256": editorial_receipt.receipt_sha256,
         "final_artifact_set_sha256": final_artifacts.artifact_set_sha256,
@@ -415,8 +463,14 @@ def run_cv_composition_orchestration(
         "initial_artifact_set_sha256": initial_artifacts.artifact_set_sha256,
         "initial_constraint_receipt_sha256": initial_constraint.receipt_sha256,
         "initial_quality_receipt_sha256": initial_quality.receipt_sha256,
+        "initial_benchmark_receipt_sha256": (
+            initial_benchmark.receipt_sha256 if initial_benchmark is not None else None
+        ),
         "rebuild_sha256": rebuild.rebuild_sha256,
         "recruiter_receipt_sha256": assessed.receipt_sha256,
+        "final_benchmark_receipt_sha256": (
+            final_benchmark.receipt_sha256 if final_benchmark is not None else None
+        ),
         "release_authority": False,
         "schema_version": ORCHESTRATION_SCHEMA,
     }
@@ -425,11 +479,13 @@ def run_cv_composition_orchestration(
         initial_constraint_receipt=initial_constraint,
         initial_artifacts=initial_artifacts,
         initial_quality_receipt=initial_quality,
+        initial_benchmark_receipt=initial_benchmark,
         recruiter_receipt=assessed,
         rebuild=rebuild,
         final_constraint_receipt=final_constraint,
         final_artifacts=final_artifacts,
         final_quality_receipt=final_quality,
+        final_benchmark_receipt=final_benchmark,
         orchestration_sha256=content_hash(values),
     )
 
