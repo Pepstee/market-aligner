@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import time
@@ -10,11 +11,17 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
 from market_aligner.collectors.adapters.base import SourceUnavailable, load_adapter
-from market_aligner.state.vacancies import JobDatabase
+from market_aligner.state.vacancies import (
+    JobDatabase,
+    VacancyRefreshConflict,
+    raw_posting_bytes,
+    raw_posting_content_sha256,
+    raw_posting_from_bytes,
+)
 from market_aligner.collectors.scrapling_client import ScraplingClient, ScraplingFetchError
 
 
@@ -36,6 +43,58 @@ def _save_raw(base: Path, row: RawPosting) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
+def _write_durable_bytes(path: Path, value: bytes) -> None:
+    """Atomically materialize exact bytes and fsync file plus parent directory."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() != value:
+            raise ValueError(f"content-addressed object differs at {path}")
+        return
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        _fsync_directory_chain(path.parent)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _replace_durable_bytes(path: Path, value: bytes) -> None:
+    """Atomically replace convenience materialization and fsync its directory."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        _fsync_directory_chain(path.parent)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _fsync_directory_chain(path: Path) -> None:
+    """Persist newly created directory entries through the external data root."""
+
+    current = path.absolute()
+    for directory in (current, *current.parents):
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if directory == directory.parent:
+            break
+
+
 class Collector:
     """Uncapped parallel collector with durable resume state and fair fetching."""
 
@@ -48,11 +107,13 @@ class Collector:
         adapter_loader=None,
         sleeper=time.sleep,
         monotonic=time.monotonic,
+        crash_injector: Callable[[str], None] | None = None,
     ) -> None:
         self.cfg, self.root, self.log = cfg, Path(data_root), log
         self.adapter_loader = adapter_loader
         self.sleeper = sleeper
         self.monotonic = monotonic
+        self.crash_injector = crash_injector or (lambda _point: None)
         io = cfg.get("io", {}) or {}
         self.urls_path = self.root / io.get("job_urls", "state/job_urls.jsonl")
         self.raw_cache = self.root / io.get("raw_cache", "raw/vacancies")
@@ -141,46 +202,152 @@ class Collector:
         job_key: str,
         *,
         expected_content_sha256: str,
+        operation_id: str,
+        refresh_id: str,
+        context_sha256: str,
+        started_at: str,
+        receipt_context: Mapping[str, object],
+        finished_at: Callable[[], str],
     ) -> dict[str, object]:
-        """Fetch and CAS-replace exactly one configured, already-fetched vacancy."""
+        """Journal, fetch once, CAS, and reconcile one exact vacancy refresh."""
 
-        job, observed_content_sha256, old_fetched_at = self.db.fetched_posting(job_key)
-        if observed_content_sha256 != expected_content_sha256:
-            raise ValueError(
-                f"expected content identity does not match current vacancy: {job_key}"
-            )
-        if job.board not in self.boards:
-            raise ValueError(f"vacancy board is not enabled by collection config: {job.board}")
-        adapter_loader = self.adapter_loader or load_adapter
-        adapter_config = dict(self.cfg.get(job.board, {}) or {})
-        adapter = adapter_loader(job.board, config=adapter_config)
-        owns = getattr(adapter, "owns", None)
-        if not callable(owns) or not owns(job):
-            raise ValueError(
-                f"configured adapter does not own exact vacancy key: {job_key}"
-            )
-        # A guarded refresh is deliberately one official adapter invocation.
-        # Unlike broad collection, it must not turn an authoritative absence
-        # or source error into a second, differently scoped fallback fetch.
-        raw = adapter.fetch(job, True)
-        fallback_engine = None
-        if raw.key != job_key or raw.board != job.board or raw.job_id != job.job_id:
-            raise ValueError(f"adapter returned a different vacancy identity: {raw.key}")
-        result = self.db.compare_and_swap_raw(
-            raw,
-            expected_content_sha256=expected_content_sha256,
+        transition = self.db.refresh_transition(
+            operation_id,
+            context_sha256=context_sha256,
         )
-        _save_raw(self.raw_cache, raw)
-        raw_path = _raw_path(self.raw_cache, raw)
-        return {
-            **result,
-            "adapter": job.board,
-            "adapter_config": adapter_config,
-            "fallback_engine": fallback_engine,
-            "job_key": job_key,
-            "old_fetched_at": old_fetched_at,
-            "raw_cache_path": str(raw_path),
-        }
+        if transition is None:
+            job, observed_content_sha256, _old_fetched_at = self.db.fetched_posting(job_key)
+            if observed_content_sha256 != expected_content_sha256:
+                raise ValueError(
+                    f"expected content identity does not match current vacancy: {job_key}"
+                )
+            if job.board not in self.boards:
+                raise ValueError(
+                    f"vacancy board is not enabled by collection config: {job.board}"
+                )
+            old_path = _raw_path(self.raw_cache, RawPosting(
+                job.board, job.job_id, job.url, _old_fetched_at
+            ))
+            if not old_path.is_file():
+                raise FileNotFoundError(
+                    f"exact old raw-cache response is unavailable: {old_path}"
+                )
+            old_raw_bytes = old_path.read_bytes()
+            old_raw = raw_posting_from_bytes(old_raw_bytes)
+            if (
+                old_raw.key != job_key
+                or raw_posting_content_sha256(old_raw) != expected_content_sha256
+            ):
+                raise ValueError("old raw-cache response differs from SQLite vacancy")
+            transition = self.db.begin_vacancy_refresh(
+                refresh_id=refresh_id,
+                operation_id=operation_id,
+                context_sha256=context_sha256,
+                job_key=job_key,
+                expected_content_sha256=expected_content_sha256,
+                started_at=started_at,
+                old_raw_bytes=old_raw_bytes,
+            )
+
+        old_object_sha256 = str(transition["old_object_sha256"])
+        old_object_path = (
+            self.root / "state" / "collection-refresh-objects"
+            / old_object_sha256[:2] / old_object_sha256
+        )
+        _write_durable_bytes(old_object_path, bytes(transition["old_raw_bytes"]))
+
+        if transition["status"] == "intent":
+            old_raw = raw_posting_from_bytes(bytes(transition["old_raw_bytes"]))
+            job = JobUrl(old_raw.board, old_raw.job_id, old_raw.url)
+            if job.board not in self.boards:
+                raise ValueError(
+                    f"vacancy board is not enabled by collection config: {job.board}"
+                )
+            adapter_loader = self.adapter_loader or load_adapter
+            adapter_config = dict(self.cfg.get(job.board, {}) or {})
+            adapter = adapter_loader(job.board, config=adapter_config)
+            owns = getattr(adapter, "owns", None)
+            if not callable(owns) or not owns(job):
+                raise ValueError(
+                    f"configured adapter does not own exact vacancy key: {job_key}"
+                )
+            raw = adapter.fetch(job, True)
+            if raw.key != job_key or raw.board != job.board or raw.job_id != job.job_id:
+                raise ValueError(f"adapter returned a different vacancy identity: {raw.key}")
+            self.db.record_vacancy_refresh_fetch(
+                refresh_id,
+                new_raw_bytes=raw_posting_bytes(raw),
+            )
+            transition = self.db.refresh_transition(
+                operation_id, context_sha256=context_sha256
+            )
+            assert transition is not None
+
+        if transition["status"] == "fetched":
+            self.crash_injector("before_object")
+            new_raw_bytes = bytes(transition["new_raw_bytes"])
+            new_object_sha256 = str(transition["new_object_sha256"])
+            new_object_path = (
+                self.root / "state" / "collection-refresh-objects"
+                / new_object_sha256[:2] / new_object_sha256
+            )
+            _write_durable_bytes(new_object_path, new_raw_bytes)
+            self.db.mark_vacancy_refresh_object_ready(
+                refresh_id,
+                object_sha256=new_object_sha256,
+            )
+            transition = self.db.refresh_transition(
+                operation_id, context_sha256=context_sha256
+            )
+            assert transition is not None
+
+        if transition["status"] == "object_ready":
+            self.crash_injector("after_object_pre_cas")
+            new_object_sha256 = str(transition["new_object_sha256"])
+            journalled_new = raw_posting_from_bytes(bytes(transition["new_raw_bytes"]))
+            raw_cache_path = _raw_path(self.raw_cache, journalled_new)
+            basis = {
+                **dict(receipt_context),
+                "finished_at": finished_at(),
+                "started_at": str(transition["started_at"]),
+                "new_raw_object_path": str(
+                    Path("state") / "collection-refresh-objects"
+                    / new_object_sha256[:2] / new_object_sha256
+                ),
+                "old_raw_object_path": str(
+                    Path("state") / "collection-refresh-objects"
+                    / old_object_sha256[:2] / old_object_sha256
+                ),
+                "raw_cache_file_sha256": new_object_sha256,
+                "raw_cache_path": str(raw_cache_path.relative_to(self.root)),
+            }
+            sealed = self.db.seal_vacancy_refresh(
+                refresh_id,
+                receipt_basis=basis,
+            )
+            transition = self.db.refresh_transition(
+                operation_id, context_sha256=context_sha256
+            )
+            assert transition is not None and transition["status"] == "committed"
+            self.crash_injector("after_cas_pre_cache")
+        else:
+            sealed_value = transition.get("receipt_basis")
+            if transition["status"] != "committed" or not isinstance(sealed_value, dict):
+                raise VacancyRefreshConflict("refresh journal has no recoverable terminal state")
+            sealed = sealed_value
+
+        new_raw_bytes = bytes(transition["new_raw_bytes"])
+        new_raw = raw_posting_from_bytes(new_raw_bytes)
+        _current_job, current_content, current_fetched_at = self.db.fetched_posting(job_key)
+        if (
+            current_content != transition["new_content_sha256"]
+            or current_fetched_at != transition["new_fetched_at"]
+        ):
+            raise VacancyRefreshConflict("committed refresh has been superseded")
+        raw_path = _raw_path(self.raw_cache, new_raw)
+        _replace_durable_bytes(raw_path, new_raw_bytes)
+        self.crash_injector("after_cache_pre_receipt")
+        return {**sealed, "raw_cache_path_absolute": str(raw_path)}
 
     def cycle(self) -> dict[str, int]:
         adapters: dict[str, Any] = {}

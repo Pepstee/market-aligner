@@ -201,6 +201,7 @@ def _refresh_vacancy_command(args: argparse.Namespace) -> int:
         args.config,
         job_key=args.job_key,
         expected_content_sha256=args.expected_content_sha256,
+        operation_id=args.operation_id,
         log=lambda message: print(message, file=sys.stderr),
     )
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
@@ -349,6 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
     refresh.add_argument("--config", type=Path, required=True)
     refresh.add_argument("--job-key", required=True)
     refresh.add_argument("--expected-content-sha256", required=True)
+    refresh.add_argument(
+        "--operation-id",
+        required=True,
+        help="Stable opaque ID reused only to recover/replay this exact refresh.",
+    )
     _add_data_home(refresh)
     refresh.set_defaults(handler=_refresh_vacancy_command)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -91,6 +92,14 @@ def _write_receipt(path: Path, receipt: dict[str, object]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_name, path)
+        for directory in (path.parent.absolute(), *path.parent.absolute().parents):
+            directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+            if directory == directory.parent:
+                break
     except BaseException:
         try:
             os.unlink(temporary_name)
@@ -173,6 +182,7 @@ class CollectionService:
         *,
         job_key: str,
         expected_content_sha256: str,
+        operation_id: str,
         log=print,
     ) -> dict[str, object]:
         """Refresh exactly one configured existing vacancy under a SQLite CAS."""
@@ -183,6 +193,8 @@ class CollectionService:
             character not in "0123456789abcdef" for character in expected_content_sha256
         ):
             raise ValueError("expected content identity must be lowercase SHA-256")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", operation_id) is None:
+            raise ValueError("refresh operation ID must be a stable opaque token")
         config = load_config(config_path)
         _validate_collection_config(config)
         board = job_key.split(":", 1)[0]
@@ -196,41 +208,61 @@ class CollectionService:
                 "job_key": job_key,
             }
         )
+        refresh_context = {
+            "config_sha256": config_sha256,
+            "expected_content_sha256": expected_content_sha256,
+            "job_key": job_key,
+            "operation_id": operation_id,
+            "schema_version": "market-aligner.vacancy-refresh-context.v1",
+            "source_sha256": source_sha256,
+        }
+        context_sha256 = _sha256(refresh_context)
+        refresh_id = _sha256(
+            {
+                "context_sha256": context_sha256,
+                "schema_version": "market-aligner.vacancy-refresh-id.v1",
+            }
+        )
         started_at = self.now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         collector = self.collector_factory(config, self.paths.root, log=log)
+        receipt_context: dict[str, object] = {
+            "adapter": board,
+            "application_authority": False,
+            "authority_scope": "collection_only",
+            "config_sha256": config_sha256,
+            "context_sha256": context_sha256,
+            "expected_old_content_sha256": expected_content_sha256,
+            "fallback_engine": None,
+            "job_key": job_key,
+            "official_fetch_count": 1,
+            "operation_id": operation_id,
+            "refresh_id": refresh_id,
+            "schema_version": "market-aligner.vacancy-refresh-receipt.v2",
+            "source_sha256": source_sha256,
+            "started_at": started_at,
+        }
         refreshed = collector.refresh_vacancy(
             job_key,
             expected_content_sha256=expected_content_sha256,
+            operation_id=operation_id,
+            refresh_id=refresh_id,
+            context_sha256=context_sha256,
+            started_at=started_at,
+            receipt_context=receipt_context,
+            finished_at=lambda: self.now().astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
         )
-        finished_at = self.now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        raw_path = Path(str(refreshed["raw_cache_path"])).resolve()
+        raw_path = Path(str(refreshed.pop("raw_cache_path_absolute"))).resolve()
         try:
-            raw_cache_path = str(raw_path.relative_to(self.paths.root.resolve()))
+            raw_path.relative_to(self.paths.root.resolve())
         except ValueError as exc:
             raise ValueError("collector raw cache escaped the external data home") from exc
-        raw_cache_file_sha256 = hashlib.sha256(raw_path.read_bytes()).hexdigest()
-        body: dict[str, object] = {
-            "adapter": str(refreshed["adapter"]),
-            "application_authority": False,
-            "authority_scope": "collection_only",
-            "changed": bool(refreshed["changed"]),
-            "config_sha256": config_sha256,
-            "expected_old_content_sha256": expected_content_sha256,
-            "fallback_engine": refreshed["fallback_engine"],
-            "finished_at": finished_at,
-            "job_key": job_key,
-            "new_content_sha256": str(refreshed["new_content_sha256"]),
-            "new_fetched_at": str(refreshed["new_fetched_at"]),
-            "official_fetch_count": 1,
-            "old_content_sha256": str(refreshed["old_content_sha256"]),
-            "old_fetched_at": str(refreshed["old_fetched_at"]),
-            "raw_cache_file_sha256": raw_cache_file_sha256,
-            "raw_cache_path": raw_cache_path,
-            "schema_version": "market-aligner.vacancy-refresh-receipt.v1",
-            "source_sha256": source_sha256,
-            "started_at": started_at,
-            "state_sha256": _sha256(collector.db.collection_state()),
-        }
+        if hashlib.sha256(raw_path.read_bytes()).hexdigest() != refreshed.get(
+            "raw_cache_file_sha256"
+        ):
+            raise ValueError("materialized raw cache differs from sealed refresh transition")
+        body = dict(refreshed)
         receipt_sha256 = _sha256(body)
         receipt = {**body, "receipt_sha256": receipt_sha256}
         receipt_path = (

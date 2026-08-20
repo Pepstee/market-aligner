@@ -16,7 +16,7 @@ from market_aligner.cli import build_parser, main
 from market_aligner.collectors.adapters.base import load_adapter
 from market_aligner.collectors.adapters.workable import WorkableAdapter
 from market_aligner.collectors.engine import Collector
-from market_aligner.domain.contracts import JobUrl, RawPosting
+from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
 from market_aligner.service.api import CollectionService
 from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
 
@@ -50,15 +50,15 @@ class CollectionTests(unittest.TestCase):
         database = JobDatabase(root / "state" / "vacancies.sqlite3")
         job = JobUrl("injected", "tenant:1", "https://example.test/jobs/1")
         database.upsert_discovered(job)
-        database.store_raw(
-            RawPosting(
-                job.board,
-                job.job_id,
-                job.url,
-                "2026-08-20T00:00:00Z",
-                raw_text="old official bytes",
-            )
+        old_raw = RawPosting(
+            job.board,
+            job.job_id,
+            job.url,
+            "2026-08-20T00:00:00Z",
+            raw_text="old official bytes",
         )
+        database.store_raw(old_raw)
+        write_jsonl(root / "raw" / "vacancies" / "injected" / "tenant_1.json", [old_raw])
         _job, old_hash, _fetched_at = database.fetched_posting(job.key)
         calls = {"fetch": 0}
 
@@ -250,6 +250,7 @@ class CollectionTests(unittest.TestCase):
                 config,
                 job_key="injected:tenant:1",
                 expected_content_sha256=old_hash,
+                operation_id="changed-refresh",
                 log=lambda _message: None,
             )
             self.assertEqual(1, calls["fetch"])
@@ -269,6 +270,36 @@ class CollectionTests(unittest.TestCase):
                 receipt["raw_cache_file_sha256"],
                 hashlib.sha256(raw_cache.read_bytes()).hexdigest(),
             )
+            with self.assertRaisesRegex(ValueError, "already bound"):
+                service.refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256="b" * 64,
+                    operation_id="changed-refresh",
+                    log=lambda _message: None,
+                )
+            self.assertEqual(1, calls["fetch"])
+
+            database.store_raw(
+                RawPosting(
+                    "injected",
+                    "tenant:1",
+                    "https://example.test/jobs/1",
+                    "2026-08-20T01:30:00Z",
+                    raw_text="later authoritative refresh",
+                )
+            )
+            cache_before_replay = raw_cache.read_bytes()
+            with self.assertRaisesRegex(VacancyRefreshConflict, "superseded"):
+                service.refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id="changed-refresh",
+                    log=lambda _message: None,
+                )
+            self.assertEqual(cache_before_replay, raw_cache.read_bytes())
+            self.assertEqual(1, calls["fetch"])
 
     def test_exact_refresh_records_unchanged_official_content(self) -> None:
         class UnchangedAdapter:
@@ -295,6 +326,7 @@ class CollectionTests(unittest.TestCase):
                 config,
                 job_key="injected:tenant:1",
                 expected_content_sha256=old_hash,
+                operation_id="unchanged-refresh",
                 log=lambda _message: None,
             )
             self.assertEqual(1, calls["fetch"])
@@ -340,12 +372,16 @@ class CollectionTests(unittest.TestCase):
                     config,
                     job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
+                    operation_id="racing-refresh",
                     log=lambda _message: None,
                 )
             self.assertEqual(1, calls["fetch"])
             self.assertNotEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
             self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
-            self.assertFalse((root / "raw" / "vacancies").exists())
+            self.assertIn(
+                b"old official bytes",
+                (root / "raw" / "vacancies" / "injected" / "tenant_1.json").read_bytes(),
+            )
 
     def test_exact_refresh_fetch_error_preserves_existing_good_state(self) -> None:
         class ErrorAdapter:
@@ -367,11 +403,103 @@ class CollectionTests(unittest.TestCase):
                     config,
                     job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
+                    operation_id="error-refresh",
                     log=lambda _message: None,
                 )
             self.assertEqual(1, calls["fetch"])
             self.assertEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
             self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
+
+    def test_exact_refresh_recovers_every_crash_boundary_without_refetch(self) -> None:
+        class RecoverableAdapter:
+            board = "injected"
+
+            def owns(self, _job):
+                return True
+
+            def fetch(self, job, live=False):
+                self.calls["fetch"] += 1
+                return RawPosting(
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T04:00:00Z",
+                    raw_text="recoverable new official bytes",
+                )
+
+        for crash_point in (
+            "before_object",
+            "after_object_pre_cas",
+            "after_cas_pre_cache",
+            "after_cache_pre_receipt",
+        ):
+            with self.subTest(crash_point=crash_point), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                adapter = RecoverableAdapter()
+                config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                old_cache = root / "raw" / "vacancies" / "injected" / "tenant_1.json"
+                exact_old_bytes = old_cache.read_bytes()
+
+                def crash_factory(loaded_config, data_home, log=print):
+                    collector = factory(loaded_config, data_home, log=log)
+
+                    def inject(point):
+                        if point == crash_point:
+                            raise RuntimeError(f"crash:{point}")
+
+                    collector.crash_injector = inject
+                    return collector
+
+                operation_id = f"recovery-{crash_point}"
+                with self.assertRaisesRegex(RuntimeError, f"crash:{crash_point}"):
+                    CollectionService(root, collector_factory=crash_factory).refresh_vacancy(
+                        config,
+                        job_key="injected:tenant:1",
+                        expected_content_sha256=old_hash,
+                        operation_id=operation_id,
+                        log=lambda _message: None,
+                    )
+                self.assertEqual(1, calls["fetch"])
+                self.assertFalse(
+                    (root / "state" / "collection-refresh-receipts").exists()
+                )
+
+                receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id=operation_id,
+                    log=lambda _message: None,
+                )
+                self.assertEqual(1, calls["fetch"])
+                self.assertEqual("market-aligner.vacancy-refresh-receipt.v2", receipt["schema_version"])
+                self.assertEqual(operation_id, receipt["operation_id"])
+                self.assertTrue(receipt["changed"])
+                old_object = root / receipt["old_raw_object_path"]
+                new_object = root / receipt["new_raw_object_path"]
+                self.assertEqual(exact_old_bytes, old_object.read_bytes())
+                self.assertEqual(
+                    receipt["old_raw_object_sha256"],
+                    hashlib.sha256(old_object.read_bytes()).hexdigest(),
+                )
+                self.assertEqual(
+                    receipt["new_raw_object_sha256"],
+                    hashlib.sha256(new_object.read_bytes()).hexdigest(),
+                )
+                self.assertEqual(
+                    receipt["new_content_sha256"],
+                    database.fetched_posting("injected:tenant:1")[1],
+                )
+
+                replay = CollectionService(root, collector_factory=factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id=operation_id,
+                    log=lambda _message: None,
+                )
+                self.assertEqual(receipt["receipt_sha256"], replay["receipt_sha256"])
+                self.assertEqual(1, calls["fetch"])
 
     def test_workable_exact_fetch_is_one_config_owned_official_request(self) -> None:
         adapter = WorkableAdapter(config={"companies": {"cogna": "Cogna"}})
@@ -467,6 +595,8 @@ class CollectionTests(unittest.TestCase):
                 "workable:cogna:847CFBC5F4",
                 "--expected-content-sha256",
                 "a" * 64,
+                "--operation-id",
+                "cogna-refresh-20260820T180000Z",
             ]
         )
         self.assertEqual("workable:cogna:847CFBC5F4", refresh.job_key)
