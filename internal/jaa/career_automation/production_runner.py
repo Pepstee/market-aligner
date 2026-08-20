@@ -376,10 +376,19 @@ class GeneratedRevisionSink:
     def _generator_source_identity(self) -> tuple[str, tuple[tuple[str, str], ...]]:
         repository = self._recorder.attempt.archive.repository_root
         head = exact_clean_head(repository)
+        prefix = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--show-prefix"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if prefix and not prefix.endswith("/"):
+            raise ValueError("repository prefix is not canonical")
         identities: list[tuple[str, str]] = []
         for relative in _GENERATOR_SOURCE_PATHS:
+            committed_path = f"{prefix}{relative}"
             completed = subprocess.run(
-                ["git", "-C", str(repository), "show", f"{head}:{relative}"],
+                ["git", "-C", str(repository), "show", f"{head}:{committed_path}"],
                 check=True,
                 capture_output=True,
             )
