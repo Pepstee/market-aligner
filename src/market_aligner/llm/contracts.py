@@ -94,6 +94,43 @@ class EvidenceAlignment:
 
 
 @dataclass(frozen=True)
+class LLMTransportReceipt:
+    provider_identity: str
+    provider_sha256: str
+    model_identity: str
+    model_sha256: str
+    transport_sha256: str
+    request_sha256: str
+    response_sha256: str
+    binary_sha256: str
+    invocation_count: int
+    receipt_sha256: str
+    schema_version: str = "market-aligner.llm-transport.v1"
+
+    def __post_init__(self) -> None:
+        if not self.provider_identity.strip() or not self.model_identity.strip():
+            raise ValueError("transport provider and model identities are required")
+        if self.invocation_count != 1:
+            raise ValueError("semantic transport requires exactly one invocation")
+        for name in (
+            "provider_sha256",
+            "model_sha256",
+            "transport_sha256",
+            "request_sha256",
+            "response_sha256",
+            "binary_sha256",
+            "receipt_sha256",
+        ):
+            value = getattr(self, name)
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+        document = asdict(self)
+        observed = document.pop("receipt_sha256")
+        if observed != canonical_hash(document):
+            raise ValueError("transport receipt hash differs from its exact document")
+
+
+@dataclass(frozen=True)
 class LLMReceipt:
     receipt_id: str
     task: str
@@ -102,6 +139,7 @@ class LLMReceipt:
     input_sha256: str
     output_sha256: str
     created_at: str
+    transport: LLMTransportReceipt | None = None
     contract_version: str = LLM_CONTRACT_VERSION
 
     @classmethod
@@ -115,6 +153,7 @@ class LLMReceipt:
         inputs: Mapping[str, Any],
         output: Any,
         created_at: str,
+        transport: LLMTransportReceipt | None = None,
     ) -> "LLMReceipt":
         output_payload = asdict(output) if hasattr(output, "__dataclass_fields__") else output
         return cls(
@@ -125,6 +164,7 @@ class LLMReceipt:
             input_sha256=canonical_hash(dict(inputs)),
             output_sha256=canonical_hash(output_payload),
             created_at=created_at,
+            transport=transport,
         )
 
 

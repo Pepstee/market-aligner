@@ -10,6 +10,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
+from market_aligner.assessment.opportunity import (
+    OpportunityAxisPolicy,
+    derive_opportunity_axes,
+)
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, ScoreResult, score
 from market_aligner.assessment.viability import assess_viability
 from market_aligner.config import ProductPaths
@@ -74,22 +78,12 @@ def _processing_config(config: dict[str, Any]) -> dict[str, Any]:
     value = config.get("processing") or {}
     if not isinstance(value, dict):
         raise ValueError("processing config must be an object")
-    required = {"market_demand", "barrier_to_entry", "growth_potential"}
-    if not required <= set(value):
-        raise ValueError(f"processing config missing configured axes: {sorted(required - set(value))}")
-    for name in required:
-        number = float(value[name])
-        if not 0 <= number <= 10:
-            raise ValueError(f"processing.{name} must be in [0,10]")
     shard_size = int(value.get("shard_size", 25))
     lease_seconds = int(value.get("lease_seconds", 900))
     if not 1 <= shard_size <= 1000 or not 1 <= lease_seconds <= 86400:
         raise ValueError("processing shard or lease is outside the safe bound")
     return {
-        "barrier_to_entry": float(value["barrier_to_entry"]),
-        "growth_potential": float(value["growth_potential"]),
         "lease_seconds": lease_seconds,
-        "market_demand": float(value["market_demand"]),
         "shard_size": shard_size,
     }
 
@@ -124,9 +118,12 @@ class ProcessingService:
         self,
         data_home: str | Path | None,
         semantic_worker: LLMGateway,
+        *,
+        opportunity_policy: OpportunityAxisPolicy | None = None,
     ) -> None:
         self.paths = ProductPaths.resolve(data_home).ensure()
         self.worker = semantic_worker
+        self.opportunity_policy = opportunity_policy or OpportunityAxisPolicy()
         self.profiles = ProfileStore(self.paths.root)
         self.jobs = JobDatabase(self.paths.state / "vacancies.sqlite3")
         self.assessments = AssessmentStore(self.paths.state / "assessments.sqlite3")
@@ -152,7 +149,9 @@ class ProcessingService:
         }
         profile_context = profile.llm_context(evidence)
         authority_sha256 = _sha256(authority_document)
-        config_sha256 = _sha256(processing)
+        config_sha256 = _sha256(
+            {"opportunity_policy": asdict(self.opportunity_policy), "processing": processing}
+        )
         claimed = self.jobs.claim_fetched_for_processing(
             profile_id=profile_id,
             track=track,
@@ -212,12 +211,13 @@ class ProcessingService:
                     accepted: EvidenceAlignment = accept_alignment(
                         alignment, evidence, alignment_receipt
                     )
+                    opportunity = derive_opportunity_axes(vacancy, self.opportunity_policy)
                     axes = AssessmentAxes(
                         technical_alignment=accepted.technical_alignment * 10,
                         evidence_match=accepted.evidence_match * 10,
-                        market_demand=processing["market_demand"],
-                        barrier_to_entry=processing["barrier_to_entry"],
-                        growth_potential=processing["growth_potential"],
+                        market_demand=opportunity.market_demand,
+                        barrier_to_entry=opportunity.barrier_to_entry,
+                        growth_potential=opportunity.growth_potential,
                     )
                     score_result = score(profile, vacancy.key, track, axes)
                     self.assessments.upsert_score(
@@ -231,6 +231,7 @@ class ProcessingService:
                         "alignment_receipt": asdict(alignment_receipt),
                         "extraction_receipt": asdict(extraction_receipt),
                         "included": True,
+                        "opportunity_axes": asdict(opportunity),
                         "score": {**asdict(score_result), "fit_status": score_result.fit_status.value},
                         "vacancy": asdict(vacancy),
                         "viability": asdict(viability),
@@ -274,7 +275,8 @@ class ProcessingService:
             "errors": errors,
             "evidence_authority_sha256": authority_sha256,
             "included": completed,
-            "job_specific_opportunity_axes": False,
+            "job_specific_opportunity_axes": True,
+            "opportunity_policy_sha256": self.opportunity_policy.policy_hash,
             "profile_id": profile_id,
             "ranked_count": len(ranked),
             "rejected": rejected,

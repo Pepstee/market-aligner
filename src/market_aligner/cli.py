@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from dataclasses import asdict
@@ -14,6 +13,12 @@ from market_aligner.applications.producer import write_handoff
 from market_aligner.profiler.importers import import_evidence_led, import_guided_profile
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
+from market_aligner.llm.codex_gateway import (
+    SYNTHETIC_CANARY_MARKER,
+    CodexSemanticGateway,
+    synthetic_extraction_canary,
+)
+from market_aligner.llm.contracts import canonical_hash
 from market_aligner.assessment.scoring import AssessmentAxes
 from market_aligner.service.api import AssessmentRequest, CollectionService, MarketAlignerService
 from market_aligner.service.processing import ProcessingService
@@ -136,23 +141,16 @@ def _collect_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _semantic_worker(specification: str, *, config: Path, data_home: Path | None):
-    module_name, separator, attribute_name = specification.partition(":")
-    if not separator or not module_name or not attribute_name:
-        raise ValueError("semantic worker must use module:factory syntax")
-    factory = getattr(importlib.import_module(module_name), attribute_name)
-    worker = factory(config_path=config, data_home=data_home)
-    if not callable(getattr(worker, "extract_vacancy", None)) or not callable(
-        getattr(worker, "align_evidence", None)
-    ):
-        raise ValueError("semantic worker factory returned an incompatible object")
-    return worker
+def _codex_gateway(args: argparse.Namespace) -> CodexSemanticGateway:
+    return CodexSemanticGateway(
+        model=args.model,
+        cli_timeout_seconds=args.semantic_timeout,
+        codex_binary=str(args.codex_binary) if args.codex_binary else None,
+    )
 
 
 def _process_command(args: argparse.Namespace) -> int:
-    worker = _semantic_worker(
-        args.semantic_worker, config=args.config, data_home=args.data_home
-    )
+    worker = _codex_gateway(args)
     receipt = ProcessingService(args.data_home, worker).process(
         args.config,
         profile_id=args.profile_id,
@@ -160,6 +158,24 @@ def _process_command(args: argparse.Namespace) -> int:
         worker_id=args.worker_id,
     )
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _semantic_canary_command(args: argparse.Namespace) -> int:
+    extraction, receipt = synthetic_extraction_canary(_codex_gateway(args))
+    payload = {
+        "extraction_sha256": canonical_hash(asdict(extraction)),
+        "marker": SYNTHETIC_CANARY_MARKER,
+        "receipt": asdict(receipt),
+        "schema_version": "market-aligner.synthetic-semantic-canary.v1",
+        "synthetic_non_candidate_canary": True,
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps({**payload, "output": str(args.output)}, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -233,13 +249,21 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--profile-id", required=True)
     process.add_argument("--track", required=True)
     process.add_argument("--worker-id", required=True)
-    process.add_argument(
-        "--semantic-worker",
-        required=True,
-        help="Explicit module:factory implementing the receipt-bound LLM gateway protocol.",
-    )
+    process.add_argument("--model", required=True, help="Explicit Codex model identity.")
+    process.add_argument("--semantic-timeout", type=float, default=120.0)
+    process.add_argument("--codex-binary", type=Path)
     _add_data_home(process)
     process.set_defaults(handler=_process_command)
+
+    canary = commands.add_parser(
+        "semantic-canary",
+        help="Explicitly run one synthetic non-candidate Codex transport canary.",
+    )
+    canary.add_argument("--model", required=True, help="Explicit Codex model identity.")
+    canary.add_argument("--semantic-timeout", type=float, default=120.0)
+    canary.add_argument("--codex-binary", type=Path)
+    canary.add_argument("--output", type=Path, required=True)
+    canary.set_defaults(handler=_semantic_canary_command)
     return parser
 
 

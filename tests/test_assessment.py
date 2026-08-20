@@ -13,7 +13,7 @@ from market_aligner.assessment.eligibility import (
     EligibilityPolicy,
     assess_eligibility,
 )
-from market_aligner.assessment.opportunity import apply_gate
+from market_aligner.assessment.opportunity import apply_gate, derive_opportunity_axes
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, score
 from market_aligner.assessment.viability import assess_viability
 from market_aligner.domain.contracts import Vacancy
@@ -113,6 +113,31 @@ class AssessmentTests(unittest.TestCase):
         self.assertGreater(result.final, 70)
         self.assertFalse(readiness(29, 9).ready)
         self.assertTrue(readiness(30, 10).ready)
+
+    def test_opportunity_axes_are_job_specific_policy_hashed_fact_proxies(self) -> None:
+        accessible = vacancy(
+            contract_type="permanent",
+            seniority="junior",
+            required_skills=("Python", "Git"),
+            responsibilities=("Build automation",),
+            description="Permanent junior role with mentorship and a learning budget.",
+        )
+        demanding = vacancy(
+            job_id="2",
+            seniority="principal",
+            required_skills=("Python", "Kubernetes", "AWS", "Terraform", "Go"),
+            required_qualifications=("Masters degree", "Eight years experience"),
+            work_authorisation=("Existing local work authorisation required",),
+        )
+        first = derive_opportunity_axes(accessible)
+        repeat = derive_opportunity_axes(accessible)
+        second = derive_opportunity_axes(demanding)
+        self.assertEqual(first, repeat)
+        self.assertNotEqual(first.facts_sha256, second.facts_sha256)
+        self.assertEqual(first.policy_sha256, second.policy_sha256)
+        self.assertLess(first.barrier_to_entry, second.barrier_to_entry)
+        self.assertGreater(first.growth_potential, second.growth_potential)
+        self.assertIn("explicit_growth:mentorship", first.signals)
 
     def test_llm_alignment_cannot_cite_invented_evidence(self) -> None:
         alignment = EvidenceAlignment(

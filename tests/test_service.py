@@ -151,9 +151,6 @@ def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
     config = root / "config.yaml"
     config.write_text(
         "processing:\n"
-        "  market_demand: 8\n"
-        "  barrier_to_entry: 2\n"
-        "  growth_potential: 8\n"
         "  shard_size: 1\n"
         "  lease_seconds: 60\n",
         encoding="utf-8",
@@ -218,9 +215,20 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(1, first["included"])
             self.assertEqual(0, first["errors"])
             self.assertFalse(first["application_authority"])
-            self.assertFalse(first["job_specific_opportunity_axes"])
+            self.assertTrue(first["job_specific_opportunity_axes"])
+            self.assertEqual(64, len(str(first["opportunity_policy_sha256"])))
             self.assertEqual(64, len(str(first["evidence_authority_sha256"])))
             self.assertEqual(64, len(str(first["state_sha256"])))
+            completed_rows = service.jobs.completed_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=str(first["evidence_authority_sha256"]),
+            )
+            self.assertEqual(64, len(str(completed_rows[0]["opportunity_axes"]["facts_sha256"])))
+            self.assertEqual(
+                first["opportunity_policy_sha256"],
+                completed_rows[0]["opportunity_axes"]["policy_sha256"],
+            )
             reports = {name: Path(path) for name, path in dict(first["reports"]).items()}
             self.assertTrue(all(path.is_file() for path in reports.values()))
             ranked = json.loads(reports["ranked_json"].read_text(encoding="utf-8"))
