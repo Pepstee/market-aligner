@@ -33,6 +33,7 @@ from .models import (
     SourceCitation,
     research_refresh_bridge_sha256,
 )
+from .store import AssessmentStore
 
 
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
@@ -931,6 +932,323 @@ class SourceBoundResearchProvider:
         return self.materialize(task).dossier
 
 
+@dataclass(frozen=True)
+class RefreshPlanDerivation:
+    plan_sha256: str
+    plan_path: Path
+    semantic_receipt_sha256: str
+    receipt_file_sha256: str
+    receipt_path: Path
+    prior_dossier_sha256: str
+    current_canonical_object_sha256: str
+
+
+def _research_dossier_from_document(document: object) -> ResearchDossier:
+    if not isinstance(document, dict):
+        raise PublicResearchError("prior research dossier is not an object")
+    try:
+        claims = tuple(
+            ResearchClaim(
+                str(row["claim"]),
+                tuple(str(value) for value in row["citation_ids"]),
+                float(row["confidence"]),
+                tuple(
+                    ClaimSupport(
+                        str(support["citation_id"]),
+                        str(support["selector"]),
+                        str(support["excerpt"]),
+                        str(support["excerpt_sha256"]),
+                    )
+                    for support in row.get("supports", ())
+                ),
+            )
+            for row in document["claims"]
+        )
+        citations = tuple(
+            SourceCitation(
+                str(row["citation_id"]),
+                str(row["url"]),
+                str(row["title"]),
+                str(row["accessed_at"]),
+                str(row["content_sha256"]),
+                str(row.get("source_kind", "public_web")),
+            )
+            for row in document["citations"]
+        )
+        dossier = ResearchDossier(
+            profile_id=str(document["profile_id"]),
+            job_key=str(document["job_key"]),
+            company=str(document["company"]),
+            role=str(document["role"]),
+            claims=claims,
+            citations=citations,
+            unknowns=tuple(str(value) for value in document.get("unknowns", ())),
+            source_content_sha256=document.get("source_content_sha256"),
+            vacancy_snapshot_sha256=document.get("vacancy_snapshot_sha256"),
+            promotion_receipt_sha256=document.get("promotion_receipt_sha256"),
+            canonical_vacancy_object_sha256=document.get(
+                "canonical_vacancy_object_sha256"
+            ),
+            schema_version=str(document.get("schema_version", "")),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PublicResearchError("prior research dossier shape is invalid") from exc
+    dossier.validate()
+    return dossier
+
+
+class RefreshDerivedResearchProvider:
+    """Derive an unchanged-claims v2 plan for one verified refresh lease."""
+
+    def __init__(
+        self,
+        *,
+        store: AssessmentStore,
+        canonical_vacancy_loader: CanonicalCollectorVacancyLoader,
+        repository_root: Path,
+        archive_root: Path,
+    ) -> None:
+        self.store = store
+        self.loader = canonical_vacancy_loader
+        self.root = _private_external_root(archive_root, repository_root)
+        self.repository_root = repository_root.resolve(strict=True)
+        self.last_materialization: MaterializedPublicResearch | None = None
+        self.last_derivation: RefreshPlanDerivation | None = None
+
+    def _load_prior(self, task: ResearchTask) -> tuple[ResearchDossier, bytes, str]:
+        if task.refresh_event_id is None or task.refresh_bridge_sha256 is None:
+            raise PublicResearchError("research-run-one requires a refresh-linked task")
+        with self.store.connection() as connection:
+            row = connection.execute(
+                """SELECT q.refresh_event_id,q.refresh_bridge_sha256,
+                          d.dossier_json,d.dossier_hash,e.payload_json
+                   FROM employer_research_queue q
+                   JOIN employer_dossiers d
+                     ON d.profile_id=q.profile_id AND d.job_key=q.job_key
+                   JOIN assessment_events e
+                     ON e.id=q.refresh_event_id
+                    AND e.profile_id=q.profile_id AND e.job_key=q.job_key
+                   WHERE q.profile_id=? AND q.job_key=?""",
+                (task.profile_id, task.job_key),
+            ).fetchone()
+        if row is None:
+            raise PublicResearchError("refresh-linked prior dossier is unavailable")
+        exact_bytes = str(row["dossier_json"]).encode("utf-8")
+        digest = _sha256(exact_bytes)
+        try:
+            event_payload = json.loads(str(row["payload_json"]))
+            document = json.loads(exact_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PublicResearchError("prior dossier or refresh event is invalid JSON") from exc
+        if (
+            row["refresh_event_id"] != task.refresh_event_id
+            or row["refresh_bridge_sha256"] != task.refresh_bridge_sha256
+            or digest != row["dossier_hash"]
+            or digest != task.refresh_prior_dossier_sha256
+            or not isinstance(event_payload, dict)
+            or event_payload.get("prior_dossier_hash") != digest
+            or event_payload.get("refresh_bridge_sha256")
+            != task.refresh_bridge_sha256
+        ):
+            raise PublicResearchError("prior dossier differs from refresh authority")
+        dossier = _research_dossier_from_document(document)
+        if (
+            json.dumps(asdict(dossier), ensure_ascii=False, sort_keys=True).encode("utf-8")
+            != exact_bytes
+            or dossier.profile_id != task.profile_id
+            or dossier.job_key != task.job_key
+            or dossier.company != task.company
+            or dossier.role != task.title
+            or dossier.source_content_sha256 != task.source_content_sha256
+            or dossier.vacancy_snapshot_sha256 != task.vacancy_snapshot_sha256
+            or dossier.promotion_receipt_sha256 != task.promotion_receipt_sha256
+        ):
+            raise PublicResearchError("prior dossier semantic authority differs from task")
+        return dossier, exact_bytes, digest
+
+    def _read_prior_object(self, dossier: ResearchDossier) -> bytes:
+        digest = dossier.canonical_vacancy_object_sha256
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise PublicResearchError("prior dossier lacks canonical object authority")
+        path = self.root / "objects" / digest
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise PublicResearchError("prior canonical object is unavailable") from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o077
+        ):
+            raise PublicResearchError("prior canonical object is unsafe")
+        value = path.read_bytes()
+        if _sha256(value) != digest:
+            raise PublicResearchError("prior canonical object hash differs")
+        return value
+
+    def _derive_plan(
+        self,
+        task: ResearchTask,
+        prior: ResearchDossier,
+        prior_bytes: bytes,
+        prior_digest: str,
+        current: FetchedPublicSource,
+    ) -> PublicResearchPlan:
+        if (
+            len(prior.citations) != 1
+            or prior.citations[0].source_kind != "canonical_vacancy"
+            or prior.citations[0].content_sha256
+            != prior.canonical_vacancy_object_sha256
+        ):
+            raise PublicResearchError(
+                "refresh derivation permits no prior public-web authority"
+            )
+        citation = prior.citations[0]
+        planned_claims: list[PlannedClaim] = []
+        for claim in prior.claims:
+            if (
+                tuple(claim.citation_ids) != (citation.citation_id,)
+                or not claim.supports
+                or {support.citation_id for support in claim.supports}
+                != {citation.citation_id}
+            ):
+                raise PublicResearchError("prior claim authority is not canonical-only")
+            planned_supports: list[PlannedSupport] = []
+            for support in claim.supports:
+                match = _BYTE_SELECTOR.fullmatch(support.selector)
+                if match is None:
+                    raise PublicResearchError("prior support selector is invalid")
+                start, end = int(match.group(1)), int(match.group(2))
+                selected = prior_bytes[start:end]
+                try:
+                    excerpt = selected.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise PublicResearchError("prior support is not UTF-8") from exc
+                if (
+                    end > len(prior_bytes)
+                    or excerpt != support.excerpt
+                    or _sha256(selected) != support.excerpt_sha256
+                    or " ".join(claim.claim.split())
+                    != " ".join(excerpt.split())
+                ):
+                    raise PublicResearchError("prior claim support differs from dossier")
+                needle = support.excerpt.encode("utf-8")
+                current_start = current.body.find(needle)
+                if (
+                    current_start < 0
+                    or current.body.find(needle, current_start + 1) >= 0
+                ):
+                    raise PublicResearchError(
+                        "prior claim is absent or ambiguous in current vacancy bytes"
+                    )
+                current_end = current_start + len(needle)
+                current_excerpt = current.body[current_start:current_end].decode("utf-8")
+                if (
+                    current_excerpt != support.excerpt
+                    or " ".join(claim.claim.split())
+                    != " ".join(current_excerpt.split())
+                ):
+                    raise PublicResearchError("current claim text differs from prior claim")
+                planned_supports.append(
+                    PlannedSupport(
+                        citation.citation_id,
+                        f"bytes:{current_start}-{current_end}",
+                        support.excerpt,
+                    )
+                )
+            planned_claims.append(
+                PlannedClaim(
+                    claim.claim,
+                    tuple(claim.citation_ids),
+                    claim.confidence,
+                    tuple(planned_supports),
+                )
+            )
+        plan = PublicResearchPlan(
+            profile_id=task.profile_id,
+            job_key=task.job_key,
+            company=task.company,
+            role=task.title,
+            citations=(
+                PlannedCitation(
+                    citation.citation_id,
+                    citation.url,
+                    citation.title,
+                    _sha256(current.body),
+                    current.final_url,
+                    "canonical_vacancy",
+                ),
+            ),
+            claims=tuple(planned_claims),
+            source_content_sha256=task.source_content_sha256 or "",
+            vacancy_snapshot_sha256=task.vacancy_snapshot_sha256 or "",
+            promotion_receipt_sha256=task.promotion_receipt_sha256 or "",
+            unknowns=tuple(prior.unknowns),
+        )
+        plan_bytes = _canonical_bytes(asdict(plan))
+        plan_sha = _sha256(plan_bytes)
+        plan_path = _write_exact(self.root, "plans", f"{plan_sha}.json", plan_bytes)
+        receipt_body = {
+            "application_authority": False,
+            "current_canonical_object_sha256": _sha256(current.body),
+            "job_key": task.job_key,
+            "plan_file_sha256": plan_sha,
+            "plan_sha256": plan_sha,
+            "prior_dossier_sha256": prior_digest,
+            "profile_id": task.profile_id,
+            "promotion_receipt_sha256": task.promotion_receipt_sha256,
+            "refresh_bridge_sha256": task.refresh_bridge_sha256,
+            "refresh_event_id": task.refresh_event_id,
+            "refresh_event_idempotency_key": task.refresh_event_idempotency_key,
+            "release_authority": False,
+            "schema_version": "market-aligner.refresh-plan-derivation.v1",
+            "source_content_sha256": task.source_content_sha256,
+            "vacancy_snapshot_sha256": task.vacancy_snapshot_sha256,
+        }
+        semantic_sha = _sha256(_canonical_bytes(receipt_body))
+        receipt_bytes = _canonical_bytes(
+            {**receipt_body, "semantic_receipt_sha256": semantic_sha}
+        )
+        receipt_file_sha = _sha256(receipt_bytes)
+        receipt_path = _write_exact(
+            self.root, "derivations", f"{semantic_sha}.json", receipt_bytes
+        )
+        self.last_derivation = RefreshPlanDerivation(
+            plan_sha,
+            plan_path,
+            semantic_sha,
+            receipt_file_sha,
+            receipt_path,
+            prior_digest,
+            _sha256(current.body),
+        )
+        return plan
+
+    def research(self, task: ResearchTask) -> ResearchDossier:
+        current = self.loader(task)
+        prior, _exact_dossier_bytes, prior_digest = self._load_prior(task)
+        prior_object = self._read_prior_object(prior)
+        plan = self._derive_plan(
+            task, prior, prior_object, prior_digest, current
+        )
+
+        def no_public_web(_url: str) -> FetchedPublicSource:
+            raise PublicResearchError("refresh derivation forbids public-web fetching")
+
+        delegate = SourceBoundResearchProvider(
+            plan=plan,
+            repository_root=self.repository_root,
+            archive_root=self.root,
+            fetcher=no_public_web,
+            canonical_vacancy_loader=self.loader,
+        )
+        dossier = delegate.research(task)
+        self.last_materialization = delegate.last_materialization
+        return dossier
+
+
 __all__ = [
     "FetchedPublicSource",
     "CanonicalCollectorVacancyLoader",
@@ -942,4 +1260,6 @@ __all__ = [
     "PublicResearchPlan",
     "ScraplingPublicSourceFetcher",
     "SourceBoundResearchProvider",
+    "RefreshDerivedResearchProvider",
+    "RefreshPlanDerivation",
 ]

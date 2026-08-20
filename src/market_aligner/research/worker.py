@@ -38,8 +38,12 @@ class ResearchWorker:
         self.provider = provider
         self.worker_id = worker_id
 
-    def run_one(self) -> ResearchRun:
-        task = self.store.claim_research(self.worker_id)
+    def run_one(
+        self, *, profile_id: str | None = None, job_key: str | None = None
+    ) -> ResearchRun:
+        task = self.store.claim_research(
+            self.worker_id, profile_id=profile_id, job_key=job_key
+        )
         if task is None:
             return ResearchRun("idle")
         try:

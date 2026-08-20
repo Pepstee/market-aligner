@@ -18,6 +18,11 @@ from market_aligner.profiler.importers import (
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.research.store import AssessmentStore
+from market_aligner.research.public_provider import (
+    CanonicalCollectorVacancyLoader,
+    RefreshDerivedResearchProvider,
+)
+from market_aligner.research.worker import ResearchWorker
 from market_aligner.llm.codex_gateway import (
     SYNTHETIC_CANARY_MARKER,
     CodexSemanticGateway,
@@ -234,6 +239,59 @@ def _refresh_research_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _research_run_one_command(args: argparse.Namespace) -> int:
+    profiles = ProfileStore(args.data_home)
+    assessments = AssessmentStore(profiles.paths.state / "assessments.sqlite3")
+    loader = CanonicalCollectorVacancyLoader(
+        data_home=assessments.data_home,
+        collection_config_path=args.collection_config,
+    )
+    provider = RefreshDerivedResearchProvider(
+        store=assessments,
+        canonical_vacancy_loader=loader,
+        repository_root=Path(__file__).resolve().parents[2],
+        archive_root=(
+            assessments.data_home / "state" / "public-employer-research-v2"
+        ),
+    )
+    run = ResearchWorker(assessments, provider, args.worker_id).run_one(
+        profile_id=args.profile_id, job_key=args.job_key
+    )
+    derivation = provider.last_derivation
+    output = {
+        "application_authority": False,
+        "completed": run.status == "completed",
+        "dossier_sha256": run.dossier_sha256,
+        "error": run.error,
+        "job_key": args.job_key,
+        "profile_id": args.profile_id,
+        "release_authority": False,
+        "schema_version": "market-aligner.research-run-one.v1",
+        "status": run.status,
+        "worker_id": args.worker_id,
+    }
+    if derivation is not None:
+        output.update(
+            {
+                "current_canonical_object_sha256": (
+                    derivation.current_canonical_object_sha256
+                ),
+                "derivation_receipt_file_sha256": (
+                    derivation.receipt_file_sha256
+                ),
+                "derivation_receipt_path": str(derivation.receipt_path),
+                "derivation_receipt_sha256": (
+                    derivation.semantic_receipt_sha256
+                ),
+                "plan_path": str(derivation.plan_path),
+                "plan_sha256": derivation.plan_sha256,
+                "prior_dossier_sha256": derivation.prior_dossier_sha256,
+            }
+        )
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
+    return 0 if run.status == "completed" else 1
+
+
 def _codex_gateway(args: argparse.Namespace) -> CodexSemanticGateway:
     return CodexSemanticGateway(
         model=args.model,
@@ -396,6 +454,17 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_research.add_argument("--collection-config", type=Path, required=True)
     _add_data_home(refresh_research)
     refresh_research.set_defaults(handler=_refresh_research_command)
+
+    research_run_one = commands.add_parser(
+        "research-run-one",
+        help="Rebuild one exact refresh-linked dossier without new public claims.",
+    )
+    research_run_one.add_argument("--profile-id", required=True)
+    research_run_one.add_argument("--job-key", required=True)
+    research_run_one.add_argument("--worker-id", required=True)
+    research_run_one.add_argument("--collection-config", type=Path, required=True)
+    _add_data_home(research_run_one)
+    research_run_one.set_defaults(handler=_research_run_one_command)
 
     process = commands.add_parser(
         "process",

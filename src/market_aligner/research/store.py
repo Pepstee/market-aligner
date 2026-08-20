@@ -601,10 +601,24 @@ class AssessmentStore:
                 (profile_id, job_key, priority),
             )
 
-    def claim_research(self, worker_id: str, lease_seconds: int = 900) -> ResearchTask | None:
+    def claim_research(
+        self,
+        worker_id: str,
+        lease_seconds: int = 900,
+        *,
+        profile_id: str | None = None,
+        job_key: str | None = None,
+    ) -> ResearchTask | None:
+        if (profile_id is None) != (job_key is None):
+            raise ValueError("research claim scope requires both profile_id and job_key")
         now = datetime.now(timezone.utc)
         lease_until = now + timedelta(seconds=max(1, lease_seconds))
         with self.transaction() as connection:
+            scope = ""
+            parameters: tuple[object, ...] = ()
+            if profile_id is not None and job_key is not None:
+                scope = " AND q.profile_id=? AND q.job_key=?"
+                parameters = (profile_id, job_key)
             row = connection.execute(
                 """SELECT q.profile_id,q.job_key,a.title,a.company,a.url,a.opportunity,
                           q.priority,q.attempts,p.source_content_sha256,
@@ -625,9 +639,11 @@ class AssessmentStore:
                     AND e.profile_id=q.profile_id AND e.job_key=q.job_key
                    LEFT JOIN employer_dossiers d
                      ON d.profile_id=q.profile_id AND d.job_key=q.job_key
-                   WHERE (q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
-                      OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP)
-                   ORDER BY q.priority DESC,a.opportunity DESC,q.queued_at LIMIT 1"""
+                   WHERE ((q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
+                      OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP))"""
+                + scope
+                + " ORDER BY q.priority DESC,a.opportunity DESC,q.queued_at LIMIT 1",
+                parameters,
             ).fetchone()
             if row is None:
                 return None

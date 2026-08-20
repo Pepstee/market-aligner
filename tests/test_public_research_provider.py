@@ -19,7 +19,7 @@ from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
 from market_aligner.research.public_provider import (
     CanonicalCollectorVacancyLoader, PlannedCitation, PlannedClaim, PlannedSupport,
     PublicResearchError, PublicResearchPlan, ScraplingPublicSourceFetcher,
-    SourceBoundResearchProvider, _safe_public_url,
+    SourceBoundResearchProvider, RefreshDerivedResearchProvider, _safe_public_url,
 )
 from market_aligner.research.models import ResearchDossier
 from market_aligner.research.store import AssessmentStore
@@ -150,7 +150,9 @@ def _canonical_collection_refresh(
     return Path(str(receipt["receipt_path"])), database, config
 
 
-def _queued_store(path: Path, source_digest: str) -> tuple[AssessmentStore, str]:
+def _queued_store(
+    path: Path, source_digest: str, *, promotion: str = PROMOTION
+) -> tuple[AssessmentStore, str]:
     profile = CandidateProfile(
         new_profile_id(), "v1", {"track": TrackProfile(8, 7, 0.8, 6, rationale="fixture")}
     )
@@ -170,7 +172,7 @@ def _queued_store(path: Path, source_digest: str) -> tuple[AssessmentStore, str]
                  receipt_bytes,receipt_sha256
                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (profile.profile_id, JOB_KEY, "track", "c" * 64, source_digest, "d" * 64,
-             "e" * 64, "f" * 64, "2" * 64, "1" * 64, b"{}", PROMOTION),
+             "e" * 64, "f" * 64, "2" * 64, "1" * 64, b"{}", promotion),
         )
     return store, profile.profile_id
 
@@ -745,6 +747,160 @@ def test_refresh_completion_revalidates_prior_dossier_after_provider(
         assert connection.execute(
             "SELECT status FROM employer_research_queue"
         ).fetchone()[0] == "queued"
+
+
+def test_research_run_one_derives_exact_plan_and_leaves_sibling_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    archive = tmp_path / "state" / "public-employer-research-v2"
+    initial = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=archive, canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, initial, "initial-worker").run_one().status == "completed"
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+
+    sibling_store, sibling_profile = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest,
+        promotion="9" * 64,
+    )
+    assert sibling_store.path == store.path
+    parser = build_parser()
+    parsed = parser.parse_args(
+        [
+            "research-run-one",
+            "--profile-id", profile_id,
+            "--job-key", JOB_KEY,
+            "--worker-id", "cli-worker",
+            "--collection-config", str(config),
+            "--data-home", str(tmp_path),
+        ]
+    )
+    assert parsed.handler.__name__ == "_research_run_one_command"
+    assert parsed.handler(parsed) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "completed"
+    assert output["completed"] is True
+    assert output["application_authority"] is False
+    assert output["release_authority"] is False
+    plan_path = Path(output["plan_path"])
+    derivation_path = Path(output["derivation_receipt_path"])
+    plan_document = json.loads(plan_path.read_bytes())
+    receipt_document = json.loads(derivation_path.read_bytes())
+    assert hashlib.sha256(plan_path.read_bytes()).hexdigest() == output["plan_sha256"]
+    assert hashlib.sha256(derivation_path.read_bytes()).hexdigest() == (
+        output["derivation_receipt_file_sha256"]
+    )
+    assert receipt_document["application_authority"] is False
+    assert receipt_document["release_authority"] is False
+    assert receipt_document["plan_sha256"] == output["plan_sha256"]
+    assert len(plan_document["citations"]) == 1
+    assert plan_document["citations"][0]["source_kind"] == "canonical_vacancy"
+    assert plan_document["claims"][0]["claim"] == BODY.decode()
+    with store.connection() as connection:
+        sibling = connection.execute(
+            """SELECT status,attempts FROM employer_research_queue
+               WHERE profile_id=? AND job_key=?""",
+            (sibling_profile, JOB_KEY),
+        ).fetchone()
+        completed = json.loads(connection.execute(
+            """SELECT dossier_json FROM employer_dossiers
+               WHERE profile_id=? AND job_key=?""",
+            (profile_id, JOB_KEY),
+        ).fetchone()[0])
+    assert tuple(sibling) == ("queued", 0)
+    assert completed["source_content_sha256"] == legacy_digest
+    parsed.worker_id = "cli-worker-replay"
+    assert parsed.handler(parsed) == 1
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["status"] == "idle"
+    assert replay["completed"] is False
+    with pytest.raises(ValueError, match="both profile_id and job_key"):
+        store.claim_research("partial-scope", profile_id=profile_id)
+
+
+
+@pytest.mark.parametrize("mutation", ("prior_object", "plan", "receipt"))
+def test_refresh_plan_derivation_rejects_archive_substitution(
+    tmp_path: Path, mutation: str
+) -> None:
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, _canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    task = _task_and_reset(store)
+    source = loader(task)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    archive = tmp_path / "state" / "public-employer-research-v2"
+    initial = SourceBoundResearchProvider(
+        plan=_plan(task, source), repository_root=repository,
+        archive_root=archive, canonical_vacancy_loader=loader,
+    )
+    assert ResearchWorker(store, initial, "initial-worker").run_one().status == "completed"
+    prior_object_path = archive / "objects" / (
+        initial.last_materialization.dossier.canonical_vacancy_object_sha256
+    )
+    receipt_path, _database, config = _canonical_collection_refresh(tmp_path)
+    assert store.refresh_completed_research_if_needed(
+        profile_id, JOB_KEY,
+        collection_refresh_receipt_path=receipt_path,
+        collection_config_path=config,
+    ) is True
+    bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    derived = RefreshDerivedResearchProvider(
+        store=store, canonical_vacancy_loader=bridge,
+        repository_root=repository, archive_root=archive,
+    )
+    if mutation == "prior_object":
+        prior_object_path.write_bytes(b"substituted")
+    else:
+        preview = store.claim_research(
+            "derivation-preview", profile_id=profile_id, job_key=JOB_KEY
+        )
+        assert preview is not None
+        current = bridge(preview)
+        prior, _dossier_bytes, prior_digest = derived._load_prior(preview)
+        old_object = derived._read_prior_object(prior)
+        derived._derive_plan(
+            preview, prior, old_object, prior_digest, current
+        )
+        assert derived.last_derivation is not None
+        target = (
+            derived.last_derivation.plan_path
+            if mutation == "plan"
+            else derived.last_derivation.receipt_path
+        )
+        target.write_bytes(b"{}")
+        with store.connection() as connection:
+            connection.execute(
+                """UPDATE employer_research_queue SET status='queued',attempts=0,
+                     lease_owner=NULL,lease_until=NULL
+                   WHERE profile_id=? AND job_key=?""",
+                (profile_id, JOB_KEY),
+            )
+    run = ResearchWorker(store, derived, "substitution-worker").run_one(
+        profile_id=profile_id, job_key=JOB_KEY
+    )
+    assert run.status == "retry_scheduled"
+    assert run.dossier_sha256 is None
 
 
 def test_dual_identity_v3_rejects_relabelled_promotion_and_canonical_drift(
