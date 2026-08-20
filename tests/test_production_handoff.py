@@ -127,6 +127,7 @@ def _verify(tmp_path: Path, row: dict, dossier: dict, dossier_bytes: bytes, *, u
         promotion_receipt_sha256=PROMOTION_SHA, source_content_sha256=SOURCE_SHA,
         now=now or datetime(2026, 8, 21, 0, 1, tzinfo=timezone.utc),
         maximum_age_seconds=21_600,
+        expected_archive_root_identity="state/public-employer-research-v2",
     )
 
 
@@ -213,6 +214,15 @@ def test_v2_rejects_writable_archive_category(tmp_path: Path) -> None:
     row, dossier, dossier_bytes, _, root = _archive(tmp_path)
     (root / "receipts").chmod(0o770)
     with pytest.raises(ProductionHandoffError, match="archive category is not private"):
+        _verify(tmp_path, row, dossier, dossier_bytes)
+
+
+def test_v2_rejects_alternate_private_archive_identity_before_read(tmp_path: Path) -> None:
+    row, dossier, dossier_bytes, _, root = _archive(tmp_path)
+    alternate = root.with_name("alternate-private-archive")
+    root.rename(alternate)
+    row["archive_root_identity"] = "state/alternate-private-archive"
+    with pytest.raises(ProductionHandoffError, match="research_archive_authority"):
         _verify(tmp_path, row, dossier, dossier_bytes)
 
 

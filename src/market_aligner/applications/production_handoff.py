@@ -61,12 +61,14 @@ class ProductionHandoffError(ValueError):
 
 
 @dataclass(frozen=True)
-class ProductionHandoffDeployment:
+class _ProductionHandoffDeployment:
     """Pins supplied only by JAA's root-owned deployment configuration."""
 
     data_home: Path
     repository_root: Path
     output_root: Path
+    deployment_configuration_sha256: str
+    research_archive_root_identity: str
 
 
 @dataclass(frozen=True)
@@ -493,6 +495,7 @@ def _research_evidence(
     source_content_sha256: str,
     now: datetime,
     maximum_age_seconds: int,
+    expected_archive_root_identity: str,
 ) -> tuple[bytes, bytes, bytes, datetime]:
     """Reverify the store-owned v2 archive binding; no path comes from the operator."""
 
@@ -519,6 +522,11 @@ def _research_evidence(
         raise ProductionHandoffError(
             "research_contract_v2_required", "legacy research cannot authorize production"
         ) from exc
+    if binding.archive_root_identity != expected_archive_root_identity:
+        raise ProductionHandoffError(
+            "research_archive_authority",
+            "research archive differs from the installed deployment authority",
+        )
     dossier = _validated_dossier(dossier_document)
     expected_snapshot = _sha(_canonical({
         "company": dossier_document.get("company"),
@@ -699,7 +707,7 @@ def _reference(
 
 def _build_production_handoff_from_authenticated_time(
     *,
-    deployment: ProductionHandoffDeployment,
+    deployment: _ProductionHandoffDeployment,
     profile_id: str,
     track: str,
     source_job_key: str,
@@ -852,6 +860,7 @@ def _build_production_handoff_from_authenticated_time(
         source_content_sha256=str(promotion_row["source_content_sha256"]),
         now=current,
         maximum_age_seconds=vacancy_maximum_age_seconds,
+        expected_archive_root_identity=deployment.research_archive_root_identity,
     )
     source_envelope = _document(source_object_bytes, "canonical vacancy object")
     expected_raw_json = (
@@ -1271,6 +1280,5 @@ __all__ = [
     "PRODUCTION_CANDIDATE_AUTHORITY_PATH",
     "PRODUCTION_CANDIDATE_AUTHORITY_SHA256",
     "ProductionHandoffError",
-    "ProductionHandoffDeployment",
     "ProductionHandoffReceipt",
 ]
