@@ -58,6 +58,45 @@ def test_service_rejects_noncanonical_or_substituted_request() -> None:
         service.issue_response(json.dumps(request, separators=(",", ":"), sort_keys=True).encode(), private)
 
 
+def test_deployment_verification_executes_required_clock_skew_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def signature_strict_obtain(
+        witness,
+        *,
+        environment: str,
+        purpose: str,
+        subject_sha256: str,
+        maximum_clock_skew_seconds: int,
+    ):
+        calls.append(
+            {
+                "witness": witness,
+                "environment": environment,
+                "purpose": purpose,
+                "subject_sha256": subject_sha256,
+                "maximum_clock_skew_seconds": maximum_clock_skew_seconds,
+            }
+        )
+        return SimpleNamespace(purpose=purpose, subject_sha256=subject_sha256)
+
+    monkeypatch.setattr(installer, "obtain_current_time", signature_strict_obtain)
+    witness = object()
+    evidence = installer._obtain_deployment_verification(witness)
+    assert installer.DEPLOYMENT_MAXIMUM_CLOCK_SKEW_SECONDS == 5
+    assert evidence.purpose == "deployment_verification"
+    assert evidence.subject_sha256 == installer.STAGED_CONFIG_SHA256
+    assert calls == [
+        {
+            "witness": witness,
+            "environment": "production",
+            "purpose": "deployment_verification",
+            "subject_sha256": installer.STAGED_CONFIG_SHA256,
+            "maximum_clock_skew_seconds": 5,
+        }
+    ]
+
+
 def test_unit_preserves_root_service_and_exact_socket_contract(tmp_path) -> None:
     unit = _unit(python=tmp_path / "python", key=tmp_path / "device-key.pem").decode()
     assert "User=root" in unit

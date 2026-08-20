@@ -24,6 +24,7 @@ SERVICE_TARGET = Path("/usr/local/libexec/jaa-current-time-v1")
 UNIT_TARGET = Path("/etc/systemd/system/jaa-current-time-v1.service")
 STAGED_CONFIG_SHA256 = "2ab67684897303a619283c94ecab166a840f4b9efbf1df90d7e67aab46ea31a7"
 LEGACY_CONFIG_SHA256 = "db98c0b1071fb7eb34681a9765a4c943deba7749597299a7de808e009f8a95bb"
+DEPLOYMENT_MAXIMUM_CLOCK_SKEW_SECONDS = 5
 PINNED_VENV_PYTHON = Path("/home/gutua/software-factory/.control/market-aligner-recovery-20260820/environments/jaa-integration/bin/python")
 PINNED_COMPONENT_ROOT = Path("/home/gutua")
 PINNED_RUNTIME = Path("/home/gutua/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12")
@@ -219,6 +220,16 @@ def _unit(*, python: Path, key: Path) -> bytes:
     ).encode("utf-8")
 
 
+def _obtain_deployment_verification(witness):
+    return obtain_current_time(
+        witness,
+        environment="production",
+        purpose="deployment_verification",
+        subject_sha256=STAGED_CONFIG_SHA256,
+        maximum_clock_skew_seconds=DEPLOYMENT_MAXIMUM_CLOCK_SKEW_SECONDS,
+    )
+
+
 def install(
     *,
     staged_config: Path,
@@ -283,12 +294,7 @@ def install(
     ):
         raise ValueError("deployed current-time socket differs from the production pin")
     witness = installed_production_current_time_witness()
-    evidence = obtain_current_time(
-        witness,
-        environment="production",
-        purpose="deployment_verification",
-        subject_sha256=STAGED_CONFIG_SHA256,
-    )
+    evidence = _obtain_deployment_verification(witness)
     return {
         "activated": True,
         "configuration_sha256": STAGED_CONFIG_SHA256,
