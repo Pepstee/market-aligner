@@ -451,6 +451,7 @@ def build_market_application_decision_authority(
         if isinstance(row, Mapping)
     } if isinstance(projected_rows, list) else {}
     ledger_ids: set[str] = set()
+    ledger_order: list[str] = []
     for row in ledger_rows:
         evidence_id = row.get("evidence_id")
         claim = row.get("claim")
@@ -474,8 +475,9 @@ def build_market_application_decision_authority(
         ):
             raise ValueError("market application evidence ledger differs from candidate projection")
         ledger_ids.add(evidence_id)
+        ledger_order.append(evidence_id)
     ledger_evidence = tuple(
-        approved_statements[evidence_id] for evidence_id in sorted(ledger_ids)
+        approved_statements[evidence_id] for evidence_id in ledger_order
     )
     compiled = compile_canonical_requirements_evidence_matrix(
         requirements_bytes, ledger_evidence

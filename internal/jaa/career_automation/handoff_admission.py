@@ -775,6 +775,12 @@ def _verified_market_decision_references(
     payload = handoff.payload
     vacancy = payload["vacancy"]
     provenance = vacancy["provenance"]
+    fetched_at = provenance.get("fetched_at")
+    if integrated_shape and (not isinstance(fetched_at, str) or not fetched_at):
+        raise HandoffAdmissionError(
+            "market_decision_source_time",
+            "integrated Market vacancy lacks exact fetched_at authority",
+        )
     return {
         "assessment_receipt_bytes": exact["assessment"],
         "assessment_receipt_sha256": payload["assessment"]["assessment_receipt_sha256"],
@@ -783,9 +789,7 @@ def _verified_market_decision_references(
         "selection_receipt_bytes": exact["selection"],
         "selection_receipt_sha256": payload["selection"]["selection_receipt_sha256"],
         "source_job_key": source_job_key,
-        "source_observed_at": str(
-            provenance.get("fetched_at", provenance.get("observed_at", ""))
-        ),
+        "source_observed_at": str(fetched_at or ""),
         "evidence_ledger_sha256": payload["evidence_ledger_sha256"],
         "evidence_ledger_bytes": graph.objects["evidence_ledger"],
         "candidate_authority_bytes": graph.objects[
