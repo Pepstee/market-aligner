@@ -13,22 +13,10 @@ from pathlib import Path
 
 import pytest
 
-
 JAA_ROOT = Path(__file__).resolve().parents[1] / "internal" / "jaa"
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE_ROOT))
 sys.path.insert(0, str(JAA_ROOT))
-
-from market_aligner.assessment.scoring import FitStatus, ScoreResult
-from market_aligner.applications.producer import (
-    HandoffProducerError,
-    HandoffReference,
-    write_protected_handoff_bundle,
-)
-from market_aligner.cli import main as market_aligner_main
-from market_aligner.profiler.schema import CandidateProfile, TrackProfile
-from market_aligner.profiler.store import ProfileStore
-from market_aligner.service.api import MarketAlignerService
 
 from career_automation.current_time import configured_hmac_current_time_witness
 from career_automation.handoff_admission import (
@@ -45,21 +33,91 @@ from career_automation.market_aligner_handoff import (
     canonical_json_bytes,
     parse_handoff,
 )
+from career_automation.production_handoff_admission_runner import (
+    _promotion_receipt_semantic_identity,
+)
 
+from market_aligner.applications.handoff import encode_handoff_v1
+from market_aligner.applications.producer import (
+    HandoffProducerError,
+    HandoffReference,
+    write_protected_handoff_bundle,
+)
+from market_aligner.assessment.scoring import FitStatus, ScoreResult
+from market_aligner.cli import main as market_aligner_main
+from market_aligner.profiler.schema import CandidateProfile, TrackProfile
+from market_aligner.profiler.store import ProfileStore
+from market_aligner.service.api import MarketAlignerService
 
 MARKET_VECTOR_SHA256 = (
     "421d39504c4828c928389d5c30c2147fb7c01249b299972a11e204e956350160"
 )
-MARKET_HANDOFF_ROOT = (
-    "f6303777b7ea5c9962904e5c6adc6cdffb69a257e62cb0cc26126aad2ca0212f"
-)
+MARKET_HANDOFF_ROOT = "f6303777b7ea5c9962904e5c6adc6cdffb69a257e62cb0cc26126aad2ca0212f"
 MARKET_APPLICATION_ID = (
     "app_571f6fbc56b70ab27d526e720a5159ad3d0587fdf44da9323f07fddaf4dfa819"
 )
-MARKET_JOB_KEY = (
-    "job_14877e94d4ed2635f6ef6b6d834a62636f1712a7f7011701f9655bdf1d6bfe09"
-)
+MARKET_JOB_KEY = "job_14877e94d4ed2635f6ef6b6d834a62636f1712a7f7011701f9655bdf1d6bfe09"
 ADMISSION_TIME = datetime(2026, 8, 10, 10, 5, tzinfo=timezone.utc)
+
+
+def _promotion_bundle(tmp_path: Path):
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    document = json.loads(fixture_bytes)
+    original = parse_handoff(
+        base64.b64decode(document["handoff"]["canonical_base64"], validate=True)
+    )
+    source_job_key = "workable:synthetic:promotion"
+    body = {
+        "binding": {"source_content_sha256": "1" * 64},
+        "binding_sha256": hashlib.sha256(
+            canonical_json_bytes({"source_content_sha256": "1" * 64})
+        ).hexdigest(),
+        "decision": "pass",
+        "job_key": source_job_key,
+        "policy": {"schema_version": "market-aligner.selection-policy.v1"},
+        "policy_sha256": hashlib.sha256(
+            canonical_json_bytes(
+                {"schema_version": "market-aligner.selection-policy.v1"}
+            )
+        ).hexdigest(),
+        "profile_id": original.payload["profile_id"],
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        "score_payload_hash": "2" * 64,
+    }
+    semantic_sha256 = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    promotion_bytes = canonical_json_bytes({**body, "receipt_sha256": semantic_sha256})
+    promotion_object_sha256 = hashlib.sha256(promotion_bytes).hexdigest()
+    payload = json.loads(json.dumps(original.payload))
+    payload["assessment"]["assessment_receipt_sha256"] = promotion_object_sha256
+    handoff = encode_handoff_v1(payload)
+    references = {
+        "assessment.receipt": HandoffReference(
+            exact_bytes=promotion_bytes,
+            type_id="assessment_receipt",
+            schema_version="market-aligner.assessment-promotion-receipt.v1",
+            subject={
+                "application_id": handoff.application_id,
+                "job_key": handoff.payload["job_key"],
+            },
+            issued_at="2026-08-10T10:04:00Z",
+            valid_until=None,
+        )
+    }
+    arguments = {
+        "references": references,
+        "environment": "synthetic",
+        "trust_root_id": "synthetic-market-root",
+        "issued_at": "2026-08-10T10:04:00Z",
+        "source_job_key": source_job_key,
+    }
+    written = write_protected_handoff_bundle(
+        tmp_path / "external-data-home", handoff, **arguments
+    )
+    return written, handoff, arguments, semantic_sha256
 
 
 class _MarketVectorContextAuthenticator:
@@ -69,7 +127,9 @@ class _MarketVectorContextAuthenticator:
 
     def authenticate(self, *, context_bytes: bytes, handoff_bytes: bytes, **_) -> None:
         context = json.loads(context_bytes)
-        assert context["handoff_root_sha256"] == hashlib.sha256(handoff_bytes).hexdigest()
+        assert (
+            context["handoff_root_sha256"] == hashlib.sha256(handoff_bytes).hexdigest()
+        )
         assert context["trust_root_id"] == "synthetic-market-root"
 
 
@@ -104,9 +164,11 @@ class _MarketVectorResolver:
 
 
 def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> None:
-    fixture_bytes = files("career_automation").joinpath(
-        "fixtures/market-aligner-v1-vectors.json"
-    ).read_bytes()
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
     assert hashlib.sha256(fixture_bytes).hexdigest() == MARKET_VECTOR_SHA256
     document = json.loads(fixture_bytes)
     handoff_bytes = base64.b64decode(
@@ -114,7 +176,9 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
     )
 
     parsed = parse_handoff(handoff_bytes)
-    assert parsed.root_sha256 == document["handoff"]["root_sha256"] == MARKET_HANDOFF_ROOT
+    assert (
+        parsed.root_sha256 == document["handoff"]["root_sha256"] == MARKET_HANDOFF_ROOT
+    )
     assert parsed.application_id == MARKET_APPLICATION_ID
     assert parsed.payload["job_key"] == MARKET_JOB_KEY
     assert parsed.emission_profile == STRICT_EMISSION_PROFILE
@@ -168,8 +232,7 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
     expected_candidate_sha256 = next(
         row["metadata"]["object_sha256"]
         for row in document["reference_bundle"]["value"]["entries"]
-        if row["metadata"]["reference_key"]
-        == "candidate_intent.authority_source"
+        if row["metadata"]["reference_key"] == "candidate_intent.authority_source"
     )
     assert admitted_candidate_sha256 == expected_candidate_sha256
     verified = store.for_boundary_at_for_test(
@@ -182,10 +245,14 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
         store.reference_sha256(admission.application_id, "candidate.claims")
 
 
-def test_protected_outbox_bundle_authenticates_and_replays_idempotently(tmp_path) -> None:
-    fixture_bytes = files("career_automation").joinpath(
-        "fixtures/market-aligner-v1-vectors.json"
-    ).read_bytes()
+def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
+    tmp_path,
+) -> None:
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
     document = json.loads(fixture_bytes)
     handoff_bytes = base64.b64decode(
         document["handoff"]["canonical_base64"], validate=True
@@ -223,6 +290,23 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(tmp_path
         source_job_key="workable:synthetic:42",
     )
     assert second == first
+    for directory in (
+        output_root,
+        output_root / "bundles",
+        first.path,
+        first.path / "objects",
+        first.path / "metadata",
+    ):
+        assert directory.stat().st_mode & 0o777 == 0o700
+    for file_path in (
+        first.path / "context.json",
+        first.path / "handoff.json",
+        first.path / "manifest.json",
+        first.path / "source-record.json",
+        *(first.path / "objects").iterdir(),
+        *(first.path / "metadata").iterdir(),
+    ):
+        assert file_path.stat().st_mode & 0o777 == 0o600
     adapter = ProtectedLocalOutbox(
         first.path,
         repository_root=Path(__file__).resolve().parents[1],
@@ -255,14 +339,100 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(tmp_path
             first.path,
             repository_root=Path(__file__).resolve().parents[1],
             expected_source_record_sha256=first.source_record_sha256,
-            allowed_producer_commits=frozenset({handoff.payload["producer"]["commit_sha"]}),
+            allowed_producer_commits=frozenset(
+                {handoff.payload["producer"]["commit_sha"]}
+            ),
         ).context_bytes
 
 
+def test_private_producer_real_descriptor_reader_binds_promotion_semantic(
+    tmp_path: Path,
+) -> None:
+    written, handoff, _arguments, semantic_sha256 = _promotion_bundle(tmp_path)
+    parsed = parse_handoff(handoff.exact_bytes)
+    descriptor = os.open(written.path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        adapter = ProtectedLocalOutbox(
+            written.path,
+            repository_root=Path(__file__).resolve().parents[1],
+            expected_source_record_sha256=written.source_record_sha256,
+            allowed_producer_commits=frozenset(
+                {handoff.payload["producer"]["commit_sha"]}
+            ),
+            bundle_descriptor=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+    try:
+        assert (
+            _promotion_receipt_semantic_identity(
+                adapter,
+                parsed,
+                adapter._entries["assessment.receipt"],
+                source_job_key="workable:synthetic:promotion",
+            )
+            == semantic_sha256
+        )
+    finally:
+        adapter.close()
+
+
+def test_legacy_public_category_mode_rejects_replay_and_real_reader(
+    tmp_path: Path,
+) -> None:
+    written, handoff, arguments, _semantic_sha256 = _promotion_bundle(tmp_path)
+    os.chmod(written.path / "objects", 0o755)
+    with pytest.raises(HandoffProducerError, match="owner-private"):
+        write_protected_handoff_bundle(
+            tmp_path / "external-data-home", handoff, **arguments
+        )
+    descriptor = os.open(written.path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        adapter = ProtectedLocalOutbox(
+            written.path,
+            repository_root=Path(__file__).resolve().parents[1],
+            expected_source_record_sha256=written.source_record_sha256,
+            allowed_producer_commits=frozenset(
+                {handoff.payload["producer"]["commit_sha"]}
+            ),
+            bundle_descriptor=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+    try:
+        with pytest.raises(HandoffAdmissionError, match="category is not private"):
+            adapter._read(
+                "objects/" + adapter._entries["assessment.receipt"]["object_sha256"]
+            )
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize(
+    ("target", "mode", "message"),
+    [
+        ("bundle", 0o755, "owner-private"),
+        ("manifest", 0o644, "bytes or mode"),
+    ],
+)
+def test_producer_replay_rejects_unsafe_bundle_and_file_modes(
+    tmp_path: Path, target: str, mode: int, message: str
+) -> None:
+    written, handoff, arguments, _semantic_sha256 = _promotion_bundle(tmp_path)
+    path = written.path if target == "bundle" else written.path / "manifest.json"
+    os.chmod(path, mode)
+    with pytest.raises(HandoffProducerError, match=message):
+        write_protected_handoff_bundle(
+            tmp_path / "external-data-home", handoff, **arguments
+        )
+
+
 def test_recovered_canonical_vectors_preserve_declared_dispositions() -> None:
-    fixture_bytes = files("career_automation").joinpath(
-        "fixtures/market-aligner-v1-vectors.json"
-    ).read_bytes()
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
     assert hashlib.sha256(fixture_bytes).hexdigest() == MARKET_VECTOR_SHA256
     document = json.loads(fixture_bytes)
 
@@ -280,9 +450,11 @@ def test_recovered_canonical_vectors_preserve_declared_dispositions() -> None:
 def test_persisted_gated_assessment_emits_exact_handoff_and_enters_jaa(
     tmp_path, capsys
 ) -> None:
-    fixture_bytes = files("career_automation").joinpath(
-        "fixtures/market-aligner-v1-vectors.json"
-    ).read_bytes()
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
     document = json.loads(fixture_bytes)
     expected_bytes = base64.b64decode(
         document["handoff"]["canonical_base64"], validate=True
@@ -384,9 +556,7 @@ def test_persisted_gated_assessment_emits_exact_handoff_and_enters_jaa(
             expected["profile_id"], expected["job_key"]
         )["score_payload_hash"],
     }
-    promotion_sha = hashlib.sha256(
-        canonical_json_bytes(promotion_body)
-    ).hexdigest()
+    promotion_sha = hashlib.sha256(canonical_json_bytes(promotion_body)).hexdigest()
     service.assessments.promote_processing_gate(
         profile_id=expected["profile_id"],
         job_key=expected["job_key"],

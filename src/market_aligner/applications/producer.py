@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,6 @@ from market_aligner.applications.handoff import (
     encode_handoff_v1,
 )
 from market_aligner.research.store import AssessmentStore
-
 
 _MANIFEST_KEYS = {
     "assessment_receipt_sha256",
@@ -58,12 +58,98 @@ class WrittenHandoffBundle:
 
 
 def _write_exact(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("xb") as handle:
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o600)
         handle.write(value)
         handle.flush()
         os.fsync(handle.fileno())
-    os.chmod(path, 0o600)
+
+
+def _private_directory(path: Path, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise HandoffProducerError(f"{label} is unavailable") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise HandoffProducerError(f"{label} is not an owner-private directory")
+
+
+def _exact_private_file(path: Path, expected: bytes) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise HandoffProducerError(
+            "content-addressed bundle replay is incomplete"
+        ) from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise HandoffProducerError(
+            "content-addressed bundle replay bytes or mode differ"
+        )
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        )
+        with os.fdopen(descriptor, "rb") as handle:
+            current = os.fstat(handle.fileno())
+            actual = handle.read()
+    except OSError as exc:
+        raise HandoffProducerError(
+            "content-addressed bundle replay is incomplete"
+        ) from exc
+    if (
+        current.st_dev != metadata.st_dev
+        or current.st_ino != metadata.st_ino
+        or actual != expected
+    ):
+        raise HandoffProducerError(
+            "content-addressed bundle replay bytes or identity differ"
+        )
+
+
+def _verify_exact_private_bundle(
+    destination: Path, expected_files: Mapping[Path, bytes]
+) -> None:
+    _private_directory(destination, "content-addressed bundle")
+    for category in ("objects", "metadata"):
+        _private_directory(destination / category, f"bundle {category} category")
+    expected_root = {
+        "context.json",
+        "handoff.json",
+        "manifest.json",
+        "metadata",
+        "objects",
+        "source-record.json",
+    }
+    if {path.name for path in destination.iterdir()} != expected_root:
+        raise HandoffProducerError("content-addressed bundle replay file set differs")
+    for category in ("objects", "metadata"):
+        expected_names = {
+            relative.name
+            for relative in expected_files
+            if relative.parts[0] == category
+        }
+        if {path.name for path in (destination / category).iterdir()} != expected_names:
+            raise HandoffProducerError(
+                f"content-addressed bundle replay {category} set differs"
+            )
+    for relative, exact in expected_files.items():
+        _exact_private_file(destination / relative, exact)
 
 
 def _reference_metadata(
@@ -158,7 +244,9 @@ def write_protected_handoff_bundle(
                 "reference_key": key,
             }
         )
-        materialized.append((key, reference.exact_bytes, metadata, object_sha, metadata_sha))
+        materialized.append(
+            (key, reference.exact_bytes, metadata, object_sha, metadata_sha)
+        )
     source_record = {
         "entries": rows,
         "handoff_root_sha256": handoff_root,
@@ -192,32 +280,47 @@ def write_protected_handoff_bundle(
     }
     manifest_bytes = canonical_json_bytes(manifest)
     manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    expected_files: dict[Path, bytes] = {
+        Path("context.json"): context_bytes,
+        Path("handoff.json"): handoff_bytes,
+        Path("manifest.json"): manifest_bytes,
+        Path("source-record.json"): source_record_bytes,
+    }
+    for _key, exact, metadata, object_sha, metadata_sha in materialized:
+        object_path = Path("objects") / object_sha
+        prior = expected_files.setdefault(object_path, exact)
+        if prior != exact:
+            raise HandoffProducerError("content-addressed reference object collision")
+        expected_files[Path("metadata") / metadata_sha] = metadata
     root = Path(output_root).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
-    destination = root / "bundles" / source_record_sha
-    if destination.exists():
-        existing = destination / "manifest.json"
-        if not existing.is_file() or existing.read_bytes() != manifest_bytes:
-            raise HandoffProducerError("content-addressed bundle replay differs")
-        return WrittenHandoffBundle(destination, source_record_sha, manifest_sha, handoff_root)
+    root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    _private_directory(root, "protected outbox root")
+    bundles = root / "bundles"
+    bundles.mkdir(mode=0o700, exist_ok=True)
+    _private_directory(bundles, "protected bundle category")
+    destination = bundles / source_record_sha
+    if destination.exists() or destination.is_symlink():
+        _verify_exact_private_bundle(destination, expected_files)
+        return WrittenHandoffBundle(
+            destination, source_record_sha, manifest_sha, handoff_root
+        )
     temporary = Path(tempfile.mkdtemp(prefix=".handoff-", dir=root))
     os.chmod(temporary, 0o700)
     try:
-        _write_exact(temporary / "handoff.json", handoff_bytes)
-        _write_exact(temporary / "context.json", context_bytes)
-        _write_exact(temporary / "source-record.json", source_record_bytes)
-        for key, exact, metadata, object_sha, metadata_sha in materialized:
-            _write_exact(temporary / "objects" / object_sha, exact)
-            _write_exact(temporary / "metadata" / metadata_sha, metadata)
-        _write_exact(temporary / "manifest.json", manifest_bytes)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(destination.parent, 0o700)
+        (temporary / "objects").mkdir(mode=0o700)
+        (temporary / "metadata").mkdir(mode=0o700)
+        for relative, exact in sorted(
+            expected_files.items(), key=lambda item: str(item[0])
+        ):
+            _write_exact(temporary / relative, exact)
         os.replace(temporary, destination)
+        _verify_exact_private_bundle(destination, expected_files)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    return WrittenHandoffBundle(destination, source_record_sha, manifest_sha, handoff_root)
+    return WrittenHandoffBundle(
+        destination, source_record_sha, manifest_sha, handoff_root
+    )
 
 
 def _exact_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -267,7 +370,9 @@ def produce_handoff(
         promotion_body = dict(promotion_document)
         promotion_body.pop("receipt_sha256", None)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
-        raise HandoffProducerError("canonical processing promotion is malformed") from exc
+        raise HandoffProducerError(
+            "canonical processing promotion is malformed"
+        ) from exc
     if (
         promotion["score_payload_hash"] != row["score_payload_hash"]
         or promotion["policy_hash"] != row["policy_hash"]
@@ -277,36 +382,52 @@ def produce_handoff(
         != promotion["receipt_sha256"]
         or promotion_document.get("receipt_sha256") != promotion["receipt_sha256"]
     ):
-        raise HandoffProducerError("canonical processing promotion differs from assessment")
+        raise HandoffProducerError(
+            "canonical processing promotion differs from assessment"
+        )
 
     try:
         score = json.loads(row["score_payload_json"])
     except (TypeError, json.JSONDecodeError) as exc:
         raise HandoffProducerError("persisted score payload is invalid") from exc
     if score.get("profile_id") != profile_id or score.get("job_key") != job_key:
-        raise HandoffProducerError("persisted score identity differs from requested handoff")
+        raise HandoffProducerError(
+            "persisted score identity differs from requested handoff"
+        )
     for score_key, row_key in (
         ("fit", "fit"),
         ("opportunity", "opportunity"),
         ("final", "final_score"),
     ):
         if float(score.get(score_key, -1)) != float(row[row_key]):
-            raise HandoffProducerError(f"persisted {score_key} projection differs from its row")
+            raise HandoffProducerError(
+                f"persisted {score_key} projection differs from its row"
+            )
 
     selection = inputs["selection"]
     if not isinstance(selection, Mapping):
         raise HandoffProducerError("selection manifest must be an object")
     if selection.get("selection_policy_sha256") != row["policy_hash"]:
-        raise HandoffProducerError("selection policy differs from the persisted gate policy")
+        raise HandoffProducerError(
+            "selection policy differs from the persisted gate policy"
+        )
 
     vacancy = inputs["vacancy"]
     if not isinstance(vacancy, Mapping):
         raise HandoffProducerError("vacancy manifest must be an object")
     provenance = vacancy.get("provenance")
-    if not isinstance(provenance, Mapping) or provenance.get("canonical_url") != row["url"]:
+    if (
+        not isinstance(provenance, Mapping)
+        or provenance.get("canonical_url") != row["url"]
+    ):
         raise HandoffProducerError("vacancy URL differs from the persisted assessment")
-    if vacancy.get("role_title") != row["title"] or vacancy.get("company_name") != row["company"]:
-        raise HandoffProducerError("vacancy title or company differs from the persisted assessment")
+    if (
+        vacancy.get("role_title") != row["title"]
+        or vacancy.get("company_name") != row["company"]
+    ):
+        raise HandoffProducerError(
+            "vacancy title or company differs from the persisted assessment"
+        )
 
     wire_job_key = handoff_job_key or job_key
     payload = {
