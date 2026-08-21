@@ -21,6 +21,10 @@ from career_automation.production_handoff_runner import (  # noqa: E402
     PRODUCTION_HANDOFF_DEPLOYMENT_CONFIG_PATH,
     production_handoff_deployment_configuration_bytes,
 )
+from career_automation.production_preparation_runner import (  # noqa: E402
+    PRODUCTION_PREPARATION_CONFIG_PATH,
+    production_preparation_configuration_bytes,
+)
 
 TARGET_MODE = 0o644
 _DIRECTORY_WRITE_MASK = 0o022
@@ -279,6 +283,27 @@ def install() -> dict[str, object]:
     }
 
 
+def install_preparation() -> dict[str, object]:
+    """Install the distinct fixed preparation lifecycle authority."""
+    if os.geteuid() != 0:
+        raise PermissionError("installation requires root")
+    value = production_preparation_configuration_bytes()
+    outcome = _create_or_exact_at(
+        PRODUCTION_PREPARATION_CONFIG_PATH,
+        value,
+        trusted_root=Path("/"),
+        expected_uid=0,
+    )
+    return {
+        "mode": "0644",
+        "outcome": outcome,
+        "owner_uid": 0,
+        "schema_version": "jaa.production-preparation-config-installation.v1",
+        "sha256": hashlib.sha256(value).hexdigest(),
+        "target": str(PRODUCTION_PREPARATION_CONFIG_PATH),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
@@ -292,13 +317,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="create-or-exact install the fixed root-owned configuration",
     )
+    action.add_argument(
+        "--print-preparation-config",
+        action="store_true",
+        help="write the exact preparation configuration bytes without installing",
+    )
+    action.add_argument(
+        "--install-preparation",
+        action="store_true",
+        help="create-or-exact install the fixed preparation configuration",
+    )
     args = parser.parse_args(argv)
     if args.print_config:
         sys.stdout.buffer.write(production_handoff_deployment_configuration_bytes())
         sys.stdout.buffer.flush()
         return 0
+    if args.print_preparation_config:
+        sys.stdout.buffer.write(production_preparation_configuration_bytes())
+        sys.stdout.buffer.flush()
+        return 0
     try:
-        result = install()
+        result = install_preparation() if args.install_preparation else install()
     except (OSError, ValueError) as exc:
         print(
             f"market-handoff configuration installation refused: {exc}", file=sys.stderr

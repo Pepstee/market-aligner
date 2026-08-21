@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from career_automation import production_handoff_runner as runner
+from career_automation import production_preparation_runner as preparation_runner
 
 from scripts import install_market_handoff_config as installer
 
@@ -27,6 +28,23 @@ def test_exported_configuration_bytes_are_exact_runner_authority() -> None:
         == hashlib.sha256(value).hexdigest()
     )
     assert not value.endswith(b"\n")
+
+
+def test_exported_preparation_configuration_is_exact_fixed_authority() -> None:
+    value = preparation_runner.production_preparation_configuration_bytes()
+    assert value == installer.production_preparation_configuration_bytes()
+    assert not value.endswith(b"\n")
+    document = __import__("json").loads(value)
+    assert document["schema_version"] == (
+        "jaa.production-application-preparation-deployment.v1"
+    )
+    assert document["candidate_authority_sha256"] == (
+        preparation_runner.PRODUCTION_CANDIDATE_AUTHORITY_SHA256
+    )
+    assert document["codex_binary_sha256"] == (
+        preparation_runner.PRODUCTION_CODEX_BINARY_SHA256
+    )
+    assert document["poppler_sha256"] == preparation_runner.PRODUCTION_POPPLER_SHA256
 
 
 def test_create_then_exact_replay(tmp_path: Path) -> None:
@@ -167,6 +185,22 @@ def test_non_root_install_refuses_before_opening_fixed_target(monkeypatch) -> No
     assert called["create"] is False
 
 
+def test_non_root_preparation_install_refuses_before_opening_fixed_target(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(installer.os, "geteuid", lambda: 1000)
+    called = {"create": False}
+
+    def forbidden(*args, **kwargs):
+        called["create"] = True
+        raise AssertionError("target must not be opened")
+
+    monkeypatch.setattr(installer, "_create_or_exact_at", forbidden)
+    with pytest.raises(PermissionError, match="requires root"):
+        installer.install_preparation()
+    assert called["create"] is False
+
+
 def test_print_config_cli_is_byte_exact(capsys) -> None:
     assert installer.main(["--print-config"]) == 0
     captured = capsys.readouterr()
@@ -174,4 +208,14 @@ def test_print_config_cli_is_byte_exact(capsys) -> None:
     assert (
         captured.out.encode()
         == runner.production_handoff_deployment_configuration_bytes()
+    )
+
+
+def test_print_preparation_config_cli_is_byte_exact(capsys) -> None:
+    assert installer.main(["--print-preparation-config"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert (
+        captured.out.encode()
+        == preparation_runner.production_preparation_configuration_bytes()
     )
