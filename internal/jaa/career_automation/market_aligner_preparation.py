@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from cv_generation.constraints import policy_for_candidate
 from cv_generation.service import (
     CVCompositionOrchestrationResult,
     run_cv_composition_orchestration,
@@ -55,6 +56,22 @@ def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode()
 
 
+def _candidate_editorial_authority(
+    *, candidate_name: str, candidate_city: str, source_sha256: str
+) -> CandidateEditorialAuthority:
+    """Project the canonical candidate-specific CV policy into editorial authority."""
+
+    policy = policy_for_candidate(candidate_name)
+    return CandidateEditorialAuthority(
+        candidate_name=candidate_name,
+        candidate_city=candidate_city,
+        graduation_month_year=policy.required_graduation,
+        dissertation_title=policy.required_dissertation_title,
+        source_sha256=source_sha256,
+        require_dissertation=policy.required_dissertation_title is not None,
+    )
+
+
 def _private_external_root(
     path: Path,
     repository_root: Path,
@@ -62,7 +79,6 @@ def _private_external_root(
     descriptor: int | None = None,
 ) -> Path:
     if descriptor is not None:
-        metadata = os.fstat(descriptor)
         if not os.path.isdir(f"/proc/self/fd/{descriptor}"):
             raise ValueError("preparation output lease is not a directory")
         return Path(f"/proc/self/fd/{descriptor}")
@@ -284,11 +300,9 @@ class CanonicalPreparationInputMaterializer:
             if row["document_kind"] == "cv"
         )
         request = build_editorial_request(
-            authority=CandidateEditorialAuthority(
+            authority=_candidate_editorial_authority(
                 candidate_name=contact_authority.contact.full_name,
                 candidate_city=contact_authority.contact.city,
-                graduation_month_year=None,
-                dissertation_title=None,
                 source_sha256=deployment_binding.candidate_authority_file_sha256,
             ),
             role_title=role_title,

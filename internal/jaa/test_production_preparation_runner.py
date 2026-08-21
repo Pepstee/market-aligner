@@ -11,8 +11,32 @@ from pathlib import Path
 
 import pytest
 
+from career_automation import market_aligner_preparation as preparation
 from career_automation import production_preparation_runner as runner
 from career_automation.market_aligner_preparation import MarketApplicationPreparation
+
+
+def test_candidate_editorial_authority_uses_exact_candidate_policy() -> None:
+    authority = preparation._candidate_editorial_authority(
+        candidate_name="Artiom Gutu",
+        candidate_city="Birmingham",
+        source_sha256="a" * 64,
+    )
+    assert authority.graduation_month_year == "July 2026"
+    assert authority.dissertation_title == (
+        "SCAFAD: A Seven-Layer, Privacy-Preserving, Explainable "
+        "Anomaly-Detection Pipeline for Serverless Workloads"
+    )
+    assert authority.require_dissertation is True
+
+    unrelated = preparation._candidate_editorial_authority(
+        candidate_name="Another Candidate",
+        candidate_city="Birmingham",
+        source_sha256="b" * 64,
+    )
+    assert unrelated.graduation_month_year is None
+    assert unrelated.dissertation_title is None
+    assert unrelated.require_dissertation is False
 
 
 def _deployment(tmp_path: Path) -> runner._ProductionPreparationDeployment:
