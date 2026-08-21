@@ -162,17 +162,21 @@ class DetachedCodexRecruiterBackend(Backend):
         cli_timeout_seconds: float = 120.0,
         codex_binary: str | None = None,
         environment: Mapping[str, str] | None = None,
+        codex_binary_fd: int | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("detached recruiter requires an explicit model")
         self.model = model.strip()
         self.cli_timeout_seconds = float(cli_timeout_seconds)
         self.codex_binary = codex_binary
+        self.codex_binary_fd = codex_binary_fd
         self.environment = dict(os.environ if environment is None else environment)
         self.invocation_count = 0
         self.transport_receipt: DetachedTransportReceipt | None = None
 
     def _binary(self) -> str | None:
+        if self.codex_binary_fd is not None:
+            return f"/proc/self/fd/{self.codex_binary_fd}"
         return self.codex_binary or shutil.which("codex", path=self.environment.get("PATH"))
 
     def available(self) -> bool:
@@ -235,6 +239,11 @@ class DetachedCodexRecruiterBackend(Backend):
                     timeout=self.cli_timeout_seconds,
                     cwd=request_dir,
                     env=env,
+                    pass_fds=(
+                        ()
+                        if self.codex_binary_fd is None
+                        else (self.codex_binary_fd,)
+                    ),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise LLMError("detached recruiter codex invocation timed out") from exc
@@ -291,11 +300,13 @@ def run_detached_recruiter_assessment(
     model: str,
     cli_timeout_seconds: float = 120.0,
     codex_binary: str | None = None,
+    codex_binary_fd: int | None = None,
 ) -> DetachedRecruiterRun:
     backend = DetachedCodexRecruiterBackend(
         model=model,
         cli_timeout_seconds=cli_timeout_seconds,
         codex_binary=codex_binary,
+        codex_binary_fd=codex_binary_fd,
     )
     with tempfile.TemporaryDirectory(prefix="jaa-recruiter-client-") as client_dir:
         root = Path(client_dir)

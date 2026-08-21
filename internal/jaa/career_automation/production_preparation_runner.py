@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,8 +27,13 @@ from cv_generation.editorial_composition import (
     DetachedCodexEditorialAdapter,
     EditorialCompositionRuntime,
 )
+from cv_generation.document_quality import pinned_poppler_runtime
 
-from .candidate_contact_authority import PUBLIC_KEY_ENV, REGISTRY_ENV
+from .candidate_contact_authority import (
+    PUBLIC_KEY_ENV,
+    REGISTRY_ENV,
+    CandidateContactResourceLease,
+)
 from .current_time import installed_production_current_time_witness
 from .handoff_admission import HandoffAdmissionStore, ProtectedLocalOutbox
 from .market_aligner_preparation import (
@@ -88,6 +94,7 @@ PRODUCTION_CODEX_BINARY = Path(
 PRODUCTION_CODEX_BINARY_SHA256 = (
     "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477"
 )
+PRODUCTION_CODEX_OWNER_UID = 0
 PRODUCTION_CODEX_MODEL = "gpt-5.6-sol"
 PRODUCTION_CODEX_TIMEOUT_SECONDS = 300.0
 PRODUCTION_POPPLER_BIN = Path("/home/gutua/.local/poppler/usr/bin")
@@ -350,6 +357,31 @@ class _PinnedPreparationResources:
                     "compiled preparation file changed during operation"
                 )
 
+    def file_descriptor(self, path: Path) -> int:
+        matches = [pin.descriptor for pin in self._file_pins if pin.path == path]
+        if len(matches) != 1:
+            raise ProductionPreparationDeploymentError(
+                "compiled preparation file lease is absent"
+            )
+        return matches[0]
+
+    def file_bytes(self, path: Path) -> bytes:
+        descriptor = self.file_descriptor(path)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return b"".join(chunks)
+
+    def directory_descriptor(self, path: Path) -> int:
+        matches = [row[1] for row in self._directory_pins if row[0] == path]
+        if len(matches) != 1:
+            raise ProductionPreparationDeploymentError(
+                "compiled preparation directory lease is absent"
+            )
+        return matches[0]
+
     def close(self) -> None:
         while self._descriptors:
             os.close(self._descriptors.pop())
@@ -487,6 +519,8 @@ def _open_admission_database(data_descriptor: int) -> tuple[int, int]:
 def _verify_preparation_output(
     result: MarketApplicationPreparation,
     output_root: Path,
+    *,
+    output_root_descriptor: int | None = None,
 ) -> None:
     expected = output_root / "preparations" / result.preparation_id
     if (
@@ -497,7 +531,37 @@ def _verify_preparation_output(
         raise ProductionPreparationDeploymentError(
             "production preparation output path differs"
         )
-    chain = _open_absolute_directory_chain(expected, private_leaf=True)
+    if output_root_descriptor is None:
+        chain = _open_absolute_directory_chain(expected, private_leaf=True)
+    else:
+        root_metadata = os.fstat(output_root_descriptor)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        ):
+            raise ProductionPreparationDeploymentError(
+                "production preparation output lease differs"
+            )
+        chain_members: list[int] = []
+        parent = output_root_descriptor
+        try:
+            for name in ("preparations", result.preparation_id):
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | os.O_CLOEXEC
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent,
+                )
+                chain_members.append(descriptor)
+                parent = descriptor
+            chain = tuple(chain_members)
+        except BaseException:
+            for descriptor in reversed(chain_members):
+                os.close(descriptor)
+            raise
     try:
         for descriptor in chain[-2:]:
             metadata = os.fstat(descriptor)
@@ -600,6 +664,8 @@ def _verify_preparation_output(
 def _run_production_preparation(
     application_id: str,
     deployment: _ProductionPreparationDeployment,
+    *,
+    after_preflight_hook: Callable[[str], None] | None = None,
 ) -> MarketApplicationPreparation:
     if (
         not application_id.startswith("app_")
@@ -629,7 +695,7 @@ def _run_production_preparation(
             deployment.codex_binary,
             expected_sha256=PRODUCTION_CODEX_BINARY_SHA256,
             expected_mode=0o755,
-            expected_uid=0,
+            expected_uid=PRODUCTION_CODEX_OWNER_UID,
             executable=True,
             label="Codex",
         )
@@ -681,11 +747,25 @@ def _run_production_preparation(
         admission_descriptor, database_descriptor = _open_admission_database(
             pinned.data_descriptor
         )
-        pinned_database = Path(
-            f"/proc/self/fd/{admission_descriptor}/admissions.sqlite3"
-        )
+        leased_database = resources.file_descriptor(deployment.admission_database)
+        if (
+            os.fstat(leased_database).st_dev
+            != os.fstat(database_descriptor).st_dev
+            or os.fstat(leased_database).st_ino
+            != os.fstat(database_descriptor).st_ino
+        ):
+            raise ProductionPreparationDeploymentError(
+                "admission database descriptor differs from compiled lease"
+            )
+        if after_preflight_hook is not None:
+            after_preflight_hook("database")
+        resources.verify()
+        pinned_database = Path(f"/proc/self/fd/{database_descriptor}")
         source_record = _source_record_for_application(pinned_database, application_id)
         bundle_descriptor = pinned.open_bundle(source_record)
+        if after_preflight_hook is not None:
+            after_preflight_hook("bundle")
+        pinned.verify_references()
         adapter = ProtectedLocalOutbox(
             deployment.outbox_root / "bundles" / source_record,
             repository_root=deployment.repository_root,
@@ -701,10 +781,29 @@ def _run_production_preparation(
             current_time_witness=installed_production_current_time_witness(),
         )
         pinned.verify_references()
+        if after_preflight_hook is not None:
+            after_preflight_hook("resources")
         resources.verify()
         os.environ[PUBLIC_KEY_ENV] = str(deployment.contact_public_key_path)
         os.environ[REGISTRY_ENV] = str(deployment.contact_registry_path)
         os.environ["JAA_POPPLER_BIN"] = str(PRODUCTION_POPPLER_BIN)
+        candidate_bytes = resources.file_bytes(deployment.candidate_authority_path)
+        contact_lease = CandidateContactResourceLease(
+            authority_path=deployment.contact_authority_path,
+            authority_bytes=resources.file_bytes(deployment.contact_authority_path),
+            public_key_path=deployment.contact_public_key_path,
+            public_key_bytes=resources.file_bytes(deployment.contact_public_key_path),
+            registry_path=deployment.contact_registry_path,
+            registry_bytes=resources.file_bytes(deployment.contact_registry_path),
+        )
+        codex_descriptor = resources.file_descriptor(deployment.codex_binary)
+        poppler_runtime = pinned_poppler_runtime(
+            {
+                name: resources.file_descriptor(PRODUCTION_POPPLER_BIN / name)
+                for name in PRODUCTION_POPPLER_SHA256
+            },
+            PRODUCTION_POPPLER_SHA256,
+        )
 
         def runtime(kind: str) -> EditorialCompositionRuntime:
             prefix = "cover_letter_" if kind == "cover_letter" else ""
@@ -716,6 +815,7 @@ def _run_production_preparation(
                     codex_binary=str(deployment.codex_binary),
                     environment="production",
                     timeout_seconds=deployment.timeout_seconds,
+                    codex_binary_fd=codex_descriptor,
                 ),
                 humanizer=DetachedCodexEditorialAdapter(
                     stage=f"{prefix}humanizer" if prefix else "humanizer",
@@ -723,6 +823,7 @@ def _run_production_preparation(
                     codex_binary=str(deployment.codex_binary),
                     environment="production",
                     timeout_seconds=deployment.timeout_seconds,
+                    codex_binary_fd=codex_descriptor,
                 ),
                 document_kind=kind,
             )
@@ -733,6 +834,10 @@ def _run_production_preparation(
             repository_root=deployment.repository_root,
             cli_timeout_seconds=deployment.timeout_seconds,
             codex_binary=str(deployment.codex_binary),
+            codex_binary_fd=codex_descriptor,
+            archive_descriptor=resources.directory_descriptor(
+                deployment.recruiter_archive_root
+            ),
         )
         result = prepare_admitted_market_application_from_authorities(
             admission_store=store,
@@ -742,7 +847,9 @@ def _run_production_preparation(
             candidate_authority_path=deployment.candidate_authority_path,
             contact_authority_path=deployment.contact_authority_path,
             input_materializer=CanonicalPreparationInputMaterializer(
-                candidate_authority_path=deployment.candidate_authority_path
+                candidate_authority_path=deployment.candidate_authority_path,
+                candidate_authority_bytes=candidate_bytes,
+                contact_authority_bytes=contact_lease.authority_bytes,
             ),
             environment="production",
             editorial_runtime=runtime("cv"),
@@ -751,9 +858,21 @@ def _run_production_preparation(
                 "bindings": (),
                 "form_fields": (),
                 "production_recruiter_assessor": assessor,
+                "poppler_runtime": poppler_runtime,
             },
+            candidate_authority_bytes=candidate_bytes,
+            contact_resource_lease=contact_lease,
+            output_root_descriptor=resources.directory_descriptor(
+                deployment.output_root
+            ),
         )
-        _verify_preparation_output(result, deployment.output_root)
+        _verify_preparation_output(
+            result,
+            deployment.output_root,
+            output_root_descriptor=resources.directory_descriptor(
+                deployment.output_root
+            ),
+        )
         pinned.verify_references()
         resources.verify()
     finally:

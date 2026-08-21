@@ -19,6 +19,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -1571,13 +1572,27 @@ def probe_detached_codex_editorial_cli(
     codex_binary: str,
     *,
     process_environment: Mapping[str, str] | None = None,
+    codex_binary_fd: int | None = None,
 ) -> CodexCLIContract:
     """Validate current CLI flags/features locally without contacting a model."""
 
     binary_path = Path(codex_binary)
+    if codex_binary_fd is not None:
+        metadata = os.fstat(codex_binary_fd)
+        if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & stat.S_IXUSR:
+            raise EditorialCompositionError("editorial Codex descriptor is invalid")
+        os.lseek(codex_binary_fd, 0, os.SEEK_SET)
+        executable_chunks: list[bytes] = []
+        while chunk := os.read(codex_binary_fd, 1024 * 1024):
+            executable_chunks.append(chunk)
+        executable_bytes = b"".join(executable_chunks)
+        os.lseek(codex_binary_fd, 0, os.SEEK_SET)
+        binary_path = Path(f"/proc/self/fd/{codex_binary_fd}")
+    else:
+        executable_bytes = binary_path.read_bytes() if binary_path.is_file() else b""
     if not binary_path.is_file() or not os.access(binary_path, os.X_OK):
         raise EditorialCompositionError("editorial Codex binary is unavailable")
-    executable_sha256 = hashlib.sha256(binary_path.read_bytes()).hexdigest()
+    executable_sha256 = hashlib.sha256(executable_bytes).hexdigest()
     source_environment = dict(
         os.environ if process_environment is None else process_environment
     )
@@ -1595,12 +1610,15 @@ def probe_detached_codex_editorial_cli(
         def run(arguments: Sequence[str]) -> str:
             try:
                 result = subprocess.run(
-                    [codex_binary, *arguments],
+                    [str(binary_path), *arguments],
                     capture_output=True,
                     text=True,
                     timeout=15.0,
                     cwd=root,
                     env=env,
+                    pass_fds=(
+                        () if codex_binary_fd is None else (codex_binary_fd,)
+                    ),
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise EditorialCompositionError(
@@ -1693,6 +1711,7 @@ class DetachedCodexEditorialAdapter:
         environment: str,
         process_environment: Mapping[str, str] | None = None,
         timeout_seconds: float = 120.0,
+        codex_binary_fd: int | None = None,
     ) -> None:
         if stage not in _EDITORIAL_STAGES:
             raise EditorialCompositionError("editorial Codex adapter stage is invalid")
@@ -1706,7 +1725,12 @@ class DetachedCodexEditorialAdapter:
             os.environ if process_environment is None else process_environment
         )
         self.timeout_seconds = float(timeout_seconds)
-        binary_path = Path(self.codex_binary)
+        self.codex_binary_fd = codex_binary_fd
+        binary_path = Path(
+            f"/proc/self/fd/{codex_binary_fd}"
+            if codex_binary_fd is not None
+            else self.codex_binary
+        )
         if not binary_path.is_file() or (
             environment == "production" and not os.access(binary_path, os.X_OK)
         ):
@@ -1716,6 +1740,7 @@ class DetachedCodexEditorialAdapter:
             contract = probe_detached_codex_editorial_cli(
                 self.codex_binary,
                 process_environment=self.process_environment,
+                codex_binary_fd=self.codex_binary_fd,
             )
             if contract.executable_sha256 != self.executable_sha256:
                 raise EditorialCompositionError(
@@ -1759,7 +1784,11 @@ class DetachedCodexEditorialAdapter:
         )
 
     def available(self) -> bool:
-        path = Path(self.codex_binary)
+        path = Path(
+            f"/proc/self/fd/{self.codex_binary_fd}"
+            if self.codex_binary_fd is not None
+            else self.codex_binary
+        )
         return (
             path.is_file()
             and (self.environment == "synthetic" or os.access(path, os.X_OK))
@@ -1805,8 +1834,13 @@ class DetachedCodexEditorialAdapter:
             schema_path.write_text(
                 canonical_json(self._response_schema), encoding="utf-8"
             )
+            executable = (
+                f"/proc/self/fd/{self.codex_binary_fd}"
+                if self.codex_binary_fd is not None
+                else self.codex_binary
+            )
             command = [
-                self.codex_binary,
+                executable,
                 "exec",
                 "--skip-git-repo-check",
                 "--ephemeral",
@@ -1837,6 +1871,9 @@ class DetachedCodexEditorialAdapter:
                     timeout=self.timeout_seconds,
                     cwd=request_dir,
                     env=env,
+                    pass_fds=(
+                        () if self.codex_binary_fd is None else (self.codex_binary_fd,)
+                    ),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise EditorialCompositionError(

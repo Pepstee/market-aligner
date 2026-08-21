@@ -1634,8 +1634,9 @@ def _authority_document(
     decision_receipt: Mapping[str, object],
     candidate_projection: Mapping[str, object],
     require_embedded_decision: bool = True,
+    exact_bytes: bytes | None = None,
 ) -> tuple[dict[str, object], str]:
-    authority_bytes = path.read_bytes()
+    authority_bytes = path.read_bytes() if exact_bytes is None else exact_bytes
     if _sha256(authority_bytes) != expected_file_sha256:
         raise ValueError("candidate authority file hash differs")
     value = json.loads(authority_bytes)
@@ -1721,12 +1722,18 @@ def materialize_candidate_application_source(
     approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
     revision_writer: GenerationRevisionWriter | None = None,
     market_decision_authority: MarketApplicationDecisionAuthority | None = None,
+    candidate_authority_bytes: bytes | None = None,
+    contact_authority_bytes: bytes | None = None,
 ) -> CandidateApplicationMaterialization:
     """Materialize exact source authority without rendering or release authority."""
     deployment_binding.__post_init__()
     if contact != contact_authority.contact:
         raise ValueError("application contact differs from signed operator authority")
-    contact_bytes = contact_authority.source_path.read_bytes()
+    contact_bytes = (
+        contact_authority.source_path.read_bytes()
+        if contact_authority_bytes is None
+        else contact_authority_bytes
+    )
     if _sha256(contact_bytes) != contact_authority.envelope_sha256:
         raise ValueError("signed contact authority envelope hash differs")
     if market_decision_authority is not None:
@@ -1756,6 +1763,7 @@ def materialize_candidate_application_source(
         decision_receipt=decision_receipt,
         candidate_projection=candidate_projection,
         require_embedded_decision=market_decision_authority is None,
+        exact_bytes=candidate_authority_bytes,
     )
     evidence_bytes = approved_evidence_path.read_bytes()
     if _sha256(evidence_bytes) != APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]:

@@ -60,6 +60,27 @@ class CandidateContactAuthority:
 
 
 @dataclass(frozen=True)
+class CandidateContactResourceLease:
+    """Exact already-open resource bytes supplied by the production boundary."""
+
+    authority_path: Path
+    authority_bytes: bytes
+    public_key_path: Path
+    public_key_bytes: bytes
+    registry_path: Path
+    registry_bytes: bytes
+
+    def __post_init__(self) -> None:
+        for path, value in (
+            (self.authority_path, self.authority_bytes),
+            (self.public_key_path, self.public_key_bytes),
+            (self.registry_path, self.registry_bytes),
+        ):
+            if not path.is_absolute() or not isinstance(value, bytes) or not value:
+                raise ValueError("contact resource lease is malformed")
+
+
+@dataclass(frozen=True)
 class _VerifiedRegistry:
     sha256: str
     version: int
@@ -80,30 +101,43 @@ def _load_contact_registry(
     authority_sha256: str,
     record_id: str,
     record_version: int,
+    resource_lease: CandidateContactResourceLease | None = None,
 ) -> str:
     configured = os.environ.get(REGISTRY_ENV)
     if not configured:
         raise ValueError(f"{REGISTRY_ENV} is required")
     candidate = Path(configured)
+    if resource_lease is not None:
+        if type(resource_lease) is not CandidateContactResourceLease:
+            raise ValueError("contact registry resource lease type is invalid")
+        resource_lease.__post_init__()
+        if candidate != resource_lease.registry_path:
+            raise ValueError("contact registry resource lease path differs")
+        paths_and_values = ((candidate, resource_lease.registry_bytes),)
+    else:
+        paths_and_values = None
     if not candidate.is_absolute() or candidate.is_symlink():
         raise ValueError("operator contact registry must be an absolute directory")
-    directory = candidate.resolve(strict=True)
-    if (
-        not directory.is_dir()
-        or repository == directory
-        or repository in directory.parents
-    ):
-        raise ValueError("operator contact registry must be outside the repository")
-    paths = sorted(directory.iterdir())
-    if not paths or any(
-        path.is_symlink() or not path.is_file() or path.suffix != ".json"
-        for path in paths
-    ):
-        raise ValueError("operator contact registry directory is unsafe or empty")
+    if paths_and_values is None:
+        directory = candidate.resolve(strict=True)
+        if (
+            not directory.is_dir()
+            or repository == directory
+            or repository in directory.parents
+        ):
+            raise ValueError("operator contact registry must be outside the repository")
+        paths = sorted(directory.iterdir())
+        if not paths or any(
+            path.is_symlink() or not path.is_file() or path.suffix != ".json"
+            for path in paths
+        ):
+            raise ValueError("operator contact registry directory is unsafe or empty")
+        paths_and_values = tuple((path, path.read_bytes()) for path in paths)
+    else:
+        paths = [candidate]
 
     registries: dict[str, _VerifiedRegistry] = {}
-    for path in paths:
-        value = path.read_bytes()
+    for path, value in paths_and_values:
         try:
             document = json.loads(value)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -250,16 +284,31 @@ def load_candidate_contact_authority(
     *,
     repository_root: str | Path,
     verified_at: datetime | None = None,
+    resource_lease: CandidateContactResourceLease | None = None,
 ) -> CandidateContactAuthority:
     """Load one content-addressed operator file without accepting repo fixtures."""
     candidate = Path(path)
     repository = Path(repository_root).resolve(strict=True)
-    if not candidate.is_absolute() or candidate.is_symlink():
+    if resource_lease is not None:
+        if type(resource_lease) is not CandidateContactResourceLease:
+            raise ValueError("contact resource lease type is invalid")
+        resource_lease.__post_init__()
+        if candidate != resource_lease.authority_path:
+            raise ValueError("contact authority resource lease path differs")
+    if not candidate.is_absolute() or (resource_lease is None and candidate.is_symlink()):
         raise ValueError("contact authority must be an absolute non-symlink file")
-    resolved = candidate.resolve(strict=True)
-    if not resolved.is_file() or repository == resolved or repository in resolved.parents:
+    resolved = candidate if resource_lease is not None else candidate.resolve(strict=True)
+    if (
+        (resource_lease is None and not resolved.is_file())
+        or repository == resolved
+        or repository in resolved.parents
+    ):
         raise ValueError("contact authority must be a regular file outside the repository")
-    value = resolved.read_bytes()
+    value = (
+        resource_lease.authority_bytes
+        if resource_lease is not None
+        else resolved.read_bytes()
+    )
     try:
         document = json.loads(value)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -329,13 +378,26 @@ def load_candidate_contact_authority(
     if not public_key_value:
         raise ValueError(f"{PUBLIC_KEY_ENV} is required")
     public_key_path = Path(public_key_value)
-    if not public_key_path.is_absolute() or public_key_path.is_symlink():
+    if (
+        not public_key_path.is_absolute()
+        or (resource_lease is None and public_key_path.is_symlink())
+    ):
         raise ValueError("operator contact public key must be an absolute non-symlink file")
-    resolved_public_key = public_key_path.resolve(strict=True)
+    if resource_lease is not None and public_key_path != resource_lease.public_key_path:
+        raise ValueError("contact public-key resource lease path differs")
+    resolved_public_key = (
+        public_key_path
+        if resource_lease is not None
+        else public_key_path.resolve(strict=True)
+    )
     if repository == resolved_public_key or repository in resolved_public_key.parents:
         raise ValueError("operator contact public key must be outside the repository")
     try:
-        loaded = serialization.load_pem_public_key(resolved_public_key.read_bytes())
+        loaded = serialization.load_pem_public_key(
+            resource_lease.public_key_bytes
+            if resource_lease is not None
+            else resolved_public_key.read_bytes()
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("operator contact public key is invalid") from exc
     if not isinstance(loaded, Ed25519PublicKey):
@@ -363,6 +425,7 @@ def load_candidate_contact_authority(
         authority_sha256=authority_sha256,
         record_id=str(document["record_id"]),
         record_version=int(document["record_version"]),
+        resource_lease=resource_lease,
     )
     projected_values = (
         contact.get("full_name"),
@@ -402,6 +465,7 @@ def load_candidate_contact_authority(
 __all__ = [
     "ATTESTATION",
     "CandidateContactAuthority",
+    "CandidateContactResourceLease",
     "SCHEMA_VERSION",
     "PUBLIC_KEY_ENV",
     "REGISTRY_ATTESTATION",

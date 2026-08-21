@@ -24,6 +24,7 @@ from cv_generation.service import (
 from .evidence_matching import canonical_json, content_hash
 from .candidate_contact_authority import (
     CandidateContactAuthority,
+    CandidateContactResourceLease,
     load_candidate_contact_authority,
 )
 from .candidate_application_factory import (
@@ -54,7 +55,17 @@ def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode()
 
 
-def _private_external_root(path: Path, repository_root: Path) -> Path:
+def _private_external_root(
+    path: Path,
+    repository_root: Path,
+    *,
+    descriptor: int | None = None,
+) -> Path:
+    if descriptor is not None:
+        metadata = os.fstat(descriptor)
+        if not os.path.isdir(f"/proc/self/fd/{descriptor}"):
+            raise ValueError("preparation output lease is not a directory")
+        return Path(f"/proc/self/fd/{descriptor}")
     root = path.resolve()
     repository = repository_root.resolve(strict=True)
     if repository == root or repository in root.parents:
@@ -133,6 +144,8 @@ class CanonicalPreparationInputMaterializer:
     source_url: str | None = None
     role_title: str | None = None
     company_name: str | None = None
+    candidate_authority_bytes: bytes | None = None
+    contact_authority_bytes: bytes | None = None
 
     def __call__(
         self,
@@ -140,8 +153,17 @@ class CanonicalPreparationInputMaterializer:
         deployment_binding: CandidateApplicationDeploymentBinding,
         contact_authority: CandidateContactAuthority,
     ) -> Mapping[str, Any]:
-        candidate_path = self.candidate_authority_path.resolve(strict=True)
-        authority_document = json.loads(candidate_path.read_bytes())
+        candidate_path = (
+            self.candidate_authority_path.resolve(strict=True)
+            if self.candidate_authority_bytes is None
+            else self.candidate_authority_path
+        )
+        authority_bytes = (
+            candidate_path.read_bytes()
+            if self.candidate_authority_bytes is None
+            else self.candidate_authority_bytes
+        )
+        authority_document = json.loads(authority_bytes)
         projection = authority_document.get("candidate_projection")
         if not isinstance(projection, Mapping):
             raise ValueError("canonical materializer candidate projection is malformed")
@@ -235,6 +257,8 @@ class CanonicalPreparationInputMaterializer:
             company_name=company_name,
             contact=contact_authority.contact,
             market_decision_authority=market_authority,
+            candidate_authority_bytes=self.candidate_authority_bytes,
+            contact_authority_bytes=self.contact_authority_bytes,
         )
         heading_by_id = {
             sentence_id: section.heading
@@ -333,6 +357,9 @@ def prepare_admitted_market_application_from_authorities(
     contact_authority_loader: Callable[..., CandidateContactAuthority] = (
         load_candidate_contact_authority
     ),
+    candidate_authority_bytes: bytes | None = None,
+    contact_resource_lease: CandidateContactResourceLease | None = None,
+    output_root_descriptor: int | None = None,
 ) -> MarketApplicationPreparation:
     """Materialize one real preparation from admitted and operator authority.
 
@@ -362,17 +389,44 @@ def prepare_admitted_market_application_from_authorities(
         raise ValueError(
             "production preparation requires canonical materializer and editorial runtime"
         )
-    candidate_path = candidate_authority_path.resolve(strict=True)
+    candidate_path = (
+        candidate_authority_path.resolve(strict=True)
+        if candidate_authority_bytes is None
+        else candidate_authority_path
+    )
+    if not candidate_path.is_absolute():
+        raise ValueError("candidate authority path must be absolute")
     if environment == "production" and (
-        input_materializer.candidate_authority_path.resolve(strict=True)
+        (
+            input_materializer.candidate_authority_path.resolve(strict=True)
+            if input_materializer.candidate_authority_bytes is None
+            else input_materializer.candidate_authority_path
+        )
         != candidate_path
+        or input_materializer.candidate_authority_bytes != candidate_authority_bytes
+        or input_materializer.contact_authority_bytes
+        != (
+            contact_resource_lease.authority_bytes
+            if contact_resource_lease is not None
+            else None
+        )
     ):
         raise ValueError("production materializer targets another candidate authority")
-    contact_path = contact_authority_path.resolve(strict=True)
+    contact_path = (
+        contact_authority_path.resolve(strict=True)
+        if contact_resource_lease is None
+        else contact_authority_path
+    )
+    if not contact_path.is_absolute():
+        raise ValueError("contact authority path must be absolute")
     for label, path in (("candidate", candidate_path), ("contact", contact_path)):
         if repository == path or repository in path.parents:
             raise ValueError(f"{label} authority must be outside the repository")
-    candidate_bytes = _read_private(candidate_path)
+    candidate_bytes = (
+        _read_private(candidate_path)
+        if candidate_authority_bytes is None
+        else candidate_authority_bytes
+    )
     candidate_sha256 = hashlib.sha256(candidate_bytes).hexdigest()
     admitted_candidate_sha256 = getattr(
         verified, "candidate_authority_sha256", None
@@ -390,8 +444,13 @@ def prepare_admitted_market_application_from_authorities(
     contact_authority = contact_authority_loader(
         contact_path,
         repository_root=repository,
+        resource_lease=contact_resource_lease,
     )
-    contact_bytes = _read_private(contact_path)
+    contact_bytes = (
+        _read_private(contact_path)
+        if contact_resource_lease is None
+        else contact_resource_lease.authority_bytes
+    )
     contact_object_sha256 = hashlib.sha256(contact_bytes).hexdigest()
 
     deployment_binding = build_candidate_application_deployment_binding(
@@ -404,6 +463,11 @@ def prepare_admitted_market_application_from_authorities(
         ),
         candidate_authority_file_sha256=candidate_sha256,
     )
+    if environment == "production" and (
+        candidate_authority_bytes is None
+        or type(contact_resource_lease) is not CandidateContactResourceLease
+    ):
+        raise ValueError("production preparation requires exact resource leases")
     arguments = dict(input_materializer(verified, deployment_binding, contact_authority))
     source = arguments.get("base_source")
     request = arguments.get("request")
@@ -515,6 +579,7 @@ def prepare_admitted_market_application_from_authorities(
         contact_object_sha256=contact_object_sha256,
         orchestration_arguments=arguments,
         environment=environment,
+        output_root_descriptor=output_root_descriptor,
     )
 
 
@@ -573,6 +638,7 @@ def _prepare_admitted_market_application(
     contact_object_sha256: str | None = None,
     orchestration_arguments: Mapping[str, Any],
     environment: str,
+    output_root_descriptor: int | None = None,
 ) -> MarketApplicationPreparation:
     """Prepare one admitted application; never authorize upload or submission."""
 
@@ -670,8 +736,13 @@ def _prepare_admitted_market_application(
         "writer_draft_sha256": writer_draft.draft_sha256,
     }
     preparation_id = content_hash(input_identity)
-    root = _private_external_root(data_home, repository_root)
+    root = _private_external_root(
+        data_home,
+        repository_root,
+        descriptor=output_root_descriptor,
+    )
     destination = root / "preparations" / preparation_id
+    canonical_destination = data_home / "preparations" / preparation_id
     receipt_path = destination / "receipt.json"
     if receipt_path.exists():
         receipt_bytes = _read_private(receipt_path)
@@ -797,7 +868,7 @@ def _prepare_admitted_market_application(
                 raise ValueError("stored recruiter archive replay differs")
         return MarketApplicationPreparation(
             preparation_id,
-            destination,
+            canonical_destination,
             hashlib.sha256(receipt_bytes).hexdigest(),
             str(receipt["orchestration_sha256"]),
             str(receipt["recruiter_receipt_sha256"]),
@@ -914,7 +985,7 @@ def _prepare_admitted_market_application(
         raise
     return MarketApplicationPreparation(
         preparation_id,
-        destination,
+        canonical_destination,
         hashlib.sha256(receipt_bytes).hexdigest(),
         result.orchestration_sha256,
         result.recruiter_receipt.receipt_sha256,

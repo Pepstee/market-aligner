@@ -13,12 +13,13 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from career_automation.evidence_matching import content_hash
 from career_automation.rendering import (
@@ -69,12 +70,15 @@ class PopplerRuntime:
     tool_sha256: tuple[tuple[str, str], ...]
     runtime_sha256: str
     library_directory: str | None = None
+    tool_descriptors: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.version.strip() or set(dict(self.tool_paths)) != set(POPPLER_TOOLS):
             raise DocumentQualityError("Poppler runtime is incomplete")
         if set(dict(self.tool_sha256)) != set(POPPLER_TOOLS):
             raise DocumentQualityError("Poppler runtime hashes are incomplete")
+        if self.tool_descriptors and set(dict(self.tool_descriptors)) != set(POPPLER_TOOLS):
+            raise DocumentQualityError("Poppler runtime descriptors are incomplete")
         for value in (*dict(self.tool_sha256).values(), self.runtime_sha256):
             if not _SHA256.fullmatch(value):
                 raise DocumentQualityError("Poppler runtime identity is invalid")
@@ -221,6 +225,54 @@ def resolve_poppler_runtime(bin_directory: str | Path | None = None) -> PopplerR
     return PopplerRuntime(version, paths, hashes, runtime_sha256, library_directory)
 
 
+def pinned_poppler_runtime(
+    descriptors: Mapping[str, int],
+    expected_sha256: Mapping[str, str],
+) -> PopplerRuntime:
+    """Build a runtime that consumes only already-open executable descriptors."""
+    if set(descriptors) != set(POPPLER_TOOLS) or set(expected_sha256) != set(POPPLER_TOOLS):
+        raise DocumentQualityError("pinned Poppler lease is incomplete")
+    paths: list[tuple[str, str]] = []
+    hashes: list[tuple[str, str]] = []
+    for tool in POPPLER_TOOLS:
+        descriptor = descriptors[tool]
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & stat.S_IXUSR:
+            raise DocumentQualityError("pinned Poppler executable is invalid")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if digest.hexdigest() != expected_sha256[tool]:
+            raise DocumentQualityError("pinned Poppler executable hash differs")
+        paths.append((tool, f"/proc/self/fd/{descriptor}"))
+        hashes.append((tool, digest.hexdigest()))
+    completed = subprocess.run(
+        (dict(paths)["pdftoppm"], "-v"),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        pass_fds=tuple(descriptors.values()),
+    )
+    version_output = (completed.stderr or completed.stdout).splitlines()
+    if completed.returncode not in {0, 99} or not any(
+        "pdftoppm version" in line for line in version_output
+    ):
+        raise DocumentQualityError("pinned Poppler runtime cannot execute")
+    version = next(line.strip() for line in version_output if "pdftoppm version" in line)
+    runtime_sha256 = content_hash({"version": version, "tool_sha256": dict(hashes)})
+    return PopplerRuntime(
+        version,
+        tuple(paths),
+        tuple(hashes),
+        runtime_sha256,
+        None,
+        tuple((tool, descriptors[tool]) for tool in POPPLER_TOOLS),
+    )
+
+
 def _runtime_environment(library_directory: str | None) -> dict[str, str]:
     environment = dict(os.environ)
     if library_directory:
@@ -239,6 +291,7 @@ def _run(runtime: PopplerRuntime, tool: str, *arguments: str) -> subprocess.Comp
         timeout=20,
         check=False,
         env=_runtime_environment(runtime.library_directory),
+        pass_fds=tuple(dict(runtime.tool_descriptors).values()),
     )
     if completed.returncode != 0:
         raise DocumentQualityError(f"Poppler {tool} failed")
@@ -367,10 +420,12 @@ def verify_document_quality(
     artifacts: ApplicationArtifacts,
     *,
     poppler_bin_directory: str | Path | None = None,
+    poppler_runtime: PopplerRuntime | None = None,
 ) -> DocumentQualityReceipt:
     """Verify both rendered PDFs with Poppler and emit a non-release receipt."""
     verify_application_artifacts(artifacts)
-    runtime = resolve_poppler_runtime(poppler_bin_directory)
+    runtime = poppler_runtime or resolve_poppler_runtime(poppler_bin_directory)
+    runtime.__post_init__()
     with tempfile.TemporaryDirectory(prefix="jaa-cv-quality-") as temporary:
         directory = Path(temporary)
         results = (
@@ -408,5 +463,6 @@ __all__ = [
     "PopplerRuntime",
     "QUALITY_POLICY_SHA256",
     "resolve_poppler_runtime",
+    "pinned_poppler_runtime",
     "verify_document_quality",
 ]

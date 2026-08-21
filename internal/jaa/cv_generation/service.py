@@ -58,7 +58,11 @@ from .constraints import (
     validate_generated_cv,
     verify_poppler_cv_quality,
 )
-from .document_quality import DocumentQualityReceipt, verify_document_quality
+from .document_quality import (
+    DocumentQualityReceipt,
+    PopplerRuntime,
+    verify_document_quality,
+)
 from .benchmark_learning import (
     CVBenchmarkDiagnosticReceipt,
     CVBenchmarkManifest,
@@ -588,6 +592,7 @@ def run_cv_composition_orchestration(
     cover_letter_humanizer_evidence: EditorialStageEvidence | None = None,
     cover_letter_bindings: Sequence[CoverLetterRecruiterImprovementBinding] = (),
     cover_letter_improvement_binder: CoverLetterImprovementBinder | None = None,
+    poppler_runtime: PopplerRuntime | None = None,
 ) -> CVCompositionOrchestrationResult:
     """Run one offline-safe CV composition, assessment and rebuild cycle."""
 
@@ -629,6 +634,10 @@ def run_cv_composition_orchestration(
         ):
             raise CVCompositionServiceError(
                 "production requires the typed detached recruiter assessor"
+            )
+        if type(poppler_runtime) is not PopplerRuntime or not poppler_runtime.tool_descriptors:
+            raise CVCompositionServiceError(
+                "production requires a pinned Poppler runtime"
             )
     elif environment == "synthetic":
         if production_recruiter_assessor is not None or (
@@ -725,7 +734,10 @@ def run_cv_composition_orchestration(
         source=initial_source,
         artifacts=initial_artifacts,
     )
-    initial_quality = verify_document_quality(initial_artifacts)
+    initial_quality = verify_document_quality(
+        initial_artifacts,
+        poppler_runtime=poppler_runtime,
+    )
     initial_benchmark = (
         evaluate_cv_benchmark(
             draft=humanized_draft,
@@ -832,7 +844,10 @@ def run_cv_composition_orchestration(
         source=final_source,
         artifacts=final_artifacts,
     )
-    final_quality = verify_document_quality(final_artifacts)
+    final_quality = verify_document_quality(
+        final_artifacts,
+        poppler_runtime=poppler_runtime,
+    )
     final_benchmark = (
         evaluate_cv_benchmark(
             draft=rebuild.rebuilt_draft,

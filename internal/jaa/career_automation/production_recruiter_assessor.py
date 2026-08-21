@@ -76,13 +76,21 @@ class ProductionDetachedRecruiterAssessor:
         repository_root: Path,
         cli_timeout_seconds: float = 120.0,
         codex_binary: str,
+        codex_binary_fd: int | None = None,
+        archive_descriptor: int | None = None,
     ) -> None:
         if not model.strip():
             raise ProductionRecruiterAssessorError(
                 "production recruiter requires an explicit model"
             )
         repository = repository_root.resolve(strict=True)
-        archive = archive_root.resolve()
+        archive = archive_root.resolve() if archive_descriptor is None else archive_root
+        if archive_descriptor is not None:
+            metadata = os.fstat(archive_descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ProductionRecruiterAssessorError(
+                    "production recruiter archive descriptor is invalid"
+                )
         if archive == repository or repository in archive.parents:
             raise ProductionRecruiterAssessorError(
                 "production recruiter archive must be outside the repository"
@@ -91,10 +99,14 @@ class ProductionDetachedRecruiterAssessor:
             raise ProductionRecruiterAssessorError(
                 "production recruiter requires an explicit Codex executable"
             )
-        binary_path = Path(codex_binary)
+        binary_path = Path(
+            f"/proc/self/fd/{codex_binary_fd}"
+            if codex_binary_fd is not None
+            else codex_binary
+        )
         if (
             not binary_path.is_absolute()
-            or binary_path.is_symlink()
+            or (codex_binary_fd is None and binary_path.is_symlink())
             or not binary_path.is_file()
             or not stat.S_ISREG(binary_path.stat().st_mode)
             or not os.access(binary_path, os.X_OK)
@@ -102,12 +114,12 @@ class ProductionDetachedRecruiterAssessor:
             raise ProductionRecruiterAssessorError(
                 "production recruiter requires an explicit regular Codex executable"
             )
-        binary = binary_path.resolve(strict=True)
+        binary = Path(codex_binary) if codex_binary_fd is not None else binary_path.resolve(strict=True)
         if binary == repository or repository in binary.parents:
             raise ProductionRecruiterAssessorError(
                 "production recruiter executable must be outside the repository"
             )
-        binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
+        binary_sha256 = hashlib.sha256(binary_path.read_bytes()).hexdigest()
         self.model = model.strip()
         self.archive_root = archive
         self.cli_timeout_seconds = float(cli_timeout_seconds)
@@ -116,6 +128,8 @@ class ProductionDetachedRecruiterAssessor:
                 "production recruiter timeout is outside policy"
             )
         self.codex_binary = str(binary)
+        self.codex_binary_fd = codex_binary_fd
+        self.archive_descriptor = archive_descriptor
         self._configuration = {
             "archive_manifest_schema": ARCHIVE_SCHEMA_VERSION,
             "archive_receipt_schema": ARCHIVE_RECEIPT_SCHEMA_VERSION,
@@ -148,9 +162,13 @@ class ProductionDetachedRecruiterAssessor:
                 "production recruiter assessor is single-use"
             )
         self._used = True
-        binary_path = Path(self.codex_binary)
+        binary_path = Path(
+            f"/proc/self/fd/{self.codex_binary_fd}"
+            if self.codex_binary_fd is not None
+            else self.codex_binary
+        )
         if (
-            binary_path.is_symlink()
+            (self.codex_binary_fd is None and binary_path.is_symlink())
             or not binary_path.is_file()
             or hashlib.sha256(binary_path.read_bytes()).hexdigest()
             != self._configuration["binary_sha256"]
@@ -163,6 +181,7 @@ class ProductionDetachedRecruiterAssessor:
             model=self.model,
             cli_timeout_seconds=self.cli_timeout_seconds,
             codex_binary=self.codex_binary,
+            codex_binary_fd=self.codex_binary_fd,
         )
         if not isinstance(run.transport, DetachedTransportReceipt):
             raise ProductionRecruiterAssessorError(
@@ -177,11 +196,16 @@ class ProductionDetachedRecruiterAssessor:
                 "detached recruiter transport differs from production configuration"
             )
         verify_recruiter_assessment_receipt(run.assessment, package)
+        archive_access_root = (
+            Path(f"/proc/self/fd/{self.archive_descriptor}")
+            if self.archive_descriptor is not None
+            else self.archive_root
+        )
         archived = archive_recruiter_diagnostic(
-            run.assessment, run.transport, root=self.archive_root
+            run.assessment, run.transport, root=archive_access_root
         )
         replayed = verify_recruiter_diagnostic_archive(
-            archived, root=self.archive_root
+            archived, root=archive_access_root
         )
         if (
             replayed.assessment.document() != run.assessment.document()

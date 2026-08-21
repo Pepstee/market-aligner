@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import inspect
 import os
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +35,134 @@ def _deployment(tmp_path: Path) -> runner._ProductionPreparationDeployment:
     )
 
 
+def _real_preflight_deployment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[runner._ProductionPreparationDeployment, dict[str, Path]]:
+    data_home = tmp_path / "data-home"
+    admission_root = data_home / "state" / "jaa-production-admissions"
+    admission_root.mkdir(parents=True, mode=0o700)
+    (data_home / "state").chmod(0o700)
+    admission_root.chmod(0o700)
+    database = admission_root / "admissions.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE fixture (identity TEXT NOT NULL)")
+    connection.commit()
+    connection.close()
+    database.chmod(0o600)
+
+    repository = tmp_path / "repository"
+    repository.mkdir(mode=0o700)
+    outbox = tmp_path / "outbox"
+    outbox.mkdir(mode=0o700)
+    poppler = tmp_path / "poppler"
+    poppler.mkdir(mode=0o700)
+    codex = tmp_path / "codex"
+    codex.write_bytes(b"exact codex")
+    codex.chmod(0o755)
+    paths = {
+        "candidate": tmp_path / "authority" / "candidate.json",
+        "contact": tmp_path / "contact" / "contact.json",
+        "public_key": tmp_path / "contact" / "public.pem",
+        "registry": tmp_path / "contact" / "registry.json",
+        "codex": codex,
+        "database": database,
+        "output": tmp_path / "output",
+        "recruiter": tmp_path / "recruiter",
+    }
+    paths["candidate"].parent.mkdir(mode=0o700)
+    paths["contact"].parent.mkdir(mode=0o700)
+    for name in ("candidate", "contact", "public_key", "registry"):
+        paths[name].write_bytes(name.encode())
+        paths[name].chmod(0o600)
+    poppler_hashes: dict[str, str] = {}
+    for name in runner.PRODUCTION_POPPLER_SHA256:
+        path = poppler / name
+        path.write_bytes(name.encode())
+        path.chmod(0o755)
+        poppler_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    paths["poppler"] = poppler / "pdfinfo"
+
+    deployment = runner._ProductionPreparationDeployment(
+        repository_root=repository,
+        admission_database=database,
+        outbox_root=outbox,
+        candidate_authority_path=paths["candidate"],
+        contact_authority_path=paths["contact"],
+        contact_public_key_path=paths["public_key"],
+        contact_registry_path=paths["registry"],
+        output_root=paths["output"],
+        recruiter_archive_root=paths["recruiter"],
+        codex_binary=codex,
+        model="gpt-test",
+        timeout_seconds=30,
+    )
+    monkeypatch.setattr(runner, "PRODUCTION_MARKET_DATA_HOME", data_home)
+    monkeypatch.setattr(runner, "PRODUCTION_POPPLER_BIN", poppler)
+    monkeypatch.setattr(runner, "PRODUCTION_POPPLER_SHA256", poppler_hashes)
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CODEX_BINARY_SHA256",
+        hashlib.sha256(codex.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(runner, "PRODUCTION_CODEX_OWNER_UID", os.geteuid())
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CANDIDATE_AUTHORITY_SHA256",
+        hashlib.sha256(paths["candidate"].read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CONTACT_ENVELOPE_SHA256",
+        hashlib.sha256(paths["contact"].read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CONTACT_PUBLIC_KEY_FILE_SHA256",
+        hashlib.sha256(paths["public_key"].read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CONTACT_REGISTRY_FILE_SHA256",
+        hashlib.sha256(paths["registry"].read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(runner, "_git_commit", lambda *args, **kwargs: "2" * 40)
+
+    class _Pinned:
+        def __init__(self, _deployment):
+            self.data_descriptor = os.open(data_home, os.O_RDONLY | os.O_DIRECTORY)
+            self.repository_descriptor = os.open(
+                repository, os.O_RDONLY | os.O_DIRECTORY
+            )
+            self.bundle_descriptor: int | None = None
+
+        def open_bundle(self, _source):
+            self.bundle_descriptor = os.open(outbox, os.O_RDONLY | os.O_DIRECTORY)
+            return self.bundle_descriptor
+
+        def register_adapter(self, _adapter):
+            pass
+
+        def verify_references(self):
+            pass
+
+        def close(self):
+            if self.bundle_descriptor is not None:
+                os.close(self.bundle_descriptor)
+            os.close(self.repository_descriptor)
+            os.close(self.data_descriptor)
+
+    monkeypatch.setattr(runner, "_PinnedProductionPaths", _Pinned)
+    monkeypatch.setattr(
+        runner, "_source_record_for_application", lambda *args: "3" * 64
+    )
+    monkeypatch.setattr(runner, "ProtectedLocalOutbox", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runner, "HandoffAdmissionStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        runner, "installed_production_current_time_witness", lambda: object()
+    )
+    return deployment, paths
+
+
 def test_public_runner_accepts_only_application_id() -> None:
     assert tuple(inspect.signature(runner.run_production_preparation).parameters) == (
         "application_id",
@@ -45,6 +176,9 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     application_id = "app_" + "1" * 64
     captured: dict[str, object] = {}
     adapter_arguments: dict[str, object] = {}
+    editorial_arguments: list[dict[str, object]] = []
+    recruiter_arguments: dict[str, object] = {}
+    poppler_arguments: dict[str, object] = {}
     stages: list[str] = []
     monkeypatch.delenv(runner.PUBLIC_KEY_ENV, raising=False)
     monkeypatch.delenv(runner.REGISTRY_ENV, raising=False)
@@ -86,13 +220,38 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
         lambda: {"codex_binary_sha256": hashlib.sha256(deployment.codex_binary.read_bytes()).hexdigest()},
     )
 
+    descriptor_holder: dict[str, int] = {}
+
     class _Resources:
+        def __init__(self):
+            self.directory_descriptors: list[int] = []
         def pin_file(self, *args, **kwargs): return args[0]
-        def pin_private_directory(self, path): return path
+        def pin_private_directory(self, path):
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            return path
+        def file_bytes(self, path): return path.read_bytes()
+        def file_descriptor(self, path):
+            return (
+                descriptor_holder["database"]
+                if path == deployment.admission_database
+                else 44
+            )
+        def directory_descriptor(self, path):
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            self.directory_descriptors.append(descriptor)
+            return descriptor
         def verify(self): pass
-        def close(self): pass
+        def close(self):
+            while self.directory_descriptors:
+                os.close(self.directory_descriptors.pop())
 
     monkeypatch.setattr(runner, "_PinnedPreparationResources", _Resources)
+    pinned_poppler = object()
+    def pin_poppler(descriptors, hashes):
+        poppler_arguments.update({"descriptors": descriptors, "hashes": hashes})
+        return pinned_poppler
+
+    monkeypatch.setattr(runner, "pinned_poppler_runtime", pin_poppler)
 
     class _Pinned:
         repository_descriptor = 10
@@ -105,10 +264,9 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
 
     monkeypatch.setattr(runner, "_PinnedProductionPaths", _Pinned)
     def open_admission(_parent):
-        return (
-            os.open(tmp_path, os.O_RDONLY),
-            os.open(deployment.codex_binary, os.O_RDONLY),
-        )
+        database = os.open(deployment.codex_binary, os.O_RDONLY)
+        descriptor_holder["database"] = database
+        return (os.open(tmp_path, os.O_RDONLY), database)
 
     monkeypatch.setattr(
         runner,
@@ -125,10 +283,15 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
         def __init__(self, *, stage: str, **kwargs):
             self.stage = stage
             stages.append(stage)
+            editorial_arguments.append(dict(kwargs))
 
     monkeypatch.setattr(runner, "DetachedCodexEditorialAdapter", _Adapter)
     assessor = object()
-    monkeypatch.setattr(runner, "ProductionDetachedRecruiterAssessor", lambda **kwargs: assessor)
+    def production_assessor(**kwargs):
+        recruiter_arguments.update(kwargs)
+        return assessor
+
+    monkeypatch.setattr(runner, "ProductionDetachedRecruiterAssessor", production_assessor)
     preparation_id = "5" * 64
     destination = deployment.output_root / "preparations" / preparation_id
     expected = MarketApplicationPreparation(
@@ -170,6 +333,19 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     assert adapter_arguments["expected_source_record_sha256"] == "3" * 64
     assert adapter_arguments["allowed_producer_commits"] == frozenset({"2" * 40})
     assert captured["orchestration_extras"]["production_recruiter_assessor"] is assessor
+    assert captured["orchestration_extras"]["poppler_runtime"] is pinned_poppler
+    assert {row["codex_binary_fd"] for row in editorial_arguments} == {44}
+    assert recruiter_arguments["codex_binary_fd"] == 44
+    assert isinstance(recruiter_arguments["archive_descriptor"], int)
+    assert set(poppler_arguments["descriptors"]) == set(
+        runner.PRODUCTION_POPPLER_SHA256
+    )
+    assert captured["candidate_authority_bytes"] == (
+        deployment.candidate_authority_path.read_bytes()
+    )
+    assert captured["contact_resource_lease"].authority_bytes == (
+        deployment.contact_authority_path.read_bytes()
+    )
     assert result.release_authority is False
     assert runner.PUBLIC_KEY_ENV not in __import__("os").environ
     assert runner.REGISTRY_ENV not in __import__("os").environ
@@ -361,3 +537,130 @@ def test_preparation_output_requires_exact_private_replay(tmp_path: Path) -> Non
     (destination / "receipt.json").write_bytes(b"substituted")
     with pytest.raises(runner.ProductionPreparationDeploymentError, match="receipt differs"):
         runner._verify_preparation_output(result, output_root)
+
+
+@pytest.mark.parametrize(
+    ("resource_name", "stage"),
+    (
+        ("database", "database"),
+        ("candidate", "resources"),
+        ("contact", "resources"),
+        ("public_key", "resources"),
+        ("registry", "resources"),
+        ("codex", "resources"),
+        ("poppler", "resources"),
+        ("output", "resources"),
+        ("recruiter", "resources"),
+    ),
+)
+def test_after_preflight_resource_replacement_fails_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resource_name: str,
+    stage: str,
+) -> None:
+    deployment, paths = _real_preflight_deployment(monkeypatch, tmp_path)
+    calls = {"editorial": 0, "recruiter": 0, "preparation": 0}
+    monkeypatch.setattr(
+        runner,
+        "DetachedCodexEditorialAdapter",
+        lambda **kwargs: calls.__setitem__("editorial", calls["editorial"] + 1),
+    )
+    monkeypatch.setattr(
+        runner,
+        "ProductionDetachedRecruiterAssessor",
+        lambda **kwargs: calls.__setitem__("recruiter", calls["recruiter"] + 1),
+    )
+    monkeypatch.setattr(
+        runner,
+        "prepare_admitted_market_application_from_authorities",
+        lambda **kwargs: calls.__setitem__("preparation", calls["preparation"] + 1),
+    )
+
+    def replace_resource(current_stage: str) -> None:
+        if current_stage != stage:
+            return
+        path = paths[resource_name]
+        if path.is_dir():
+            displaced = path.with_name(path.name + "-pinned")
+            path.rename(displaced)
+            path.mkdir(mode=0o700)
+            return
+        mode = path.stat().st_mode & 0o777
+        content = path.read_bytes()
+        path.unlink()
+        path.write_bytes(content)
+        path.chmod(mode)
+
+    with pytest.raises(
+        runner.ProductionPreparationDeploymentError,
+        match="changed during operation|descriptor differs",
+    ):
+        runner._run_production_preparation(
+            "app_" + "1" * 64,
+            deployment,
+            after_preflight_hook=replace_resource,
+        )
+    assert calls == {"editorial": 0, "recruiter": 0, "preparation": 0}
+
+
+def test_after_preflight_authority_ancestor_replacement_fails_before_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    deployment, paths = _real_preflight_deployment(monkeypatch, tmp_path)
+    calls = {"editorial": 0, "recruiter": 0}
+    monkeypatch.setattr(
+        runner,
+        "DetachedCodexEditorialAdapter",
+        lambda **kwargs: calls.__setitem__("editorial", calls["editorial"] + 1),
+    )
+    monkeypatch.setattr(
+        runner,
+        "ProductionDetachedRecruiterAssessor",
+        lambda **kwargs: calls.__setitem__("recruiter", calls["recruiter"] + 1),
+    )
+
+    def replace_ancestor(stage: str) -> None:
+        if stage != "resources":
+            return
+        parent = paths["candidate"].parent
+        content = paths["candidate"].read_bytes()
+        displaced = parent.with_name(parent.name + "-pinned")
+        parent.rename(displaced)
+        parent.mkdir(mode=0o700)
+        replacement = parent / paths["candidate"].name
+        replacement.write_bytes(content)
+        replacement.chmod(0o600)
+
+    with pytest.raises(
+        runner.ProductionPreparationDeploymentError,
+        match="directory changed during operation",
+    ):
+        runner._run_production_preparation(
+            "app_" + "1" * 64,
+            deployment,
+            after_preflight_hook=replace_ancestor,
+        )
+    assert calls == {"editorial": 0, "recruiter": 0}
+
+
+def test_cli_help_bootstraps_from_unrelated_locked_working_directory(
+    tmp_path: Path,
+) -> None:
+    script = (
+        Path(__file__).resolve().parent
+        / "scripts"
+        / "run_production_application_preparation.py"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--application-id" in completed.stdout
