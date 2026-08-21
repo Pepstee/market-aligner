@@ -3470,9 +3470,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/editorial_composition.py": {
-    "mtime": 1787288805.4329548,
-    "ast_hash": "113b38a97d411b70c8ae20ccac6d9475",
-    "semantic_hash": "113b38a97d411b70c8ae20ccac6d9475"
+    "mtime": 1787291698.0592642,
+    "ast_hash": "b669d1b70340ce8a8f010cd29859601c",
+    "semantic_hash": ""
   },
   "internal/jaa/form_filling/ats_forensics.py": {
     "mtime": 1787226092.0,
@@ -3560,9 +3560,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_editorial_composition.py": {
-    "mtime": 1787257368.0,
-    "ast_hash": "156682deac198d4f92c4fa603b7b07bf",
-    "semantic_hash": "156682deac198d4f92c4fa603b7b07bf"
+    "mtime": 1787291698.0592642,
+    "ast_hash": "672378b90e17e585d15f9af3042d547e",
+    "semantic_hash": ""
   },
   "internal/jaa/test_cv_import_order.py": {
     "mtime": 1787227359.0,
