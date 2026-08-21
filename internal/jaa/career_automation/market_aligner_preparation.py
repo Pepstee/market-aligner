@@ -31,6 +31,7 @@ from .candidate_application_factory import (
     CandidateApplicationMaterializationReceipt,
     CandidateApplicationDeploymentBinding,
     build_candidate_application_deployment_binding,
+    build_market_application_decision_authority,
     materialize_candidate_application_source,
 )
 from cv_generation.editorial_composition import (
@@ -123,13 +124,13 @@ class CanonicalPreparationInputMaterializer:
     """Pure authority compiler used before any production provider is available."""
 
     candidate_authority_path: Path
-    decision_receipt: Mapping[str, object]
-    candidate_projection: Mapping[str, object]
-    job_key: str
-    vacancy_sha256: str
-    source_url: str
-    role_title: str
-    company_name: str
+    decision_receipt: Mapping[str, object] | None = None
+    candidate_projection: Mapping[str, object] | None = None
+    job_key: str | None = None
+    vacancy_sha256: str | None = None
+    source_url: str | None = None
+    role_title: str | None = None
+    company_name: str | None = None
 
     def __call__(
         self,
@@ -138,26 +139,97 @@ class CanonicalPreparationInputMaterializer:
         contact_authority: CandidateContactAuthority,
     ) -> Mapping[str, Any]:
         candidate_path = self.candidate_authority_path.resolve(strict=True)
-        if (
-            verified.job_key != self.job_key
-            or verified.vacancy_snapshot_sha256 != self.vacancy_sha256
-            or verified.role_title != self.role_title
-            or verified.company_name != self.company_name
-            or verified.canonical_url != self.source_url
-        ):
-            raise ValueError("canonical materializer vacancy differs from admission")
+        authority_document = json.loads(candidate_path.read_bytes())
+        projection = authority_document.get("candidate_projection")
+        if not isinstance(projection, Mapping):
+            raise ValueError("canonical materializer candidate projection is malformed")
+        integrated = bool(
+            verified.source_job_key
+            and verified.assessment_receipt_bytes
+            and verified.eligibility_receipt_bytes
+            and verified.selection_receipt_bytes
+        )
+        if integrated:
+            if any(
+                value is not None
+                for value in (
+                    self.decision_receipt,
+                    self.candidate_projection,
+                    self.job_key,
+                    self.vacancy_sha256,
+                    self.source_url,
+                    self.role_title,
+                    self.company_name,
+                )
+            ):
+                raise ValueError("admitted materializer rejects caller vacancy authority")
+            market_authority = build_market_application_decision_authority(
+                deployment_binding=deployment_binding,
+                source_job_key=verified.source_job_key,
+                internal_job_key=verified.job_key,
+                vacancy_snapshot_sha256=verified.vacancy_snapshot_sha256,
+                raw_listing_sha256=verified.raw_listing_sha256,
+                raw_listing_bytes=verified.raw_listing_bytes,
+                requirements_sha256=verified.requirements_sha256,
+                requirements_bytes=verified.requirements_bytes,
+                assessment_receipt_sha256=verified.assessment_receipt_sha256,
+                assessment_receipt_bytes=verified.assessment_receipt_bytes,
+                eligibility_receipt_sha256=verified.eligibility_receipt_sha256,
+                eligibility_receipt_bytes=verified.eligibility_receipt_bytes,
+                selection_receipt_sha256=verified.selection_receipt_sha256,
+                selection_receipt_bytes=verified.selection_receipt_bytes,
+                candidate_projection=projection,
+                source_url=verified.canonical_url,
+                role_title=verified.role_title,
+                company_name=verified.company_name,
+                observed_at=verified.source_observed_at,
+            )
+            decision = market_authority.decision_receipt()
+            source_job_key = market_authority.source_job_key
+            raw_listing_sha256 = market_authority.raw_listing_sha256
+            source_url = market_authority.source_url
+            role_title = market_authority.role_title
+            company_name = market_authority.company_name
+        else:
+            if (
+                self.decision_receipt is None
+                or self.candidate_projection is None
+                or self.job_key is None
+                or self.vacancy_sha256 is None
+                or self.source_url is None
+                or self.role_title is None
+                or self.company_name is None
+            ):
+                raise ValueError("legacy materializer vacancy authority is incomplete")
+            if (
+                verified.job_key != self.job_key
+                or verified.raw_listing_sha256 != self.vacancy_sha256
+                or verified.role_title != self.role_title
+                or verified.company_name != self.company_name
+                or verified.canonical_url != self.source_url
+            ):
+                raise ValueError("canonical materializer vacancy differs from admission")
+            market_authority = None
+            decision = self.decision_receipt
+            projection = self.candidate_projection
+            source_job_key = self.job_key
+            raw_listing_sha256 = self.vacancy_sha256
+            source_url = self.source_url
+            role_title = self.role_title
+            company_name = self.company_name
         materialization = materialize_candidate_application_source(
             candidate_authority_path=candidate_path,
             deployment_binding=deployment_binding,
             contact_authority=contact_authority,
-            decision_receipt=self.decision_receipt,
-            candidate_projection=self.candidate_projection,
-            job_key=self.job_key,
-            vacancy_sha256=self.vacancy_sha256,
-            source_url=self.source_url,
-            role_title=self.role_title,
-            company_name=self.company_name,
+            decision_receipt=decision,
+            candidate_projection=projection,
+            job_key=source_job_key,
+            vacancy_sha256=raw_listing_sha256,
+            source_url=source_url,
+            role_title=role_title,
+            company_name=company_name,
             contact=contact_authority.contact,
+            market_decision_authority=market_authority,
         )
         heading_by_id = {
             sentence_id: section.heading
@@ -190,13 +262,13 @@ class CanonicalPreparationInputMaterializer:
                 dissertation_title=None,
                 source_sha256=deployment_binding.candidate_authority_file_sha256,
             ),
-            role_title=self.role_title,
-            company_name=self.company_name,
-            vacancy_sha256=self.vacancy_sha256,
+            role_title=role_title,
+            company_name=company_name,
+            vacancy_sha256=raw_listing_sha256,
             approved_claims=claims,
         )
         listing_text = verified.raw_listing_bytes.decode("utf-8")
-        if hashlib.sha256(listing_text.encode()).hexdigest() != self.vacancy_sha256:
+        if hashlib.sha256(listing_text.encode()).hexdigest() != raw_listing_sha256:
             raise ValueError("canonical materializer listing differs from vacancy")
         return {
             "base_source": materialization.source,

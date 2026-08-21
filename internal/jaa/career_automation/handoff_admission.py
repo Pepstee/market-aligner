@@ -8,6 +8,7 @@ are available solely through the explicitly named synthetic-test entry point.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -715,6 +716,72 @@ class VerifiedApplicationInput:
     admission_receipt_sha256: str
     current_boundary: str
     current_boundary_receipt_sha256: str
+    source_job_key: str = ""
+    source_observed_at: str = ""
+    assessment_receipt_sha256: str = ""
+    assessment_receipt_bytes: bytes = b""
+    eligibility_receipt_sha256: str = ""
+    eligibility_receipt_bytes: bytes = b""
+    selection_receipt_sha256: str = ""
+    selection_receipt_bytes: bytes = b""
+
+
+def _verified_market_decision_references(
+    graph: VerifiedGraph, handoff: ParsedHandoff
+) -> dict[str, object]:
+    """Project exact MA decision objects from the freshly verified graph."""
+
+    exact = {
+        "assessment": graph.objects["assessment.receipt"],
+        "eligibility": graph.objects["eligibility.receipt"],
+        "selection": graph.objects["selection.receipt"],
+    }
+    try:
+        documents = {name: json.loads(value) for name, value in exact.items()}
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HandoffAdmissionError(
+            "market_decision_object", "verified Market decision object is not JSON"
+        ) from exc
+    assessment = documents["assessment"]
+    eligibility = documents["eligibility"]
+    selection = documents["selection"]
+    integrated_shape = (
+        isinstance(assessment, dict)
+        and assessment.get("schema_version")
+        == "market-aligner.assessment-promotion-receipt.v1"
+    )
+    source_keys = (
+        assessment.get("job_key") if isinstance(assessment, dict) else None,
+        eligibility.get("source_job_key") if isinstance(eligibility, dict) else None,
+        selection.get("source_job_key") if isinstance(selection, dict) else None,
+    )
+    if not integrated_shape:
+        source_keys = (None, None, None)
+    if all(value is None for value in source_keys):
+        source_job_key = ""
+    elif (
+        not all(isinstance(value, str) and value for value in source_keys)
+        or len(set(source_keys)) != 1
+    ):
+        raise HandoffAdmissionError(
+            "market_decision_job_key",
+            "verified Market decision objects disagree on source job key",
+        )
+    else:
+        source_job_key = str(source_keys[0])
+    payload = handoff.payload
+    vacancy = payload["vacancy"]
+    provenance = vacancy["provenance"]
+    return {
+        "assessment_receipt_bytes": exact["assessment"],
+        "assessment_receipt_sha256": payload["assessment"]["assessment_receipt_sha256"],
+        "eligibility_receipt_bytes": exact["eligibility"],
+        "eligibility_receipt_sha256": payload["eligibility"]["eligibility_receipt_sha256"],
+        "selection_receipt_bytes": exact["selection"],
+        "selection_receipt_sha256": payload["selection"]["selection_receipt_sha256"],
+        "source_job_key": source_job_key,
+        "source_observed_at": str(provenance.get("observed_at", "")),
+    }
 
 
 @dataclass(frozen=True)
@@ -2401,6 +2468,7 @@ class HandoffAdmissionStore:
                 "current reference graph differs from carried validation",
             )
         vacancy = handoff.payload["vacancy"]
+        market = _verified_market_decision_references(graph, handoff)
         return VerifiedApplicationInput(
             application_id=application_id,
             admission_kind=str(admission["admission_kind"]),
@@ -2424,6 +2492,7 @@ class HandoffAdmissionStore:
             admission_receipt_sha256=str(admission["verification_receipt_sha256"]),
             current_boundary=boundary,
             current_boundary_receipt_sha256=validation_sha256,
+            **market,
         )
 
     def _for_boundary_tx(
@@ -2541,6 +2610,7 @@ class HandoffAdmissionStore:
                 "forward_validation_conflict", "stored exact boundary evidence differs"
             )
         vacancy = handoff.payload["vacancy"]
+        market = _verified_market_decision_references(graph, handoff)
         return VerifiedApplicationInput(
             application_id=application_id,
             admission_kind=kind,
@@ -2564,6 +2634,7 @@ class HandoffAdmissionStore:
             admission_receipt_sha256=str(row["verification_receipt_sha256"]),
             current_boundary=boundary,
             current_boundary_receipt_sha256=receipt_sha256,
+            **market,
         )
 
 

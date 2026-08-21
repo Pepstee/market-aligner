@@ -10,10 +10,12 @@ import pytest
 
 from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import (
+    build_market_application_decision_authority,
     build_candidate_application_deployment_binding,
     build_candidate_application_package,
     materialize_candidate_application_source,
 )
+from career_automation.evidence_matching import canonical_json
 from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.candidate_authority import APPROVED_EVIDENCE_PATH
 from career_automation.production_attempt import _approved_fact_authorities
@@ -94,6 +96,144 @@ def _materialization_inputs(tmp_path: Path) -> dict[str, object]:
         candidate_authority_file_sha256=AUTHORITY_PATH.stem,
     )
     return {**values, "deployment_binding": binding, "contact_authority": contact}
+
+
+def _integrated_decision(tmp_path: Path):
+    inputs = _materialization_inputs(tmp_path)
+    source_job_key = "workable:cogna:847CFBC5F4"
+    requirements = {
+        "preferred_qualifications": ["Hands-on experimentation with emerging AI tools and models"],
+        "preferred_skills": ["Modern frontend development"],
+        "required_qualifications": ["Professional or personal experience working with LLM APIs"],
+        "required_skills": ["Python"],
+        "responsibilities": ["Design and build reusable application architectures and toolchains"],
+    }
+    raw_listing_bytes = b'{"fixture":"exact Workable listing"}'
+    requirements_bytes = canonical_json(requirements).encode()
+    assessment = {
+        "decision": "pass",
+        "job_key": source_job_key,
+        "receipt_sha256": "5" * 64,
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+    }
+    eligibility = {
+        "checks": [],
+        "decision": "eligible",
+        "hard_gate_passed": True,
+        "promotion_receipt_sha256": "5" * 64,
+        "source_job_key": source_job_key,
+    }
+    selection = {
+        "decision": "selected_for_application",
+        "hard_gate_passed": True,
+        "promotion_receipt_sha256": "5" * 64,
+        "source_job_key": source_job_key,
+    }
+    encoded = [canonical_json(value).encode() for value in (assessment, eligibility, selection)]
+    projection = json.loads(AUTHORITY_PATH.read_bytes())["candidate_projection"]
+    authority = build_market_application_decision_authority(
+        deployment_binding=inputs["deployment_binding"],
+        source_job_key=source_job_key,
+        internal_job_key="job_" + "6" * 64,
+        vacancy_snapshot_sha256="7" * 64,
+        raw_listing_sha256=hashlib.sha256(raw_listing_bytes).hexdigest(),
+        raw_listing_bytes=raw_listing_bytes,
+        requirements_sha256=hashlib.sha256(requirements_bytes).hexdigest(),
+        requirements_bytes=requirements_bytes,
+        assessment_receipt_sha256=hashlib.sha256(encoded[0]).hexdigest(),
+        assessment_receipt_bytes=encoded[0],
+        eligibility_receipt_sha256=hashlib.sha256(encoded[1]).hexdigest(),
+        eligibility_receipt_bytes=encoded[1],
+        selection_receipt_sha256=hashlib.sha256(encoded[2]).hexdigest(),
+        selection_receipt_bytes=encoded[2],
+        candidate_projection=projection,
+        source_url="https://apply.workable.com/j/847CFBC5F4",
+        role_title="Software Engineer",
+        company_name="Cogna",
+        observed_at="2026-08-20T19:46:02+00:00",
+    )
+    return authority, inputs, projection
+
+
+def test_integrated_market_decision_keeps_candidate_authority_vacancy_independent(
+    tmp_path: Path,
+) -> None:
+    authority, inputs, projection = _integrated_decision(tmp_path)
+    assert authority.vacancy_snapshot_sha256 != authority.raw_listing_sha256
+    assert any(row["status"] == "matched" for row in authority.evidence_matrix)
+    decision = authority.decision_receipt()
+    materialized = materialize_candidate_application_source(
+        candidate_authority_path=AUTHORITY_PATH,
+        deployment_binding=inputs["deployment_binding"],
+        contact_authority=inputs["contact_authority"],
+        decision_receipt=decision,
+        candidate_projection=projection,
+        job_key=authority.source_job_key,
+        vacancy_sha256=authority.raw_listing_sha256,
+        source_url=authority.source_url,
+        role_title=authority.role_title,
+        company_name=authority.company_name,
+        contact=inputs["contact"],
+        market_decision_authority=authority,
+    )
+    assert materialized.source.vacancy_sha256 == authority.raw_listing_sha256
+    assert materialized.receipt.vacancy_snapshot_sha256 == authority.vacancy_snapshot_sha256
+    assert materialized.receipt.decision_authority_sha256 == authority.authority_sha256
+    assert all(
+        row["receipt"].get("job_key") != authority.source_job_key
+        for row in json.loads(AUTHORITY_PATH.read_bytes())["decisions"]
+    )
+
+
+def test_integrated_market_decision_rejects_receipt_and_snapshot_substitution(
+    tmp_path: Path,
+) -> None:
+    authority, inputs, projection = _integrated_decision(tmp_path)
+    with pytest.raises(ValueError, match="raw listing bytes differ"):
+        build_market_application_decision_authority(
+            deployment_binding=inputs["deployment_binding"],
+            source_job_key=authority.source_job_key,
+            internal_job_key=authority.internal_job_key,
+            vacancy_snapshot_sha256=authority.vacancy_snapshot_sha256,
+            raw_listing_sha256=authority.raw_listing_sha256,
+            raw_listing_bytes=b"substituted",
+            requirements_sha256=authority.requirements_sha256,
+            requirements_bytes=canonical_json({}).encode(),
+            assessment_receipt_sha256=authority.assessment_receipt_sha256,
+            assessment_receipt_bytes=b"{}",
+            eligibility_receipt_sha256=authority.eligibility_receipt_sha256,
+            eligibility_receipt_bytes=b"{}",
+            selection_receipt_sha256=authority.selection_receipt_sha256,
+            selection_receipt_bytes=b"{}",
+            candidate_projection=projection,
+            source_url=authority.source_url,
+            role_title=authority.role_title,
+            company_name=authority.company_name,
+            observed_at=authority.observed_at,
+        )
+    with pytest.raises(ValueError, match="identity"):
+        materialize_candidate_application_source(
+            candidate_authority_path=AUTHORITY_PATH,
+            deployment_binding=inputs["deployment_binding"],
+            contact_authority=inputs["contact_authority"],
+            decision_receipt=authority.decision_receipt(),
+            candidate_projection=projection,
+            job_key=authority.source_job_key,
+            vacancy_sha256=authority.raw_listing_sha256,
+            source_url=authority.source_url,
+            role_title=authority.role_title,
+            company_name=authority.company_name,
+            contact=inputs["contact"],
+            market_decision_authority=replace(
+                authority,
+                vacancy_snapshot_sha256="8" * 64,
+                authority_sha256=authority.authority_sha256,
+            ),
+        )
+    with pytest.raises(ValueError, match="matrix policy"):
+        replace(authority, matrix_policy_sha256="9" * 64)
+    with pytest.raises(ValueError, match="identity"):
+        replace(authority, approved_evidence_file_sha256="a" * 64)
 
 
 def test_builds_plain_vacancy_bound_documents_from_approved_atoms() -> None:

@@ -1025,6 +1025,108 @@ def _evidence_matrix(
     return tuple(rows)
 
 
+CANONICAL_REQUIREMENTS_SCHEMA = "market-aligner.requirement-projection.v1"
+_CANONICAL_REQUIREMENT_CATEGORIES: tuple[tuple[str, str], ...] = (
+    ("required_qualifications", "essential"),
+    ("required_skills", "essential"),
+    ("responsibilities", "essential"),
+    ("preferred_qualifications", "desirable"),
+    ("preferred_skills", "desirable"),
+)
+CANONICAL_REQUIREMENTS_MATRIX_POLICY_SHA256 = hashlib.sha256(
+    _json_bytes(
+        {
+            "category_order": [name for name, _ in _CANONICAL_REQUIREMENT_CATEGORIES],
+            "classification": dict(_CANONICAL_REQUIREMENT_CATEGORIES),
+            "matcher_schema": TYPED_EVIDENCE_SCHEMA,
+            "requirement_schema": CANONICAL_REQUIREMENTS_SCHEMA,
+            "schema_version": "jaa.canonical-requirements-matrix-policy.v1",
+            "suppressor_mode": "suppress_only",
+        }
+    )
+).hexdigest()
+
+
+def compile_canonical_requirements_evidence_matrix(
+    requirements_bytes: bytes,
+    evidence: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Compile JAA evidence selection from an admitted MA requirement projection.
+
+    This is deliberately separate from :func:`_requirements`, which owns the
+    legacy HTML extraction path.  The caller supplies the exact, already
+    authenticated Market Aligner object bytes.  This function accepts only the
+    closed canonical requirement projection shape and applies the existing
+    conservative typed matcher; generic overlap therefore cannot promote a
+    candidate claim.
+    """
+
+    try:
+        document = json.loads(requirements_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("canonical requirements object is not JSON") from exc
+    expected_keys = {name for name, _ in _CANONICAL_REQUIREMENT_CATEGORIES}
+    if not isinstance(document, dict) or set(document) != expected_keys:
+        raise ValueError("canonical requirements object has an unsupported shape")
+    projection = typed_evidence_projection(evidence)
+    rows: list[dict[str, object]] = []
+    for category, classification in _CANONICAL_REQUIREMENT_CATEGORIES:
+        values = document[category]
+        if (
+            not isinstance(values, list)
+            or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
+                for value in values
+            )
+            or len(values) != len(set(values))
+        ):
+            raise ValueError("canonical requirement category is malformed")
+        prefix = category.replace("_", "-")
+        for index, requirement_text in enumerate(values, start=1):
+            suppressors = _applied_suppressors(requirement_text)
+            matches = (
+                ()
+                if suppressors
+                else _matched_evidence(requirement_text, evidence, projection)
+            )
+            rows.append(
+                {
+                    "classification": classification,
+                    "evidence_ids": list(matches),
+                    "requirement_category": category,
+                    "requirement_id": f"{prefix}:{index:03d}",
+                    "requirement_text": requirement_text,
+                    "requirement_text_sha256": hashlib.sha256(
+                        requirement_text.encode()
+                    ).hexdigest(),
+                    "status": (
+                        "suppressed"
+                        if suppressors
+                        else "matched"
+                        if matches
+                        else "gap"
+                    ),
+                    "suppressor_ids": list(suppressors),
+                    "weight": "2" if classification == "essential" else "1",
+                }
+            )
+    if not rows:
+        raise ValueError("canonical requirements object is empty")
+    body: dict[str, object] = {
+        "evidence_projection_schema": TYPED_EVIDENCE_SCHEMA,
+        "evidence_projection_sha256": typed_evidence_projection_hash(evidence),
+        "matrix": rows,
+        "matrix_policy_sha256": CANONICAL_REQUIREMENTS_MATRIX_POLICY_SHA256,
+        "row_matrix_sha256": hashlib.sha256(_json_bytes(rows)).hexdigest(),
+        "requirements_sha256": hashlib.sha256(requirements_bytes).hexdigest(),
+        "schema_version": "jaa.canonical-requirements-evidence-matrix.v1",
+    }
+    body["compiler_receipt_sha256"] = hashlib.sha256(_json_bytes(body)).hexdigest()
+    return body
+
+
 def fit_from_evidence_matrix(matrix: Sequence[Mapping[str, object]]) -> str:
     total = Decimal("0")
     matched = Decimal("0")
@@ -1551,12 +1653,14 @@ __all__ = [
     "APPROVED_EVIDENCE_IDS",
     "AVAILABILITY_AUTHORITY",
     "CandidateAuthoritySources",
+    "CANONICAL_REQUIREMENTS_MATRIX_POLICY_SHA256",
     "HARD_ELIGIBLE",
     "HARD_INELIGIBLE",
     "HARD_UNRESOLVED",
     "MaterializedCandidateAuthority",
     "archive_duplicate_snapshot",
     "build_candidate_authority_document",
+    "compile_canonical_requirements_evidence_matrix",
     "fit_from_evidence_matrix",
     "materialize_candidate_authority",
 ]

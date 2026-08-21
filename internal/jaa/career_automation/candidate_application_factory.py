@@ -28,6 +28,8 @@ from .application_strategy import (
 from .candidate_authority import (
     APPROVED_CANDIDATE_SOURCE_HASHES,
     APPROVED_EVIDENCE_PATH,
+    CANONICAL_REQUIREMENTS_MATRIX_POLICY_SHA256,
+    compile_canonical_requirements_evidence_matrix,
 )
 from .candidate_contact_authority import CandidateContactAuthority
 from .evidence_matching import (
@@ -215,6 +217,270 @@ def build_candidate_application_deployment_binding(
 
 
 @dataclass(frozen=True)
+class MarketApplicationDecisionAuthority:
+    """Exact MA eligibility plus conservative JAA evidence selection.
+
+    Market Aligner remains the authority for whether the vacancy may proceed.
+    JAA only projects the already approved candidate evidence against the exact
+    admitted requirement object.  This avoids mutating the candidate evidence
+    authority with vacancy-specific decisions.
+    """
+
+    application_id: str
+    environment: str
+    handoff_root_sha256: str
+    admission_receipt_sha256: str
+    current_boundary_receipt_sha256: str
+    source_job_key: str
+    internal_job_key: str
+    vacancy_snapshot_sha256: str
+    raw_listing_sha256: str
+    requirements_sha256: str
+    assessment_receipt_sha256: str
+    eligibility_receipt_sha256: str
+    selection_receipt_sha256: str
+    candidate_projection_sha256: str
+    approved_evidence_file_sha256: str
+    approved_evidence_object_sha256: str
+    evidence_projection_sha256: str
+    matrix_policy_sha256: str
+    evidence_matrix_sha256: str
+    evidence_matrix: tuple[Mapping[str, object], ...]
+    source_url: str
+    role_title: str
+    company_name: str
+    observed_at: str
+    authority_sha256: str
+    schema_version: str = "jaa.market-application-decision-authority.v1"
+    release_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not self.application_id.startswith("app_")
+            or self.environment not in {"production", "synthetic"}
+            or not self.source_job_key
+            or not self.internal_job_key
+            or not self.source_url
+            or not self.role_title
+            or not self.company_name
+            or not self.observed_at
+            or not self.evidence_matrix
+            or self.release_authority is not False
+        ):
+            raise ValueError("market application decision authority is malformed")
+        for value in (
+            self.handoff_root_sha256,
+            self.admission_receipt_sha256,
+            self.current_boundary_receipt_sha256,
+            self.vacancy_snapshot_sha256,
+            self.raw_listing_sha256,
+            self.requirements_sha256,
+            self.assessment_receipt_sha256,
+            self.eligibility_receipt_sha256,
+            self.selection_receipt_sha256,
+            self.candidate_projection_sha256,
+            self.approved_evidence_file_sha256,
+            self.approved_evidence_object_sha256,
+            self.evidence_projection_sha256,
+            self.matrix_policy_sha256,
+            self.evidence_matrix_sha256,
+            self.authority_sha256,
+        ):
+            if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError("market application decision hash is invalid")
+        if self.evidence_matrix_sha256 != content_hash(
+            [dict(row) for row in self.evidence_matrix]
+        ):
+            raise ValueError("market application evidence matrix identity is invalid")
+        if self.matrix_policy_sha256 != CANONICAL_REQUIREMENTS_MATRIX_POLICY_SHA256:
+            raise ValueError("market application matrix policy identity is invalid")
+        if self.authority_sha256 != content_hash(self.document(include_identity=False)):
+            raise ValueError("market application decision identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "admission_receipt_sha256": self.admission_receipt_sha256,
+            "application_id": self.application_id,
+            "assessment_receipt_sha256": self.assessment_receipt_sha256,
+            "approved_evidence_file_sha256": self.approved_evidence_file_sha256,
+            "approved_evidence_object_sha256": self.approved_evidence_object_sha256,
+            "candidate_projection_sha256": self.candidate_projection_sha256,
+            "company_name": self.company_name,
+            "current_boundary_receipt_sha256": self.current_boundary_receipt_sha256,
+            "eligibility_receipt_sha256": self.eligibility_receipt_sha256,
+            "environment": self.environment,
+            "evidence_matrix": [dict(row) for row in self.evidence_matrix],
+            "evidence_matrix_sha256": self.evidence_matrix_sha256,
+            "evidence_projection_sha256": self.evidence_projection_sha256,
+            "handoff_root_sha256": self.handoff_root_sha256,
+            "internal_job_key": self.internal_job_key,
+            "matrix_policy_sha256": self.matrix_policy_sha256,
+            "observed_at": self.observed_at,
+            "raw_listing_sha256": self.raw_listing_sha256,
+            "release_authority": False,
+            "requirements_sha256": self.requirements_sha256,
+            "role_title": self.role_title,
+            "schema_version": self.schema_version,
+            "selection_receipt_sha256": self.selection_receipt_sha256,
+            "source_job_key": self.source_job_key,
+            "source_url": self.source_url,
+            "vacancy_snapshot_sha256": self.vacancy_snapshot_sha256,
+        }
+        if include_identity:
+            value["authority_sha256"] = self.authority_sha256
+        return value
+
+    def decision_receipt(self) -> dict[str, object]:
+        """Return the legacy-shaped deterministic input consumed by the compiler."""
+        return {
+            "candidate_projection_sha256": self.candidate_projection_sha256,
+            "company_name": self.company_name,
+            "decision": "eligible",
+            "evidence_matrix": [dict(row) for row in self.evidence_matrix],
+            "job_key": self.source_job_key,
+            "observed_at": self.observed_at,
+            "role_title": self.role_title,
+            "source_url": self.source_url,
+            "vacancy_description_sha256": self.requirements_sha256,
+            "vacancy_sha256": self.raw_listing_sha256,
+            "vacancy_snapshot_sha256": self.vacancy_snapshot_sha256,
+        }
+
+
+def build_market_application_decision_authority(
+    *,
+    deployment_binding: CandidateApplicationDeploymentBinding,
+    source_job_key: str,
+    internal_job_key: str,
+    vacancy_snapshot_sha256: str,
+    raw_listing_sha256: str,
+    raw_listing_bytes: bytes,
+    requirements_sha256: str,
+    requirements_bytes: bytes,
+    assessment_receipt_sha256: str,
+    assessment_receipt_bytes: bytes,
+    eligibility_receipt_sha256: str,
+    eligibility_receipt_bytes: bytes,
+    selection_receipt_sha256: str,
+    selection_receipt_bytes: bytes,
+    candidate_projection: Mapping[str, object],
+    source_url: str,
+    role_title: str,
+    company_name: str,
+    observed_at: str,
+    approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
+) -> MarketApplicationDecisionAuthority:
+    """Compile an exact integrated decision from a freshly verified MA graph."""
+
+    deployment_binding.__post_init__()
+    exact = (
+        (raw_listing_sha256, raw_listing_bytes, "raw listing"),
+        (requirements_sha256, requirements_bytes, "requirements"),
+        (assessment_receipt_sha256, assessment_receipt_bytes, "assessment"),
+        (eligibility_receipt_sha256, eligibility_receipt_bytes, "eligibility"),
+        (selection_receipt_sha256, selection_receipt_bytes, "selection"),
+    )
+    for expected, value, label in exact:
+        if _sha256(value) != expected:
+            raise ValueError(f"market application {label} bytes differ")
+    try:
+        assessment = json.loads(assessment_receipt_bytes)
+        eligibility = json.loads(eligibility_receipt_bytes)
+        selection = json.loads(selection_receipt_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("market application decision object is not JSON") from exc
+    promotion = assessment.get("receipt_sha256") if isinstance(assessment, dict) else None
+    if (
+        not isinstance(assessment, dict)
+        or assessment.get("schema_version")
+        != "market-aligner.assessment-promotion-receipt.v1"
+        or assessment.get("decision") != "pass"
+        or assessment.get("job_key") != source_job_key
+        or not isinstance(promotion, str)
+        or not isinstance(eligibility, dict)
+        or set(eligibility)
+        != {"checks", "decision", "hard_gate_passed", "promotion_receipt_sha256", "source_job_key"}
+        or eligibility.get("decision") != "eligible"
+        or eligibility.get("hard_gate_passed") is not True
+        or eligibility.get("promotion_receipt_sha256") != promotion
+        or eligibility.get("source_job_key") != source_job_key
+        or not isinstance(selection, dict)
+        or selection.get("decision") != "selected_for_application"
+        or selection.get("hard_gate_passed") is not True
+        or selection.get("promotion_receipt_sha256") != promotion
+        or selection.get("source_job_key") != source_job_key
+    ):
+        raise ValueError("market application eligibility authority differs")
+    evidence_bytes = approved_evidence_path.read_bytes()
+    evidence_document = json.loads(evidence_bytes)
+    evidence = tuple(_approved_statements(approved_evidence_path).values())
+    compiled = compile_canonical_requirements_evidence_matrix(
+        requirements_bytes, evidence
+    )
+    if compiled["requirements_sha256"] != requirements_sha256:
+        raise ValueError("market application requirement authority differs")
+    matrix = tuple(dict(row) for row in compiled["matrix"])
+    projection_sha256 = candidate_projection.get("projection_sha256")
+    if not isinstance(projection_sha256, str):
+        raise ValueError("market application candidate projection is malformed")
+    values = {
+        "admission_receipt_sha256": deployment_binding.admission_receipt_sha256,
+        "application_id": deployment_binding.application_id,
+        "assessment_receipt_sha256": assessment_receipt_sha256,
+        "approved_evidence_file_sha256": _sha256(evidence_bytes),
+        "approved_evidence_object_sha256": content_hash(evidence_document),
+        "candidate_projection_sha256": projection_sha256,
+        "company_name": company_name,
+        "current_boundary_receipt_sha256": deployment_binding.current_boundary_receipt_sha256,
+        "eligibility_receipt_sha256": eligibility_receipt_sha256,
+        "environment": deployment_binding.environment,
+        "evidence_matrix": [dict(row) for row in matrix],
+        "evidence_matrix_sha256": content_hash([dict(row) for row in matrix]),
+        "evidence_projection_sha256": str(compiled["evidence_projection_sha256"]),
+        "handoff_root_sha256": deployment_binding.handoff_root_sha256,
+        "internal_job_key": internal_job_key,
+        "matrix_policy_sha256": str(compiled["matrix_policy_sha256"]),
+        "observed_at": observed_at,
+        "raw_listing_sha256": raw_listing_sha256,
+        "release_authority": False,
+        "requirements_sha256": requirements_sha256,
+        "role_title": role_title,
+        "schema_version": "jaa.market-application-decision-authority.v1",
+        "selection_receipt_sha256": selection_receipt_sha256,
+        "source_job_key": source_job_key,
+        "source_url": source_url,
+        "vacancy_snapshot_sha256": vacancy_snapshot_sha256,
+    }
+    return MarketApplicationDecisionAuthority(
+        application_id=deployment_binding.application_id,
+        environment=deployment_binding.environment,
+        handoff_root_sha256=deployment_binding.handoff_root_sha256,
+        admission_receipt_sha256=deployment_binding.admission_receipt_sha256,
+        current_boundary_receipt_sha256=deployment_binding.current_boundary_receipt_sha256,
+        source_job_key=source_job_key,
+        internal_job_key=internal_job_key,
+        vacancy_snapshot_sha256=vacancy_snapshot_sha256,
+        raw_listing_sha256=raw_listing_sha256,
+        requirements_sha256=requirements_sha256,
+        assessment_receipt_sha256=assessment_receipt_sha256,
+        eligibility_receipt_sha256=eligibility_receipt_sha256,
+        selection_receipt_sha256=selection_receipt_sha256,
+        candidate_projection_sha256=projection_sha256,
+        approved_evidence_file_sha256=_sha256(evidence_bytes),
+        approved_evidence_object_sha256=content_hash(evidence_document),
+        evidence_projection_sha256=str(compiled["evidence_projection_sha256"]),
+        matrix_policy_sha256=str(compiled["matrix_policy_sha256"]),
+        evidence_matrix_sha256=str(values["evidence_matrix_sha256"]),
+        evidence_matrix=matrix,
+        source_url=source_url,
+        role_title=role_title,
+        company_name=company_name,
+        observed_at=observed_at,
+        authority_sha256=content_hash(values),
+    )
+
+
+@dataclass(frozen=True)
 class CandidateApplicationMaterializationReceipt:
     """Non-release proof that exact authorities produced one application source."""
 
@@ -231,6 +497,9 @@ class CandidateApplicationMaterializationReceipt:
     approved_evidence_object_sha256: str
     decision_receipt_sha256: str
     vacancy_sha256: str
+    vacancy_snapshot_sha256: str
+    decision_authority_schema: str
+    decision_authority_sha256: str
     job_key: str
     role_title: str
     company_name: str
@@ -241,7 +510,7 @@ class CandidateApplicationMaterializationReceipt:
     style_bindings: tuple[Mapping[str, object], ...]
     source_policy_receipt: CandidateSourcePolicyReceipt
     receipt_sha256: str
-    schema_version: str = "jaa.candidate-application-materialization-receipt.v2"
+    schema_version: str = "jaa.candidate-application-materialization-receipt.v3"
     release_authority: bool = False
 
     def __post_init__(self) -> None:
@@ -258,6 +527,8 @@ class CandidateApplicationMaterializationReceipt:
             self.approved_evidence_object_sha256,
             self.decision_receipt_sha256,
             self.vacancy_sha256,
+            self.vacancy_snapshot_sha256,
+            self.decision_authority_sha256,
             self.application_source_id,
             self.application_source_sha256,
             self.receipt_sha256,
@@ -269,6 +540,7 @@ class CandidateApplicationMaterializationReceipt:
             or not self.role_title
             or not self.company_name
             or not self.source_url
+            or not self.decision_authority_schema
             or not self.fact_bindings
             or self.release_authority is not False
         ):
@@ -313,6 +585,8 @@ class CandidateApplicationMaterializationReceipt:
             "deployment_binding": self.deployment_binding.document(),
             "source_policy_receipt": self.source_policy_receipt.document(),
             "decision_receipt_sha256": self.decision_receipt_sha256,
+            "decision_authority_schema": self.decision_authority_schema,
+            "decision_authority_sha256": self.decision_authority_sha256,
             "fact_bindings": [dict(row) for row in self.fact_bindings],
             "job_key": self.job_key,
             "role_title": self.role_title,
@@ -322,6 +596,7 @@ class CandidateApplicationMaterializationReceipt:
             "schema_version": self.schema_version,
             "style_bindings": [dict(row) for row in self.style_bindings],
             "vacancy_sha256": self.vacancy_sha256,
+            "vacancy_snapshot_sha256": self.vacancy_snapshot_sha256,
         }
         if include_identity:
             value["receipt_sha256"] = self.receipt_sha256
@@ -1290,6 +1565,7 @@ def _authority_document(
     expected_file_sha256: str,
     decision_receipt: Mapping[str, object],
     candidate_projection: Mapping[str, object],
+    require_embedded_decision: bool = True,
 ) -> tuple[dict[str, object], str]:
     authority_bytes = path.read_bytes()
     if _sha256(authority_bytes) != expected_file_sha256:
@@ -1301,6 +1577,8 @@ def _authority_document(
         raise ValueError("candidate authority object is malformed")
     if value.get("candidate_projection") != dict(candidate_projection):
         raise ValueError("candidate projection differs from exact authority")
+    if not require_embedded_decision:
+        return value, _sha256((canonical_json(dict(decision_receipt)) + "\n").encode())
     rows = value.get("decisions")
     matches = (
         [
@@ -1374,6 +1652,7 @@ def materialize_candidate_application_source(
     contact: CandidateContact,
     approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
     revision_writer: GenerationRevisionWriter | None = None,
+    market_decision_authority: MarketApplicationDecisionAuthority | None = None,
 ) -> CandidateApplicationMaterialization:
     """Materialize exact source authority without rendering or release authority."""
     deployment_binding.__post_init__()
@@ -1382,11 +1661,33 @@ def materialize_candidate_application_source(
     contact_bytes = contact_authority.source_path.read_bytes()
     if _sha256(contact_bytes) != contact_authority.envelope_sha256:
         raise ValueError("signed contact authority envelope hash differs")
+    if market_decision_authority is not None:
+        market_decision_authority.__post_init__()
+        if (
+            market_decision_authority.application_id != deployment_binding.application_id
+            or market_decision_authority.environment != deployment_binding.environment
+            or market_decision_authority.handoff_root_sha256
+            != deployment_binding.handoff_root_sha256
+            or market_decision_authority.admission_receipt_sha256
+            != deployment_binding.admission_receipt_sha256
+            or market_decision_authority.current_boundary_receipt_sha256
+            != deployment_binding.current_boundary_receipt_sha256
+            or market_decision_authority.source_job_key != job_key
+            or market_decision_authority.raw_listing_sha256 != vacancy_sha256
+            or market_decision_authority.source_url != source_url
+            or market_decision_authority.role_title != role_title
+            or market_decision_authority.company_name != company_name
+            or market_decision_authority.candidate_projection_sha256
+            != candidate_projection.get("projection_sha256")
+            or market_decision_authority.decision_receipt() != dict(decision_receipt)
+        ):
+            raise ValueError("integrated market decision differs from application")
     authority, decision_sha256 = _authority_document(
         path=candidate_authority_path,
         expected_file_sha256=deployment_binding.candidate_authority_file_sha256,
         decision_receipt=decision_receipt,
         candidate_projection=candidate_projection,
+        require_embedded_decision=market_decision_authority is None,
     )
     evidence_bytes = approved_evidence_path.read_bytes()
     if _sha256(evidence_bytes) != APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]:
@@ -1463,15 +1764,30 @@ def materialize_candidate_application_source(
         "deployment_binding": deployment_binding.document(),
         "source_policy_receipt": source_policy.document(),
         "decision_receipt_sha256": decision_sha256,
+        "decision_authority_schema": (
+            market_decision_authority.schema_version
+            if market_decision_authority is not None
+            else "jaa.production-candidate-authority.v2"
+        ),
+        "decision_authority_sha256": (
+            market_decision_authority.authority_sha256
+            if market_decision_authority is not None
+            else content_hash(authority)
+        ),
         "fact_bindings": [dict(row) for row in fact_bindings],
         "job_key": job_key,
         "role_title": role_title,
         "company_name": company_name,
         "source_url": source_url,
         "release_authority": False,
-        "schema_version": "jaa.candidate-application-materialization-receipt.v2",
+        "schema_version": "jaa.candidate-application-materialization-receipt.v3",
         "style_bindings": [dict(row) for row in style_bindings],
         "vacancy_sha256": vacancy_sha256,
+        "vacancy_snapshot_sha256": (
+            market_decision_authority.vacancy_snapshot_sha256
+            if market_decision_authority is not None
+            else vacancy_sha256
+        ),
     }
     receipt = CandidateApplicationMaterializationReceipt(
         candidate_authority_file_sha256=(
@@ -1491,6 +1807,21 @@ def materialize_candidate_application_source(
         approved_evidence_object_sha256=content_hash(evidence_document),
         decision_receipt_sha256=decision_sha256,
         vacancy_sha256=vacancy_sha256,
+        vacancy_snapshot_sha256=(
+            market_decision_authority.vacancy_snapshot_sha256
+            if market_decision_authority is not None
+            else vacancy_sha256
+        ),
+        decision_authority_schema=(
+            market_decision_authority.schema_version
+            if market_decision_authority is not None
+            else "jaa.production-candidate-authority.v2"
+        ),
+        decision_authority_sha256=(
+            market_decision_authority.authority_sha256
+            if market_decision_authority is not None
+            else content_hash(authority)
+        ),
         job_key=job_key,
         role_title=role_title,
         company_name=company_name,
@@ -1522,6 +1853,8 @@ __all__ = [
     "CandidateApplicationMaterializationReceipt",
     "CandidateApplicationDeploymentBinding",
     "CandidateApplicationPackage",
+    "MarketApplicationDecisionAuthority",
+    "build_market_application_decision_authority",
     "build_candidate_application_package",
     "build_candidate_application_deployment_binding",
     "materialize_candidate_application_source",
