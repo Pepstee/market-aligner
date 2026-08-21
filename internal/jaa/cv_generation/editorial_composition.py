@@ -698,7 +698,11 @@ def validate_editorial_draft(
                 authority_context=claim.category,
             )
             if claim.category not in _CATEGORY_BY_HEADING[section.heading]:
-                raise EditorialCompositionError("approved claim is in the wrong CV section")
+                raise EditorialCompositionError(
+                    "approved claim is in the wrong CV section: "
+                    f"claim_id={claim.claim_id}, category={claim.category}, "
+                    f"heading={section.heading}"
+                )
             if section.heading == "Core Capabilities" and _FORMAT_OR_DATASTORE.search(
                 atom.text
             ):
@@ -2134,17 +2138,26 @@ def run_editorial_composition_runtime(
         raise EditorialCompositionError("editorial runtime adapter is unavailable")
     writer_request = canonical_json(
         {
+            "claim_section_policy": {
+                claim.claim_id: sorted(
+                    heading
+                    for heading, categories in _CATEGORY_BY_HEADING.items()
+                    if claim.category in categories
+                )
+                for claim in request.approved_claims
+            },
             "editorial_request": request.document(),
             "instructions": [
                 "Return only one canonical JSON object matching the supplied response schema.",
                 "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
+                "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
                 "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
                 "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
                 "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
                 "Keep formats and datastores out of Core Capabilities.",
             ],
             "rhetorical_catalog": sorted(_CV_RHETORICAL_CONNECTIVES),
-            "schema_version": "jaa.cv-writer-runtime-request.v2",
+            "schema_version": "jaa.cv-writer-runtime-request.v3",
             "stage": "resume_writer",
         }
     ).encode()

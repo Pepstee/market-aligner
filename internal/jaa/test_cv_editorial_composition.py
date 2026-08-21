@@ -217,6 +217,13 @@ def test_runtime_invokes_explicit_writer_and_humanizer_then_admits_outputs() -> 
     assert result[3].provider == "fixture-humanizer"
     assert len(writer_adapter.calls) == len(humanizer_adapter.calls) == 1
     assert writer_adapter.calls[0][1] != humanizer_adapter.calls[0][1]
+    writer_request = json.loads(writer_adapter.calls[0][0])
+    assert writer_request["claim_section_policy"] == {
+        "capability": ["Core Capabilities"],
+        "education": ["Education"],
+        "project": ["Professional Summary", "Projects"],
+        "summary": ["Professional Summary"],
+    }
 
 
 def test_production_runtime_requires_exact_source_materialization() -> None:
