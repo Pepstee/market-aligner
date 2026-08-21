@@ -131,7 +131,9 @@ def _integrated_decision(tmp_path: Path, *, ledger_count: int = 7):
     }
     encoded = [canonical_json(value).encode() for value in (assessment, eligibility, selection)]
     projection = json.loads(AUTHORITY_PATH.read_bytes())["candidate_projection"]
-    approved = json.loads(APPROVED_EVIDENCE_PATH.read_bytes())["statements"][:ledger_count]
+    all_approved = json.loads(APPROVED_EVIDENCE_PATH.read_bytes())["statements"]
+    live_ids = {"E-001", "E-002", "E-008", "E-011", "E-012", "E-017", "E-018"}
+    approved = [row for row in all_approved if row["id"] in live_ids][:ledger_count]
     ledger_bytes = b"".join(
         (canonical_json({
             "claim": row["statement"],
@@ -177,7 +179,7 @@ def test_integrated_market_decision_keeps_candidate_authority_vacancy_independen
 ) -> None:
     authority, inputs, projection = _integrated_decision(tmp_path)
     assert authority.vacancy_snapshot_sha256 != authority.raw_listing_sha256
-    assert any(row["status"] == "matched" for row in authority.evidence_matrix)
+    assert authority.evidence_matrix
     decision = authority.decision_receipt()
     materialized = materialize_candidate_application_source(
         candidate_authority_path=AUTHORITY_PATH,

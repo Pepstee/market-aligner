@@ -427,13 +427,7 @@ def build_market_application_decision_authority(
         raise ValueError("market application eligibility authority differs")
     evidence_bytes = approved_evidence_path.read_bytes()
     evidence_document = json.loads(evidence_bytes)
-    evidence = tuple(_approved_statements(approved_evidence_path).values())
-    compiled = compile_canonical_requirements_evidence_matrix(
-        requirements_bytes, evidence
-    )
-    if compiled["requirements_sha256"] != requirements_sha256:
-        raise ValueError("market application requirement authority differs")
-    matrix = tuple(dict(row) for row in compiled["matrix"])
+    approved_statements = _approved_statements(approved_evidence_path)
     projection_sha256 = candidate_projection.get("projection_sha256")
     if not isinstance(projection_sha256, str):
         raise ValueError("market application candidate projection is malformed")
@@ -480,6 +474,15 @@ def build_market_application_decision_authority(
         ):
             raise ValueError("market application evidence ledger differs from candidate projection")
         ledger_ids.add(evidence_id)
+    ledger_evidence = tuple(
+        approved_statements[evidence_id] for evidence_id in sorted(ledger_ids)
+    )
+    compiled = compile_canonical_requirements_evidence_matrix(
+        requirements_bytes, ledger_evidence
+    )
+    if compiled["requirements_sha256"] != requirements_sha256:
+        raise ValueError("market application requirement authority differs")
+    matrix = tuple(dict(row) for row in compiled["matrix"])
     values = {
         "admission_receipt_sha256": deployment_binding.admission_receipt_sha256,
         "application_id": deployment_binding.application_id,
