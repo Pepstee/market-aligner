@@ -472,6 +472,7 @@ def build_market_application_decision_authority(
             or _sha256(claim.encode()) != row.get("content_sha256")
             or projected.get(evidence_id)
             != (row.get("content_sha256"), row.get("kind"))
+            or type(row.get("confidence")) is not float
             or row.get("confidence") != 1.0
             or row.get("observed_at") is not None
             or row.get("source_ref") != f"authority://approved-evidence/{evidence_id}"
