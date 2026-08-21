@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +13,13 @@ from playwright.sync_api import Route, sync_playwright
 
 import career_automation.workable_live_adapter as workable_module
 from career_automation.ashby_live_adapter import JAA08ReleaseAuthority
+from career_automation.candidate_release_gate import (
+    WorkableReleaseBinding,
+    WorkableUploadBinding,
+)
 from career_automation.workable_live_adapter import (
     WorkableApplication,
+    WorkableCircuitError,
     WorkableField,
     WorkableLiveAdapter,
     WorkableOneUseCircuit,
@@ -21,6 +27,7 @@ from career_automation.workable_live_adapter import (
     WorkableSchemaError,
     WorkableSubmissionIndeterminateError,
     WorkableUpload,
+    SyntheticWorkableFixtureAdapter,
 )
 from form_filling.provider_diagnostics import ProviderDiagnosticObservation
 
@@ -151,7 +158,12 @@ def _install(page, policy: WorkablePolicy, *, success: bool = True) -> None:
         route.fulfill(status=200, content_type="text/html", body=_html(success=success))
 
     page.route("**/*", fulfill)
-    page.goto(policy.application_url, wait_until="domcontentloaded")
+    page.goto(
+        f"http://127.0.0.1/fixture/workable/{policy.tenant}/j/"
+        f"{policy.vacancy_id}/apply/",
+        wait_until="domcontentloaded",
+    )
+    page.evaluate("window.__JAA_WORKABLE_FIXTURE__ = true")
 
 
 def _install_inventory_fixture(page, body: str) -> None:
@@ -332,7 +344,7 @@ def test_inventory_and_prefill_are_separate_and_nonconsequential(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         _install(page, policy)
-        adapter = WorkableLiveAdapter(
+        adapter = SyntheticWorkableFixtureAdapter(
             WorkableOneUseCircuit(tmp_path / "circuit.sqlite3"), Path("/synthetic")
         )
         review = adapter.prepare_review(page, policy=policy, application=application)
@@ -356,7 +368,7 @@ def test_certified_workable_click_is_one_use_and_hash_journaled(
         page = browser.new_page()
         _install(page, policy)
         circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
-        adapter = WorkableLiveAdapter(circuit, Path("/synthetic"))
+        adapter = SyntheticWorkableFixtureAdapter(circuit, Path("/synthetic"))
         review = adapter.prepare_review(page, policy=policy, application=application)
         receipt = adapter.submit(
             page,
@@ -390,7 +402,7 @@ def test_missing_success_is_indeterminate_and_never_retried(
         page = browser.new_page()
         _install(page, policy, success=False)
         circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
-        adapter = WorkableLiveAdapter(circuit, Path("/synthetic"))
+        adapter = SyntheticWorkableFixtureAdapter(circuit, Path("/synthetic"))
         review = adapter.prepare_review(page, policy=policy, application=application)
         with pytest.raises(WorkableSubmissionIndeterminateError):
             adapter.submit(
@@ -432,7 +444,7 @@ def test_diagnostic_observation_cannot_confer_workable_authority(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         _install(page, policy)
-        adapter = WorkableLiveAdapter(
+        adapter = SyntheticWorkableFixtureAdapter(
             WorkableOneUseCircuit(tmp_path / "circuit.sqlite3"), Path("/synthetic")
         )
         with pytest.raises(TypeError, match="certified review"):
@@ -458,7 +470,7 @@ def test_dom_drift_rejects_before_release_or_click(
         page = browser.new_page()
         _install(page, policy)
         circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
-        adapter = WorkableLiveAdapter(circuit, Path("/synthetic"))
+        adapter = SyntheticWorkableFixtureAdapter(circuit, Path("/synthetic"))
         review = adapter.prepare_review(page, policy=policy, application=application)
         page.locator("form").evaluate(
             "element => element.setAttribute('data-drift', 'true')"
@@ -488,7 +500,7 @@ def test_answer_drift_rejects_before_release_or_click(
         page = browser.new_page()
         _install(page, policy)
         circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
-        adapter = WorkableLiveAdapter(circuit, Path("/synthetic"))
+        adapter = SyntheticWorkableFixtureAdapter(circuit, Path("/synthetic"))
         review = adapter.prepare_review(page, policy=policy, application=application)
         page.locator('[name="full_name"]').fill("Changed Candidate")
         with pytest.raises(WorkableSchemaError, match="answer changed"):
@@ -523,7 +535,7 @@ def test_package_for_another_vacancy_rejects_before_release_or_click(
         page = browser.new_page()
         _install(page, policy)
         circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
-        adapter = WorkableLiveAdapter(circuit, Path("/synthetic"))
+        adapter = SyntheticWorkableFixtureAdapter(circuit, Path("/synthetic"))
         review = adapter.prepare_review(page, policy=policy, application=wrong)
         with pytest.raises(WorkableSchemaError, match="release source differ"):
             adapter.submit(
@@ -540,10 +552,185 @@ def test_package_for_another_vacancy_rejects_before_release_or_click(
 
 
 def test_workable_source_has_one_consequential_click_and_real_clean_head() -> None:
-    source = inspect.getsource(WorkableLiveAdapter.submit)
-    assert source.count("submit.click()") == 1
+    production = inspect.getsource(WorkableLiveAdapter.submit)
+    assert "JAA08ReleaseAuthority" not in production
+    source = inspect.getsource(WorkableLiveAdapter._submit)
+    assert source.count("certified_final_submit_click(") == 1
+    assert source.count("submit.click()") == 0
     assert "trial=True" in source
     root = Path(__file__).resolve().parent
     head, identities = workable_module._source_identity(root)
     assert len(head) == 40
     assert identities[0][0] == "career_automation/workable_live_adapter.py"
+
+
+def test_crash_after_consumption_before_click_intent_is_not_replayable(
+    tmp_path: Path,
+) -> None:
+    circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
+    binding = "1" * 64
+    circuit.prepare(binding)
+    circuit.consumption_started(binding)
+    circuit.release_consumed(binding, "2" * 64, "3" * 64)
+    assert circuit.snapshot()["state"] == "release_consumed"
+    receipt = circuit.reconcile_preclick_crash(
+        binding, reason_code="process_crash_after_token_consumption"
+    )
+    assert receipt.document["disposition"] == "blocked_no_click_retry"
+    assert circuit.snapshot()["state"] == "blocked"
+    recovered = WorkableOneUseCircuit(circuit.path).reconciliation_receipts()
+    assert recovered == (receipt,)
+    with pytest.raises(WorkableCircuitError, match="no longer retryable"):
+        circuit.prepare(binding)
+    with pytest.raises(WorkableCircuitError, match="no longer retryable"):
+        circuit.release_consumed(binding, "2" * 64, "3" * 64)
+    with pytest.raises(WorkableCircuitError, match="pre-click release crash"):
+        circuit.reconcile_preclick_crash(binding, reason_code="duplicate_reconcile")
+
+
+def test_restart_from_prepared_is_terminally_reconciled_without_release_or_click(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "circuit.sqlite3"
+    binding = "a" * 64
+    WorkableOneUseCircuit(path).prepare(binding)
+    restarted = WorkableOneUseCircuit(path)
+    receipt = restarted.reconcile_preclick_crash(
+        binding, reason_code="process_crash_after_prepare"
+    )
+    assert receipt.document["from_state"] == "prepared"
+    assert receipt.document["release_manifest_sha256"] is None
+    assert receipt.document["token_sha256"] is None
+    assert restarted.snapshot()["state"] == "blocked"
+    transitions = tuple(row["to_state"] for row in restarted.journal())
+    assert transitions == ("prepared", "blocked")
+    assert "release_consumption_started" not in transitions
+    assert "click_started" not in transitions
+    assert WorkableOneUseCircuit(path).reconciliation_receipts() == (receipt,)
+
+
+def test_crash_after_click_intent_is_terminal_and_forbids_duplicate_click(
+    tmp_path: Path,
+) -> None:
+    circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
+    binding = "4" * 64
+    circuit.prepare(binding)
+    circuit.consumption_started(binding)
+    circuit.release_consumed(binding, "5" * 64, "6" * 64)
+    circuit.click_started(binding)
+    assert circuit.snapshot()["state"] == "click_started"
+    with pytest.raises(WorkableCircuitError, match="no longer retryable"):
+        circuit.click_started(binding)
+    assert [event["to_state"] for event in circuit.journal()].count("click_started") == 1
+
+
+def test_route_or_binding_substitution_cannot_reuse_prepared_circuit(
+    tmp_path: Path,
+) -> None:
+    circuit = WorkableOneUseCircuit(tmp_path / "circuit.sqlite3")
+    circuit.prepare("7" * 64)
+    with pytest.raises(WorkableCircuitError, match="binding changed"):
+        circuit.consumption_started("8" * 64)
+
+
+def test_cogna_cover_upload_must_equal_assured_cover_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cv = tmp_path / "cv.pdf"
+    cover = tmp_path / "cover.pdf"
+    unrelated = tmp_path / "unrelated.pdf"
+    cv.write_bytes(b"assured-cv")
+    cover.write_bytes(b"assured-cover")
+    unrelated.write_bytes(b"unrelated-cover")
+    policy = WorkablePolicy(
+        tenant="",
+        vacancy_id="847CFBC5F4",
+        job_key="workable:cogna:847CFBC5F4",
+        fields=(
+            WorkableField("resume", "file", True, "Resume"),
+            WorkableField("cover_letter", "file", True, "Cover letter"),
+        ),
+    )
+    answers: dict[str, str | bool] = {}
+    wrong_uploads = {
+        "resume": WorkableUpload(cv, _sha(cv.read_bytes())),
+        "cover_letter": WorkableUpload(unrelated, _sha(unrelated.read_bytes())),
+    }
+    provisional = WorkableApplication(b"placeholder", answers, wrong_uploads)
+    upload_bindings = (
+        WorkableUploadBinding("resume", "cv", _sha(cv.read_bytes()), "8" * 64),
+        WorkableUploadBinding(
+            "cover_letter", "cover_letter", _sha(cover.read_bytes()), "9" * 64
+        ),
+    )
+    package = {
+        "application_source_sha256": "a" * 64,
+        "application_url": policy.application_url,
+        "attached_roles": ["cv", "cover_letter"],
+        "cover_letter_assurance_receipt_sha256": "9" * 64,
+        "cover_letter_sha256": _sha(cover.read_bytes()),
+        "cv_assurance_receipt_sha256": "8" * 64,
+        "cv_quality_receipt_sha256": "7" * 64,
+        "cv_sha256": _sha(cv.read_bytes()),
+        "form_answers_sha256": provisional.answers_sha256,
+        "job_key": policy.job_key,
+        "schema_version": "jaa.workable-application-package.v2",
+        "upload_bindings": [row.document() for row in upload_bindings],
+        "vacancy_sha256": "b" * 64,
+    }
+    package_bytes = (workable_module._canonical_json(package) + "\n").encode()
+    application = WorkableApplication(package_bytes, answers, wrong_uploads)
+    binding = WorkableReleaseBinding(
+        tenant="",
+        vacancy_id=policy.vacancy_id,
+        source_url="https://apply.workable.com/j/847CFBC5F4",
+        application_url=policy.application_url,
+        policy_sha256=policy.policy_sha256,
+        package_sha256=application.package_sha256,
+        answers_sha256=application.answers_sha256,
+        inventory_sha256=policy.inventory_sha256,
+        preflight_sha256="6" * 64,
+        cv_pdf_sha256=_sha(cv.read_bytes()),
+        cover_letter_pdf_sha256=_sha(cover.read_bytes()),
+        cv_assurance_receipt_sha256="8" * 64,
+        cover_letter_assurance_receipt_sha256="9" * 64,
+        upload_bindings=upload_bindings,
+    )
+
+    class CandidateAuthority:
+        pass
+
+    authority = CandidateAuthority()
+    authority.source = SimpleNamespace(
+        job_key=policy.job_key, vacancy_sha256="b" * 64, content_sha256="a" * 64
+    )
+    authority.artifacts = SimpleNamespace(
+        cv_pdf=SimpleNamespace(pdf_sha256=_sha(cv.read_bytes())),
+        cover_letter_pdf=SimpleNamespace(pdf_sha256=_sha(cover.read_bytes())),
+    )
+    authority.workable_release_binding = binding
+    monkeypatch.setattr(
+        workable_module, "CandidateReleaseExecutionAuthority", CandidateAuthority
+    )
+    with pytest.raises(WorkableSchemaError, match="assured PDFs"):
+        WorkableLiveAdapter._assert_package(policy, application, authority)
+
+    correct_uploads = {
+        "resume": wrong_uploads["resume"],
+        "cover_letter": WorkableUpload(cover, _sha(cover.read_bytes())),
+    }
+    correct_provisional = WorkableApplication(b"placeholder", answers, correct_uploads)
+    correct_document = {
+        **package,
+        "form_answers_sha256": correct_provisional.answers_sha256,
+    }
+    correct_bytes = (
+        workable_module._canonical_json(correct_document) + "\n"
+    ).encode()
+    correct = WorkableApplication(correct_bytes, answers, correct_uploads)
+    authority.workable_release_binding = replace(
+        binding,
+        package_sha256=correct.package_sha256,
+        answers_sha256=correct.answers_sha256,
+    )
+    WorkableLiveAdapter._assert_package(policy, correct, authority)

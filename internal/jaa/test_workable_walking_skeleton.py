@@ -40,7 +40,7 @@ from career_automation.release_gate import (
 from career_automation.workable_live_adapter import (
     WorkableApplication,
     WorkableField,
-    WorkableLiveAdapter,
+    SyntheticWorkableFixtureAdapter,
     WorkableOneUseCircuit,
     WorkablePolicy,
     WorkableUpload,
@@ -612,7 +612,7 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         _install(page, policy)
-        adapter = WorkableLiveAdapter(circuit, ROOT)
+        adapter = SyntheticWorkableFixtureAdapter(circuit, ROOT)
         review = adapter.prepare_review(page, policy=policy, application=application)
         assert review.consequential_click_authority is False
         receipt = adapter.submit(

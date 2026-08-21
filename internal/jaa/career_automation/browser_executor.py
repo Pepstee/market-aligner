@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Collection, Mapping
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 from playwright.sync_api import Locator, Page, Route
 
@@ -365,6 +365,17 @@ class ReleaseExecutionAuthority:
                 or set(dict(self.upload_field_names)) != set(self.attached_roles)
             ):
                 raise ValueError("Greenhouse release bindings are incomplete")
+        elif self.ats_provider == "workable":
+            _validate_workable_routes(
+                self.application_url, self.receipt_url, self.application_id
+            )
+            if (
+                self.archive_receipt.vacancy.source_url != self.application_url
+                or self.success_evidence is not None
+                or not self.field_authority_names
+                or set(dict(self.upload_field_names)) != set(self.attached_roles)
+            ):
+                raise ValueError("Workable release bindings are incomplete")
         else:
             raise ValueError("release authority ATS provider is unsupported")
         if (
@@ -615,6 +626,44 @@ def _validate_greenhouse_routes(
         or not receipt.path.rstrip("/").startswith(application_path + "/")
     ):
         raise ValueError("Greenhouse receipt route differs from its observed application")
+
+
+def _validate_workable_routes(
+    application_url: str, receipt_url: str, application_id: str
+) -> None:
+    application = urlsplit(application_url)
+    receipt = urlsplit(receipt_url)
+    parts = application.path.strip("/").split("/")
+    exact_path = (
+        len(parts) == 3
+        and parts[0] == "j"
+        and parts[1] == application_id
+        and parts[2] == "apply"
+    ) or (
+        len(parts) == 4
+        and parts[1] == "j"
+        and parts[2] == application_id
+        and parts[3] == "apply"
+    )
+    if (
+        application.scheme != "https"
+        or application.hostname != "apply.workable.com"
+        or application.username is not None
+        or application.password is not None
+        or application.port is not None
+        or application.query
+        or application.fragment
+        or not exact_path
+        or receipt.scheme != "https"
+        or receipt.hostname != application.hostname
+        or receipt.username is not None
+        or receipt.password is not None
+        or receipt.port is not None
+        or receipt.path != application.path
+        or receipt.fragment
+        or parse_qsl(receipt.query, keep_blank_values=True) != [("success", "")]
+    ):
+        raise ValueError("Workable release route is not an admitted official URL")
 
 
 class LocalBrowserExecutor:

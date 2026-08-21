@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,16 +11,251 @@ from types import SimpleNamespace
 import pytest
 
 import career_automation.candidate_release_gate as gate_module
+import career_automation.candidate_release_authority as authority_module
+from career_automation.browser_executor import ReleaseExecutionAuthority
+from career_automation.candidate_release_authority import (
+    CandidateReleaseExecutionAuthority,
+)
+from career_automation.candidate_application_factory import (
+    materialize_candidate_application_source,
+)
 from career_automation.candidate_release_gate import (
     CandidateAuthorityFiles,
     CandidateAuthorityReleaseGate,
+    WorkableReleaseBinding,
+    WorkableUploadBinding,
 )
 from career_automation.rendering import render_pdf_artifacts
+from career_automation.evidence_matching import content_hash
 from test_jaa08_independent_acceptance import _compilation_inputs
+from test_candidate_application_factory import (
+    AUTHORITY_PATH,
+    DISCOVERY_PATH,
+    _integrated_decision,
+)
 
 
 ROOT = Path(__file__).resolve().parent
 NOW = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+
+
+def _workable_binding(**changes: object) -> WorkableReleaseBinding:
+    values = {
+        "tenant": "",
+        "vacancy_id": "847CFBC5F4",
+        "source_url": "https://apply.workable.com/j/847CFBC5F4",
+        "application_url": "https://apply.workable.com/j/847CFBC5F4/apply/",
+        "policy_sha256": "1" * 64,
+        "package_sha256": "2" * 64,
+        "answers_sha256": "3" * 64,
+        "inventory_sha256": "4" * 64,
+        "preflight_sha256": "5" * 64,
+        "cv_pdf_sha256": "6" * 64,
+        "cover_letter_pdf_sha256": "7" * 64,
+        "cv_assurance_receipt_sha256": "8" * 64,
+        "cover_letter_assurance_receipt_sha256": "9" * 64,
+        "upload_bindings": (
+            WorkableUploadBinding("resume", "cv", "6" * 64, "8" * 64),
+        ),
+    }
+    values.update(changes)
+    return WorkableReleaseBinding(**values)
+
+
+def test_workable_release_binding_accepts_exact_flat_cogna_shape() -> None:
+    binding = _workable_binding()
+    assert binding.document()["adapter_id"] == "workable.production"
+    assert binding.document()["source_url"].endswith("/j/847CFBC5F4")
+
+
+def test_workable_release_binding_accepts_exact_tenant_shape() -> None:
+    binding = _workable_binding(
+        tenant="cogna",
+        source_url="https://apply.workable.com/cogna/j/847CFBC5F4",
+        application_url="https://apply.workable.com/cogna/j/847CFBC5F4/apply/",
+    )
+    assert binding.tenant == "cogna"
+
+
+def test_non_synthetic_workable_gate_requires_market_materialization_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate, _arguments, _url = _gate_inputs(tmp_path, monkeypatch)
+    with pytest.raises(
+        ValueError, match="requires market decision materialization"
+    ):
+        CandidateAuthorityReleaseGate(
+            tmp_path / "workable-gate.sqlite3",
+            repository_root=gate.repository_root,
+            authority_files=gate.authority_files,
+            vacancy_requirements=gate.vacancy_requirements,
+            workable_release_binding=_workable_binding(),
+            clock=lambda: NOW,
+        )
+
+    synthetic_binding = _workable_binding(
+        tenant="synthetic",
+        source_url="https://apply.workable.com/synthetic/j/847CFBC5F4",
+        application_url=(
+            "https://apply.workable.com/synthetic/j/847CFBC5F4/apply/"
+        ),
+    )
+    with pytest.raises(
+        ValueError, match="requires market decision materialization"
+    ):
+        CandidateAuthorityReleaseGate(
+            tmp_path / "synthetic-non-loopback-gate.sqlite3",
+            repository_root=gate.repository_root,
+            authority_files=gate.authority_files,
+            vacancy_requirements=gate.vacancy_requirements,
+            workable_release_binding=synthetic_binding,
+            clock=lambda: NOW,
+        )
+
+
+def test_candidate_execution_authority_requires_exact_workable_upload_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGate:
+        vacancy_requirements = ("requirement",)
+
+    monkeypatch.setattr(authority_module, "CandidateAuthorityReleaseGate", FakeGate)
+    monkeypatch.setattr(
+        ReleaseExecutionAuthority, "__post_init__", lambda _self: None
+    )
+    binding = _workable_binding()
+    authority = object.__new__(CandidateReleaseExecutionAuthority)
+    values = {
+        "gate": FakeGate(),
+        "vacancy_requirements": ("requirement",),
+        "ats_provider": "workable",
+        "workable_release_binding": binding,
+        "application_url": binding.application_url,
+        "artifacts": SimpleNamespace(
+            cv_pdf=SimpleNamespace(pdf_sha256=binding.cv_pdf_sha256),
+            cover_letter_pdf=SimpleNamespace(
+                pdf_sha256=binding.cover_letter_pdf_sha256
+            ),
+        ),
+        "document_assurance_receipts": (
+            SimpleNamespace(receipt_sha256=binding.cv_assurance_receipt_sha256),
+            SimpleNamespace(
+                receipt_sha256=binding.cover_letter_assurance_receipt_sha256
+            ),
+        ),
+        "attached_roles": ("cv",),
+        "upload_field_names": (("cv", "resume"),),
+    }
+    for name, value in values.items():
+        object.__setattr__(authority, name, value)
+    authority.__post_init__()
+
+    object.__setattr__(authority, "upload_field_names", (("cv", "substituted"),))
+    with pytest.raises(ValueError, match="execution binding is incomplete"):
+        authority.__post_init__()
+
+    object.__setattr__(authority, "upload_field_names", (("cv", "resume"),))
+    object.__setattr__(authority, "attached_roles", ("cv", "cover_letter"))
+    with pytest.raises(ValueError, match="execution binding is incomplete"):
+        authority.__post_init__()
+
+
+def test_candidate_gate_accepts_exact_cogna_market_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    market, inputs, projection = _integrated_decision(tmp_path)
+    materialized = materialize_candidate_application_source(
+        candidate_authority_path=AUTHORITY_PATH,
+        deployment_binding=inputs["deployment_binding"],
+        contact_authority=inputs["contact_authority"],
+        decision_receipt=market.decision_receipt(),
+        candidate_projection=projection,
+        job_key=market.source_job_key,
+        vacancy_sha256=market.raw_listing_sha256,
+        source_url=market.source_url,
+        role_title=market.role_title,
+        company_name=market.company_name,
+        contact=inputs["contact"],
+        market_decision_authority=market,
+    )
+    authority_document = json.loads(AUTHORITY_PATH.read_bytes())
+    monkeypatch.setattr(
+        gate_module, "build_candidate_authority_document", lambda **_kwargs: authority_document
+    )
+    monkeypatch.setattr(
+        gate_module,
+        "load_candidate_contact_authority",
+        lambda *_args, **_kwargs: inputs["contact_authority"],
+    )
+    requirements = tuple(
+        f"{row['requirement_id']}: {row['requirement_text']}"
+        for row in market.evidence_matrix
+    )
+    files = CandidateAuthorityFiles(
+        archive_root=AUTHORITY_PATH.parent.parent,
+        discovery_path=DISCOVERY_PATH,
+        candidate_authority_path=AUTHORITY_PATH,
+        contact_authority_path=inputs["contact_authority"].source_path,
+        job_key=market.source_job_key,
+        decision_receipt_sha256=materialized.receipt.decision_receipt_sha256,
+    )
+    verified = gate_module._verify_durable_candidate_authority(
+        files,
+        repository_root=ROOT,
+        vacancy_requirements=requirements,
+        market_decision_authority=market,
+        materialization_receipt=materialized.receipt,
+        required_environment="synthetic",
+    )
+    assert verified["market_decision_authority_sha256"] == market.authority_sha256
+    assert verified["materialization_receipt_sha256"] == materialized.receipt.receipt_sha256
+
+    with pytest.raises(ValueError):
+        replace(
+            materialized.receipt,
+            decision_authority_sha256="f" * 64,
+            receipt_sha256="e" * 64,
+        )
+
+    forged_document = materialized.receipt.document(include_identity=False)
+    forged_document["contact_envelope_sha256"] = "f" * 64
+    forged = replace(
+        materialized.receipt,
+        contact_envelope_sha256="f" * 64,
+        receipt_sha256=content_hash(forged_document),
+    )
+    with pytest.raises(ValueError, match="integrated market release authority differs"):
+        gate_module._verify_durable_candidate_authority(
+            files,
+            repository_root=ROOT,
+            vacancy_requirements=requirements,
+            market_decision_authority=market,
+            materialization_receipt=forged,
+            required_environment="synthetic",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("source_url", "https://apply.workable.com/j/SUBSTITUTED"),
+        ("application_url", "https://apply.workable.com/j/847CFBC5F4/apply/?x=1"),
+        ("cv_pdf_sha256", "a" * 64),
+        ("cover_letter_pdf_sha256", "b" * 64),
+        ("inventory_sha256", "c" * 64),
+        ("preflight_sha256", "d" * 64),
+    ),
+)
+def test_workable_release_binding_changes_are_content_addressed(
+    field: str, value: str
+) -> None:
+    original = _workable_binding()
+    if field.endswith("url") or field == "cv_pdf_sha256":
+        with pytest.raises(ValueError):
+            _workable_binding(**{field: value})
+    else:
+        changed = _workable_binding(**{field: value})
+        assert changed.document() != original.document()
 
 
 def _gate_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

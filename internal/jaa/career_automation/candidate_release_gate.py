@@ -23,6 +23,10 @@ from .application_compiler import (
     verify_application_source,
 )
 from .candidate_authority import build_candidate_authority_document
+from .candidate_application_factory import (
+    CandidateApplicationMaterializationReceipt,
+    MarketApplicationDecisionAuthority,
+)
 from .candidate_contact_authority import load_candidate_contact_authority
 from .evidence_matching import canonical_json, content_hash
 from .provider_observation_capture import exact_clean_head
@@ -40,7 +44,8 @@ POLICY_SHA256 = content_hash(
             "current-operator-contact-registry-binding",
             "deterministic-source-and-artifact-replay",
             "content-addressed-upload-file-reverification",
-            "exact-official-greenhouse-route",
+            "exact-typed-official-provider-route",
+            "sealed-workable-prefill-and-inventory-binding",
             "one-use-durable-token",
         ],
     }
@@ -74,6 +79,109 @@ class CandidateAuthorityFiles:
     decision_receipt_sha256: str
 
 
+@dataclass(frozen=True)
+class WorkableUploadBinding:
+    """One actual Workable file control bound to one assured PDF."""
+
+    field_name: str
+    document_kind: str
+    pdf_sha256: str
+    assurance_receipt_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", self.field_name)
+            or self.document_kind not in {"cv", "cover_letter"}
+            or not HEX_64.fullmatch(self.pdf_sha256)
+            or not HEX_64.fullmatch(self.assurance_receipt_sha256)
+        ):
+            raise ValueError("Workable upload binding is invalid")
+
+    def document(self) -> dict[str, str]:
+        return {
+            "assurance_receipt_sha256": self.assurance_receipt_sha256,
+            "document_kind": self.document_kind,
+            "field_name": self.field_name,
+            "pdf_sha256": self.pdf_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class WorkableReleaseBinding:
+    """Content-addressed Workable route and reviewed prefill boundary."""
+
+    tenant: str
+    vacancy_id: str
+    source_url: str
+    application_url: str
+    policy_sha256: str
+    package_sha256: str
+    answers_sha256: str
+    inventory_sha256: str
+    preflight_sha256: str
+    cv_pdf_sha256: str
+    cover_letter_pdf_sha256: str
+    cv_assurance_receipt_sha256: str
+    cover_letter_assurance_receipt_sha256: str
+    upload_bindings: tuple[WorkableUploadBinding, ...] = ()
+    adapter_id: str = "workable.production"
+    adapter_version: str = "v1"
+
+    def __post_init__(self) -> None:
+        component = r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
+        if ((self.tenant and not re.fullmatch(component, self.tenant))
+                or not re.fullmatch(component, self.vacancy_id)
+                or self.adapter_id != "workable.production"
+                or self.adapter_version != "v1"):
+            raise ValueError("Workable release route identity is invalid")
+        prefix = f"/{self.tenant}" if self.tenant else ""
+        expected_source = f"https://apply.workable.com{prefix}/j/{self.vacancy_id}"
+        expected_application = expected_source + "/apply/"
+        if (
+            self.source_url.rstrip("/") != expected_source
+            or self.application_url != expected_application
+        ):
+            raise ValueError("Workable release URL differs from its typed route")
+        for value in (self.policy_sha256, self.package_sha256, self.answers_sha256,
+                      self.inventory_sha256, self.preflight_sha256,
+                      self.cv_pdf_sha256, self.cover_letter_pdf_sha256,
+                      self.cv_assurance_receipt_sha256,
+                      self.cover_letter_assurance_receipt_sha256):
+            if not HEX_64.fullmatch(value):
+                raise ValueError("Workable release binding contains an invalid hash")
+        if any(type(row) is not WorkableUploadBinding for row in self.upload_bindings):
+            raise TypeError("Workable release upload bindings must be exact typed objects")
+        roles = [row.document_kind for row in self.upload_bindings]
+        fields = [row.field_name for row in self.upload_bindings]
+        if (
+            len(set(roles)) != len(roles)
+            or len(set(fields)) != len(fields)
+            or "cv" not in roles
+        ):
+            raise ValueError("Workable release upload roles are incomplete or ambiguous")
+        for row in self.upload_bindings:
+            expected = (
+                (self.cv_pdf_sha256, self.cv_assurance_receipt_sha256)
+                if row.document_kind == "cv"
+                else (
+                    self.cover_letter_pdf_sha256,
+                    self.cover_letter_assurance_receipt_sha256,
+                )
+            )
+            if (row.pdf_sha256, row.assurance_receipt_sha256) != expected:
+                raise ValueError("Workable upload differs from assured document")
+
+    def document(self) -> dict[str, object]:
+        return {
+            **{
+                name: str(getattr(self, name))
+                for name in self.__dataclass_fields__
+                if name != "upload_bindings"
+            },
+            "upload_bindings": [row.document() for row in self.upload_bindings],
+        }
+
+
 def _regular_absolute_file(path: Path, label: str) -> Path:
     if not path.is_absolute() or path.is_symlink():
         raise ValueError(f"{label} must be an absolute non-symlink file")
@@ -88,6 +196,9 @@ def _verify_durable_candidate_authority(
     *,
     repository_root: Path,
     vacancy_requirements: tuple[str, ...],
+    market_decision_authority: MarketApplicationDecisionAuthority | None = None,
+    materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
+    required_environment: str = "production",
 ) -> dict[str, str]:
     """Re-read and deterministically authenticate every release authority object."""
     archive_root = files.archive_root.resolve(strict=True)
@@ -123,6 +234,109 @@ def _verify_durable_candidate_authority(
     )
     if current != authority:
         raise ValueError("candidate authority differs from current durable sources")
+    if market_decision_authority is not None or materialization_receipt is not None:
+        if (
+            type(market_decision_authority) is not MarketApplicationDecisionAuthority
+            or type(materialization_receipt)
+            is not CandidateApplicationMaterializationReceipt
+        ):
+            raise TypeError(
+                "integrated release requires exact market decision and materialization"
+            )
+        market_decision_authority.__post_init__()
+        materialization_receipt.__post_init__()
+        projection = authority.get("candidate_projection")
+        if not isinstance(projection, Mapping):
+            raise ValueError("candidate projection is malformed")
+        projection_payload = {
+            key: value for key, value in projection.items() if key != "projection_sha256"
+        }
+        projection_sha256 = _sha256(_json_bytes(projection_payload))
+        contact = load_candidate_contact_authority(
+            contact_path, repository_root=repository_root
+        )
+        exact_requirements = tuple(
+            f"{row['requirement_id']}: {row['requirement_text']}"
+            for row in market_decision_authority.evidence_matrix
+        )
+        deployment = materialization_receipt.deployment_binding
+        if (
+            required_environment not in {"production", "synthetic"}
+            or market_decision_authority.environment != required_environment
+            or market_decision_authority.release_authority is not False
+            or materialization_receipt.release_authority is not False
+            or materialization_receipt.decision_authority_schema
+            != market_decision_authority.schema_version
+            or materialization_receipt.decision_authority_sha256
+            != market_decision_authority.authority_sha256
+            or deployment.application_id != market_decision_authority.application_id
+            or deployment.environment != market_decision_authority.environment
+            or deployment.handoff_root_sha256
+            != market_decision_authority.handoff_root_sha256
+            or deployment.admission_receipt_sha256
+            != market_decision_authority.admission_receipt_sha256
+            or deployment.current_boundary_receipt_sha256
+            != market_decision_authority.current_boundary_receipt_sha256
+            or materialization_receipt.job_key
+            != market_decision_authority.source_job_key
+            or files.job_key != market_decision_authority.source_job_key
+            or files.decision_receipt_sha256
+            != materialization_receipt.decision_receipt_sha256
+            or materialization_receipt.vacancy_sha256
+            != market_decision_authority.raw_listing_sha256
+            or materialization_receipt.vacancy_snapshot_sha256
+            != market_decision_authority.vacancy_snapshot_sha256
+            or materialization_receipt.candidate_authority_file_sha256
+            != authority_sha256
+            or market_decision_authority.candidate_authority_file_sha256
+            != authority_sha256
+            or materialization_receipt.candidate_authority_object_sha256
+            != content_hash(authority)
+            or market_decision_authority.candidate_authority_object_sha256
+            != content_hash(authority)
+            or materialization_receipt.candidate_projection_sha256
+            != projection_sha256
+            or market_decision_authority.candidate_projection_sha256
+            != projection_sha256
+            or projection.get("projection_sha256") != projection_sha256
+            or materialization_receipt.approved_evidence_file_sha256
+            != market_decision_authority.approved_evidence_file_sha256
+            or materialization_receipt.approved_evidence_object_sha256
+            != market_decision_authority.approved_evidence_object_sha256
+            or materialization_receipt.contact_authority_sha256
+            != contact.authority_sha256
+            or materialization_receipt.contact_envelope_sha256
+            != contact.envelope_sha256
+            or materialization_receipt.contact_registry_sha256
+            != contact.registry_sha256
+            or materialization_receipt.contact_signer_public_key_sha256
+            != contact.signer_public_key_sha256
+            or materialization_receipt.source_url
+            != market_decision_authority.source_url
+            or materialization_receipt.role_title
+            != market_decision_authority.role_title
+            or materialization_receipt.company_name
+            != market_decision_authority.company_name
+            or exact_requirements != vacancy_requirements
+        ):
+            raise ValueError("integrated market release authority differs")
+        return {
+            "job_key": market_decision_authority.source_job_key,
+            "role_title": market_decision_authority.role_title,
+            "company_name": market_decision_authority.company_name,
+            "vacancy_sha256": market_decision_authority.raw_listing_sha256,
+            "vacancy_snapshot_sha256": market_decision_authority.vacancy_snapshot_sha256,
+            "source_url": market_decision_authority.source_url,
+            "candidate_authority_sha256": authority_sha256,
+            "candidate_decision_receipt_sha256": materialization_receipt.decision_receipt_sha256,
+            "candidate_projection_sha256": projection_sha256,
+            "market_decision_authority_sha256": market_decision_authority.authority_sha256,
+            "materialization_receipt_sha256": materialization_receipt.receipt_sha256,
+            "contact_authority_sha256": contact.authority_sha256,
+            "contact_envelope_sha256": contact.envelope_sha256,
+            "contact_registry_sha256": contact.registry_sha256,
+            "contact_signer_public_key_sha256": contact.signer_public_key_sha256,
+        }
     decisions = authority.get("decisions")
     if not isinstance(decisions, list):
         raise ValueError("candidate authority decisions are malformed")
@@ -205,6 +419,9 @@ class CandidateAuthorityReleaseGate(ReleaseGateStore):
         repository_root: str | Path,
         authority_files: CandidateAuthorityFiles,
         vacancy_requirements: tuple[str, ...],
+        workable_release_binding: WorkableReleaseBinding | None = None,
+        market_decision_authority: MarketApplicationDecisionAuthority | None = None,
+        materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__(path, clock=clock)
@@ -222,11 +439,30 @@ class CandidateAuthorityReleaseGate(ReleaseGateStore):
         ):
             raise ValueError("candidate release vacancy requirements are invalid")
         self.vacancy_requirements = vacancy_requirements
+        if (market_decision_authority is None) != (materialization_receipt is None):
+            raise ValueError("market decision and materialization must be supplied together")
+        if (
+            workable_release_binding is not None
+            and type(workable_release_binding) is not WorkableReleaseBinding
+        ):
+            raise TypeError("candidate Workable release requires an exact typed binding")
+        if (
+            workable_release_binding is not None
+            and market_decision_authority is None
+        ):
+            raise ValueError(
+                "production Workable release requires market decision materialization"
+            )
+        self.market_decision_authority = market_decision_authority
+        self.materialization_receipt = materialization_receipt
         self.authority_binding = _verify_durable_candidate_authority(
             authority_files,
             repository_root=self.repository_root,
             vacancy_requirements=self.vacancy_requirements,
+            market_decision_authority=self.market_decision_authority,
+            materialization_receipt=self.materialization_receipt,
         )
+        self.workable_release_binding = workable_release_binding
         connection = sqlite3.connect(self.path)
         try:
             connection.execute(
@@ -282,6 +518,8 @@ class CandidateAuthorityReleaseGate(ReleaseGateStore):
             self.authority_files,
             repository_root=self.repository_root,
             vacancy_requirements=self.vacancy_requirements,
+            market_decision_authority=self.market_decision_authority,
+            materialization_receipt=self.materialization_receipt,
         )
         if current_authority != self.authority_binding:
             raise ValueError("candidate release durable authority drifted")
@@ -296,24 +534,40 @@ class CandidateAuthorityReleaseGate(ReleaseGateStore):
             or source.company_name != self.authority_binding["company_name"]
             or source.vacancy_sha256
             != self.authority_binding["vacancy_sha256"]
-            or application_url != self.authority_binding["source_url"]
+            or (
+                self.workable_release_binding is None
+                and application_url != self.authority_binding["source_url"]
+            )
             or contact.provenance_sha256
             != self.authority_binding["contact_authority_sha256"]
             or source.contact != contact
+            or (
+                self.materialization_receipt is not None
+                and (
+                    source.source_id
+                    != self.materialization_receipt.application_source_id
+                    or source.content_sha256
+                    != self.materialization_receipt.application_source_sha256
+                )
+            )
         ):
             raise ValueError("candidate release differs from approved authority")
         route = urlsplit(application_url)
-        application_id = application_url.rstrip("/").rsplit("/", 1)[-1]
-        if (
-            route.scheme != "https"
-            or route.hostname
-            not in {"job-boards.greenhouse.io", "job-boards.eu.greenhouse.io"}
-            or route.query
-            or route.fragment
-            or not application_id.isdigit()
-            or application_id not in source.job_key.split(":")
-        ):
-            raise ValueError("candidate release official route is invalid")
+        if self.workable_release_binding is None:
+            application_id = application_url.rstrip("/").rsplit("/", 1)[-1]
+            if (route.scheme != "https"
+                    or route.hostname not in {"job-boards.greenhouse.io", "job-boards.eu.greenhouse.io"}
+                    or route.query or route.fragment or not application_id.isdigit()
+                    or application_id not in source.job_key.split(":")):
+                raise ValueError("candidate release official route is invalid")
+        else:
+            workable = self.workable_release_binding
+            if (application_url != workable.application_url
+                    or str(self.authority_binding["source_url"]).rstrip("/")
+                    != workable.source_url.rstrip("/")
+                    or workable.cv_pdf_sha256 != artifacts.cv_pdf.pdf_sha256
+                    or workable.cover_letter_pdf_sha256 != artifacts.cover_letter_pdf.pdf_sha256):
+                raise ValueError("candidate Workable release binding differs")
         verify_application_source(source)
         if render_pdf_artifacts(source) != artifacts:
             raise ValueError("candidate release artifacts are not deterministic")
@@ -346,6 +600,12 @@ class CandidateAuthorityReleaseGate(ReleaseGateStore):
                 "cv_pdf_sha256": artifacts.cv_pdf.pdf_sha256,
                 "cover_letter_pdf_sha256": artifacts.cover_letter_pdf.pdf_sha256,
             },
+            "official_route": {
+                "adapter_id": "greenhouse.production" if self.workable_release_binding is None else "workable.production",
+                "adapter_version": "v1",
+                "source_identity": application_url,
+            },
+            "workable_release_binding": None if self.workable_release_binding is None else self.workable_release_binding.document(),
             "contact": {
                 "record_id": contact.record_id,
                 "record_version": contact.record_version,
@@ -523,13 +783,16 @@ class CandidateAuthorityReleaseGate(ReleaseGateStore):
         source_identity: str,
     ) -> object:
         _, stored = self._stored(release_token)
+        route = stored.get("official_route")
+        if not isinstance(route, dict):
+            route = {"adapter_id": "greenhouse.production", "adapter_version": "v1", "source_identity": stored["application_url"]}
         if (
-            adapter_id != "greenhouse.production"
-            or adapter_version != "v1"
-            or source_identity != stored["application_url"]
+            adapter_id != route.get("adapter_id")
+            or adapter_version != route.get("adapter_version")
+            or source_identity != route.get("source_identity")
         ):
             raise ValueError("candidate release token cites a different official route")
-        return stored["application_url"]
+        return route["source_identity"]
 
     def verify_current_release_token(
         self,
@@ -590,4 +853,6 @@ __all__ = [
     "CandidateAuthorityReleaseGate",
     "CandidateIssuedRelease",
     "POLICY_SHA256",
+    "WorkableReleaseBinding",
+    "WorkableUploadBinding",
 ]
