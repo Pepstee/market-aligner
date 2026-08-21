@@ -182,7 +182,7 @@ BASE_CV_POLICY = CVPolicy("jaa.cv-policy.v1")
 ARTIOM_GUTU_CV_POLICY = CVPolicy(
     "jaa.cv-policy.v1",
     candidate_name="Artiom Gutu",
-    required_city="Birmingham, United Kingdom",
+    required_city="Birmingham",
     required_graduation="July 2026",
     required_dissertation_title=(
         "SCAFAD: A Seven-Layer, Privacy-Preserving, Explainable "

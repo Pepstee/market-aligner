@@ -33,7 +33,7 @@ def _valid(**changes: object):
         ),
     }
     cv_text = (
-        "Artiom Gutu\nartiom@example.test | Birmingham, United Kingdom\n\n"
+        "Artiom Gutu\nartiom@example.test | Birmingham\n\n"
         + "\n\n".join(
             f"{heading}\n" + "\n".join(values)
             for heading, values in sections.items()
@@ -43,7 +43,7 @@ def _valid(**changes: object):
     values: dict[str, object] = {
         "source_id": SOURCE_ID,
         "candidate_name": "Artiom Gutu",
-        "candidate_city": "Birmingham, United Kingdom",
+        "candidate_city": "Birmingham",
         "cv_text": cv_text,
         "cv_sha256": hashlib.sha256(cv_text.encode()).hexdigest(),
         "sections": sections,
@@ -80,7 +80,7 @@ def test_forbids_amateur_labels_and_application_declarations(
 
 def _base_text() -> str:
     return str(_valid.__defaults__) if False else (
-        "Artiom Gutu\nartiom@example.test | Birmingham, United Kingdom\n\n"
+        "Artiom Gutu\nartiom@example.test | Birmingham\n\n"
         "Professional Summary\nAI systems engineer.\n\n"
         "Core Capabilities\nAI orchestration, systems design, workflow automation "
         "and assurance.\n\nProjects\nBuilt and evaluated reliable automation systems.\n\n"
@@ -100,7 +100,15 @@ def test_forbids_day_level_graduation_dates() -> None:
         _valid(sections=sections)
 
 
-@pytest.mark.parametrize("city", ("Wolverhampton", "London"))
+@pytest.mark.parametrize(
+    "city",
+    (
+        "Wolverhampton",
+        "Wolverhampton, United Kingdom",
+        "London",
+        "Birmingham, United Kingdom",
+    ),
+)
 def test_candidate_location_is_birmingham(city: str) -> None:
     with pytest.raises(CVConstraintError, match="location differs"):
         _valid(candidate_city=city)
