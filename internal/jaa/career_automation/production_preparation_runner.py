@@ -98,11 +98,25 @@ PRODUCTION_CODEX_OWNER_UID = 0
 PRODUCTION_CODEX_MODEL = "gpt-5.6-sol"
 PRODUCTION_CODEX_TIMEOUT_SECONDS = 300.0
 PRODUCTION_POPPLER_BIN = Path("/home/gutua/.local/poppler/usr/bin")
+PRODUCTION_POPPLER_LIBRARY_DIRECTORY = Path(
+    "/home/gutua/.local/poppler/usr/lib/x86_64-linux-gnu"
+)
 PRODUCTION_POPPLER_SHA256 = {
     "pdffonts": "5956c57d42bf8a116aa6c44f961720366664c60471e948d215a698bdb6608fba",
     "pdfinfo": "bc643b05d93f5edf86ac536313c38d759130c8192ea83e0251b9d8d4cb336763",
     "pdftoppm": "ad3659e9229f0609640db64611023130222f892a00706ea318af04a07326014a",
     "pdftotext": "5bc8817737f5a4c94240e3f642943ec085669e22b85af33bae22786a45c8d49e",
+}
+PRODUCTION_POPPLER_LIBRARY_SHA256 = {
+    "libLerc.so.4": "b7c1fe626e31e8c3ecb80d428ffb3a8824fd241ec55c6edc8b12437412206060",
+    "libdeflate.so.0": "0e33bbae9bd7f62fd4172ac04d9088736defa499491aacae723732ce4e905f94",
+    "libgpgme.so.45.0.1": "caece624998149737441172de399b6927b93b303e55fdd0123ae20904df1234b",
+    "libgpgmepp.so.7.0.0": "79d799f07547309334a48360a4344cd6e570068d0f2eec6f88c1209facc9448b",
+    "libjbig.so.0": "19ae16694b0f2c442b367fd9dfecf8da68c9b8ded0bc9029c1d53a9ba91a4151",
+    "libjpeg.so.8.2.2": "90a1eebead4d7c1abc46cf9c66c5392c60fc2c16f038af20fc7efbd0d8dd427f",
+    "libpoppler.so.156.0.0": "6a315c699daad7f4727f8177cbe8f6241735bd5066fcf3836682ac0e533c6db7",
+    "libtiff.so.6.1.0": "d65b506791e2469e886c716a7993b5e65ce40015aef1d15a678804a9fc3c4844",
+    "libwebp.so.7.1.10": "0b477702bb43d90a1205813a9c211faa8dfef025a258b9d60663b37311b87c08",
 }
 _CONFIG_SCHEMA = "jaa.production-application-preparation-deployment.v1"
 
@@ -691,6 +705,14 @@ def _run_production_preparation(
                 executable=True,
                 label="Poppler",
             )
+        for name, expected in PRODUCTION_POPPLER_LIBRARY_SHA256.items():
+            resources.pin_file(
+                PRODUCTION_POPPLER_LIBRARY_DIRECTORY / name,
+                expected_sha256=expected,
+                expected_mode=0o644,
+                expected_uid=os.geteuid(),
+                label="Poppler library",
+            )
         resources.pin_file(
             deployment.codex_binary,
             expected_sha256=PRODUCTION_CODEX_BINARY_SHA256,
@@ -803,6 +825,13 @@ def _run_production_preparation(
                 for name in PRODUCTION_POPPLER_SHA256
             },
             PRODUCTION_POPPLER_SHA256,
+            library_descriptors={
+                name: resources.file_descriptor(
+                    PRODUCTION_POPPLER_LIBRARY_DIRECTORY / name
+                )
+                for name in PRODUCTION_POPPLER_LIBRARY_SHA256
+            },
+            expected_library_sha256=PRODUCTION_POPPLER_LIBRARY_SHA256,
         )
 
         def runtime(kind: str) -> EditorialCompositionRuntime:

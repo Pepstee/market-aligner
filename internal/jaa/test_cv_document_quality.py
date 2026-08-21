@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+from cv_generation import document_quality as quality
 from career_automation.rendering import (
     ApplicationArtifacts,
     EditableArtifacts,
@@ -16,9 +19,88 @@ from cv_generation.document_quality import (
     _font_hierarchy,
     _minimum_margin,
     _parse_pdfinfo,
+    pinned_poppler_runtime,
     resolve_poppler_runtime,
     verify_document_quality,
 )
+
+
+def test_pinned_poppler_preloads_exact_library_descriptors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    descriptors: dict[str, int] = {}
+    hashes: dict[str, str] = {}
+    for name in quality.POPPLER_TOOLS:
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        path.chmod(0o755)
+        descriptors[name] = os.open(path, os.O_RDONLY)
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    library_path = tmp_path / "libpoppler.so.156.0.0"
+    library_path.write_bytes(b"exact library")
+    library_path.chmod(0o644)
+    library_descriptor = os.open(library_path, os.O_RDONLY)
+    calls: list[dict[str, object]] = []
+
+    def run(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="pdftoppm version 26.01.0\n",
+        )
+
+    monkeypatch.setattr(quality.subprocess, "run", run)
+    try:
+        runtime = pinned_poppler_runtime(
+            descriptors,
+            hashes,
+            library_descriptors={"libpoppler.so.156.0.0": library_descriptor},
+            expected_library_sha256={
+                "libpoppler.so.156.0.0": hashlib.sha256(
+                    library_path.read_bytes()
+                ).hexdigest()
+            },
+        )
+        assert runtime.preload_paths == (f"/proc/self/fd/{library_descriptor}",)
+        assert runtime.preload_descriptors == (library_descriptor,)
+        assert calls[0]["env"]["LD_PRELOAD"] == runtime.preload_paths[0]
+        assert set(calls[0]["pass_fds"]) == {*descriptors.values(), library_descriptor}
+    finally:
+        for descriptor in (*descriptors.values(), library_descriptor):
+            os.close(descriptor)
+
+
+def test_pinned_poppler_rejects_library_hash_substitution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    descriptors: dict[str, int] = {}
+    hashes: dict[str, str] = {}
+    for name in quality.POPPLER_TOOLS:
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        path.chmod(0o755)
+        descriptors[name] = os.open(path, os.O_RDONLY)
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    library_path = tmp_path / "libpoppler.so.156.0.0"
+    library_path.write_bytes(b"substituted library")
+    library_descriptor = os.open(library_path, os.O_RDONLY)
+    monkeypatch.setattr(
+        quality.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("transport ran after library substitution"),
+    )
+    try:
+        with pytest.raises(DocumentQualityError, match="library hash differs"):
+            pinned_poppler_runtime(
+                descriptors,
+                hashes,
+                library_descriptors={"libpoppler.so.156.0.0": library_descriptor},
+                expected_library_sha256={"libpoppler.so.156.0.0": "0" * 64},
+            )
+    finally:
+        for descriptor in (*descriptors.values(), library_descriptor):
+            os.close(descriptor)
 
 
 def _clean_artifacts() -> ApplicationArtifacts:
@@ -179,4 +261,3 @@ def test_quality_receipt_cannot_claim_release_or_visual_review() -> None:
         replace(receipt, release_authority=True)
     with pytest.raises(DocumentQualityError, match="visual judgement"):
         replace(receipt, visual_judgement="pass")
-

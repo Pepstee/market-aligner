@@ -71,6 +71,8 @@ class PopplerRuntime:
     runtime_sha256: str
     library_directory: str | None = None
     tool_descriptors: tuple[tuple[str, int], ...] = ()
+    preload_paths: tuple[str, ...] = ()
+    preload_descriptors: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.version.strip() or set(dict(self.tool_paths)) != set(POPPLER_TOOLS):
@@ -79,6 +81,8 @@ class PopplerRuntime:
             raise DocumentQualityError("Poppler runtime hashes are incomplete")
         if self.tool_descriptors and set(dict(self.tool_descriptors)) != set(POPPLER_TOOLS):
             raise DocumentQualityError("Poppler runtime descriptors are incomplete")
+        if len(self.preload_paths) != len(self.preload_descriptors):
+            raise DocumentQualityError("Poppler runtime preload lease is incomplete")
         for value in (*dict(self.tool_sha256).values(), self.runtime_sha256):
             if not _SHA256.fullmatch(value):
                 raise DocumentQualityError("Poppler runtime identity is invalid")
@@ -228,6 +232,9 @@ def resolve_poppler_runtime(bin_directory: str | Path | None = None) -> PopplerR
 def pinned_poppler_runtime(
     descriptors: Mapping[str, int],
     expected_sha256: Mapping[str, str],
+    *,
+    library_descriptors: Mapping[str, int] | None = None,
+    expected_library_sha256: Mapping[str, str] | None = None,
 ) -> PopplerRuntime:
     """Build a runtime that consumes only already-open executable descriptors."""
     if set(descriptors) != set(POPPLER_TOOLS) or set(expected_sha256) != set(POPPLER_TOOLS):
@@ -248,13 +255,38 @@ def pinned_poppler_runtime(
             raise DocumentQualityError("pinned Poppler executable hash differs")
         paths.append((tool, f"/proc/self/fd/{descriptor}"))
         hashes.append((tool, digest.hexdigest()))
+    if (library_descriptors is None) != (expected_library_sha256 is None):
+        raise DocumentQualityError("pinned Poppler library lease is incomplete")
+    library_paths: list[str] = []
+    library_hashes: list[tuple[str, str]] = []
+    if library_descriptors is not None and expected_library_sha256 is not None:
+        if not library_descriptors or set(library_descriptors) != set(expected_library_sha256):
+            raise DocumentQualityError("pinned Poppler library lease is incomplete")
+        for name in sorted(library_descriptors):
+            descriptor = library_descriptors[name]
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise DocumentQualityError("pinned Poppler library is invalid")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if digest.hexdigest() != expected_library_sha256[name]:
+                raise DocumentQualityError("pinned Poppler library hash differs")
+            library_paths.append(f"/proc/self/fd/{descriptor}")
+            library_hashes.append((name, digest.hexdigest()))
+    pass_descriptors = tuple(descriptors.values()) + tuple(
+        () if library_descriptors is None else library_descriptors.values()
+    )
     completed = subprocess.run(
         (dict(paths)["pdftoppm"], "-v"),
         capture_output=True,
         text=True,
         timeout=10,
         check=False,
-        pass_fds=tuple(descriptors.values()),
+        env=_runtime_environment(None, tuple(library_paths)),
+        pass_fds=pass_descriptors,
     )
     version_output = (completed.stderr or completed.stdout).splitlines()
     if completed.returncode not in {0, 99} or not any(
@@ -262,7 +294,13 @@ def pinned_poppler_runtime(
     ):
         raise DocumentQualityError("pinned Poppler runtime cannot execute")
     version = next(line.strip() for line in version_output if "pdftoppm version" in line)
-    runtime_sha256 = content_hash({"version": version, "tool_sha256": dict(hashes)})
+    runtime_identity: dict[str, object] = {
+        "version": version,
+        "tool_sha256": dict(hashes),
+    }
+    if library_hashes:
+        runtime_identity["preload_sha256"] = dict(library_hashes)
+    runtime_sha256 = content_hash(runtime_identity)
     return PopplerRuntime(
         version,
         tuple(paths),
@@ -270,16 +308,23 @@ def pinned_poppler_runtime(
         runtime_sha256,
         None,
         tuple((tool, descriptors[tool]) for tool in POPPLER_TOOLS),
+        tuple(library_paths),
+        tuple(() if library_descriptors is None else library_descriptors.values()),
     )
 
 
-def _runtime_environment(library_directory: str | None) -> dict[str, str]:
+def _runtime_environment(
+    library_directory: str | None,
+    preload_paths: tuple[str, ...] = (),
+) -> dict[str, str]:
     environment = dict(os.environ)
     if library_directory:
         existing = environment.get("LD_LIBRARY_PATH")
         environment["LD_LIBRARY_PATH"] = (
             library_directory if not existing else f"{library_directory}:{existing}"
         )
+    if preload_paths:
+        environment["LD_PRELOAD"] = ":".join(preload_paths)
     return environment
 
 
@@ -290,8 +335,11 @@ def _run(runtime: PopplerRuntime, tool: str, *arguments: str) -> subprocess.Comp
         text=True,
         timeout=20,
         check=False,
-        env=_runtime_environment(runtime.library_directory),
-        pass_fds=tuple(dict(runtime.tool_descriptors).values()),
+        env=_runtime_environment(runtime.library_directory, runtime.preload_paths),
+        pass_fds=(
+            tuple(dict(runtime.tool_descriptors).values())
+            + runtime.preload_descriptors
+        ),
     )
     if completed.returncode != 0:
         raise DocumentQualityError(f"Poppler {tool} failed")

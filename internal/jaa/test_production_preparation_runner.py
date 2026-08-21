@@ -56,6 +56,8 @@ def _real_preflight_deployment(
     outbox.mkdir(mode=0o700)
     poppler = tmp_path / "poppler"
     poppler.mkdir(mode=0o700)
+    poppler_libraries = tmp_path / "poppler-libraries"
+    poppler_libraries.mkdir(mode=0o700)
     codex = tmp_path / "codex"
     codex.write_bytes(b"exact codex")
     codex.chmod(0o755)
@@ -80,6 +82,12 @@ def _real_preflight_deployment(
         path.write_bytes(name.encode())
         path.chmod(0o755)
         poppler_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    poppler_library_hashes: dict[str, str] = {}
+    for name in runner.PRODUCTION_POPPLER_LIBRARY_SHA256:
+        path = poppler_libraries / name
+        path.write_bytes(name.encode())
+        path.chmod(0o644)
+        poppler_library_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     paths["poppler"] = poppler / "pdfinfo"
 
     deployment = runner._ProductionPreparationDeployment(
@@ -99,6 +107,12 @@ def _real_preflight_deployment(
     monkeypatch.setattr(runner, "PRODUCTION_MARKET_DATA_HOME", data_home)
     monkeypatch.setattr(runner, "PRODUCTION_POPPLER_BIN", poppler)
     monkeypatch.setattr(runner, "PRODUCTION_POPPLER_SHA256", poppler_hashes)
+    monkeypatch.setattr(
+        runner, "PRODUCTION_POPPLER_LIBRARY_DIRECTORY", poppler_libraries
+    )
+    monkeypatch.setattr(
+        runner, "PRODUCTION_POPPLER_LIBRARY_SHA256", poppler_library_hashes
+    )
     monkeypatch.setattr(
         runner,
         "PRODUCTION_CODEX_BINARY_SHA256",
@@ -204,13 +218,21 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
         path.write_bytes(name.encode())
         hashes[name] = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
     monkeypatch.setattr(runner, "PRODUCTION_POPPLER_SHA256", hashes)
+    monkeypatch.setattr(runner, "PRODUCTION_POPPLER_LIBRARY_DIRECTORY", tmp_path)
+    library_hashes = {}
+    for name in runner.PRODUCTION_POPPLER_LIBRARY_SHA256:
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        library_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        runner, "PRODUCTION_POPPLER_LIBRARY_SHA256", library_hashes
+    )
     authority_constants = (
         (deployment.candidate_authority_path, "PRODUCTION_CANDIDATE_AUTHORITY_SHA256"),
         (deployment.contact_authority_path, "PRODUCTION_CONTACT_ENVELOPE_SHA256"),
         (deployment.contact_public_key_path, "PRODUCTION_CONTACT_PUBLIC_KEY_FILE_SHA256"),
         (deployment.contact_registry_path, "PRODUCTION_CONTACT_REGISTRY_FILE_SHA256"),
     )
-    import hashlib
     for path, name in authority_constants:
         path.write_bytes(name.encode())
         monkeypatch.setattr(runner, name, hashlib.sha256(path.read_bytes()).hexdigest())
@@ -247,8 +269,21 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
 
     monkeypatch.setattr(runner, "_PinnedPreparationResources", _Resources)
     pinned_poppler = object()
-    def pin_poppler(descriptors, hashes):
-        poppler_arguments.update({"descriptors": descriptors, "hashes": hashes})
+    def pin_poppler(
+        descriptors,
+        hashes,
+        *,
+        library_descriptors,
+        expected_library_sha256,
+    ):
+        poppler_arguments.update(
+            {
+                "descriptors": descriptors,
+                "hashes": hashes,
+                "library_descriptors": library_descriptors,
+                "library_hashes": expected_library_sha256,
+            }
+        )
         return pinned_poppler
 
     monkeypatch.setattr(runner, "pinned_poppler_runtime", pin_poppler)
@@ -339,6 +374,12 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     assert isinstance(recruiter_arguments["archive_descriptor"], int)
     assert set(poppler_arguments["descriptors"]) == set(
         runner.PRODUCTION_POPPLER_SHA256
+    )
+    assert set(poppler_arguments["library_descriptors"]) == set(
+        runner.PRODUCTION_POPPLER_LIBRARY_SHA256
+    )
+    assert poppler_arguments["library_hashes"] == (
+        runner.PRODUCTION_POPPLER_LIBRARY_SHA256
     )
     assert captured["candidate_authority_bytes"] == (
         deployment.candidate_authority_path.read_bytes()
