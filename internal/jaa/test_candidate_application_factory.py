@@ -98,7 +98,9 @@ def _materialization_inputs(tmp_path: Path) -> dict[str, object]:
     return {**values, "deployment_binding": binding, "contact_authority": contact}
 
 
-def _integrated_decision(tmp_path: Path, *, ledger_count: int = 7):
+def _integrated_decision(
+    tmp_path: Path, *, ledger_count: int = 7, ledger_confidence: object = 1.0
+):
     inputs = _materialization_inputs(tmp_path)
     source_job_key = "workable:cogna:847CFBC5F4"
     requirements = {
@@ -138,7 +140,7 @@ def _integrated_decision(tmp_path: Path, *, ledger_count: int = 7):
         (canonical_json({
             "claim": row["statement"],
             "content_sha256": hashlib.sha256(row["statement"].encode()).hexdigest(),
-            "confidence": 1.0,
+            "confidence": ledger_confidence,
             "evidence_id": row["id"],
             "kind": row["kind"],
             "observed_at": None,
@@ -209,6 +211,13 @@ def test_integrated_market_decision_accepts_sealed_ledger_cardinality(
 ) -> None:
     authority, _, _ = _integrated_decision(tmp_path, ledger_count=3)
     assert authority.evidence_ledger_sha256
+
+
+def test_integrated_market_decision_rejects_boolean_ledger_confidence(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="evidence ledger"):
+        _integrated_decision(tmp_path, ledger_confidence=True)
 
 
 def test_integrated_market_decision_rejects_receipt_and_snapshot_substitution(
