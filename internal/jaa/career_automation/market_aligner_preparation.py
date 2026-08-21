@@ -35,9 +35,11 @@ from .candidate_application_factory import (
     materialize_candidate_application_source,
 )
 from cv_generation.editorial_composition import (
+    ApprovedCoverLetterClaim,
     ApprovedCVClaim,
     CandidateEditorialAuthority,
     EditorialCompositionRuntime,
+    build_cover_letter_editorial_request,
     build_editorial_request,
     run_editorial_composition_runtime,
 )
@@ -270,6 +272,25 @@ class CanonicalPreparationInputMaterializer:
             vacancy_sha256=raw_listing_sha256,
             approved_claims=claims,
         )
+        cover_claims = tuple(
+            ApprovedCoverLetterClaim(
+                claim_id=str(row["sentence_id"]),
+                text=str(row["text"]),
+                text_sha256=str(row["text_sha256"]),
+                evidence_ids=tuple(str(value) for value in row["evidence_ids"]),
+                fact_kind=str(row["fact_kind"]),
+                section_heading=str(row["section_heading"]),
+            )
+            for row in materialization.receipt.fact_bindings
+            if row["document_kind"] == "cover_letter"
+        )
+        cover_request = build_cover_letter_editorial_request(
+            authority=request.authority,
+            role_title=role_title,
+            company_name=company_name,
+            vacancy_sha256=raw_listing_sha256,
+            approved_claims=cover_claims,
+        )
         listing_text = verified.raw_listing_bytes.decode("utf-8")
         if hashlib.sha256(listing_text.encode()).hexdigest() != raw_listing_sha256:
             raise ValueError("canonical materializer listing differs from vacancy")
@@ -278,6 +299,7 @@ class CanonicalPreparationInputMaterializer:
             "listing_text": listing_text,
             "materialization": materialization,
             "request": request,
+            "cover_letter_request": cover_request,
         }
 
 
@@ -306,6 +328,7 @@ def prepare_admitted_market_application_from_authorities(
     input_materializer: PreparationInputMaterializer,
     environment: str,
     editorial_runtime: EditorialCompositionRuntime | None = None,
+    cover_letter_editorial_runtime: EditorialCompositionRuntime | None = None,
     orchestration_extras: Mapping[str, Any] | None = None,
     contact_authority_loader: Callable[..., CandidateContactAuthority] = (
         load_candidate_contact_authority
@@ -332,6 +355,9 @@ def prepare_admitted_market_application_from_authorities(
     if environment == "production" and (
         type(input_materializer) is not CanonicalPreparationInputMaterializer
         or type(editorial_runtime) is not EditorialCompositionRuntime
+        or type(cover_letter_editorial_runtime) is not EditorialCompositionRuntime
+        or editorial_runtime.document_kind != "cv"
+        or cover_letter_editorial_runtime.document_kind != "cover_letter"
     ):
         raise ValueError(
             "production preparation requires canonical materializer and editorial runtime"
@@ -381,11 +407,12 @@ def prepare_admitted_market_application_from_authorities(
     arguments = dict(input_materializer(verified, deployment_binding, contact_authority))
     source = arguments.get("base_source")
     request = arguments.get("request")
+    cover_letter_request = arguments.get("cover_letter_request")
     materialization = arguments.get("materialization")
     if source is None:
         raise ValueError("preparation materializer omitted the application source")
-    if request is None:
-        raise ValueError("preparation materializer omitted the editorial request")
+    if request is None or (environment == "production" and cover_letter_request is None):
+        raise ValueError("preparation materializer omitted an editorial request")
     if not isinstance(materialization, CandidateApplicationMaterialization):
         raise ValueError("preparation requires typed candidate materialization")
     receipt = materialization.receipt
@@ -410,9 +437,12 @@ def prepare_admitted_market_application_from_authorities(
     if request.authority.source_sha256 != candidate_sha256:
         raise ValueError("materialized editorial request differs from candidate authority")
     receipt.authorize_editorial_request(request)
+    if cover_letter_request is not None:
+        receipt.authorize_editorial_request(cover_letter_request)
     arguments["materialization_receipt"] = receipt
     if environment == "production":
         assert editorial_runtime is not None
+        assert cover_letter_editorial_runtime is not None
         reserved = {
             "base_source",
             "humanized_draft",
@@ -421,6 +451,11 @@ def prepare_admitted_market_application_from_authorities(
             "materialization",
             "materialization_receipt",
             "request",
+            "cover_letter_request",
+            "cover_letter_writer_draft",
+            "cover_letter_humanized_draft",
+            "cover_letter_writer_evidence",
+            "cover_letter_humanizer_evidence",
             "writer_draft",
             "writer_evidence",
         }
@@ -437,6 +472,16 @@ def prepare_admitted_market_application_from_authorities(
             runtime=editorial_runtime,
             materialization_receipt=receipt,
         )
+        (
+            cover_writer_draft,
+            cover_humanized_draft,
+            cover_writer_evidence,
+            cover_humanizer_evidence,
+        ) = run_editorial_composition_runtime(
+            cover_letter_request,
+            runtime=cover_letter_editorial_runtime,
+            materialization_receipt=receipt,
+        )
         arguments.update(extras)
         arguments.update(
             {
@@ -444,9 +489,17 @@ def prepare_admitted_market_application_from_authorities(
                 "humanized_draft": humanized_draft,
                 "writer_evidence": writer_evidence,
                 "humanizer_evidence": humanizer_evidence,
+                "cover_letter_writer_draft": cover_writer_draft,
+                "cover_letter_humanized_draft": cover_humanized_draft,
+                "cover_letter_writer_evidence": cover_writer_evidence,
+                "cover_letter_humanizer_evidence": cover_humanizer_evidence,
             }
         )
-    elif editorial_runtime is not None or orchestration_extras is not None:
+    elif (
+        editorial_runtime is not None
+        or cover_letter_editorial_runtime is not None
+        or orchestration_extras is not None
+    ):
         raise ValueError(
             "synthetic preparation receives complete injected orchestration inputs"
         )
@@ -770,12 +823,16 @@ def _prepare_admitted_market_application(
             ),
         )
     exact = {
-        "job_key": (base_source.job_key, verified.job_key),
+        "job_key": (base_source.job_key, verified.source_job_key or verified.job_key),
         "role_title": (base_source.role_title, verified.role_title),
         "company_name": (base_source.company_name, verified.company_name),
-        "vacancy_snapshot_sha256": (
+        "vacancy_sha256": (
             base_source.vacancy_sha256,
-            verified.vacancy_snapshot_sha256,
+            (
+                verified.raw_listing_sha256
+                if environment == "production" or verified.source_job_key
+                else verified.vacancy_snapshot_sha256
+            ),
         ),
     }
     if any(left != right for left, right in exact.values()):
