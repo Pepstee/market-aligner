@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import cv_generation.editorial_composition as editorial_module
 from career_automation.candidate_application_factory import (
     CandidateApplicationMaterializationReceipt,
 )
@@ -36,6 +37,22 @@ TITLE = (
     "SCAFAD: A Seven-Layer, Privacy-Preserving, Explainable "
     "Anomaly-Detection Pipeline for Serverless Workloads"
 )
+
+
+def test_detached_response_schema_types_every_property() -> None:
+    def require_property_types(schema: object) -> None:
+        assert isinstance(schema, dict)
+        properties = schema.get("properties", {})
+        assert isinstance(properties, dict)
+        for property_schema in properties.values():
+            assert isinstance(property_schema, dict)
+            assert "type" in property_schema
+            require_property_types(property_schema)
+        if isinstance(schema.get("items"), dict):
+            require_property_types(schema["items"])
+
+    require_property_types(editorial_module._DRAFT_RESPONSE_SCHEMA)
+    require_property_types(editorial_module._COVER_LETTER_RESPONSE_SCHEMA)
 
 
 def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:

@@ -209,7 +209,7 @@ _DRAFT_RESPONSE_SCHEMA: Mapping[str, object] = {
     "properties": {
         "candidate_city": {"type": "string", "minLength": 1},
         "candidate_name": {"type": "string", "minLength": 1},
-        "schema_version": {"const": DRAFT_SCHEMA},
+        "schema_version": {"type": "string", "const": DRAFT_SCHEMA},
         "sections": {
             "type": "array",
             "minItems": 2,
@@ -218,7 +218,10 @@ _DRAFT_RESPONSE_SCHEMA: Mapping[str, object] = {
                 "additionalProperties": False,
                 "required": ["atoms", "heading"],
                 "properties": {
-                    "heading": {"enum": sorted(_ALLOWED_HEADINGS)},
+                    "heading": {
+                        "type": "string",
+                        "enum": sorted(_ALLOWED_HEADINGS),
+                    },
                     "atoms": {
                         "type": "array",
                         "minItems": 1,
@@ -229,6 +232,7 @@ _DRAFT_RESPONSE_SCHEMA: Mapping[str, object] = {
                             "properties": {
                                 "claim_id": {"type": ["string", "null"]},
                                 "source_kind": {
+                                    "type": "string",
                                     "enum": ["approved_claim", "connective"]
                                 },
                                 "text": {"type": "string", "minLength": 1},
@@ -246,7 +250,10 @@ _COVER_LETTER_RESPONSE_SCHEMA: Mapping[str, object] = {
     "required": ["candidate_name", "schema_version", "sections"],
     "properties": {
         "candidate_name": {"type": "string", "minLength": 1},
-        "schema_version": {"const": COVER_LETTER_DRAFT_SCHEMA},
+        "schema_version": {
+            "type": "string",
+            "const": COVER_LETTER_DRAFT_SCHEMA,
+        },
         "sections": {
             "type": "array",
             "minItems": 4,
@@ -256,7 +263,10 @@ _COVER_LETTER_RESPONSE_SCHEMA: Mapping[str, object] = {
                 "additionalProperties": False,
                 "required": ["atoms", "heading"],
                 "properties": {
-                    "heading": {"enum": ["Opening", "Evidence Match", "Company Fit", "Close"]},
+                    "heading": {
+                        "type": "string",
+                        "enum": ["Opening", "Evidence Match", "Company Fit", "Close"],
+                    },
                     "atoms": {
                         "type": "array",
                         "minItems": 1,
@@ -266,7 +276,10 @@ _COVER_LETTER_RESPONSE_SCHEMA: Mapping[str, object] = {
                             "required": ["claim_id", "source_kind", "text"],
                             "properties": {
                                 "claim_id": {"type": ["string", "null"]},
-                                "source_kind": {"enum": ["approved_claim", "connective"]},
+                                "source_kind": {
+                                    "type": "string",
+                                    "enum": ["approved_claim", "connective"],
+                                },
                                 "text": {"type": "string", "minLength": 1},
                             },
                         },
