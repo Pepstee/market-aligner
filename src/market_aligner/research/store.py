@@ -24,6 +24,7 @@ from .models import (
     ResearchEvidenceBinding,
     ResearchTask,
     research_refresh_bridge_sha256,
+    research_refresh_preserves_source_authority,
 )
 
 
@@ -721,8 +722,15 @@ class AssessmentStore:
                     or set(payload) != expected_keys
                     or payload["source_content_sha256"]
                     != values["source_content_sha256"]
-                    or payload["old_collector_content_sha256"]
-                    != values["source_content_sha256"]
+                    or not research_refresh_preserves_source_authority(
+                        source_content_sha256=values["source_content_sha256"],
+                        old_collector_content_sha256=payload[
+                            "old_collector_content_sha256"
+                        ],
+                        old_canonical_content_sha256=payload[
+                            "old_canonical_content_sha256"
+                        ],
+                    )
                     or payload["promotion_receipt_sha256"]
                     != values["promotion_receipt_sha256"]
                     or refresh_event_idempotency_key
@@ -1012,6 +1020,103 @@ class AssessmentStore:
             )
             return True
 
+    def _has_current_v2_refresh_chain(
+        self, row: sqlite3.Row, *, collector_content_sha256: str
+    ) -> bool:
+        """Verify that current v2 evidence terminates at the prior refresh event."""
+
+        if row["status"] != "completed" or not self._has_current_v2_evidence(row):
+            return False
+        try:
+            payload = json.loads(str(row["prior_refresh_payload_json"]))
+            prior_event_id = row["prior_refresh_event_id"]
+            event_key = (
+                f"research-collection-refresh:{row['profile_id']}:{row['job_key']}:"
+                f"{payload.get('collection_transition_sha256')}"
+            )
+            root = (self.data_home / row["archive_root_identity"]).resolve()
+            object_bytes = (
+                root / "objects" / row["canonical_vacancy_object_sha256"]
+            ).read_bytes()
+            envelope = json.loads(object_bytes)
+            if (
+                not isinstance(payload, dict)
+                or not isinstance(envelope, dict)
+                or hashlib.sha256(object_bytes).hexdigest()
+                != row["canonical_vacancy_object_sha256"]
+                or object_bytes
+                != json.dumps(
+                    envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                or row["prior_refresh_event_type"]
+                != "employer_research_collection_refresh_queued"
+                or row["prior_refresh_actor_kind"] != "deterministic"
+                or row["prior_refresh_idempotency_key"] != event_key
+                or payload.get("refresh_bridge_sha256")
+                != row["prior_refresh_bridge_sha256"]
+                or research_refresh_bridge_sha256(
+                    event_type=str(row["prior_refresh_event_type"]),
+                    actor_kind=str(row["prior_refresh_actor_kind"]),
+                    idempotency_key=str(row["prior_refresh_idempotency_key"]),
+                    payload=payload,
+                )
+                != row["prior_refresh_bridge_sha256"]
+                or payload.get("source_content_sha256") != row["source_content_sha256"]
+                or payload.get("promotion_receipt_sha256")
+                != row["promotion_receipt_sha256"]
+                or not research_refresh_preserves_source_authority(
+                    source_content_sha256=row["source_content_sha256"],
+                    old_collector_content_sha256=payload.get(
+                        "old_collector_content_sha256"
+                    ),
+                    old_canonical_content_sha256=payload.get(
+                        "old_canonical_content_sha256"
+                    ),
+                )
+                or payload.get("old_canonical_content_sha256")
+                != collector_content_sha256
+                or envelope.get("schema_version")
+                != "market-aligner.canonical-collector-vacancy.v2"
+                or envelope.get("authority_source_content_sha256")
+                != row["source_content_sha256"]
+                or envelope.get("canonical_current_content_sha256")
+                != collector_content_sha256
+                or envelope.get("collection_refresh_event_id") != prior_event_id
+                or envelope.get("collection_refresh_context_sha256")
+                != payload.get("collection_context_sha256")
+                or envelope.get("collection_refresh_operation_id")
+                != payload.get("collection_operation_id")
+                or envelope.get("collection_refresh_receipt_file_sha256")
+                != payload.get("collection_receipt_file_sha256")
+                or envelope.get("collection_refresh_receipt_sha256")
+                != payload.get("collection_receipt_sha256")
+                or envelope.get("collection_refresh_id")
+                != payload.get("collection_refresh_id")
+                or envelope.get("collection_refresh_transition_sha256")
+                != payload.get("collection_transition_sha256")
+                or envelope.get("collection_refresh_raw_object_sha256")
+                != payload.get("new_raw_object_sha256")
+                or envelope.get("fetched_at") != payload.get("new_fetched_at")
+                or envelope.get("job_key") != row["job_key"]
+                or envelope.get("promotion_receipt_sha256")
+                != row["promotion_receipt_sha256"]
+            ):
+                return False
+            return True
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
+            return False
+
     def _requeue_from_unchanged_collection_refresh(
         self,
         profile_id: str,
@@ -1057,16 +1162,39 @@ class AssessmentStore:
                 schema="collector",
             )
             row = connection.execute(
-                """SELECT q.status,q.job_key,a.state,
+                """SELECT q.status,q.profile_id,q.job_key,q.refresh_event_id
+                          AS prior_refresh_event_id,q.refresh_bridge_sha256
+                          AS prior_refresh_bridge_sha256,
+                          a.state,a.title,a.company,a.url,
                           p.source_content_sha256,
                           p.receipt_sha256 AS promotion_receipt_sha256,
-                          d.dossier_hash
+                          d.dossier_json,d.dossier_hash,
+                          pe.event_type AS prior_refresh_event_type,
+                          pe.actor_kind AS prior_refresh_actor_kind,
+                          pe.payload_json AS prior_refresh_payload_json,
+                          pe.idempotency_key AS prior_refresh_idempotency_key,
+                          e.dossier_hash AS evidence_dossier_hash,
+                          e.source_content_sha256 AS evidence_source_content_sha256,
+                          e.vacancy_snapshot_sha256
+                          AS evidence_vacancy_snapshot_sha256,
+                          e.promotion_receipt_sha256
+                          AS evidence_promotion_receipt_sha256,
+                          e.canonical_vacancy_object_sha256,
+                          e.semantic_receipt_sha256,e.receipt_file_sha256,
+                          e.archive_root_identity,e.archive_root_policy_sha256,
+                          e.receipt_relative_path,
+                          e.schema_version AS evidence_schema_version
                    FROM employer_research_queue q JOIN assessments a
                      ON a.profile_id=q.profile_id AND a.job_key=q.job_key
                    LEFT JOIN assessment_promotions p
                      ON p.profile_id=q.profile_id AND p.job_key=q.job_key
                    LEFT JOIN employer_dossiers d
                      ON d.profile_id=q.profile_id AND d.job_key=q.job_key
+                   LEFT JOIN employer_research_evidence e
+                     ON e.profile_id=q.profile_id AND e.job_key=q.job_key
+                   LEFT JOIN assessment_events pe
+                     ON pe.id=q.refresh_event_id
+                    AND pe.profile_id=q.profile_id AND pe.job_key=q.job_key
                    WHERE q.profile_id=? AND q.job_key=?""",
                 (profile_id, job_key),
             ).fetchone()
@@ -1081,17 +1209,27 @@ class AssessmentStore:
                     "changed vacancy content requires assessment promotion supersession"
                 )
             promotion_source = row["source_content_sha256"]
-            if (
-                promotion_source is None
-                or promotion_source != verified.old_content_sha256
-            ):
-                raise ValueError(
-                    "refresh content differs from the current assessment promotion"
-                )
+            if promotion_source is None:
+                raise ValueError("refresh lacks a current assessment promotion")
             event_key = (
                 f"research-collection-refresh:{profile_id}:{job_key}:"
                 f"{verified.transition_sha256}"
             )
+            existing_event = connection.execute(
+                """SELECT id,event_type,actor_kind,payload_json
+                   FROM assessment_events WHERE idempotency_key=?""",
+                (event_key,),
+            ).fetchone()
+            if (
+                existing_event is None
+                and promotion_source != verified.old_content_sha256
+                and not self._has_current_v2_refresh_chain(
+                    row, collector_content_sha256=verified.old_content_sha256
+                )
+            ):
+                raise ValueError(
+                    "refresh content lacks current assessment promotion ancestry"
+                )
             payload = {
                 "collection_context_sha256": verified.context_sha256,
                 "collection_operation_id": verified.operation_id,
@@ -1116,11 +1254,6 @@ class AssessmentStore:
                 payload=payload,
             )
             payload["refresh_bridge_sha256"] = bridge_sha256
-            existing_event = connection.execute(
-                """SELECT id,event_type,actor_kind,payload_json
-                   FROM assessment_events WHERE idempotency_key=?""",
-                (event_key,),
-            ).fetchone()
             if existing_event is not None:
                 queue_event = connection.execute(
                     """SELECT refresh_event_id FROM employer_research_queue
@@ -1358,8 +1491,15 @@ class AssessmentStore:
                     != lease["current_dossier_hash"]
                     or refresh_payload.get("source_content_sha256")
                     != dossier.source_content_sha256
-                    or refresh_payload.get("old_collector_content_sha256")
-                    != lease["source_content_sha256"]
+                    or not research_refresh_preserves_source_authority(
+                        source_content_sha256=lease["source_content_sha256"],
+                        old_collector_content_sha256=refresh_payload.get(
+                            "old_collector_content_sha256"
+                        ),
+                        old_canonical_content_sha256=refresh_payload.get(
+                            "old_canonical_content_sha256"
+                        ),
+                    )
                     or refresh_payload.get("promotion_receipt_sha256")
                     != dossier.promotion_receipt_sha256
                     or lease["current_promotion_receipt_sha256"]

@@ -39,7 +39,10 @@ from market_aligner.research.models import (
     ResearchEvidenceBinding,
     SourceCitation,
 )
-from market_aligner.research.store import research_refresh_bridge_sha256
+from market_aligner.research.store import (
+    research_refresh_bridge_sha256,
+    research_refresh_preserves_source_authority,
+)
 from market_aligner.service.api import MarketAlignerService
 from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
 
@@ -770,7 +773,11 @@ def _verify_refresh_ancestry(
                 or not isinstance(refresh_context, dict)
                 or refresh_context.get("config_sha256") != collection_config_sha256
                 or verified.old_canonical_content_sha256 != verified.new_content_sha256
-                or verified.old_content_sha256 != source_content_sha256
+                or not research_refresh_preserves_source_authority(
+                    source_content_sha256=source_content_sha256,
+                    old_collector_content_sha256=verified.old_content_sha256,
+                    old_canonical_content_sha256=verified.old_canonical_content_sha256,
+                )
                 or verified.new_content_sha256
                 != envelope["canonical_current_content_sha256"]
                 or verified.new_raw_object_sha256

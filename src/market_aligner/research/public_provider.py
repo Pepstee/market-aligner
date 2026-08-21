@@ -34,6 +34,7 @@ from .models import (
     ResearchTask,
     SourceCitation,
     research_refresh_bridge_sha256,
+    research_refresh_preserves_source_authority,
 )
 from .store import AssessmentStore
 
@@ -503,7 +504,11 @@ class CanonicalCollectorVacancyLoader:
             type(task.refresh_event_id) is not int
             or task.refresh_event_id <= 0
             or any(value is None or value == "" for value in required.values())
-            or task.refresh_legacy_content_sha256 != task.source_content_sha256
+            or not research_refresh_preserves_source_authority(
+                source_content_sha256=task.source_content_sha256,
+                old_collector_content_sha256=task.refresh_legacy_content_sha256,
+                old_canonical_content_sha256=task.refresh_canonical_content_sha256,
+            )
             or task.refresh_promotion_receipt_sha256
             != task.promotion_receipt_sha256
         ):
@@ -609,7 +614,6 @@ class CanonicalCollectorVacancyLoader:
                     verified.changed
                     or verified.old_content_sha256
                     != task.refresh_legacy_content_sha256
-                    or verified.old_content_sha256 != task.source_content_sha256
                     or verified.old_canonical_content_sha256
                     != verified.new_content_sha256
                     or verified.new_content_sha256

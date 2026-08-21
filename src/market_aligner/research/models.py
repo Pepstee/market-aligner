@@ -61,6 +61,31 @@ def research_refresh_bridge_sha256(
     ).hexdigest()
 
 
+def research_refresh_preserves_source_authority(
+    *,
+    source_content_sha256: object,
+    old_collector_content_sha256: object,
+    old_canonical_content_sha256: object,
+) -> bool:
+    """Accept a direct refresh or an admitted canonical continuation.
+
+    The promotion remains the source authority.  A later unchanged refresh may
+    advance from the preceding canonical identity without relabelling it.
+    """
+
+    values = (
+        source_content_sha256,
+        old_collector_content_sha256,
+        old_canonical_content_sha256,
+    )
+    return all(
+        isinstance(value, str) and _SHA256.fullmatch(value) for value in values
+    ) and (
+        old_collector_content_sha256 == source_content_sha256
+        or old_collector_content_sha256 == old_canonical_content_sha256
+    )
+
+
 @dataclass(frozen=True)
 class SourceCitation:
     citation_id: str

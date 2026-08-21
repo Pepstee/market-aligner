@@ -83,6 +83,7 @@ def _canonical_collection_refresh(
     *,
     raw_text: str = BODY.decode(),
     operation_id: str = "unchanged-research-refresh",
+    fetched_at: str = "2026-08-21T01:00:00+00:00",
 ) -> tuple[Path, JobDatabase, Path]:
     database_relative = Path("scraper/data_overnight/jobs.sqlite3")
     database = JobDatabase(root / database_relative, data_home=root)
@@ -130,7 +131,7 @@ def _canonical_collection_refresh(
             assert live is True
             return RawPosting(
                 job.board, job.job_id, job.url,
-                "2026-08-21T01:00:00+00:00", raw_text, old.raw_json,
+                fetched_at, raw_text, old.raw_json,
             )
 
     def factory(loaded, data_home, log=print):
@@ -505,6 +506,249 @@ def test_dual_identity_v3_accepts_legacy_promotion_without_relabeling(
         assert connection.execute(
             "SELECT refresh_event_id FROM employer_research_queue"
         ).fetchone()[0] is None
+
+
+def test_chained_canonical_refresh_preserves_legacy_promotion_and_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    collector_path = tmp_path / "scraper" / "data_overnight" / "jobs.sqlite3"
+    loader, legacy_digest, canonical_digest = _legacy_bridge_collector(collector_path)
+    store, profile_id = _queued_store(
+        tmp_path / "state" / "assessments.sqlite3", legacy_digest
+    )
+    archive = tmp_path / "state" / "public-employer-research-v2"
+
+    initial_task = _task_and_reset(store)
+    initial_source = loader(initial_task)
+    initial = SourceBoundResearchProvider(
+        plan=_plan(initial_task, initial_source),
+        repository_root=repository,
+        archive_root=archive,
+        canonical_vacancy_loader=loader,
+    )
+    assert (
+        ResearchWorker(store, initial, "legacy-worker").run_one().status == "completed"
+    )
+
+    first_receipt_path, _database, config = _canonical_collection_refresh(
+        tmp_path, operation_id="legacy-to-canonical"
+    )
+    assert (
+        store.refresh_completed_research_if_needed(
+            profile_id,
+            JOB_KEY,
+            collection_refresh_receipt_path=first_receipt_path,
+            collection_config_path=config,
+        )
+        is True
+    )
+    first_refresh_task = _task_and_reset(store)
+    first_bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=config
+    )
+    first_current = first_bridge(first_refresh_task)
+    first_rebuild = SourceBoundResearchProvider(
+        plan=_plan(first_refresh_task, first_current),
+        repository_root=repository,
+        archive_root=archive,
+        canonical_vacancy_loader=first_bridge,
+    )
+    first_run = ResearchWorker(store, first_rebuild, "first-bridge-worker").run_one()
+    assert first_run.status == "completed", first_run.error
+    first_materialization = first_rebuild.last_materialization
+    assert first_materialization is not None
+    with store.connection() as connection:
+        first_event_id = connection.execute(
+            "SELECT refresh_event_id FROM employer_research_queue"
+        ).fetchone()[0]
+        first_dossier_hash = connection.execute(
+            "SELECT dossier_hash FROM employer_dossiers"
+        ).fetchone()[0]
+
+    second_receipt_path, database, second_config = _canonical_collection_refresh(
+        tmp_path,
+        operation_id="canonical-freshness-continuation",
+        fetched_at="2026-08-21T02:00:00+00:00",
+    )
+    second_receipt = json.loads(second_receipt_path.read_bytes())
+    assert second_receipt["old_content_sha256"] == canonical_digest
+    assert second_receipt["old_canonical_content_sha256"] == canonical_digest
+    assert second_receipt["new_content_sha256"] == canonical_digest
+    with pytest.raises(VacancyRefreshConflict):
+        database.verify_vacancy_refresh_receipt(first_receipt_path, job_key=JOB_KEY)
+
+    canonical_object_sha256 = (
+        first_materialization.dossier.canonical_vacancy_object_sha256
+    )
+    with store.connection() as connection:
+        connection.execute(
+            """UPDATE employer_research_evidence
+               SET canonical_vacancy_object_sha256=?
+               WHERE profile_id=? AND job_key=?""",
+            ("0" * 64, profile_id, JOB_KEY),
+        )
+    with pytest.raises(ValueError, match="promotion ancestry"):
+        store.refresh_completed_research_if_needed(
+            profile_id,
+            JOB_KEY,
+            collection_refresh_receipt_path=second_receipt_path,
+            collection_config_path=second_config,
+        )
+    with store.connection() as connection:
+        connection.execute(
+            """UPDATE employer_research_evidence
+               SET canonical_vacancy_object_sha256=?
+               WHERE profile_id=? AND job_key=?""",
+            (canonical_object_sha256, profile_id, JOB_KEY),
+        )
+    original_verify = JobDatabase.verify_vacancy_refresh_receipt
+    collector_lock_observed = False
+    assessment_lock_observed = False
+
+    def verify_with_chain_lock_probe(self, *args, **kwargs):
+        nonlocal collector_lock_observed, assessment_lock_observed
+        if not collector_lock_observed and kwargs.get("schema") == "collector":
+            with sqlite3.connect(self.path, timeout=0) as contender:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    contender.execute("BEGIN IMMEDIATE")
+            collector_lock_observed = True
+            with sqlite3.connect(store.path, timeout=0) as contender:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    contender.execute("BEGIN IMMEDIATE")
+            assessment_lock_observed = True
+        return original_verify(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        JobDatabase, "verify_vacancy_refresh_receipt", verify_with_chain_lock_probe
+    )
+    assert (
+        store.refresh_completed_research_if_needed(
+            profile_id,
+            JOB_KEY,
+            collection_refresh_receipt_path=second_receipt_path,
+            collection_config_path=second_config,
+        )
+        is True
+    )
+    assert collector_lock_observed
+    assert assessment_lock_observed
+    assert (
+        store.refresh_completed_research_if_needed(
+            profile_id,
+            JOB_KEY,
+            collection_refresh_receipt_path=second_receipt_path,
+            collection_config_path=second_config,
+        )
+        is False
+    )
+
+    second_task = _task_and_reset(store)
+    with store.connection() as connection:
+        promotion_source = connection.execute(
+            "SELECT source_content_sha256 FROM assessment_promotions"
+        ).fetchone()[0]
+        event_rows = connection.execute(
+            """SELECT id,payload_json,idempotency_key FROM assessment_events
+               WHERE event_type='employer_research_collection_refresh_queued'
+               ORDER BY id"""
+        ).fetchall()
+    assert promotion_source == legacy_digest
+    assert len(event_rows) == 2
+    assert event_rows[0]["id"] == first_event_id
+    second_event = json.loads(event_rows[1]["payload_json"])
+    assert second_event["source_content_sha256"] == legacy_digest
+    assert second_event["old_collector_content_sha256"] == canonical_digest
+    assert second_event["old_canonical_content_sha256"] == canonical_digest
+    assert second_event["prior_dossier_hash"] == first_dossier_hash
+    assert second_event["promotion_receipt_sha256"] == PROMOTION
+    assert event_rows[1]["idempotency_key"] == (
+        f"research-collection-refresh:{profile_id}:{JOB_KEY}:"
+        f"{second_receipt['transition_sha256']}"
+    )
+    assert second_task.refresh_event_id == event_rows[1]["id"]
+    assert second_task.refresh_legacy_content_sha256 == canonical_digest
+    assert second_task.refresh_canonical_content_sha256 == canonical_digest
+    assert second_task.source_content_sha256 == legacy_digest
+    assert second_task.refresh_prior_dossier_sha256 == first_dossier_hash
+
+    second_bridge = CanonicalCollectorVacancyLoader(
+        data_home=tmp_path, collection_config_path=second_config
+    )
+    with pytest.raises(PublicResearchError):
+        second_bridge(
+            replace(
+                second_task,
+                refresh_event_id=first_event_id,
+                refresh_legacy_content_sha256=legacy_digest,
+            )
+        )
+    second_current = second_bridge(second_task)
+    second_envelope = json.loads(second_current.body)
+    assert second_envelope["authority_source_content_sha256"] == legacy_digest
+    assert second_envelope["canonical_current_content_sha256"] == canonical_digest
+    assert second_envelope["fetched_at"] == "2026-08-21T02:00:00+00:00"
+
+    with store.connection() as connection:
+        prior_document = json.loads(
+            connection.execute("SELECT dossier_json FROM employer_dossiers").fetchone()[
+                0
+            ]
+        )
+    prior_selector = prior_document["claims"][0]["supports"][0]["selector"]
+    current_start = second_current.body.index(BODY)
+    review_document = {
+        "job_key": JOB_KEY,
+        "profile_id": profile_id,
+        "rows": [
+            {
+                "prior_selector": prior_selector,
+                "reviewed_current_selector": (
+                    f"bytes:{current_start}-{current_start + len(BODY)}"
+                ),
+            }
+        ],
+        "schema_version": "market-aligner.selector-occurrence-review-input.v1",
+    }
+    review_producer = RefreshDerivedResearchProvider(
+        store=store,
+        canonical_vacancy_loader=second_bridge,
+        repository_root=repository,
+        archive_root=archive,
+    )
+    admitted_review = review_producer.admit_selector_review(
+        second_task, _write_review_input(archive, review_document, "second.json")
+    )
+    derived = RefreshDerivedResearchProvider(
+        store=store,
+        canonical_vacancy_loader=second_bridge,
+        repository_root=repository,
+        archive_root=archive,
+        selector_review_receipt_path=admitted_review.receipt_path,
+    )
+    rebuilt = ResearchWorker(store, derived, "second-bridge-worker").run_one()
+    assert rebuilt.status == "completed", rebuilt.error
+    assert derived.last_materialization is not None
+    assert derived.last_derivation is not None
+    assert derived.last_materialization.dossier.source_content_sha256 == legacy_digest
+    assert (
+        derived.last_materialization.dossier.canonical_vacancy_object_sha256
+        != first_materialization.dossier.canonical_vacancy_object_sha256
+    )
+    with store.connection() as connection:
+        evidence = connection.execute(
+            "SELECT source_content_sha256 FROM employer_research_evidence"
+        ).fetchone()[0]
+    assert evidence == legacy_digest
+    assert (
+        store.refresh_completed_research_if_needed(
+            profile_id,
+            JOB_KEY,
+            collection_refresh_receipt_path=second_receipt_path,
+            collection_config_path=second_config,
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
