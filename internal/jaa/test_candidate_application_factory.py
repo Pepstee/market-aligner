@@ -98,7 +98,7 @@ def _materialization_inputs(tmp_path: Path) -> dict[str, object]:
     return {**values, "deployment_binding": binding, "contact_authority": contact}
 
 
-def _integrated_decision(tmp_path: Path):
+def _integrated_decision(tmp_path: Path, *, ledger_count: int = 7):
     inputs = _materialization_inputs(tmp_path)
     source_job_key = "workable:cogna:847CFBC5F4"
     requirements = {
@@ -131,12 +131,17 @@ def _integrated_decision(tmp_path: Path):
     }
     encoded = [canonical_json(value).encode() for value in (assessment, eligibility, selection)]
     projection = json.loads(AUTHORITY_PATH.read_bytes())["candidate_projection"]
-    approved = json.loads(APPROVED_EVIDENCE_PATH.read_bytes())["statements"][:7]
+    approved = json.loads(APPROVED_EVIDENCE_PATH.read_bytes())["statements"][:ledger_count]
     ledger_bytes = b"".join(
         (canonical_json({
             "claim": row["statement"],
             "content_sha256": hashlib.sha256(row["statement"].encode()).hexdigest(),
+            "confidence": 1.0,
             "evidence_id": row["id"],
+            "kind": row["kind"],
+            "observed_at": None,
+            "source_ref": f"authority://approved-evidence/{row['id']}",
+            "status": "explicit",
         }) + "\n").encode()
         for row in approved
     )
@@ -195,6 +200,13 @@ def test_integrated_market_decision_keeps_candidate_authority_vacancy_independen
         row["receipt"].get("job_key") != authority.source_job_key
         for row in json.loads(AUTHORITY_PATH.read_bytes())["decisions"]
     )
+
+
+def test_integrated_market_decision_accepts_sealed_ledger_cardinality(
+    tmp_path: Path,
+) -> None:
+    authority, _, _ = _integrated_decision(tmp_path, ledger_count=3)
+    assert authority.evidence_ledger_sha256
 
 
 def test_integrated_market_decision_rejects_receipt_and_snapshot_substitution(

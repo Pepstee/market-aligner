@@ -446,13 +446,13 @@ def build_market_application_decision_authority(
         not isinstance(candidate_authority_document, dict)
         or candidate_authority_document.get("candidate_projection")
         != dict(candidate_projection)
-        or len(ledger_rows) != 7
+        or not ledger_rows
         or any(not isinstance(row, dict) for row in ledger_rows)
     ):
         raise ValueError("market application candidate evidence authority differs")
     projected_rows = candidate_projection.get("approved_evidence")
     projected = {
-        str(row["id"]): str(row["statement_sha256"])
+        str(row["id"]): (str(row["statement_sha256"]), str(row["kind"]))
         for row in projected_rows
         if isinstance(row, Mapping)
     } if isinstance(projected_rows, list) else {}
@@ -461,11 +461,21 @@ def build_market_application_decision_authority(
         evidence_id = row.get("evidence_id")
         claim = row.get("claim")
         if (
-            not isinstance(evidence_id, str)
+            set(row)
+            != {
+                "claim", "confidence", "content_sha256", "evidence_id", "kind",
+                "observed_at", "source_ref", "status",
+            }
+            or not isinstance(evidence_id, str)
             or evidence_id in ledger_ids
             or not isinstance(claim, str)
             or _sha256(claim.encode()) != row.get("content_sha256")
-            or projected.get(evidence_id) != row.get("content_sha256")
+            or projected.get(evidence_id)
+            != (row.get("content_sha256"), row.get("kind"))
+            or row.get("confidence") != 1.0
+            or row.get("observed_at") is not None
+            or row.get("source_ref") != f"authority://approved-evidence/{evidence_id}"
+            or row.get("status") != "explicit"
         ):
             raise ValueError("market application evidence ledger differs from candidate projection")
         ledger_ids.add(evidence_id)
