@@ -648,8 +648,8 @@ class AssessmentStore:
                     AND e.profile_id=q.profile_id AND e.job_key=q.job_key
                    LEFT JOIN employer_dossiers d
                      ON d.profile_id=q.profile_id AND d.job_key=q.job_key
-                   WHERE ((q.status='queued' AND q.available_at<=CURRENT_TIMESTAMP)
-                      OR (q.status='leased' AND q.lease_until<CURRENT_TIMESTAMP))"""
+                   WHERE ((q.status='queued' AND datetime(q.available_at)<=CURRENT_TIMESTAMP)
+                      OR (q.status='leased' AND datetime(q.lease_until)<CURRENT_TIMESTAMP))"""
                 + scope
                 + " ORDER BY q.priority DESC,a.opportunity DESC,q.queued_at LIMIT 1",
                 parameters,

@@ -47,6 +47,36 @@ class ResearchWorkerTests(unittest.TestCase):
             self.assertIn("different task", queue["last_error"])
             self.assertEqual(0, dossiers)
 
+    def test_iso_retry_time_becomes_claimable_without_rewriting_queue_state(
+        self,
+    ) -> None:
+        profile = CandidateProfile(
+            new_profile_id(),
+            "v1",
+            {"track": TrackProfile(8, 7, 0.8, 6, rationale="fixture")},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = AssessmentStore(Path(temporary) / "state.sqlite3")
+            result = score(
+                profile, "board:1", "track", AssessmentAxes(8, 8, 9, 1, 9)
+            )
+            store.upsert_score(
+                result,
+                url="https://example.test/1",
+                title="Engineer",
+                company="Example",
+                extraction_confidence=0.95,
+            )
+            apply_gate(store, profile.profile_id, "board:1")
+            with store.connection() as connection:
+                connection.execute(
+                    "UPDATE employer_research_queue SET available_at=?",
+                    ("2000-01-01T00:00:00+00:00",),
+                )
+            task = store.claim_research("retry-worker")
+            self.assertIsNotNone(task)
+            self.assertEqual("board:1", task.job_key)
+
 
 if __name__ == "__main__":
     unittest.main()
