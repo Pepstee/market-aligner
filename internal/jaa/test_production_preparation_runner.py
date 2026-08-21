@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import os
 import sqlite3
 import subprocess
@@ -33,6 +34,65 @@ def _deployment(tmp_path: Path) -> runner._ProductionPreparationDeployment:
         model="gpt-test",
         timeout_seconds=30,
     )
+
+
+def _write_admission_fixture(
+    database: Path,
+    application_id: str,
+    *,
+    context_producer: str,
+    stored_producer: str | None = None,
+    canonical: bool = True,
+    context_sha256: str | None = None,
+) -> None:
+    handoff_root = "4" * 64
+    context = {
+        "environment": "production",
+        "handoff_root_sha256": handoff_root,
+        "producer_commit_sha": context_producer,
+        "producer_product": "market-aligner",
+        "source_record_sha256": "3" * 64,
+        "trust_root_id": runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+    }
+    if canonical:
+        context_bytes = runner.canonical_json_bytes(context)
+    else:
+        context_bytes = json.dumps(context, indent=2, sort_keys=True).encode() + b"\n"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE application_admissions ("
+        "application_id TEXT PRIMARY KEY, admission_context_bytes BLOB NOT NULL, "
+        "admission_context_sha256 TEXT NOT NULL, producer_commit_sha TEXT NOT NULL, "
+        "producer_product TEXT NOT NULL, environment TEXT NOT NULL, "
+        "trust_root_id TEXT NOT NULL, handoff_root_sha256 TEXT NOT NULL, "
+        "sealed INTEGER NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO application_admissions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        (
+            application_id,
+            context_bytes,
+            context_sha256 or hashlib.sha256(context_bytes).hexdigest(),
+            stored_producer or context_producer,
+            "market-aligner",
+            "production",
+            runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+            handoff_root,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+
+def _git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
 
 
 def _real_preflight_deployment(
@@ -167,7 +227,9 @@ def _real_preflight_deployment(
 
     monkeypatch.setattr(runner, "_PinnedProductionPaths", _Pinned)
     monkeypatch.setattr(
-        runner, "_source_record_for_application", lambda *args: "3" * 64
+        runner,
+        "_source_record_for_application",
+        lambda *args: runner._AdmittedSourceRecord("3" * 64, "2" * 40),
     )
     monkeypatch.setattr(runner, "ProtectedLocalOutbox", lambda *args, **kwargs: object())
     monkeypatch.setattr(runner, "HandoffAdmissionStore", lambda *args, **kwargs: object())
@@ -183,6 +245,115 @@ def test_public_runner_accepts_only_application_id() -> None:
     )
 
 
+def test_source_record_binds_exact_sealed_producer_context(tmp_path: Path) -> None:
+    application_id = "app_" + "1" * 64
+    database = tmp_path / "admissions.sqlite3"
+    _write_admission_fixture(
+        database,
+        application_id,
+        context_producer="2" * 40,
+    )
+    admitted = runner._source_record_for_application(database, application_id)
+    assert admitted == runner._AdmittedSourceRecord("3" * 64, "2" * 40)
+
+
+@pytest.mark.parametrize(
+    "substitution",
+    ("stored-producer", "context-encoding", "context-hash"),
+)
+def test_source_record_rejects_sealed_context_substitution(
+    tmp_path: Path, substitution: str
+) -> None:
+    application_id = "app_" + "1" * 64
+    database = tmp_path / "admissions.sqlite3"
+    _write_admission_fixture(
+        database,
+        application_id,
+        context_producer="2" * 40,
+        stored_producer="1" * 40 if substitution == "stored-producer" else None,
+        canonical=substitution != "context-encoding",
+        context_sha256="0" * 64 if substitution == "context-hash" else None,
+    )
+    with pytest.raises(
+        runner.ProductionPreparationDeploymentError,
+        match="sealed admission context differs",
+    ):
+        runner._source_record_for_application(database, application_id)
+
+
+def test_admitted_ancestor_with_unchanged_handoff_authority_is_compatible(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "Artiom Gutu")
+    _git(repository, "config", "user.email", "gutu.artiom444@gmail.com")
+    authority = repository / runner._HANDOFF_AUTHORITY_PATHS[0]
+    authority.parent.mkdir(parents=True)
+    authority.write_text("sealed authority\n")
+    _git(repository, "add", str(authority.relative_to(repository)))
+    _git(repository, "commit", "-qm", "admitted")
+    admitted = _git(repository, "rev-parse", "HEAD")
+    (repository / "unrelated.txt").write_text("current runtime\n")
+    _git(repository, "add", "unrelated.txt")
+    _git(repository, "commit", "-qm", "runtime-only change")
+    current = _git(repository, "rev-parse", "HEAD")
+    descriptor = os.open(repository, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        runner._require_compatible_admitted_producer(
+            repository_descriptor=descriptor,
+            admitted_producer_commit=admitted,
+            current_commit=current,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def test_admitted_producer_rejects_authority_change_and_nonancestor(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "Artiom Gutu")
+    _git(repository, "config", "user.email", "gutu.artiom444@gmail.com")
+    authority = repository / runner._HANDOFF_AUTHORITY_PATHS[0]
+    authority.parent.mkdir(parents=True)
+    authority.write_text("sealed authority\n")
+    _git(repository, "add", str(authority.relative_to(repository)))
+    _git(repository, "commit", "-qm", "admitted")
+    admitted = _git(repository, "rev-parse", "HEAD")
+    authority.write_text("changed authority\n")
+    _git(repository, "add", str(authority.relative_to(repository)))
+    _git(repository, "commit", "-qm", "changed authority")
+    changed = _git(repository, "rev-parse", "HEAD")
+    descriptor = os.open(repository, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="handoff authority changed",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=admitted,
+                current_commit=changed,
+            )
+        empty_tree = _git(repository, "hash-object", "-t", "tree", "/dev/null")
+        diverged = _git(repository, "commit-tree", empty_tree, "-m", "diverged")
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="not an ancestor",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=diverged,
+                current_commit=changed,
+            )
+    finally:
+        os.close(descriptor)
+
+
 def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -193,13 +364,23 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     editorial_arguments: list[dict[str, object]] = []
     recruiter_arguments: dict[str, object] = {}
     poppler_arguments: dict[str, object] = {}
+    producer_compatibility: dict[str, object] = {}
     stages: list[str] = []
     monkeypatch.delenv(runner.PUBLIC_KEY_ENV, raising=False)
     monkeypatch.delenv(runner.REGISTRY_ENV, raising=False)
     monkeypatch.delenv("JAA_POPPLER_BIN", raising=False)
 
     monkeypatch.setattr(runner, "_git_commit", lambda path, **kwargs: "2" * 40)
-    monkeypatch.setattr(runner, "_source_record_for_application", lambda *args: "3" * 64)
+    monkeypatch.setattr(
+        runner,
+        "_source_record_for_application",
+        lambda *args: runner._AdmittedSourceRecord("3" * 64, "1" * 40),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_require_compatible_admitted_producer",
+        lambda **kwargs: producer_compatibility.update(kwargs),
+    )
     def protected_outbox(*args, **kwargs):
         adapter_arguments.update(kwargs)
         return object()
@@ -366,7 +547,9 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     assert captured["cover_letter_editorial_runtime"].document_kind == "cover_letter"
     assert captured["editorial_runtime"] is not captured["cover_letter_editorial_runtime"]
     assert adapter_arguments["expected_source_record_sha256"] == "3" * 64
-    assert adapter_arguments["allowed_producer_commits"] == frozenset({"2" * 40})
+    assert adapter_arguments["allowed_producer_commits"] == frozenset({"1" * 40})
+    assert producer_compatibility["admitted_producer_commit"] == "1" * 40
+    assert producer_compatibility["current_commit"] == "2" * 40
     assert captured["orchestration_extras"]["production_recruiter_assessor"] is assessor
     assert captured["orchestration_extras"]["poppler_runtime"] is pinned_poppler
     assert {row["codex_binary_fd"] for row in editorial_arguments} == {44}

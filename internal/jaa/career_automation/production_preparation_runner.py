@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,6 +120,17 @@ PRODUCTION_POPPLER_LIBRARY_SHA256 = {
     "libwebp.so.7.1.10": "0b477702bb43d90a1205813a9c211faa8dfef025a258b9d60663b37311b87c08",
 }
 _CONFIG_SCHEMA = "jaa.production-application-preparation-deployment.v1"
+_HANDOFF_AUTHORITY_PATHS = (
+    "src/market_aligner/applications/producer.py",
+    "src/market_aligner/applications/handoff.py",
+    "src/market_aligner/applications/production_handoff.py",
+    "src/market_aligner/service/api.py",
+    "internal/jaa/career_automation/handoff_admission.py",
+    "internal/jaa/career_automation/production_handoff_runner.py",
+    "internal/jaa/career_automation/production_handoff_admission_runner.py",
+    "internal/jaa/career_automation/current_time.py",
+    "internal/jaa/career_automation/authenticated_time_witness.py",
+)
 
 
 class ProductionPreparationDeploymentError(ValueError):
@@ -139,6 +151,12 @@ class _ProductionPreparationDeployment:
     codex_binary: Path
     model: str
     timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class _AdmittedSourceRecord:
+    source_record_sha256: str
+    producer_commit_sha: str
 
 
 @dataclass(frozen=True)
@@ -457,11 +475,16 @@ def installed_production_preparation_deployment() -> _ProductionPreparationDeplo
     )
 
 
-def _source_record_for_application(database: Path, application_id: str) -> str:
+def _source_record_for_application(
+    database: Path, application_id: str
+) -> _AdmittedSourceRecord:
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
         row = connection.execute(
-            "SELECT admission_context_bytes FROM application_admissions WHERE application_id=? AND sealed=1",
+            "SELECT admission_context_bytes, admission_context_sha256, "
+            "producer_commit_sha, producer_product, environment, trust_root_id, "
+            "handoff_root_sha256 FROM application_admissions "
+            "WHERE application_id=? AND sealed=1",
             (application_id,),
         ).fetchone()
     finally:
@@ -469,19 +492,94 @@ def _source_record_for_application(database: Path, application_id: str) -> str:
     if row is None:
         raise ProductionPreparationDeploymentError("sealed production admission is missing")
     try:
-        context = json.loads(bytes(row[0]))
+        context_bytes = bytes(row[0])
+        context = json.loads(context_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProductionPreparationDeploymentError("sealed admission context is invalid") from exc
     source_record = context.get("source_record_sha256") if isinstance(context, dict) else None
+    producer_commit = context.get("producer_commit_sha") if isinstance(context, dict) else None
     if (
         not isinstance(source_record, str)
         or len(source_record) != 64
         or any(c not in "0123456789abcdef" for c in source_record)
+        or not isinstance(producer_commit, str)
+        or len(producer_commit) != 40
+        or any(c not in "0123456789abcdef" for c in producer_commit)
+        or canonical_json_bytes(context) != context_bytes
+        or hashlib.sha256(context_bytes).hexdigest() != row[1]
+        or producer_commit != row[2]
+        or context.get("producer_product") != row[3]
+        or context.get("environment") != row[4]
+        or context.get("trust_root_id") != row[5]
+        or context.get("handoff_root_sha256") != row[6]
+        or row[3] != "market-aligner"
         or context.get("environment") != "production"
         or context.get("trust_root_id") != PRODUCTION_HANDOFF_TRUST_ROOT_ID
     ):
         raise ProductionPreparationDeploymentError("sealed admission context differs")
-    return source_record
+    return _AdmittedSourceRecord(
+        source_record_sha256=source_record,
+        producer_commit_sha=producer_commit,
+    )
+
+
+def _require_compatible_admitted_producer(
+    *,
+    repository_descriptor: int,
+    admitted_producer_commit: str,
+    current_commit: str,
+) -> None:
+    if (
+        len(admitted_producer_commit) != 40
+        or any(c not in "0123456789abcdef" for c in admitted_producer_commit)
+        or len(current_commit) != 40
+        or any(c not in "0123456789abcdef" for c in current_commit)
+    ):
+        raise ProductionPreparationDeploymentError("producer commit identity is malformed")
+    if admitted_producer_commit == current_commit:
+        return
+    repository = f"/proc/self/fd/{repository_descriptor}"
+    try:
+        ancestor = subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                admitted_producer_commit,
+                current_commit,
+            ],
+            cwd=repository,
+            check=False,
+            capture_output=True,
+            pass_fds=(repository_descriptor,),
+        )
+        authority_diff = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--quiet",
+                admitted_producer_commit,
+                current_commit,
+                "--",
+                *_HANDOFF_AUTHORITY_PATHS,
+            ],
+            cwd=repository,
+            check=False,
+            capture_output=True,
+            pass_fds=(repository_descriptor,),
+        )
+    except (OSError, ValueError) as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer compatibility cannot be verified"
+        ) from exc
+    if ancestor.returncode != 0:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer is not an ancestor of the current repository"
+        )
+    if authority_diff.returncode != 0:
+        raise ProductionPreparationDeploymentError(
+            "handoff authority changed after the admitted producer commit"
+        )
 
 
 def _open_admission_database(data_descriptor: int) -> tuple[int, int]:
@@ -783,7 +881,15 @@ def _run_production_preparation(
             after_preflight_hook("database")
         resources.verify()
         pinned_database = Path(f"/proc/self/fd/{database_descriptor}")
-        source_record = _source_record_for_application(pinned_database, application_id)
+        admitted_source = _source_record_for_application(
+            pinned_database, application_id
+        )
+        _require_compatible_admitted_producer(
+            repository_descriptor=pinned.repository_descriptor,
+            admitted_producer_commit=admitted_source.producer_commit_sha,
+            current_commit=current_commit,
+        )
+        source_record = admitted_source.source_record_sha256
         bundle_descriptor = pinned.open_bundle(source_record)
         if after_preflight_hook is not None:
             after_preflight_hook("bundle")
@@ -792,7 +898,9 @@ def _run_production_preparation(
             deployment.outbox_root / "bundles" / source_record,
             repository_root=deployment.repository_root,
             expected_source_record_sha256=source_record,
-            allowed_producer_commits=frozenset({current_commit}),
+            allowed_producer_commits=frozenset(
+                {admitted_source.producer_commit_sha}
+            ),
             bundle_descriptor=bundle_descriptor,
         )
         pinned.register_adapter(adapter)
