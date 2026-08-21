@@ -69,6 +69,7 @@ class CandidateContactResourceLease:
     public_key_bytes: bytes
     registry_path: Path
     registry_bytes: bytes
+    registry_chain: tuple[tuple[Path, bytes], ...] = ()
 
     def __post_init__(self) -> None:
         for path, value in (
@@ -78,6 +79,22 @@ class CandidateContactResourceLease:
         ):
             if not path.is_absolute() or not isinstance(value, bytes) or not value:
                 raise ValueError("contact resource lease is malformed")
+        chain = self.registry_chain or ((self.registry_path, self.registry_bytes),)
+        if (
+            any(
+                not path.is_absolute()
+                or not isinstance(value, bytes)
+                or not value
+                for path, value in chain
+            )
+            or sum(
+                path == self.registry_path and value == self.registry_bytes
+                for path, value in chain
+            )
+            != 1
+            or len({path for path, _value in chain}) != len(chain)
+        ):
+            raise ValueError("contact registry resource chain is malformed")
 
 
 @dataclass(frozen=True)
@@ -113,7 +130,9 @@ def _load_contact_registry(
         resource_lease.__post_init__()
         if candidate != resource_lease.registry_path:
             raise ValueError("contact registry resource lease path differs")
-        paths_and_values = ((candidate, resource_lease.registry_bytes),)
+        paths_and_values = resource_lease.registry_chain or (
+            (candidate, resource_lease.registry_bytes),
+        )
     else:
         paths_and_values = None
     if not candidate.is_absolute() or candidate.is_symlink():
@@ -134,7 +153,7 @@ def _load_contact_registry(
             raise ValueError("operator contact registry directory is unsafe or empty")
         paths_and_values = tuple((path, path.read_bytes()) for path in paths)
     else:
-        paths = [candidate]
+        paths = [path for path, _value in paths_and_values]
 
     registries: dict[str, _VerifiedRegistry] = {}
     for path, value in paths_and_values:

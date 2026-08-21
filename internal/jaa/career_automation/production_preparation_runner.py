@@ -406,6 +406,49 @@ class _PinnedPreparationResources:
         os.lseek(descriptor, 0, os.SEEK_SET)
         return b"".join(chunks)
 
+    def pin_contact_registry_chain(
+        self, head_path: Path
+    ) -> tuple[tuple[Path, bytes], ...]:
+        """Pin every signed registry predecessor while retaining the exact head."""
+
+        chain: list[tuple[Path, bytes]] = []
+        cursor = head_path
+        seen: set[Path] = set()
+        while True:
+            if cursor in seen or len(seen) >= 64:
+                raise ProductionPreparationDeploymentError(
+                    "compiled contact registry chain is cyclic or unbounded"
+                )
+            seen.add(cursor)
+            if cursor != head_path:
+                self.pin_file(
+                    cursor,
+                    expected_sha256=None,
+                    expected_mode=0o600,
+                    expected_uid=os.geteuid(),
+                    label="contact registry predecessor",
+                )
+            value = self.file_bytes(cursor)
+            try:
+                document = json.loads(value)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ProductionPreparationDeploymentError(
+                    "compiled contact registry chain is invalid JSON"
+                ) from exc
+            prior = document.get("prior_registry_sha256")
+            chain.append((cursor, value))
+            if prior is None:
+                return tuple(chain)
+            if (
+                not isinstance(prior, str)
+                or len(prior) != 64
+                or any(character not in "0123456789abcdef" for character in prior)
+            ):
+                raise ProductionPreparationDeploymentError(
+                    "compiled contact registry predecessor is malformed"
+                )
+            cursor = head_path.parent / f"{prior}.json"
+
     def directory_descriptor(self, path: Path) -> int:
         matches = [row[1] for row in self._directory_pins if row[0] == path]
         if len(matches) != 1:
@@ -841,6 +884,9 @@ def _run_production_preparation(
                 expected_uid=os.geteuid(),
                 label="authority",
             )
+        registry_chain = resources.pin_contact_registry_chain(
+            deployment.contact_registry_path
+        )
         resources.pin_private_directory(deployment.output_root)
         resources.pin_private_directory(deployment.recruiter_archive_root)
         resources.pin_file(
@@ -925,6 +971,7 @@ def _run_production_preparation(
             public_key_bytes=resources.file_bytes(deployment.contact_public_key_path),
             registry_path=deployment.contact_registry_path,
             registry_bytes=resources.file_bytes(deployment.contact_registry_path),
+            registry_chain=registry_chain,
         )
         codex_descriptor = resources.file_descriptor(deployment.codex_binary)
         poppler_runtime = pinned_poppler_runtime(

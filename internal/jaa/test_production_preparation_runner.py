@@ -8,7 +8,6 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -134,7 +133,12 @@ def _real_preflight_deployment(
     paths["candidate"].parent.mkdir(mode=0o700)
     paths["contact"].parent.mkdir(mode=0o700)
     for name in ("candidate", "contact", "public_key", "registry"):
-        paths[name].write_bytes(name.encode())
+        value = (
+            b'{"prior_registry_sha256":null}'
+            if name == "registry"
+            else name.encode()
+        )
+        paths[name].write_bytes(value)
         paths[name].chmod(0o600)
     poppler_hashes: dict[str, str] = {}
     for name in runner.PRODUCTION_POPPLER_SHA256:
@@ -243,6 +247,53 @@ def test_public_runner_accepts_only_application_id() -> None:
     assert tuple(inspect.signature(runner.run_production_preparation).parameters) == (
         "application_id",
     )
+
+
+def test_registry_chain_predecessors_remain_in_the_resource_lease(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    prior_identity = "1" * 64
+    head = registry / ("2" * 64 + ".json")
+    prior = registry / f"{prior_identity}.json"
+    head.write_bytes(
+        json.dumps(
+            {"prior_registry_sha256": prior_identity},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    prior.write_bytes(b'{"prior_registry_sha256":null}')
+    head.chmod(0o600)
+    prior.chmod(0o600)
+    resources = runner._PinnedPreparationResources()
+    try:
+        resources.pin_file(
+            head,
+            expected_sha256=hashlib.sha256(head.read_bytes()).hexdigest(),
+            expected_mode=0o600,
+            expected_uid=os.geteuid(),
+            label="contact registry",
+        )
+        chain = resources.pin_contact_registry_chain(head)
+        assert tuple(path for path, _value in chain) == (head, prior)
+        assert tuple(value for _path, value in chain) == (
+            head.read_bytes(),
+            prior.read_bytes(),
+        )
+
+        replacement = registry / "replacement.json"
+        replacement.write_bytes(prior.read_bytes())
+        replacement.chmod(0o600)
+        replacement.replace(prior)
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="changed during operation",
+        ):
+            resources.verify()
+    finally:
+        resources.close()
 
 
 def test_source_record_binds_exact_sealed_producer_context(tmp_path: Path) -> None:
@@ -439,6 +490,8 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
                 if path == deployment.admission_database
                 else 44
             )
+        def pin_contact_registry_chain(self, path):
+            return ((path, path.read_bytes()),)
         def directory_descriptor(self, path):
             descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
             self.directory_descriptors.append(descriptor)

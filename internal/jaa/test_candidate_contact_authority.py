@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import base64
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from career_automation.candidate_contact_authority import (
     REGISTRY_ENV,
     REGISTRY_SCHEMA_VERSION,
     SCHEMA_VERSION,
+    CandidateContactResourceLease,
     load_candidate_contact_authority,
 )
 from career_automation.evidence_matching import canonical_json
@@ -317,6 +319,65 @@ def test_version_two_requires_monotonic_signed_revocation_chain(
             first,
             repository_root=ROOT,
             verified_at=datetime(2026, 8, 6, 12, 1, tzinfo=timezone.utc),
+        )
+
+
+def test_pinned_resource_lease_carries_complete_signed_registry_chain(
+    tmp_path: Path,
+) -> None:
+    first = _authority(tmp_path)
+    first_registry = next((tmp_path / "contact-registry").iterdir())
+    second = _authority(
+        tmp_path,
+        record_version=2,
+        create_registry=False,
+        city="Bristol",
+    )
+    second_registry = _registry(
+        tmp_path,
+        second,
+        issued_at="2026-08-06T12:01:00+00:00",
+        registry_version=2,
+        prior=first_registry,
+        revoked=(first.stem,),
+    )
+    public_key_path = Path(os.environ[contact_module.PUBLIC_KEY_ENV])
+    os.environ[REGISTRY_ENV] = str(second_registry)
+    lease = CandidateContactResourceLease(
+        authority_path=second,
+        authority_bytes=second.read_bytes(),
+        public_key_path=public_key_path,
+        public_key_bytes=public_key_path.read_bytes(),
+        registry_path=second_registry,
+        registry_bytes=second_registry.read_bytes(),
+        registry_chain=(
+            (second_registry, second_registry.read_bytes()),
+            (first_registry, first_registry.read_bytes()),
+        ),
+    )
+
+    current = load_candidate_contact_authority(
+        second,
+        repository_root=ROOT,
+        verified_at=datetime(2026, 8, 6, 12, 1, tzinfo=timezone.utc),
+        resource_lease=lease,
+    )
+    assert current.contact.record_version == 2
+    assert current.contact.city == "Bristol"
+
+    with pytest.raises(ValueError, match="chain is incomplete"):
+        load_candidate_contact_authority(
+            second,
+            repository_root=ROOT,
+            verified_at=datetime(2026, 8, 6, 12, 1, tzinfo=timezone.utc),
+            resource_lease=CandidateContactResourceLease(
+                authority_path=second,
+                authority_bytes=second.read_bytes(),
+                public_key_path=public_key_path,
+                public_key_bytes=public_key_path.read_bytes(),
+                registry_path=second_registry,
+                registry_bytes=second_registry.read_bytes(),
+            ),
         )
 
 
