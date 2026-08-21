@@ -5,7 +5,7 @@ import inspect
 import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,7 @@ from market_aligner.applications.production_handoff import (
     PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
     ProductionHandoffError,
     _build_production_handoff_from_authenticated_time,
+    _deterministic_handoff_issuance,
     _git_commit,
     _persist_execution_receipt,
     _protected_candidate_authority,
@@ -53,6 +54,66 @@ PROMOTION_SHA = "b" * 64
 
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def test_handoff_issuance_uses_latest_durable_input_and_not_evaluation_clock() -> None:
+    source = datetime(2026, 8, 20, 19, 46, 2, tzinfo=timezone.utc)
+    dossier = datetime(2026, 8, 20, 22, 7, 49, tzinfo=timezone.utc)
+    first = _deterministic_handoff_issuance(
+        source_observed_at=source,
+        dossier_issued_at=dossier,
+        evaluated_at=datetime(2026, 8, 20, 22, 8, tzinfo=timezone.utc),
+        vacancy_maximum_age_seconds=21_600,
+        dossier_maximum_age_seconds=86_400,
+    )
+    replay = _deterministic_handoff_issuance(
+        source_observed_at=source,
+        dossier_issued_at=dossier,
+        evaluated_at=datetime(2026, 8, 20, 23, 0, tzinfo=timezone.utc),
+        vacancy_maximum_age_seconds=21_600,
+        dossier_maximum_age_seconds=86_400,
+    )
+    assert first == replay
+    assert first == (
+        dossier,
+        datetime(2026, 8, 21, 1, 46, 2, tzinfo=timezone.utc),
+        datetime(2026, 8, 21, 22, 7, 49, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "dossier", "evaluated", "vacancy_age", "dossier_age", "message"),
+    [
+        ("future", "past", "now", 21_600, 86_400, "official_source_future"),
+        ("past", "future", "now", 21_600, 86_400, "employer_research_future"),
+        ("expired", "past", "now", 21_600, 86_400, "official_source_stale"),
+        ("past", "expired", "now", 21_600, 86_400, "employer_research_stale"),
+        ("past", "past", "now", 0, 86_400, "input_time_order"),
+    ],
+)
+def test_handoff_issuance_rejects_future_expired_and_impossible_ordering(
+    source: str,
+    dossier: str,
+    evaluated: str,
+    vacancy_age: int,
+    dossier_age: int,
+    message: str,
+) -> None:
+    now = datetime(2026, 8, 21, 0, 0, tzinfo=timezone.utc)
+    values = {
+        "now": now,
+        "past": now - timedelta(hours=1),
+        "future": now + timedelta(seconds=1),
+        "expired": now - timedelta(days=2),
+    }
+    with pytest.raises(ProductionHandoffError, match=message):
+        _deterministic_handoff_issuance(
+            source_observed_at=values[source],
+            dossier_issued_at=values[dossier],
+            evaluated_at=values[evaluated],
+            vacancy_maximum_age_seconds=vacancy_age,
+            dossier_maximum_age_seconds=dossier_age,
+        )
 
 
 def _private_tree(root: Path) -> None:

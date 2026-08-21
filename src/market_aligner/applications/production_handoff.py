@@ -1183,6 +1183,62 @@ def _reference(
     )
 
 
+def _deterministic_handoff_issuance(
+    *,
+    source_observed_at: datetime,
+    dossier_issued_at: datetime,
+    evaluated_at: datetime,
+    vacancy_maximum_age_seconds: int,
+    dossier_maximum_age_seconds: int,
+) -> tuple[datetime, datetime, datetime]:
+    """Derive identity time only from durable inputs and prove their validity."""
+
+    values = (source_observed_at, dossier_issued_at, evaluated_at)
+    if (
+        vacancy_maximum_age_seconds <= 0
+        or dossier_maximum_age_seconds <= 0
+        or any(
+            value.tzinfo is None
+            or value.utcoffset() != timedelta(0)
+            or value.microsecond
+            for value in values
+        )
+    ):
+        raise ProductionHandoffError(
+            "input_time_order", "handoff input times or validity intervals are invalid"
+        )
+    if source_observed_at > evaluated_at:
+        raise ProductionHandoffError(
+            "official_source_future", "official source was observed after evaluation"
+        )
+    if dossier_issued_at > evaluated_at:
+        raise ProductionHandoffError(
+            "employer_research_future", "employer dossier was issued after evaluation"
+        )
+    handoff_issued_at = max(source_observed_at, dossier_issued_at)
+    vacancy_valid_until = source_observed_at + timedelta(
+        seconds=vacancy_maximum_age_seconds
+    )
+    dossier_valid_until = dossier_issued_at + timedelta(
+        seconds=dossier_maximum_age_seconds
+    )
+    if not (
+        source_observed_at <= handoff_issued_at <= evaluated_at < vacancy_valid_until
+    ):
+        raise ProductionHandoffError(
+            "official_source_stale",
+            "official source is not current at handoff and evaluation",
+        )
+    if not (
+        dossier_issued_at <= handoff_issued_at <= evaluated_at < dossier_valid_until
+    ):
+        raise ProductionHandoffError(
+            "employer_research_stale",
+            "employer dossier is not current at handoff and evaluation",
+        )
+    return handoff_issued_at, vacancy_valid_until, dossier_valid_until
+
+
 def _build_production_handoff_from_authenticated_time(
     *,
     deployment: _ProductionHandoffDeployment,
@@ -1343,11 +1399,6 @@ def _build_production_handoff_from_authenticated_time(
         raise ProductionHandoffError(
             "employer_research_timestamp", "canonical dossier timestamp is invalid"
         ) from exc
-    if (current - dossier_issued).total_seconds() > dossier_maximum_age_seconds:
-        raise ProductionHandoffError(
-            "employer_research_stale", "canonical dossier is stale"
-        )
-
     metadata_bytes, source_object_bytes, source_receipt_bytes, observed_at = (
         _research_evidence(
             deployment.data_home,
@@ -1366,6 +1417,13 @@ def _build_production_handoff_from_authenticated_time(
             collection_config_sha256=deployment.collection_config_sha256,
             collection_config_file_sha256=deployment.collection_config_file_sha256,
         )
+    )
+    handoff_issued_at, vacancy_until, dossier_until = _deterministic_handoff_issuance(
+        source_observed_at=observed_at,
+        dossier_issued_at=dossier_issued,
+        evaluated_at=current,
+        vacancy_maximum_age_seconds=vacancy_maximum_age_seconds,
+        dossier_maximum_age_seconds=dossier_maximum_age_seconds,
     )
     source_envelope = _document(source_object_bytes, "canonical vacancy object")
     expected_raw_json = (
@@ -1521,7 +1579,7 @@ def _build_production_handoff_from_authenticated_time(
     candidate_intent_document = {
         "authority_revision": 1,
         "authority_source_sha256": _sha(candidate_authority_bytes),
-        "created_at": _utc(observed_at),
+        "created_at": _utc(handoff_issued_at),
         "geography_priority": [
             {"rank": 1, "region_code": "UK", "work_mode": "remote"},
             {"rank": 2, "region_code": "UK", "work_mode": "hybrid"},
@@ -1575,7 +1633,7 @@ def _build_production_handoff_from_authenticated_time(
     manifest = {
         "assessment_receipt_sha256": _sha(assessment_receipt_bytes),
         "candidate_intent_sha256": _sha(candidate_intent_bytes),
-        "created_at": _utc(observed_at),
+        "created_at": _utc(handoff_issued_at),
         "eligibility": eligibility,
         "employer_dossier_sha256": _sha(dossier_bytes),
         "evidence_ledger_sha256": _sha(evidence_bytes),
@@ -1599,16 +1657,14 @@ def _build_production_handoff_from_authenticated_time(
     )
 
     profile_subject = {"profile_id": profile_id, "profile_version": profile.version}
-    active_until = observed_at + timedelta(days=30)
-    vacancy_until = observed_at + timedelta(seconds=vacancy_maximum_age_seconds)
-    dossier_until = dossier_issued + timedelta(seconds=dossier_maximum_age_seconds)
+    active_until = handoff_issued_at + timedelta(days=30)
     references: dict[str, HandoffReference] = {
         "assessment.receipt": _reference(
             assessment_receipt_bytes,
             type_id="assessment_receipt",
             schema_version="market-aligner.assessment-receipt.v1",
             subject=subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         ),
         "assessment.scoring_parameters": _reference(
@@ -1616,7 +1672,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="scoring_parameters",
             schema_version="market-aligner.scoring-parameters.v1",
             subject={},
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=None,
         ),
         "candidate_intent": _reference(
@@ -1624,7 +1680,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="candidate_intent",
             schema_version="market-aligner.candidate-intent.v1",
             subject=profile_subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=active_until,
         ),
         "candidate_intent.authority_source": _reference(
@@ -1632,7 +1688,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="candidate_authority_source",
             schema_version="market-aligner.candidate-authority-source.v1",
             subject=profile_subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=active_until,
         ),
         "eligibility.receipt": _reference(
@@ -1640,7 +1696,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="eligibility_receipt",
             schema_version="market-aligner.eligibility-receipt.v1",
             subject=subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         ),
         "employer_dossier": _reference(
@@ -1656,7 +1712,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="evidence_ledger",
             schema_version="market-aligner.evidence-ledger.v1",
             subject=profile_subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=active_until,
         ),
         "selection.policy": _reference(
@@ -1664,7 +1720,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="selection_policy",
             schema_version="market-aligner.selection-policy.v1",
             subject={},
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=active_until,
         ),
         "selection.receipt": _reference(
@@ -1672,7 +1728,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="selection_receipt",
             schema_version="market-aligner.selection-receipt.v1",
             subject=subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         ),
         "vacancy.location.facts": _reference(
@@ -1680,7 +1736,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="location_facts",
             schema_version="market-aligner.location-facts.v1",
             subject=vacancy_subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         ),
         "vacancy.raw_listing": _reference(
@@ -1688,7 +1744,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="raw_listing",
             schema_version="market-aligner.raw-listing-evidence.v1",
             subject=vacancy_subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         ),
         "vacancy.requirements": _reference(
@@ -1696,7 +1752,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="requirement_projection",
             schema_version="market-aligner.requirement-projection.v1",
             subject=vacancy_subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         ),
         "vacancy.snapshot": _reference(
@@ -1704,7 +1760,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="vacancy_snapshot",
             schema_version="market-aligner.vacancy-snapshot.v1",
             subject=vacancy_subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         ),
     }
@@ -1714,7 +1770,7 @@ def _build_production_handoff_from_authenticated_time(
             type_id="eligibility_evidence",
             schema_version="market-aligner.eligibility-evidence.v1",
             subject=subject,
-            issued_at=observed_at,
+            issued_at=handoff_issued_at,
             valid_until=vacancy_until,
         )
 
@@ -1730,7 +1786,7 @@ def _build_production_handoff_from_authenticated_time(
         references=references,
         environment="production",
         trust_root_id=PRODUCTION_HANDOFF_TRUST_ROOT_ID,
-        issued_at=_utc(observed_at),
+        issued_at=_utc(handoff_issued_at),
         source_job_key=source_job_key,
     )
     receipt_basis = {

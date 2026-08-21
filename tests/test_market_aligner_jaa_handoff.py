@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+from dataclasses import asdict
 from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -43,10 +44,19 @@ from market_aligner.applications.producer import (
     HandoffReference,
     write_protected_handoff_bundle,
 )
+from market_aligner.applications.production_handoff import (
+    _deterministic_handoff_issuance,
+)
 from market_aligner.assessment.scoring import FitStatus, ScoreResult
 from market_aligner.cli import main as market_aligner_main
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile
 from market_aligner.profiler.store import ProfileStore
+from market_aligner.research.models import (
+    ClaimSupport,
+    ResearchClaim,
+    ResearchDossier,
+    SourceCitation,
+)
 from market_aligner.service.api import MarketAlignerService
 
 MARKET_VECTOR_SHA256 = (
@@ -343,6 +353,162 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
                 {handoff.payload["producer"]["commit_sha"]}
             ),
         ).context_bytes
+
+
+def test_later_dossier_anchor_survives_real_producer_and_admission_replay(
+    tmp_path: Path,
+) -> None:
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    document = json.loads(fixture_bytes)
+    original = parse_handoff(
+        base64.b64decode(document["handoff"]["canonical_base64"], validate=True)
+    )
+    source_issued = datetime(2026, 8, 10, 10, 4, tzinfo=timezone.utc)
+    dossier_issued = datetime(2026, 8, 10, 10, 4, 30, tzinfo=timezone.utc)
+    handoff_issued, _, dossier_valid_until = _deterministic_handoff_issuance(
+        source_observed_at=source_issued,
+        dossier_issued_at=dossier_issued,
+        evaluated_at=ADMISSION_TIME,
+        vacancy_maximum_age_seconds=24 * 60 * 60,
+        dossier_maximum_age_seconds=24 * 60 * 60,
+    )
+    assert handoff_issued == dossier_issued
+
+    official_excerpt = "Build agentic software systems."
+    official_object_sha256 = hashlib.sha256(official_excerpt.encode()).hexdigest()
+    support = ClaimSupport(
+        citation_id="official_job",
+        selector=f"bytes:0-{len(official_excerpt.encode())}",
+        excerpt=official_excerpt,
+        excerpt_sha256=hashlib.sha256(official_excerpt.encode()).hexdigest(),
+    )
+    dossier = ResearchDossier(
+        profile_id=original.payload["profile_id"],
+        job_key=original.payload["job_key"],
+        company=original.payload["vacancy"]["company_name"],
+        role=original.payload["vacancy"]["role_title"],
+        claims=(
+            ResearchClaim(
+                claim=official_excerpt,
+                citation_ids=("official_job",),
+                confidence=1.0,
+                supports=(support,),
+            ),
+        ),
+        citations=(
+            SourceCitation(
+                citation_id="official_job",
+                url=original.payload["vacancy"]["provenance"]["canonical_url"],
+                title="Canonical collector vacancy",
+                accessed_at=handoff_issued.isoformat().replace("+00:00", "Z"),
+                content_sha256=official_object_sha256,
+                source_kind="canonical_vacancy",
+            ),
+        ),
+        source_content_sha256=original.payload["vacancy"]["raw_listing_sha256"],
+        vacancy_snapshot_sha256=original.payload["vacancy"]["vacancy_snapshot_sha256"],
+        promotion_receipt_sha256=original.payload["assessment"][
+            "assessment_receipt_sha256"
+        ],
+        canonical_vacancy_object_sha256=official_object_sha256,
+        schema_version="market-aligner.employer-dossier.v2",
+    )
+    dossier.validate()
+    dossier_bytes = canonical_json_bytes(asdict(dossier))
+    dossier_sha256 = hashlib.sha256(dossier_bytes).hexdigest()
+    payload = json.loads(json.dumps(original.payload))
+    payload["created_at"] = handoff_issued.isoformat().replace("+00:00", "Z")
+    payload["employer_dossier_sha256"] = dossier_sha256
+    handoff = encode_handoff_v1(payload)
+
+    references = {}
+    for row in document["reference_bundle"]["value"]["entries"]:
+        metadata = row["metadata"]
+        subject = dict(metadata["subject"])
+        if "application_id" in subject:
+            subject["application_id"] = handoff.application_id
+        references[metadata["reference_key"]] = HandoffReference(
+            exact_bytes=base64.b64decode(row["object_base64"], validate=True),
+            type_id=metadata["type_id"],
+            schema_version=metadata["schema_version"],
+            subject=subject,
+            issued_at=metadata["issued_at"],
+            valid_until=metadata["valid_until"],
+            issuer_id=metadata["issuer_id"],
+        )
+    references["employer_dossier"] = HandoffReference(
+        exact_bytes=dossier_bytes,
+        type_id="employer_dossier",
+        schema_version="market-aligner.employer-dossier.v2",
+        subject={
+            "job_key": handoff.payload["job_key"],
+            "vacancy_snapshot_sha256": handoff.payload["vacancy"][
+                "vacancy_snapshot_sha256"
+            ],
+        },
+        issued_at=handoff_issued.isoformat().replace("+00:00", "Z"),
+        valid_until=dossier_valid_until.isoformat().replace("+00:00", "Z"),
+    )
+
+    arguments = {
+        "references": references,
+        "environment": "synthetic",
+        "trust_root_id": "synthetic-market-root",
+        "issued_at": handoff_issued.isoformat().replace("+00:00", "Z"),
+        "source_job_key": "workable:synthetic:42",
+    }
+    first = write_protected_handoff_bundle(
+        tmp_path / "external-data-home", handoff, **arguments
+    )
+    second = write_protected_handoff_bundle(
+        tmp_path / "external-data-home", handoff, **arguments
+    )
+    assert second == first
+
+    adapter = ProtectedLocalOutbox(
+        first.path,
+        repository_root=Path(__file__).resolve().parents[1],
+        expected_source_record_sha256=first.source_record_sha256,
+        allowed_producer_commits=frozenset({handoff.payload["producer"]["commit_sha"]}),
+    )
+    witness = configured_hmac_current_time_witness(
+        authentication_key=b"later-dossier-time-key-32bytes--",
+        environment="synthetic",
+        trust_root_id="synthetic-market-time-root",
+        witness_identity_sha256=hashlib.sha256(b"later-dossier-time").hexdigest(),
+        clock=lambda: ADMISSION_TIME,
+        nonce_source=lambda: b"later-dossier-time-nonce",
+    )
+    database = tmp_path / "later-dossier.sqlite3"
+    HandoffAdmissionStore(
+        database,
+        context_authenticator=adapter,
+        resolver=adapter,
+        current_time_witness=witness,
+    )
+    store = HandoffAdmissionStore(
+        database,
+        context_authenticator=adapter,
+        resolver=adapter,
+        current_time_witness=witness,
+    )
+    admitted = store.admit_authenticated(adapter.handoff_bytes, adapter.context_bytes)
+    replay_store = HandoffAdmissionStore(
+        database,
+        context_authenticator=adapter,
+        resolver=adapter,
+        current_time_witness=witness,
+    )
+    replay = replay_store.admit_authenticated(
+        adapter.handoff_bytes, adapter.context_bytes
+    )
+    assert admitted.created is True
+    assert replay.created is False
+    assert admitted.application_id == handoff.application_id
 
 
 def test_private_producer_real_descriptor_reader_binds_promotion_semantic(
