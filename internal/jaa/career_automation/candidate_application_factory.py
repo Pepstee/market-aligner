@@ -240,6 +240,9 @@ class MarketApplicationDecisionAuthority:
     eligibility_receipt_sha256: str
     selection_receipt_sha256: str
     candidate_projection_sha256: str
+    candidate_authority_file_sha256: str
+    candidate_authority_object_sha256: str
+    evidence_ledger_sha256: str
     approved_evidence_file_sha256: str
     approved_evidence_object_sha256: str
     evidence_projection_sha256: str
@@ -279,6 +282,9 @@ class MarketApplicationDecisionAuthority:
             self.eligibility_receipt_sha256,
             self.selection_receipt_sha256,
             self.candidate_projection_sha256,
+            self.candidate_authority_file_sha256,
+            self.candidate_authority_object_sha256,
+            self.evidence_ledger_sha256,
             self.approved_evidence_file_sha256,
             self.approved_evidence_object_sha256,
             self.evidence_projection_sha256,
@@ -305,9 +311,12 @@ class MarketApplicationDecisionAuthority:
             "approved_evidence_file_sha256": self.approved_evidence_file_sha256,
             "approved_evidence_object_sha256": self.approved_evidence_object_sha256,
             "candidate_projection_sha256": self.candidate_projection_sha256,
+            "candidate_authority_file_sha256": self.candidate_authority_file_sha256,
+            "candidate_authority_object_sha256": self.candidate_authority_object_sha256,
             "company_name": self.company_name,
             "current_boundary_receipt_sha256": self.current_boundary_receipt_sha256,
             "eligibility_receipt_sha256": self.eligibility_receipt_sha256,
+            "evidence_ledger_sha256": self.evidence_ledger_sha256,
             "environment": self.environment,
             "evidence_matrix": [dict(row) for row in self.evidence_matrix],
             "evidence_matrix_sha256": self.evidence_matrix_sha256,
@@ -364,6 +373,9 @@ def build_market_application_decision_authority(
     selection_receipt_sha256: str,
     selection_receipt_bytes: bytes,
     candidate_projection: Mapping[str, object],
+    candidate_authority_bytes: bytes,
+    evidence_ledger_sha256: str,
+    evidence_ledger_bytes: bytes,
     source_url: str,
     role_title: str,
     company_name: str,
@@ -379,6 +391,8 @@ def build_market_application_decision_authority(
         (assessment_receipt_sha256, assessment_receipt_bytes, "assessment"),
         (eligibility_receipt_sha256, eligibility_receipt_bytes, "eligibility"),
         (selection_receipt_sha256, selection_receipt_bytes, "selection"),
+        (deployment_binding.candidate_authority_file_sha256, candidate_authority_bytes, "candidate authority"),
+        (evidence_ledger_sha256, evidence_ledger_bytes, "evidence ledger"),
     )
     for expected, value, label in exact:
         if _sha256(value) != expected:
@@ -423,6 +437,38 @@ def build_market_application_decision_authority(
     projection_sha256 = candidate_projection.get("projection_sha256")
     if not isinstance(projection_sha256, str):
         raise ValueError("market application candidate projection is malformed")
+    try:
+        candidate_authority_document = json.loads(candidate_authority_bytes)
+        ledger_rows = [json.loads(line) for line in evidence_ledger_bytes.splitlines()]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("market application candidate evidence is not JSON") from exc
+    if (
+        not isinstance(candidate_authority_document, dict)
+        or candidate_authority_document.get("candidate_projection")
+        != dict(candidate_projection)
+        or len(ledger_rows) != 7
+        or any(not isinstance(row, dict) for row in ledger_rows)
+    ):
+        raise ValueError("market application candidate evidence authority differs")
+    projected_rows = candidate_projection.get("approved_evidence")
+    projected = {
+        str(row["id"]): str(row["statement_sha256"])
+        for row in projected_rows
+        if isinstance(row, Mapping)
+    } if isinstance(projected_rows, list) else {}
+    ledger_ids: set[str] = set()
+    for row in ledger_rows:
+        evidence_id = row.get("evidence_id")
+        claim = row.get("claim")
+        if (
+            not isinstance(evidence_id, str)
+            or evidence_id in ledger_ids
+            or not isinstance(claim, str)
+            or _sha256(claim.encode()) != row.get("content_sha256")
+            or projected.get(evidence_id) != row.get("content_sha256")
+        ):
+            raise ValueError("market application evidence ledger differs from candidate projection")
+        ledger_ids.add(evidence_id)
     values = {
         "admission_receipt_sha256": deployment_binding.admission_receipt_sha256,
         "application_id": deployment_binding.application_id,
@@ -430,10 +476,13 @@ def build_market_application_decision_authority(
         "approved_evidence_file_sha256": _sha256(evidence_bytes),
         "approved_evidence_object_sha256": content_hash(evidence_document),
         "candidate_projection_sha256": projection_sha256,
+        "candidate_authority_file_sha256": deployment_binding.candidate_authority_file_sha256,
+        "candidate_authority_object_sha256": content_hash(candidate_authority_document),
         "company_name": company_name,
         "current_boundary_receipt_sha256": deployment_binding.current_boundary_receipt_sha256,
         "eligibility_receipt_sha256": eligibility_receipt_sha256,
         "environment": deployment_binding.environment,
+        "evidence_ledger_sha256": evidence_ledger_sha256,
         "evidence_matrix": [dict(row) for row in matrix],
         "evidence_matrix_sha256": content_hash([dict(row) for row in matrix]),
         "evidence_projection_sha256": str(compiled["evidence_projection_sha256"]),
@@ -466,6 +515,9 @@ def build_market_application_decision_authority(
         eligibility_receipt_sha256=eligibility_receipt_sha256,
         selection_receipt_sha256=selection_receipt_sha256,
         candidate_projection_sha256=projection_sha256,
+        candidate_authority_file_sha256=deployment_binding.candidate_authority_file_sha256,
+        candidate_authority_object_sha256=content_hash(candidate_authority_document),
+        evidence_ledger_sha256=evidence_ledger_sha256,
         approved_evidence_file_sha256=_sha256(evidence_bytes),
         approved_evidence_object_sha256=content_hash(evidence_document),
         evidence_projection_sha256=str(compiled["evidence_projection_sha256"]),

@@ -724,6 +724,9 @@ class VerifiedApplicationInput:
     eligibility_receipt_bytes: bytes = b""
     selection_receipt_sha256: str = ""
     selection_receipt_bytes: bytes = b""
+    evidence_ledger_sha256: str = ""
+    evidence_ledger_bytes: bytes = b""
+    candidate_authority_bytes: bytes = b""
 
 
 def _verified_market_decision_references(
@@ -781,6 +784,11 @@ def _verified_market_decision_references(
         "selection_receipt_sha256": payload["selection"]["selection_receipt_sha256"],
         "source_job_key": source_job_key,
         "source_observed_at": str(provenance.get("observed_at", "")),
+        "evidence_ledger_sha256": payload["evidence_ledger_sha256"],
+        "evidence_ledger_bytes": graph.objects["evidence_ledger"],
+        "candidate_authority_bytes": graph.objects[
+            "candidate_intent.authority_source"
+        ],
     }
 
 

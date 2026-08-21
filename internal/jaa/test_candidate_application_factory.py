@@ -131,6 +131,15 @@ def _integrated_decision(tmp_path: Path):
     }
     encoded = [canonical_json(value).encode() for value in (assessment, eligibility, selection)]
     projection = json.loads(AUTHORITY_PATH.read_bytes())["candidate_projection"]
+    approved = json.loads(APPROVED_EVIDENCE_PATH.read_bytes())["statements"][:7]
+    ledger_bytes = b"".join(
+        (canonical_json({
+            "claim": row["statement"],
+            "content_sha256": hashlib.sha256(row["statement"].encode()).hexdigest(),
+            "evidence_id": row["id"],
+        }) + "\n").encode()
+        for row in approved
+    )
     authority = build_market_application_decision_authority(
         deployment_binding=inputs["deployment_binding"],
         source_job_key=source_job_key,
@@ -147,6 +156,9 @@ def _integrated_decision(tmp_path: Path):
         selection_receipt_sha256=hashlib.sha256(encoded[2]).hexdigest(),
         selection_receipt_bytes=encoded[2],
         candidate_projection=projection,
+        candidate_authority_bytes=AUTHORITY_PATH.read_bytes(),
+        evidence_ledger_sha256=hashlib.sha256(ledger_bytes).hexdigest(),
+        evidence_ledger_bytes=ledger_bytes,
         source_url="https://apply.workable.com/j/847CFBC5F4",
         role_title="Software Engineer",
         company_name="Cogna",
@@ -206,6 +218,9 @@ def test_integrated_market_decision_rejects_receipt_and_snapshot_substitution(
             selection_receipt_sha256=authority.selection_receipt_sha256,
             selection_receipt_bytes=b"{}",
             candidate_projection=projection,
+            candidate_authority_bytes=AUTHORITY_PATH.read_bytes(),
+            evidence_ledger_sha256=authority.evidence_ledger_sha256,
+            evidence_ledger_bytes=b"substituted",
             source_url=authority.source_url,
             role_title=authority.role_title,
             company_name=authority.company_name,
@@ -234,6 +249,10 @@ def test_integrated_market_decision_rejects_receipt_and_snapshot_substitution(
         replace(authority, matrix_policy_sha256="9" * 64)
     with pytest.raises(ValueError, match="identity"):
         replace(authority, approved_evidence_file_sha256="a" * 64)
+    with pytest.raises(ValueError, match="identity"):
+        replace(authority, evidence_ledger_sha256="b" * 64)
+    with pytest.raises(ValueError, match="identity"):
+        replace(authority, candidate_authority_file_sha256="c" * 64)
 
 
 def test_builds_plain_vacancy_bound_documents_from_approved_atoms() -> None:
