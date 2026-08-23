@@ -41,7 +41,17 @@ market-aligner profiles list
 market-aligner profiles create-synthetic
 market-aligner profiles import --format evidence-led --source /private/profile.yaml
 market-aligner assess --profile-id prf_<opaque-id> --request /private/request.json
+market-aligner ingest --config /private/collection.yaml
 ```
+
+`ingest` runs exactly one bounded official collection cycle from the exact
+configuration file given, against the established external data home, and emits
+one canonical JSON result. Each configuration identity may run once: the
+content-bound operation journal under `<data-home>/state/operations/` refuses
+any replay of a terminal operation before provider access, and marks an
+interrupted run `indeterminate` (fail closed) instead of claiming an
+exactly-once provider call. Provider failures preserve the last good database
+and raw cache.
 
 Live collection configuration is external and injected into adapters. The automatic Scrapling
 fallback uses static then dynamic fetching; stealth/challenge-solving capabilities require an
