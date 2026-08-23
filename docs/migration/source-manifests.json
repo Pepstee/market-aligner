@@ -1,0 +1,47 @@
+{
+  "schema": "market-aligner.source-manifests.v1",
+  "captured_at": "2026-07-31",
+  "sources": [
+    {
+      "id": "legacy-market-aligner",
+      "path": "/Users/admin/Documents/giga-user/market-aligner",
+      "git_status": "untracked-in-parent",
+      "selected_files": 70,
+      "selected_bytes": 450335,
+      "manifest_sha256": "46e6b8d1774bb8b6a705fd12befdd63eab8585a60d1f82d108423e9ba60b4b14"
+    },
+    {
+      "id": "redundant-person-fork",
+      "path": "/Users/admin/Documents/giga-user/market-aligner-artiom",
+      "git_status": "untracked-in-parent",
+      "selected_files": 65,
+      "selected_bytes": 405108,
+      "manifest_sha256": "7ae2c49c82f1e7760df9b27f9f209249680475d950c866785d136df5538c2033"
+    },
+    {
+      "id": "korea-project-selected-code",
+      "path": "/Users/admin/Claude/Projects/Korea Job Scraper",
+      "git_status": "not-a-git-repository",
+      "selected_files": 153,
+      "selected_bytes": 1004769,
+      "manifest_sha256": "084bbea31a2d3bb3ddeaba950cc3d591514eb2ad8188258ccb8c93cab372216a"
+    },
+    {
+      "id": "local-application-plans",
+      "path": "/Users/admin/Documents/giga-user/job-application-automation",
+      "git_status": "tracked-in-parent-with-local-state",
+      "last_relevant_parent_commit": "ab4b6111b0f15d04a1f219f805dd8cb18e788d12"
+    },
+    {
+      "id": "protected-application-upstream",
+      "path": "gutua:protected-active-worktree",
+      "git_status": "pending-sealed-final-handoff",
+      "import_allowed": false
+    }
+  ],
+  "audit_report": {
+    "path": "/Users/admin/Documents/market-aligner-audit/READ_ONLY_RECONCILIATION_2026-07-31.md",
+    "sha256": "856c590aeac543053efc50e29f558df40bcc5b3513635c974f56afbd6e338830"
+  }
+}
+

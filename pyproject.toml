@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-aligner"
+version = "0.1.0.dev0"
+description = "Evidence-led, multi-profile market opportunity and job alignment engine."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Market Aligner Contributors" }]
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+collection = [
+  "requests>=2.31",
+  "pypdf>=4.0",
+  "scrapling[all]>=0.4.11",
+]
+test = ["build>=1.2"]
+
+[project.scripts]
+market-aligner = "market_aligner.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

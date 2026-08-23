@@ -1,0 +1,30 @@
+{
+  "schema": "market-aligner.reconciliation-certification.v1",
+  "certified_commit": "f06f471cb734e0870977641e7bf0644964761680",
+  "branch": "codex/reconciliation-20260801",
+  "test_command": "MARKET_ALIGNER_SCRAPLING_PYTHON=<audited-sidecar-python> MARKET_ALIGNER_BUILD_PYTHON=<audited-build-python> PYTHONPATH=src python3 -m unittest discover -s tests -v",
+  "tests_run": 51,
+  "tests_failed": 0,
+  "package_privacy_test": "passed",
+  "forbidden_person_identity_test": "passed",
+  "scrapling_capability_test": "passed",
+  "multi_profile_service_test": "passed",
+  "migration_ledger_test": "passed",
+  "private_acceptance": {
+    "profile_count": 3,
+    "assessment_count": 3,
+    "distinct_assessed_profiles": 3,
+    "fit_statuses": [
+      "uncalibrated"
+    ],
+    "vacancy_database_integrity": "ok",
+    "vacancy_database_sha256": "d0aada412b37c959a598cd03a2b67db8c3e2ef93e03b7c5256a49ad8f33aa5df",
+    "vacancy_postings": 10437,
+    "normalised_jobs": 632,
+    "historical_scores": 632,
+    "source_states": 39
+  },
+  "protected_sources_mutated": false,
+  "gutua_jaa_imported": false,
+  "remote_configured": false
+}
