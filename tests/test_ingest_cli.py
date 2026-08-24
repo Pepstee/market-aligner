@@ -1581,6 +1581,308 @@ class IngestCliTests(unittest.TestCase):
             },
         )
 
+    # -- R5 publication-window race authority -------------------------------------
+    def _race_pair_configs(self, prefix: str, tag: str):
+        config_a = self._write_board_config(
+            f"{prefix}-a", ["fixtureboard"], operation_tag=f"{tag}-a"
+        )
+        config_b = self._write_board_config(
+            f"{prefix}-b", [SECOND_BOARD], operation_tag=f"{tag}-b"
+        )
+        return config_a, config_b
+
+    def test_link_before_unlink_window_is_lenient_and_never_mutated(self) -> None:
+        operation_id = "op-linkwin"
+        config_a, config_b = self._race_pair_configs("linkwin", "op-linkwin")
+        calls: list = []
+        tagged_calls: list[tuple] = []
+        results: dict[str, tuple[int, str, str]] = {}
+        lock = threading.Lock()
+        linked = threading.Event()
+        proceed = threading.Event()
+        real_unlink = os.unlink
+        state = {"gated": False}
+
+        # Publication barrier: the first staging-temp unlink of this operation
+        # publisher stalls after os.link, holding the two-link window open.
+        def gated_unlink(path, *args, **kwargs):
+            if f".claim-{operation_id}-" in str(path) and not state["gated"]:
+                state["gated"] = True
+                linked.set()
+                proceed.wait(10)
+            return real_unlink(path, *args, **kwargs)
+
+        from market_aligner.cli import _ingest_command, build_parser
+        fixture_dir = self.root / "fixtures"
+        adapter_tags: list[str] = []
+
+        # ONE shared load_adapter patch spans both threads; ONE shared unlink
+        # barrier patch holds the publication window. Tags derive from the
+        # immutable per-config marker.
+        def factory(board, config=None):
+            tag = str((config or {}).get("operation_tag") or f"unmarked:{board}")
+            return FixtureBoard(
+                board_name=board,
+                fixture_dir=fixture_dir,
+                config=config,
+                calls=calls,
+                guard=None,
+                operation_tag=tag,
+                registered_tags=adapter_tags,
+                tagged_calls=tagged_calls,
+            )
+
+        def contender(label: str, config_path: Path) -> None:
+            args = build_parser().parse_args([
+                "ingest", "--operation-id", operation_id,
+                "--config", str(config_path), "--data-home", str(self.root),
+            ])
+            out, err = io.StringIO(), io.StringIO()
+            code = _ingest_command(args, out=out, err=err)
+            with lock:
+                results[label] = (code, out.getvalue(), err.getvalue())
+
+        winner_thread = threading.Thread(
+            target=contender, args=("winner", config_a)
+        )
+        loser_thread = threading.Thread(
+            target=contender, args=("loser", config_b)
+        )
+
+        with mock.patch(
+            "market_aligner.collectors.engine.load_adapter", side_effect=factory
+        ), mock.patch(
+            "market_aligner.state.operations.os.unlink", side_effect=gated_unlink
+        ), mock.patch.object(
+            JobDatabase, "source_due", autospec=True, return_value=True
+        ):
+            winner_thread.start()
+            self.assertTrue(linked.wait(10), "publisher never reached two-link window")
+            loser_thread.start()
+            loser_thread.join(30)
+            self.assertFalse(loser_thread.is_alive())
+
+            code_b, out_b, err_b = results["loser"]
+            self.assertEqual(2, code_b)
+            refusal = json.loads(
+                [line for line in err_b.splitlines() if line.strip().startswith("{")][-1]
+            )
+            self.assertEqual("binding_source_scope", refusal["reason"])
+            # The loser read a genuinely claimed in_flight record, so the
+            # truthful in_flight disposition is legitimate here (the R4
+            # null-disposition rule covers only pre-claim unsafe locks).
+            self.assertNotIn("unsafe_journal_file", err_b)
+            self.assertNotIn("claim_publication_failed", err_b)
+            self.assertEqual("", out_b.strip())
+            # The reader left the live publisher's staging temp untouched.
+            self.assertEqual(
+                1, len(list(self.journal_root.glob(f".claim-{operation_id}-*")))
+            )
+            interim = self.journal.load(operation_id)
+            self.assertIsNotNone(interim)
+            self.assertEqual(["fixtureboard"], interim["source_scope"])
+
+            # Release the publisher and let it finish INSIDE the shared patch
+            # context: its provider execution must keep using this run's
+            # adapter factory and source_due seam.
+            proceed.set()
+            winner_thread.join(30)
+            self.assertFalse(winner_thread.is_alive())
+
+        code_a, out_a, err_a = results["winner"]
+        self.assertEqual(0, code_a)
+        payload = json.loads(out_a)
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual(3, payload["result"]["fetched"])
+        self.assertNotIn("claim_publication_failed", err_a)
+        self.assertNotIn("unsafe_journal_file", err_a)
+        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+        record = json.loads(
+            self.journal.record_path(operation_id).read_text(encoding="utf-8")
+        )
+        self.assertEqual("completed", record["disposition"])
+        self.assertEqual(payload["receipt_id"], record["receipt_id"])
+        # Provider evidence: only the winning scope ran, exactly one cycle.
+        self.assertEqual({"op-linkwin-a"}, set(adapter_tags))
+        self.assertEqual(1, sum(1 for call in tagged_calls if call[1] == "discover"))
+
+    def test_operation_lock_freedom_is_thread_accurate(self) -> None:
+        descriptor = self.journal.open_operation_lock("op-freecheck")
+        try:
+            held_results: list[bool] = []
+
+            def probe() -> None:
+                held_results.append(self.journal._operation_lock_is_free("op-freecheck"))
+
+            probe_thread = threading.Thread(target=probe)
+            probe_thread.start()
+            probe_thread.join(10)
+            self.assertEqual([False], held_results)
+        finally:
+            OperationJournal.release_locks([descriptor])
+        self.assertTrue(self.journal._operation_lock_is_free("op-freecheck"))
+
+    def test_abandoned_publication_recovers_only_under_free_lock_proof(self) -> None:
+        operation_id = "op-abandon"
+        staged = make_record(
+            operation_id=operation_id,
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="in_flight",
+            owner_id=new_owner_id(),
+        )
+        payload = canonical_json(staged).encode("utf-8")
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".claim-{operation_id}-", dir=self.journal_root
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        final = self.journal.record_path(operation_id)
+        os.link(temporary, final)
+        self.assertEqual(2, os.lstat(final).st_nlink)
+
+        # While an owner demonstrably holds the lock, readers stay lenient and
+        # never mutate the staging temp.
+        held = self.journal.open_operation_lock(operation_id)
+        loaded_while_held = self.journal.load(operation_id)
+        self.assertEqual("in_flight", loaded_while_held["disposition"])
+        self.assertEqual(2, os.lstat(final).st_nlink)
+        self.assertNotEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+        OperationJournal.release_locks([held])
+
+        # Free lock proves abandonment: settlement completes the publication.
+        self.assertTrue(self.journal._operation_lock_is_free(operation_id))
+        settled = self.journal.load(operation_id)
+        self.assertEqual("in_flight", settled["disposition"])
+        self.assertEqual(1, os.lstat(final).st_nlink)
+        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+
+        calls: list = []
+        with self._patched(calls):
+            code, _out, err = _run(self._argv(operation_id))
+        self.assertEqual(2, code)
+        self.assertEqual("in_progress", _stderr_json(err)["reason"])
+        self.assertEqual([], calls)
+
+    def test_high_count_same_id_disjoint_stress_keeps_exact_refusals(self) -> None:
+        from market_aligner.cli import _ingest_command, build_parser
+        fixture_dir = self.root / "fixtures"
+        races = 100
+        total_commands = 0
+        for race_index in range(races):
+            operation_id = f"op-racepair-{race_index}"
+            config_a, config_b = self._race_pair_configs(
+                f"race{race_index}", operation_id
+            )
+            calls: list = []
+            tagged_calls: list[tuple] = []
+            results: dict[str, tuple[int, str, str]] = {}
+            failures: list[BaseException] = []
+            lock = threading.Lock()
+            adapter_tags: list[str] = []
+
+            def factory(board, config=None):
+                tag = str((config or {}).get("operation_tag") or f"unmarked:{board}")
+                return FixtureBoard(
+                    board_name=board,
+                    fixture_dir=fixture_dir,
+                    config=config,
+                    calls=calls,
+                    operation_tag=tag,
+                    registered_tags=adapter_tags,
+                    tagged_calls=tagged_calls,
+                )
+
+            def contender(label: str, config_path: Path) -> None:
+                try:
+                    args = build_parser().parse_args([
+                        "ingest", "--operation-id", operation_id,
+                        "--config", str(config_path),
+                        "--data-home", str(self.root),
+                    ])
+                    out, err = io.StringIO(), io.StringIO()
+                    code = _ingest_command(args, out=out, err=err)
+                    with lock:
+                        results[label] = (code, out.getvalue(), err.getvalue())
+                except BaseException as exc:  # explicit capture, never silent
+                    with lock:
+                        failures.append(exc)
+
+            winner_thread = threading.Thread(
+                target=contender, args=("winner", config_a)
+            )
+            loser_thread = threading.Thread(
+                target=contender, args=("loser", config_b)
+            )
+            with mock.patch(
+                "market_aligner.collectors.engine.load_adapter", side_effect=factory
+            ), mock.patch.object(
+                JobDatabase, "source_due", autospec=True, return_value=True
+            ):
+                winner_thread.start()
+                loser_thread.start()
+                winner_thread.join(30)
+                loser_thread.join(30)
+
+            # Explicit thread-failure authority.
+            self.assertEqual([], failures, race_index)
+            self.assertFalse(winner_thread.is_alive(), race_index)
+            self.assertFalse(loser_thread.is_alive(), race_index)
+            total_commands += 2
+
+            codes = sorted(code for code, _out, _err in results.values())
+            self.assertEqual([0, 2], codes, race_index)
+            # Do not assume which contender wins: identify by exit code.
+            ok_payloads = [
+                json.loads(out)
+                for code, out, _err in results.values()
+                if code == 0
+            ]
+            refusals = [
+                json.loads(
+                    [
+                        line
+                        for line in err.splitlines()
+                        if line.strip().startswith("{")
+                    ][-1]
+                )
+                for code, _out, err in results.values()
+                if code == 2
+            ]
+            self.assertEqual(1, len(ok_payloads))
+            self.assertEqual(1, len(refusals))
+            refusal = refusals[0]
+            self.assertEqual("binding_source_scope", refusal["reason"], race_index)
+            for _code, _out, err in results.values():
+                self.assertNotIn("unsafe_journal_file", err, race_index)
+                self.assertNotIn("claim_publication_failed", err, race_index)
+            payload = ok_payloads[0]
+            self.assertEqual("ok", payload["status"], race_index)
+            record = json.loads(
+                self.journal.record_path(operation_id).read_text(encoding="utf-8")
+            )
+            self.assertEqual("completed", record["disposition"])
+            self.assertEqual(payload["receipt_id"], record["receipt_id"])
+            # Exactly one provider cycle, only the winning scope ran.
+            self.assertEqual(1, sum(1 for call in tagged_calls if call[1] == "discover"))
+            touched = {call[2] for call in tagged_calls}
+            self.assertTrue(touched.issubset(set(payload["source_scope"])), race_index)
+            self.assertEqual(
+                [], list(self.journal_root.glob(f".claim-{operation_id}-*"))
+            )
+            # Reset per-race accumulators for the next independent race.
+            calls.clear()
+            tagged_calls.clear()
+            adapter_tags.clear()
+            results.clear()
+        print(f"stress races executed: {races}; commands: {total_commands}")
+
     # -- existing CLI behaviour unchanged -------------------------------------------
     def test_profiles_and_assess_cli_behaviour_unchanged(self) -> None:
         home = self.root / "clihome"

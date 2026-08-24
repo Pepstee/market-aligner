@@ -404,13 +404,22 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return mapping
 
 
-def _verify_regular_file(info: os.stat_result, name: str) -> None:
-    """Exact owner, mode and link-count enforcement for journal files."""
+def _verify_regular_file(
+    info: os.stat_result, name: str, *, allow_pending_link: bool = False
+) -> None:
+    """Exact owner, mode and link-count enforcement for journal files.
+
+    ``allow_pending_link`` tolerates exactly the transient two-link window of
+    a live no-replace publication whose owner demonstrably holds the
+    operation lock; it never relaxes regular-file, owner or mode rules.
+    """
     if not stat.S_ISREG(info.st_mode):
         raise OperationRefused("unsafe_journal_file", f"{name} must be a regular file")
-    if info.st_nlink != 1:
+    if info.st_nlink != 1 and not (allow_pending_link and info.st_nlink == 2):
         raise OperationRefused(
-            "unsafe_journal_file", f"{name} must be a single-link file (no hardlinks)"
+            "unsafe_journal_file",
+            f"{name} must be a single-link file without hardlinks "
+            f"(nlink={info.st_nlink})",
         )
     if info.st_uid != os.getuid():
         raise OperationRefused("unsafe_journal_file", f"{name} must be owned by the current user")
@@ -444,14 +453,20 @@ def _verify_directory(path: Path, expected_mode: int, name: str, *, allow_missin
         )
 
 
-def read_record_bytes(path: Path) -> bytes:
-    """Open one record strictly: nofollow, single link, exact owner and mode."""
+def read_record_bytes(path: Path, *, allow_pending_link: bool = False) -> bytes:
+    """Open one record strictly: nofollow, single link, exact owner and mode.
+
+    ``allow_pending_link`` accepts exactly the transient two-link state of a
+    live publication whose owner holds the operation lock.
+    """
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as exc:
         raise OperationRefused("unsafe_journal_file", f"cannot open {path.name}: {exc}") from exc
     try:
-        _verify_regular_file(os.fstat(descriptor), path.name)
+        _verify_regular_file(
+            os.fstat(descriptor), path.name, allow_pending_link=allow_pending_link
+        )
         with os.fdopen(descriptor, "rb") as handle:
             return handle.read()
     except OSError as exc:
@@ -613,31 +628,49 @@ class OperationJournal:
         """Reopen, verify and return the current record, or None if absent.
 
         Broken symlinks are not absence: ``lexists`` gates the read so a
-        substituted entry fails closed instead of looking missing.
+        substituted entry fails closed instead of looking missing. A two-link
+        final is a live publication window while the owner holds its operation
+        lock — readers verify content leniently and never mutate the
+        publisher's staging temp; only a provably abandoned publication (the
+        operation lock is free) is settled by completing the unlink.
         """
         self._verify_root()
         path = self.record_path(operation_id)
         if not os.path.lexists(path):
             return None
-        # A crash between no-replace publication and staging cleanup leaves a
-        # complete receipt with a same-inode temp; finish that deterministic
-        # repair before verification. Foreign hardlinks never match and are
-        # rejected below.
-        self._repair_own_claim_temp(path)
-        raw_bytes = read_record_bytes(path)
+        raw_bytes = self._settled_record_bytes(operation_id, path)
         return parse_record(raw_bytes, operation_id, path.name)
 
-    def _repair_own_claim_temp(self, final: Path) -> None:
-        """Finish an interrupted link publication owned by this record.
+    def _operation_lock_is_free(self, operation_id: str) -> bool:
+        """True only when no live owner holds this operation's lock.
 
-        A crash between ``os.link`` and ``unlink`` leaves a complete final
-        receipt with two links plus its identical-inode staging temp. The
-        inode match proves ownership so removing it is deterministic repair;
-        foreign hardlinks never match and stay rejected.
+        A non-blocking exclusive flock succeeds exclusively when the owner
+        process is gone (kernel releases flock on death), which is the proof
+        that an in-progress link publication is abandoned.
+        """
+        descriptor = self._open_lock(self._lock_path(operation_id))
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                return False
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    def _settle_publication(self, operation_id: str, final: Path) -> bool:
+        """Complete cleanup only when abandonment is proven by a free lock.
+
+        Returns True when the final record is single-linked. A held operation
+        lock means a live publisher owns the transient two-link window; the
+        reader must not touch its temp.
         """
         info = os.lstat(final)
         if info.st_nlink == 1:
-            return
+            return True
+        if not self._operation_lock_is_free(operation_id):
+            return False
         for candidate in sorted(self.root.glob(self._temp_prefix(final.stem) + "*")):
             candidate_info = os.lstat(candidate)
             if (
@@ -647,28 +680,35 @@ class OperationJournal:
             ):
                 os.unlink(candidate)
                 fsync_directory(self.root)
-                if os.lstat(final).st_nlink != 1:
-                    continue
-                return
+                return os.lstat(final).st_nlink == 1
         raise OperationRefused(
             "unsafe_journal_file",
             f"{final.name} has unexpected additional links",
         )
 
+    def _settled_record_bytes(self, operation_id: str, path: Path) -> bytes:
+        """Settle if provably abandoned, then read with correct strictness."""
+        self._settle_publication(operation_id, path)
+        pending_live_link = os.lstat(path).st_nlink != 1
+        return read_record_bytes(path, allow_pending_link=pending_live_link)
+
     def claim(self, record: dict[str, Any]) -> bool:
         """Publish the owner's in_flight claim atomically; False if taken.
 
         The payload is written completely into a private 0600 temp, fsynced,
-        then published by true no-replace ``os.link`` plus parent fsync. A
-        short write, kill or pre-publication failure leaves no final record,
-        performs zero provider calls and permits a same-ID retry.
+        then published by true no-replace ``os.link`` plus parent fsync. The
+        staging temp belongs to this publisher alone and is removed by it;
+        concurrent readers recognise the transient two-link window via the
+        held operation lock and never mutate it. A short write, kill or
+        pre-publication failure leaves no final record, performs zero provider
+        calls and permits a same-ID retry; post-publication residue is settled
+        only under the free-lock proof described in :meth:`load`.
         """
         self._verify_root()
         verify_record(record)
         payload = canonical_json(record).encode("utf-8")
         final = self.record_path(record["operation_id"])
         if os.path.lexists(final):
-            self._repair_own_claim_temp(final)
             return False
         descriptor, temporary = tempfile.mkstemp(
             prefix=self._temp_prefix(record["operation_id"]), dir=self.root
@@ -720,7 +760,17 @@ class OperationJournal:
             lock = self._locked(operation_id)
         try:
             path = self.record_path(operation_id)
-            if not path.exists() or read_record_bytes(path) != expected_prior_bytes:
+            if not path.exists():
+                raise SealConflict(
+                    "seal_conflict",
+                    "on-disk record disappeared; refusing to overwrite",
+                    operation_id=operation_id,
+                    disposition=record["disposition"],
+                )
+            # Coherent publication seam: settle if provably abandoned and
+            # tolerate the live two-link window of a concurrent publisher.
+            current_bytes = self._settled_record_bytes(operation_id, path)
+            if current_bytes != expected_prior_bytes:
                 raise SealConflict(
                     "seal_conflict",
                     "on-disk record no longer matches this owner's claimed state; "
@@ -745,7 +795,7 @@ class OperationJournal:
             candidate = path.name[: -len(".json")]
             if candidate == exclude_operation_id:
                 continue
-            raw_bytes = read_record_bytes(path)
+            raw_bytes = self._settled_record_bytes(candidate, path)
             record = parse_record(raw_bytes, candidate, path.name)
             if (
                 record["data_home"] == data_home
