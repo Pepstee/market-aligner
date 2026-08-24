@@ -11,7 +11,7 @@ from pathlib import Path
 from market_aligner import __version__
 from market_aligner.collectors.engine import Collector
 from market_aligner.config import ProductPaths
-from market_aligner.config_loader import load_config
+from market_aligner.config_loader import closure_identity, snapshot_config
 from market_aligner.profiler.importers import import_evidence_led, import_guided_profile
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
@@ -21,10 +21,14 @@ from market_aligner.state.operations import (
     INGEST_CYCLE_KIND,
     OperationJournal,
     OperationRefused,
+    SealConflict,
+    canonical_json,
     content_sha256,
-    derive_operation_id,
     make_record,
+    new_owner_id,
+    normalized_error,
     utc_now,
+    validate_operation_id,
 )
 
 
@@ -109,189 +113,358 @@ def _assess_command(args: argparse.Namespace) -> int:
     print(json.dumps(output, ensure_ascii=False, sort_keys=True, default=str))
     return 0
 
-
-def _emit_refusal(exc: OperationRefused) -> int:
+def _emit_refusal(exc: OperationRefused, err=None) -> int:
     payload = {"command": "ingest", "status": "refused", **exc.payload}
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=err or sys.stderr)
     return 2
 
 
-def _ingest_command(args: argparse.Namespace) -> int:
+def _emit_ingest(payload: dict, code: int, out=None) -> int:
+    payload.setdefault("command", "ingest")
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=out or sys.stdout)
+    return code
+
+
+def _binding_refusals(existing: dict, *, kind, config_source, config_file_sha256,
+                      config_sha256, scope, data_home) -> OperationRefused | None:
+    """Same operation id with any changed binding must never reach a provider."""
+    checks = (
+        ("kind", existing["kind"], kind),
+        ("config_source", existing["config_source"], str(config_source)),
+        ("config_file_sha256", existing["config_file_sha256"], config_file_sha256),
+        ("config_sha256", existing["config_sha256"], config_sha256),
+        ("source_scope", existing["source_scope"], scope),
+        ("data_home", existing["data_home"], data_home),
+    )
+    for field, recorded, current in checks:
+        if recorded != current:
+            return OperationRefused(
+                f"binding_{field}",
+                f"journal binds a different {field} for this operation id",
+                operation_id=existing["operation_id"],
+                disposition=existing["disposition"],
+            )
+    return None
+
+
+def _emit_refusal(exc: OperationRefused, err=None) -> int:
+    payload = {"command": "ingest", "status": "refused", **exc.payload}
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=err or sys.stderr)
+    return 2
+
+
+def _emit_ingest(payload: dict, code: int, out=None) -> int:
+    payload.setdefault("command", "ingest")
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=out or sys.stdout)
+    return code
+
+
+def _preflight_refusal(exc: ValueError) -> OperationRefused:
+    """Map canonical seam errors onto stable structured refusal reasons."""
+    text = str(exc)
+    if text.startswith("escape:"):
+        return OperationRefused("path_escape", text[len("escape:"):])
+    if text.startswith("shape:"):
+        return OperationRefused("invalid_config_shape", text[len("shape:"):])
+    return OperationRefused("path_escape", text)
+
+
+def _binding_refusals(existing: dict, *, kind, config_source, config_file_sha256,
+                      config_sha256, scope, data_home) -> OperationRefused | None:
+    """Same operation id with any changed binding must never reach a provider."""
+    checks = (
+        ("kind", existing["kind"], kind),
+        ("config_source", existing["config_source"], str(config_source)),
+        ("config_file_sha256", existing["config_file_sha256"], config_file_sha256),
+        ("config_sha256", existing["config_sha256"], config_sha256),
+        ("source_scope", existing["source_scope"], scope),
+        ("data_home", existing["data_home"], data_home),
+    )
+    for field, recorded, current in checks:
+        if recorded != current:
+            return OperationRefused(
+                f"binding_{field}",
+                f"journal binds a different {field} for this operation id",
+                operation_id=existing["operation_id"],
+                disposition=existing["disposition"],
+            )
+    return None
+
+
+def _replay_payload(existing: dict) -> dict:
+    payload = {
+        "status": "replayed",
+        "replayed": True,
+        "disposition": existing["disposition"],
+        "operation_id": existing["operation_id"],
+        "receipt_id": existing["receipt_id"],
+        "result": existing["result"],
+        "finished_at": existing["finished_at"],
+    }
+    if existing["disposition"] == "failed":
+        payload.pop("result")
+        payload["error"] = existing["error"]
+    return payload
+
+
+def _ingest_command(args: argparse.Namespace, *, out=None, err=None) -> int:
+    # Thread-safe capture seam: callers (tests) may inject private streams so
+    # concurrent contenders never touch the process-global sys.stdout/stderr.
+    sink_out = out if out is not None else sys.stdout
+    sink_err = err if err is not None else sys.stderr
+
+    def _refuse(exc: OperationRefused) -> int:
+        return _emit_refusal(exc, sink_err)
+
+    def _emit(payload: dict, code: int) -> int:
+        return _emit_ingest(payload, code, sink_out)
+
+    try:
+        operation_id = validate_operation_id(args.operation_id)
+    except OperationRefused as exc:
+        return _refuse(exc)
+
     config_source = args.config.expanduser().resolve()
     try:
-        cfg = load_config(config_source)
-    except Exception as exc:  # any parse/IO failure refuses before provider access
-        return _emit_refusal(
+        cfg, config_identities = snapshot_config(config_source)
+    except Exception as exc:  # parse/IO/coherence failures refuse pre-provider
+        return _refuse(
             OperationRefused("config_unreadable", f"configuration could not be loaded: {exc}")
         )
+    config_file_sha256 = closure_identity(config_identities)
     config_sha256 = content_sha256(cfg)
-    scope = sorted(
-        str(board) for board in ((cfg.get("boards") or {}).get("enabled") or [])
-    )
+
+    # Resolve without creating: an escaping or malformed configuration must
+    # leave a fresh data home absent.
+    paths = ProductPaths.resolve(args.data_home)
+    try:
+        plan = Collector.plan(paths.root, cfg)
+    except ValueError as exc:
+        return _refuse(_preflight_refusal(exc))
+    scope = plan["boards"]
     if not scope:
-        return _emit_refusal(OperationRefused("empty_scope", "configuration enables no boards"))
-    operation_id = derive_operation_id(INGEST_CYCLE_KIND, config_sha256, scope)
+        return _refuse(OperationRefused("empty_scope", "configuration enables no boards"))
 
-    paths = ProductPaths.resolve(args.data_home).ensure()
-    journal = OperationJournal(paths.state / "operations")
+    paths.ensure()
+    try:
+        journal = OperationJournal(paths.state / "operations")
+    except OperationRefused as exc:
+        return _refuse(exc)
 
-    # Journal gate: runs before Collector construction, so a refused operation
-    # performs no provider access whatsoever.
+    bindings = dict(
+        kind=INGEST_CYCLE_KIND,
+        config_source=config_source,
+        config_file_sha256=config_file_sha256,
+        config_sha256=config_sha256,
+        scope=scope,
+        data_home=str(paths.root),
+    )
+
+    # Fast journal gate before lock contention: every refusal here performs
+    # zero provider calls.
     try:
         existing = journal.load(operation_id)
     except OperationRefused as exc:
-        return _emit_refusal(exc)
+        return _refuse(exc)
+
     if existing is not None:
-        if existing["kind"] != INGEST_CYCLE_KIND:
-            return _emit_refusal(
-                OperationRefused(
-                    "operation_substitution",
-                    "journal binds a different operation kind",
-                    operation_id=operation_id,
-                    disposition=existing["disposition"],
-                )
-            )
-        if existing["config_sha256"] != config_sha256:
-            return _emit_refusal(
-                OperationRefused(
-                    "config_substitution",
-                    "journal binds a different configuration identity",
-                    operation_id=operation_id,
-                    disposition=existing["disposition"],
-                )
-            )
-        if existing["source_scope"] != scope:
-            return _emit_refusal(
-                OperationRefused(
-                    "scope_substitution",
-                    "journal binds a different source scope",
-                    operation_id=operation_id,
-                    disposition=existing["disposition"],
-                )
-            )
+        mismatch = _binding_refusals(existing, **bindings)
+        if mismatch is not None:
+            return _refuse(mismatch)
         disposition = existing["disposition"]
-        if disposition in ("completed", "failed"):
-            return _emit_refusal(
-                OperationRefused(
-                    "replay_terminal",
-                    f"operation already reached terminal disposition {disposition!r}; "
-                    "a second identical run would perform a second provider fetch",
-                    operation_id=operation_id,
-                    disposition=disposition,
-                )
-            )
+        if disposition == "completed":
+            return _emit(_replay_payload(existing), 0)
+        if disposition == "failed":
+            return _emit(_replay_payload(existing), 2)
         if disposition == "indeterminate":
-            return _emit_refusal(
+            return _refuse(
                 OperationRefused(
                     "indeterminate_state",
-                    "an earlier run never reported a terminal disposition; whether providers "
-                    "were contacted is unknowable, so the operation fails closed",
+                    "this operation was marked indeterminate and stays fail-closed; "
+                    "an unresolved external call can never be repeated or resumed here",
                     operation_id=operation_id,
                     disposition=disposition,
                 )
             )
-        # in_flight: a killed or concurrent run holds the claim.
-        marked = make_record(
-            operation_id=operation_id,
-            kind=INGEST_CYCLE_KIND,
-            config_sha256=config_sha256,
-            config_source=str(config_source),
-            data_home=str(paths.root),
-            source_scope=scope,
-            disposition="indeterminate",
-            started_at=existing["started_at"],
-            resolved_at=utc_now(),
-            note="prior run reported no terminal disposition; whether providers were "
-            "contacted is unknowable, so the operation is marked indeterminate",
-        )
-        journal.update(marked)
-        return _emit_refusal(
+        return _refuse(
             OperationRefused(
-                "indeterminate_state",
-                "found an in-flight claim from an earlier run; marked indeterminate and "
-                "refusing to repeat an unknowable provider interaction",
+                "in_progress",
+                "another run owns this operation's in-flight claim; refusing without "
+                "touching its record or contacting any provider",
                 operation_id=operation_id,
-                disposition="indeterminate",
+                disposition=disposition,
+                extra={"owner_id": existing["owner_id"]},
             )
         )
 
     claim = make_record(
         operation_id=operation_id,
         kind=INGEST_CYCLE_KIND,
-        config_sha256=config_sha256,
         config_source=str(config_source),
-        data_home=str(paths.root),
+        config_file_sha256=config_file_sha256,
+        config_sha256=config_sha256,
         source_scope=scope,
+        data_home=str(paths.root),
         disposition="in_flight",
+        owner_id=new_owner_id(),
     )
-    if not journal.claim(claim):
-        return _emit_refusal(
-            OperationRefused(
-                "concurrent_run",
-                "another run holds the in-flight claim for this operation",
-                operation_id=operation_id,
-                disposition="in_flight",
-            )
-        )
+    claim_bytes = canonical_json(claim).encode("utf-8")
 
-    def _log(message: str) -> None:
-        print(message, file=sys.stderr)
-
+    # Per-board locks span reload, blocker scan, claim, provider cycle and
+    # seal, acquired in canonical order so intersecting scopes serialize on
+    # exactly their shared boards.
+    locks = journal.acquire_board_locks(str(paths.root), scope)
     try:
-        collector = Collector(cfg, paths.root, log=_log)
-        collector.migrate_existing()
-        result = collector.cycle()
-    except Exception as exc:
-        failed = make_record(
+        try:
+            blockers = journal.scan_unresolved_scope_blockers(str(paths.root), scope)
+        except OperationRefused as exc:
+            return _refuse(exc)
+        if blockers:
+            return _refuse(
+                OperationRefused(
+                    "scope_blocked",
+                    "an unresolved earlier call covers an intersecting board; it remains "
+                    "fail-closed and blocks this scope until a separately typed "
+                    "authority contract exists",
+                    extra={"blocked_by": blockers},
+                )
+            )
+
+        # A same-ID twin that observed absence before waiting must re-load and
+        # strictly verify inside the held lock: after the winner sealed, the
+        # loser replays truthfully with zero second provider access.
+        try:
+            current = journal.load(operation_id)
+        except OperationRefused as exc:
+            return _refuse(exc)
+        if current is not None:
+            mismatch = _binding_refusals(current, **bindings)
+            if mismatch is not None:
+                return _refuse(mismatch)
+            disposition = current["disposition"]
+            if disposition == "completed":
+                return _emit(_replay_payload(current), 0)
+            if disposition == "failed":
+                return _emit(_replay_payload(current), 2)
+            if disposition == "indeterminate":
+                return _refuse(
+                    OperationRefused(
+                        "indeterminate_state",
+                        "this operation was marked indeterminate and stays fail-closed",
+                        operation_id=operation_id,
+                        disposition=disposition,
+                    )
+                )
+            return _refuse(
+                OperationRefused(
+                    "in_progress",
+                    "the winning twin still holds its live in-flight claim",
+                    operation_id=operation_id,
+                    disposition=disposition,
+                    extra={"owner_id": current["owner_id"]},
+                )
+            )
+
+        try:
+            claimed = journal.claim(claim)
+        except OSError as exc:
+            return _refuse(
+                OperationRefused(
+                    "claim_publication_failed",
+                    f"claim could not be published; no final record exists and zero "
+                    f"provider calls were made: {exc}",
+                    operation_id=operation_id,
+                    disposition="in_flight",
+                )
+            )
+        if not claimed:
+            return _refuse(
+                OperationRefused(
+                    "in_progress",
+                    "another run won the exclusive claim between check and create; "
+                    "refusing as a contender",
+                    operation_id=operation_id,
+                    disposition="in_flight",
+                )
+            )
+
+        def _log(message: str) -> None:
+            print(message, file=sink_err)
+
+        try:
+            collector = Collector(cfg, paths.root, log=_log)
+            collector.migrate_existing()
+            result = collector.cycle()
+        except Exception as exc:
+            failed = make_record(
+                operation_id=operation_id,
+                kind=INGEST_CYCLE_KIND,
+                config_source=str(config_source),
+                config_file_sha256=config_file_sha256,
+                config_sha256=config_sha256,
+                source_scope=scope,
+                data_home=str(paths.root),
+                disposition="failed",
+                owner_id=claim["owner_id"],
+                started_at=claim["started_at"],
+                finished_at=utc_now(),
+                error=normalized_error(exc),
+            )
+            try:
+                journal.cas_replace(
+                    failed, expected_prior_bytes=claim_bytes, operation_id=operation_id
+                )
+            except SealConflict as conflict:
+                return _refuse(conflict)
+            return _refuse(
+                OperationRefused(
+                    "provider_failure",
+                    "collection cycle aborted; last good database and raw cache "
+                    f"preserved: {normalized_error(exc)}",
+                    operation_id=operation_id,
+                    disposition="failed",
+                )
+            )
+
+        completed = make_record(
             operation_id=operation_id,
             kind=INGEST_CYCLE_KIND,
-            config_sha256=config_sha256,
             config_source=str(config_source),
-            data_home=str(paths.root),
+            config_file_sha256=config_file_sha256,
+            config_sha256=config_sha256,
             source_scope=scope,
-            disposition="failed",
+            data_home=str(paths.root),
+            disposition="completed",
+            owner_id=claim["owner_id"],
             started_at=claim["started_at"],
             finished_at=utc_now(),
-            error=f"{type(exc).__name__}: {exc}",
+            result=dict(result),
         )
-        journal.update(failed)
-        return _emit_refusal(
-            OperationRefused(
-                "provider_failure",
-                f"collection cycle aborted; last good database and raw cache preserved: {exc}",
-                operation_id=operation_id,
-                disposition="failed",
+        try:
+            journal.cas_replace(
+                completed, expected_prior_bytes=claim_bytes, operation_id=operation_id
             )
-        )
+        except SealConflict as conflict:
+            return _refuse(conflict)
+    finally:
+        OperationJournal.release_locks(locks)
 
-    completed = make_record(
-        operation_id=operation_id,
-        kind=INGEST_CYCLE_KIND,
-        config_sha256=config_sha256,
-        config_source=str(config_source),
-        data_home=str(paths.root),
-        source_scope=scope,
-        disposition="completed",
-        started_at=claim["started_at"],
-        finished_at=utc_now(),
-        result=dict(result),
+    return _emit(
+        {
+            "status": "ok",
+            "replayed": False,
+            "disposition": completed["disposition"],
+            "operation_id": operation_id,
+            "receipt_id": completed["receipt_id"],
+            "config_source": str(config_source),
+            "config_file_sha256": config_file_sha256,
+            "config_sha256": config_sha256,
+            "source_scope": scope,
+            "data_home": str(paths.root),
+            "result": dict(result),
+        },
+        0,
     )
-    journal.update(completed)
-    output = {
-        "command": "ingest",
-        "status": "ok",
-        "disposition": completed["disposition"],
-        "operation_id": operation_id,
-        "receipt_id": completed["receipt_id"],
-        "config_source": str(config_source),
-        "config_sha256": config_sha256,
-        "source_scope": scope,
-        "data_home": str(paths.root),
-        "result": dict(result),
-    }
-    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
-    return 0
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="market-aligner")
@@ -337,6 +510,15 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = commands.add_parser(
         "ingest",
         help="Run one bounded official collection cycle from an exact external config.",
+    )
+    ingest.add_argument(
+        "--operation-id",
+        required=True,
+        help=(
+            "Stable opaque operation identity "
+            "([A-Za-z0-9][A-Za-z0-9._-]{7,63}); each id runs at most one "
+            "provider-reaching cycle and replays its terminal receipt."
+        ),
     )
     ingest.add_argument(
         "--config",

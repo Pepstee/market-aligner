@@ -23,6 +23,48 @@ def _raw_path(base: Path, row: RawPosting) -> Path:
     return base / row.board / f"{safe}.json"
 
 
+def bounded_relative_path(root: Path, value: Any, field: str) -> Path:
+    """Resolve one configured path strictly inside ``root``; canonical seam.
+
+    Rejects absolute values, any upward ``..`` traversal and existing symlink
+    components that would escape the data home. Used for every consequential
+    configured collector location so a configuration cannot make collection
+    state land outside the operator's explicit data home.
+    """
+    if isinstance(value, Path):
+        candidate = str(value)
+    elif isinstance(value, str):
+        candidate = value
+    else:
+        raise ValueError(f"shape: {field} must be a path string")
+    if not candidate:
+        raise ValueError(f"shape: {field} must not be empty")
+    relative = Path(candidate)
+    if relative.is_absolute():
+        raise ValueError(
+            f"escape: {field} must stay inside the data home; got absolute {candidate!r}"
+        )
+    if any(part == ".." for part in relative.parts):
+        raise ValueError(
+            f"escape: {field} must not traverse outside the data home: {candidate!r}"
+        )
+    current = Path(os.path.realpath(root))
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(
+                f"escape: {field} escapes the data home via symlink component {part!r}: "
+                f"{candidate!r}"
+            )
+    return current
+
+
+def _shape(condition: bool, message: str) -> None:
+    """Raise a stable typed-shape error for malformed configuration."""
+    if not condition:
+        raise ValueError(f"shape: {message}")
+
+
 def _save_raw(base: Path, row: RawPosting) -> None:
     destination = _raw_path(base, row)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -41,21 +83,118 @@ class Collector:
 
     def __init__(self, cfg: dict[str, Any], data_root: Path, log=print) -> None:
         self.cfg, self.root, self.log = cfg, Path(data_root), log
-        io = cfg.get("io", {}) or {}
-        self.urls_path = self.root / io.get("job_urls", "state/job_urls.jsonl")
-        self.raw_cache = self.root / io.get("raw_cache", "raw/vacancies")
-        self.db = JobDatabase(self.root / io.get("database", "state/vacancies.sqlite3"))
+        plan = self.plan(self.root, cfg)
+        self.urls_path = plan["job_urls"]
+        self.raw_cache = plan["raw_cache"]
+        self.db = JobDatabase(plan["database"])
+        self.raw_cache_roots = plan["raw_cache_roots"]
         self.terms = list(cfg.get("search_terms") or [])
-        boards = cfg.get("boards", {}) or {}
-        self.boards = list(boards.get("enabled") or [])
-        collection = cfg.get("collection", {}) or {}
+        self.boards = plan["boards"]
+        collection = plan["collection"]
         self.source_workers = int(collection.get("source_workers", len(self.boards) or 1))
         self.fetch_workers = int(collection.get("fetch_workers", 12))
-        scrapling = dict(cfg.get("scrapling", {}) or {})
-        runtime_root = Path(scrapling.get("runtime_root") or self.root)
+        scrapling = plan["scrapling"]
         self.scrapling = (
-            ScraplingClient(runtime_root, scrapling) if scrapling.get("enabled", False) else None
+            ScraplingClient(plan["runtime_root"], scrapling)
+            if scrapling.get("enabled", False)
+            else None
         )
+
+    @staticmethod
+    def plan(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Validate configuration shapes and bound every consequential path.
+
+        Shared by :meth:`__init__` and preflight callers so malformed shapes
+        and data-home escapes are refused once, in the canonical collector
+        seam, before any journal, directory creation or provider access.
+        Shape errors carry a ``shape:`` prefix; boundary violations carry
+        ``escape:`` so callers can emit stable structured refusals.
+        """
+        root = Path(root)
+        _shape(isinstance(cfg, dict), "configuration root must be a mapping")
+        io = cfg.get("io")
+        if io is None:
+            io = {}
+        _shape(isinstance(io, dict), "io must be a mapping")
+        collection = cfg.get("collection")
+        if collection is None:
+            collection = {}
+        _shape(isinstance(collection, dict), "collection must be a mapping")
+
+        boards_cfg = cfg.get("boards")
+        _shape(isinstance(boards_cfg, dict), "boards must be a mapping")
+        enabled = boards_cfg.get("enabled")
+        _shape(
+            isinstance(enabled, list) and not isinstance(enabled, (str, bytes)) and bool(enabled),
+            "boards.enabled must be a nonempty list",
+        )
+        for index, board in enumerate(enabled):
+            _shape(
+                isinstance(board, str) and bool(board.strip()) and len(board) <= 128,
+                f"boards.enabled[{index}] must be a bounded nonempty string",
+            )
+        _shape(
+            len(set(enabled)) == len(enabled),
+            "boards.enabled must not contain duplicate boards",
+        )
+
+        legacy_roots = io.get("raw_cache_roots")
+        if legacy_roots is None or legacy_roots == []:
+            raw_cache_roots = None
+        else:
+            _shape(
+                isinstance(legacy_roots, list) and not isinstance(legacy_roots, (str, bytes)),
+                "io.raw_cache_roots must be a JSON list of relative path strings",
+            )
+            for index, entry in enumerate(legacy_roots):
+                _shape(
+                    isinstance(entry, str) and bool(entry),
+                    f"io.raw_cache_roots[{index}] must be a non-empty relative path string",
+                )
+            raw_cache_roots = [
+                bounded_relative_path(root, entry, f"io.raw_cache_roots[{index}]")
+                for index, entry in enumerate(legacy_roots)
+            ]
+
+        scrapling = cfg.get("scrapling")
+        if scrapling is None:
+            scrapling = {}
+        _shape(isinstance(scrapling, dict), "scrapling must be a mapping")
+        runtime_root_value = scrapling.get("runtime_root")
+        runtime_root = (
+            bounded_relative_path(root, runtime_root_value, "scrapling.runtime_root")
+            if runtime_root_value
+            else root
+        )
+
+        for board in enabled:
+            board_config = cfg.get(board)
+            _shape(
+                board_config is None or isinstance(board_config, dict),
+                f"configuration for enabled board {board!r} must be a mapping",
+            )
+
+        return {
+            "job_urls": bounded_relative_path(
+                root, io.get("job_urls", "state/job_urls.jsonl"), "io.job_urls"
+            ),
+            "raw_cache": bounded_relative_path(
+                root, io.get("raw_cache", "raw/vacancies"), "io.raw_cache"
+            ),
+            "database": bounded_relative_path(
+                root, io.get("database", "state/vacancies.sqlite3"), "io.database"
+            ),
+            "raw_cache_roots": raw_cache_roots,
+            "runtime_root": runtime_root,
+            "boards": [str(board) for board in enabled],
+            "collection": collection,
+            "scrapling": scrapling,
+        }
+
+    @staticmethod
+    def bounded_paths(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Backward-compatible view over :meth:`plan` (paths only)."""
+        return Collector.plan(root, cfg)
 
     def _save_scrapling_failure(self, row: JobUrl, attempts: tuple[dict[str, Any], ...]) -> Path:
         safe = row.job_id.replace("/", "_").replace(":", "_")
@@ -104,8 +243,7 @@ class Collector:
             return raw, result.engine
 
     def migrate_existing(self) -> None:
-        configured = list(((self.cfg.get("io") or {}).get("raw_cache_roots") or ()))
-        roots = [self.root / str(path) for path in configured] if configured else [self.raw_cache]
+        roots = self.raw_cache_roots if self.raw_cache_roots else [self.raw_cache]
         added, fetched = self.db.import_existing_roots(self.urls_path, roots)
         if added or fetched:
             self.log(f"[migrate] preserved {added} discovered and {fetched} fetched legacy rows")

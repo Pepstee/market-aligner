@@ -46,12 +46,25 @@ market-aligner ingest --config /private/collection.yaml
 
 `ingest` runs exactly one bounded official collection cycle from the exact
 configuration file given, against the established external data home, and emits
-one canonical JSON result. Each configuration identity may run once: the
-content-bound operation journal under `<data-home>/state/operations/` refuses
-any replay of a terminal operation before provider access, and marks an
-interrupted run `indeterminate` (fail closed) instead of claiming an
-exactly-once provider call. Provider failures preserve the last good database
-and raw cache.
+one canonical JSON result. Every run requires an explicit stable
+`--operation-id`: the journal binds that id to the resolved config path, config
+file identity, merged config hash, source scope and data home, rejects any
+changed binding before provider access, and returns an already-sealed terminal
+receipt verbatim (`replayed=true`, zero provider calls). Different operation
+ids bound to the same data home and source scope are serialized by a scope
+lock and may run sequentially; only same-id live contenders are refused while
+the owner runs. An interrupted run stays explicitly unresolved, keeps failing
+closed, and blocks new same-scope operations — there is deliberately no
+reconciliation capability in this slice. Provider failures preserve the last
+good database and raw cache, and every configured collector path is enforced
+to stay inside the data home.
+
+Integrity boundary: owner-private directories, single-link 0600 files and
+unkeyed SHA-256 binding give receipts canonical identity and detect accidental
+or noncoherent corruption. They do not authenticate against a malicious
+same-UID rewrite that changes content and recomputes every public hash;
+root-owned or signature-backed admission remains a separately governed future
+authority slice.
 
 Live collection configuration is external and injected into adapters. The automatic Scrapling
 fallback uses static then dynamic fetching; stealth/challenge-solving capabilities require an
