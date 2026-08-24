@@ -138,13 +138,18 @@ def _preflight_refusal(exc: ValueError) -> OperationRefused:
 
 def _binding_refusals(existing: dict, *, kind, config_source, config_file_sha256,
                       config_sha256, scope, data_home) -> OperationRefused | None:
-    """Same operation id with any changed binding must never reach a provider."""
+    """Same operation id with any changed binding must never reach a provider.
+
+    Precedence is deliberate: the source scope is reported before config
+    identity fields so a scope-substituted contender names the scope change
+    even when its configuration file differs wholesale.
+    """
     checks = (
         ("kind", existing["kind"], kind),
+        ("source_scope", existing["source_scope"], scope),
         ("config_source", existing["config_source"], str(config_source)),
         ("config_file_sha256", existing["config_file_sha256"], config_file_sha256),
         ("config_sha256", existing["config_sha256"], config_sha256),
-        ("source_scope", existing["source_scope"], scope),
         ("data_home", existing["data_home"], data_home),
     )
     for field, recorded, current in checks:
@@ -310,11 +315,13 @@ def _ingest_command(args: argparse.Namespace, *, out=None, err=None) -> int:
         try:
             operation_lock_fd = journal.open_operation_lock(operation_id)
         except OperationRefused as exc:
+            # No claim exists yet, so there is no in_flight disposition to
+            # report: the refusal carries the operation identity only.
             enriched = OperationRefused(
                 exc.reason,
                 str(exc),
                 operation_id=operation_id,
-                disposition='in_flight',
+                disposition=None,
             )
             return _refuse(enriched)
 

@@ -1450,6 +1450,9 @@ class IngestCliTests(unittest.TestCase):
                 refusal = _stderr_json(err)
                 self.assertEqual("unsafe_journal_file", refusal["reason"])
                 self.assertEqual(operation_id, refusal["operation_id"])
+                # No claim exists yet: the structured refusal must not assert
+                # an in_flight disposition it never reached.
+                self.assertIsNone(refusal["disposition"])
                 self.assertEqual([], calls)
                 self.assertFalse(os.path.lexists(self.journal.record_path(operation_id)))
                 self.assertTrue(os.path.lexists(op_lock))
@@ -1529,12 +1532,12 @@ class IngestCliTests(unittest.TestCase):
             for line in err.splitlines()
             if line.strip().startswith("{")
         ]
-        # The loser reports the FIRST precisely changed binding (the distinct
-        # per-contender config path), never a generic in_progress.
+        # The loser reports exactly the scope substitution: source_scope is
+        # checked before the config identity fields, so a disjoint-scope twin
+        # is never masked by its wholesale configuration difference and never
+        # degrades to a generic in_progress.
         self.assertEqual(1, len(loser_reasons))
-        self.assertIn(
-            loser_reasons[0], {"binding_config_source", "binding_source_scope"}
-        )
+        self.assertEqual(["binding_source_scope"], loser_reasons)
         # Zero second provider access: every contacted board belongs only to
         # the winner's scope; the loser's disjoint board was never touched.
         touched_boards = {board for _tag, kind, board, _d in tagged_calls}
