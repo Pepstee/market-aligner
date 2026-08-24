@@ -62,8 +62,11 @@ import re
 import stat
 import tempfile
 from datetime import datetime, timezone
+from errno import EAGAIN, EWOULDBLOCK
 from pathlib import Path
 from typing import Any
+
+_BUSY_LOCK_ERRNOS = frozenset({EAGAIN, EWOULDBLOCK})
 
 
 OPERATION_SCHEMA = "market-aligner.operation-journal.v2"
@@ -719,10 +722,18 @@ class OperationJournal:
                 fcntl.flock(probe, fcntl.LOCK_UN)
             except OperationRefused:
                 raise
-            except OSError:
-                # Contention of the shared probe proves some exclusive holder
-                # exists, and only because the probe inode was just proven
-                # identical to the canonical lock.
+            except OSError as exc:
+                if exc.errno not in _BUSY_LOCK_ERRNOS:
+                    # EINTR, EIO and every other failure are not contention;
+                    # they must never be misread as proof of an exclusive
+                    # holder (that would let an unheld fd escalate).
+                    raise OperationRefused(
+                        "unsafe_journal_file",
+                        f"authority probe failed without lock contention: {exc}",
+                    ) from exc
+                # Explicit EAGAIN/EWOULDBLOCK on the shared probe proves some
+                # exclusive holder exists, and only because the probe inode
+                # was just proven identical to the canonical lock.
                 exclusive_holder_exists = True
         finally:
             os.close(probe)
@@ -750,8 +761,13 @@ class OperationJournal:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return True
-            except OSError:
-                return False
+            except OSError as exc:
+                if exc.errno in _BUSY_LOCK_ERRNOS:
+                    return False
+                raise OperationRefused(
+                    "unsafe_journal_file",
+                    f"lock freedom probe failed without contention: {exc}",
+                ) from exc
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
@@ -863,7 +879,7 @@ class OperationJournal:
                 fcntl.flock(descriptor, flags)
             except OSError as exc:
                 os.close(descriptor)
-                if not wait:
+                if not wait and exc.errno in _BUSY_LOCK_ERRNOS:
                     return None  # live publisher holds the authority lock
                 raise OperationRefused(
                     "unsafe_journal_file",

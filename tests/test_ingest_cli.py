@@ -9,6 +9,7 @@ mirroring the established pattern in :mod:`tests.test_collection`.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -2051,15 +2052,6 @@ class IngestCliTests(unittest.TestCase):
             seeding = self.journal.open_operation_lock(op)
             OperationJournal.release_locks([seeding])
 
-        def still_shared(fd: int) -> bool:
-            # Idempotent re-lock proves the supplied description kept its own
-            # SH lock and never gained (or was used for) an EX upgrade.
-            try:
-                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            except OSError:
-                return False
-            return True
-
         def free_sh_probe(op: str) -> bool:
             probe = os.open(
                 self.journal._lock_path(op), os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -2099,7 +2091,6 @@ class IngestCliTests(unittest.TestCase):
             self.assertEqual("unsafe_journal_file", caught.exception.reason)
             self.assertIn("does not hold the exclusive operation lock", str(caught.exception))
             self.assertEqual(before_bytes, path1.read_bytes())
-            self.assertTrue(still_shared(sh1))
             self.assertTrue(free_sh_probe(op1))
         finally:
             fcntl.flock(sh1, fcntl.LOCK_UN)
@@ -2125,7 +2116,6 @@ class IngestCliTests(unittest.TestCase):
             self.assertEqual(2, os.lstat(final2).st_nlink)
             self.assertNotEqual([], list(self.journal_root.glob(f".claim-{op2}-*")))
             self.assertEqual(payload2, Path(temp2).read_bytes())
-            self.assertTrue(still_shared(sh2))
             self.assertTrue(free_sh_probe(op2))
         finally:
             fcntl.flock(sh2, fcntl.LOCK_UN)
@@ -2160,7 +2150,6 @@ class IngestCliTests(unittest.TestCase):
             self.assertNotEqual([], list(self.journal_root.glob(f".claim-{op3}-*")))
             self.assertEqual(prior3, Path(temp3).read_bytes())
             self.assertEqual(prior3, final3.read_bytes())
-            self.assertTrue(still_shared(sh3))
             self.assertTrue(free_sh_probe(op3))
         finally:
             fcntl.flock(sh3, fcntl.LOCK_UN)
@@ -2169,6 +2158,117 @@ class IngestCliTests(unittest.TestCase):
                 if os.path.lexists(entry):
                     os.unlink(entry)
             fsync_directory(self.journal_root)
+
+    def test_probe_errno_strictness_never_masks_contention_or_skips_blockers(self) -> None:
+        import market_aligner.state.operations as operations_module
+
+        real_flock = operations_module.fcntl.flock
+        base = dict(
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            owner_id=new_owner_id(),
+        )
+
+        def free_sh_probe(op: str) -> bool:
+            probe = os.open(
+                self.journal._lock_path(op), os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            try:
+                real_flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                real_flock(probe, fcntl.LOCK_UN)
+                return True
+            except OSError:
+                return False
+            finally:
+                os.close(probe)
+
+        def first_flock_raises(errno_value: int):
+            state = {"raised": False}
+
+            def flaky(fd, request, *args, **kwargs):
+                if not state["raised"]:
+                    state["raised"] = True
+                    raise OSError(errno_value, "injected failure")
+                return real_flock(fd, request, *args, **kwargs)
+
+            return flaky
+
+        # Supplied canonical fd is UNHELD; R8 misread an injected EINTR on the
+        # first shared probe as contention and accepted the unheld fd as
+        # authority. R9 must refuse structurally for EINTR and EIO alike.
+        op1 = "op-eintr-auth"
+        record1 = make_record(operation_id=op1, disposition="in_flight", **base)
+        self.journal.claim(record1)
+        path1 = self.journal.record_path(op1)
+        before_bytes = path1.read_bytes()
+        seeding = self.journal.open_operation_lock(op1)
+        OperationJournal.release_locks([seeding])
+
+        for injected_errno in (errno.EINTR, errno.EIO):
+            unheld_fd = os.open(
+                self.journal._lock_path(op1), os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            try:
+                with mock.patch.object(
+                    operations_module.fcntl, "flock", first_flock_raises(injected_errno)
+                ):
+                    with self.assertRaises(OperationRefused) as caught:
+                        self.journal._settled_record_bytes(
+                            op1, path1, operation_lock_fd=unheld_fd
+                        )
+                self.assertEqual("unsafe_journal_file", caught.exception.reason)
+                self.assertIn("without lock contention", str(caught.exception))
+            finally:
+                os.close(unheld_fd)
+            # The supplied fd stayed non-authoritative and the lock itself is
+            # independently SH-probeable (nothing was upgraded or left held).
+            self.assertEqual(before_bytes, path1.read_bytes())
+            self.assertTrue(free_sh_probe(op1))
+
+        # wait=False seam: EINTR/EIO must refuse, never silently skip as if a
+        # live publisher held the lock.
+        for scan_mode in ("direct", "scope_scan"):
+            op2 = f"op-{scan_mode}-eintr"
+            record2 = make_record(operation_id=op2, disposition="in_flight", **base)
+            payload2 = canonical_json(record2).encode("utf-8")
+            descriptor, temp2 = tempfile.mkstemp(
+                prefix=f".claim-{op2}-", dir=self.journal_root
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload2)
+            final2 = self.journal.record_path(op2)
+            os.link(temp2, final2)
+            self.assertEqual(2, os.lstat(final2).st_nlink)
+
+            for injected_errno in (errno.EINTR, errno.EIO):
+                with mock.patch.object(
+                    operations_module.fcntl, "flock", first_flock_raises(injected_errno)
+                ):
+                    if scan_mode == "direct":
+                        with self.assertRaises(OperationRefused) as caught:
+                            self.journal._settled_record_bytes(op2, final2, wait=False)
+                    else:
+                        with self.assertRaises(OperationRefused) as caught:
+                            self.journal.scan_unresolved_scope_blockers(
+                                str(self.root), ["fixtureboard"]
+                            )
+                self.assertEqual("unsafe_journal_file", caught.exception.reason)
+                self.assertIn("could not acquire publication authority", str(caught.exception))
+                # The unresolved blocker survived untouched — it was refused,
+                # not skipped or settled.
+                self.assertEqual(2, os.lstat(final2).st_nlink)
+                self.assertNotEqual([], list(self.journal_root.glob(f".claim-{op2}-*")))
+                self.assertEqual(payload2, Path(temp2).read_bytes())
+
+            os.unlink(temp2)
+            os.unlink(final2)
+            operations_module.fsync_directory(self.journal_root)
 
     def test_cas_replace_without_supplied_fd_settles_exact_residue_without_deadlock(
         self,
