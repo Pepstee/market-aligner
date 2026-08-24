@@ -687,12 +687,15 @@ class OperationJournal:
                 "unsafe_journal_file",
                 "supplied authority fd is not this operation's lock file",
             )
-        # Prove the supplied description ALREADY holds the exclusive flock.
-        # A second descriptor must fail to acquire (something holds it), and
-        # re-locking the supplied fd must succeed idempotently (it is the
-        # holder). A fresh unheld fd would let both checks pass/fail in a way
-        # that betrays it: the probe acquires freely, so authority is denied
-        # before any read or mutation.
+        # Non-upgrading proof that the supplied description ALREADY holds the
+        # exclusive flock. A same-inode O_NOFOLLOW probe attempts
+        # LOCK_SH|LOCK_NB first: if the shared lock succeeds there is NO
+        # exclusive holder at all and authority is denied outright. Only when
+        # the shared probe is blocked does an exclusive holder exist, and the
+        # supplied fd must then re-lock LOCK_EX|LOCK_NB idempotently,
+        # identifying itself as exactly that exclusive open description. An
+        # unheld or merely shared supplied fd can never pass both checks, so
+        # it is never upgraded into settlement authority.
         try:
             probe = os.open(expected, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
         except OSError as exc:
@@ -701,7 +704,7 @@ class OperationJournal:
                 f"operation lock {expected.name} is not probeable: {exc}",
             ) from exc
         try:
-            held_by_anyone = False
+            exclusive_holder_exists = False
             try:
                 probe_info = os.fstat(probe)
                 if (probe_info.st_dev, probe_info.st_ino) != (
@@ -712,17 +715,18 @@ class OperationJournal:
                         "unsafe_journal_file",
                         "operation lock changed identity while probing authority",
                     )
-                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 fcntl.flock(probe, fcntl.LOCK_UN)
             except OperationRefused:
                 raise
             except OSError:
-                # Contention is only trusted once the probe descriptor is
-                # proven to reference the very same canonical inode.
-                held_by_anyone = True
+                # Contention of the shared probe proves some exclusive holder
+                # exists, and only because the probe inode was just proven
+                # identical to the canonical lock.
+                exclusive_holder_exists = True
         finally:
             os.close(probe)
-        if not held_by_anyone:
+        if not exclusive_holder_exists:
             raise OperationRefused(
                 "unsafe_journal_file",
                 "supplied authority fd does not hold the exclusive operation lock",

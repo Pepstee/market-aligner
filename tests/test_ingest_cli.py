@@ -2035,6 +2035,141 @@ class IngestCliTests(unittest.TestCase):
         finally:
             OperationJournal.release_locks([genuine_fd])
 
+    def test_shared_lock_fds_never_upgrade_to_settlement_authority(self) -> None:
+        from market_aligner.state.operations import fsync_directory
+
+        def shared_fd_for(op: str) -> int:
+            fd = os.open(
+                self.journal._lock_path(op), os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return fd
+
+        def seed_lock(op: str) -> None:
+            # Materialize the canonical lock file, then release it so the
+            # negatives run against a genuinely free authority.
+            seeding = self.journal.open_operation_lock(op)
+            OperationJournal.release_locks([seeding])
+
+        def still_shared(fd: int) -> bool:
+            # Idempotent re-lock proves the supplied description kept its own
+            # SH lock and never gained (or was used for) an EX upgrade.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            return True
+
+        def free_sh_probe(op: str) -> bool:
+            probe = os.open(
+                self.journal._lock_path(op), os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            try:
+                fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                fcntl.flock(probe, fcntl.LOCK_UN)
+                return True
+            except OSError:
+                return False
+            finally:
+                os.close(probe)
+
+        base = dict(
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            owner_id=new_owner_id(),
+        )
+
+        # --- nlink1 read path: a merely-shared supplied fd is refused. ---
+        op1 = "op-sh-read"
+        record1 = make_record(operation_id=op1, disposition="in_flight", **base)
+        self.journal.claim(record1)
+        seed_lock(op1)
+        path1 = self.journal.record_path(op1)
+        before_bytes = path1.read_bytes()
+        sh1 = shared_fd_for(op1)
+        try:
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal._settled_record_bytes(op1, path1, operation_lock_fd=sh1)
+            self.assertEqual("unsafe_journal_file", caught.exception.reason)
+            self.assertIn("does not hold the exclusive operation lock", str(caught.exception))
+            self.assertEqual(before_bytes, path1.read_bytes())
+            self.assertTrue(still_shared(sh1))
+            self.assertTrue(free_sh_probe(op1))
+        finally:
+            fcntl.flock(sh1, fcntl.LOCK_UN)
+            os.close(sh1)
+
+        # --- nlink2 settlement path: shared fd refused, residue untouched. ---
+        op2 = "op-sh-settle"
+        record2 = make_record(operation_id=op2, disposition="in_flight", **base)
+        payload2 = canonical_json(record2).encode("utf-8")
+        descriptor, temp2 = tempfile.mkstemp(prefix=f".claim-{op2}-", dir=self.journal_root)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload2)
+        final2 = self.journal.record_path(op2)
+        seed_lock(op2)
+        os.link(temp2, final2)
+        self.assertEqual(2, os.lstat(final2).st_nlink)
+        sh2 = shared_fd_for(op2)
+        try:
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal._settled_record_bytes(op2, final2, operation_lock_fd=sh2)
+            self.assertEqual("unsafe_journal_file", caught.exception.reason)
+            self.assertIn("does not hold the exclusive operation lock", str(caught.exception))
+            self.assertEqual(2, os.lstat(final2).st_nlink)
+            self.assertNotEqual([], list(self.journal_root.glob(f".claim-{op2}-*")))
+            self.assertEqual(payload2, Path(temp2).read_bytes())
+            self.assertTrue(still_shared(sh2))
+            self.assertTrue(free_sh_probe(op2))
+        finally:
+            fcntl.flock(sh2, fcntl.LOCK_UN)
+            os.close(sh2)
+
+        # --- CAS seam: a shared supplied fd refuses before any read/mutation. ---
+        op3 = "op-sh-cas"
+        record3 = make_record(operation_id=op3, disposition="in_flight", **base)
+        prior3 = canonical_json(record3).encode("utf-8")
+        descriptor, temp3 = tempfile.mkstemp(prefix=f".claim-{op3}-", dir=self.journal_root)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(prior3)
+        final3 = self.journal.record_path(op3)
+        seed_lock(op3)
+        os.link(temp3, final3)
+        sealed3 = make_record(
+            operation_id=op3,
+            disposition="completed",
+            started_at=record3["started_at"],
+            finished_at=record3["started_at"],
+            result={"seen": 1, "new": 0, "fetched": 0, "errors": 0, "database_total": 1},
+            **{**base, "owner_id": record3["owner_id"]},
+        )
+        sh3 = shared_fd_for(op3)
+        try:
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal.cas_replace(sealed3, prior3, operation_id=op3, operation_lock_fd=sh3)
+            self.assertEqual("unsafe_journal_file", caught.exception.reason)
+            self.assertIn("does not hold the exclusive operation lock", str(caught.exception))
+            # Nothing changed: claim temp bytes/links and final are intact.
+            self.assertEqual(2, os.lstat(final3).st_nlink)
+            self.assertNotEqual([], list(self.journal_root.glob(f".claim-{op3}-*")))
+            self.assertEqual(prior3, Path(temp3).read_bytes())
+            self.assertEqual(prior3, final3.read_bytes())
+            self.assertTrue(still_shared(sh3))
+            self.assertTrue(free_sh_probe(op3))
+        finally:
+            fcntl.flock(sh3, fcntl.LOCK_UN)
+            os.close(sh3)
+            for entry in (final3, temp3):
+                if os.path.lexists(entry):
+                    os.unlink(entry)
+            fsync_directory(self.journal_root)
+
     def test_cas_replace_without_supplied_fd_settles_exact_residue_without_deadlock(
         self,
     ) -> None:
