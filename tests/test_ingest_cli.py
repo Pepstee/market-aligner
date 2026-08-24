@@ -1869,10 +1869,29 @@ class IngestCliTests(unittest.TestCase):
             )
             self.assertEqual("completed", record["disposition"])
             self.assertEqual(payload["receipt_id"], record["receipt_id"])
-            # Exactly one provider cycle, only the winning scope ran.
-            self.assertEqual(1, sum(1 for call in tagged_calls if call[1] == "discover"))
+            # Exactly one provider cycle, and the actual adapter instance tag
+            # plus the single discovered board must correspond exactly to the
+            # successful payload's scope — no subset-only weakening.
+            ok_label = next(
+                label
+                for label, (code, _out, _err) in results.items()
+                if code == 0
+            )
+            expected_tag = (
+                f"{operation_id}-a" if ok_label == "winner" else f"{operation_id}-b"
+            )
+            self.assertEqual({expected_tag}, set(adapter_tags), race_index)
+            discovers = [
+                (tag, board)
+                for tag, kind, board, _detail in tagged_calls
+                if kind == "discover"
+            ]
+            self.assertEqual(1, len(discovers), race_index)
+            discover_tag, discover_board = discovers[0]
+            self.assertEqual(expected_tag, discover_tag, race_index)
             touched = {call[2] for call in tagged_calls}
-            self.assertTrue(touched.issubset(set(payload["source_scope"])), race_index)
+            self.assertEqual(set(payload["source_scope"]), touched, race_index)
+            self.assertEqual([discover_board], sorted(touched), race_index)
             self.assertEqual(
                 [], list(self.journal_root.glob(f".claim-{operation_id}-*"))
             )
