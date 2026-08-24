@@ -17,6 +17,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -64,24 +65,55 @@ class FixtureBoard(Adapter):
         calls=None,
         fail_ids=(),
         guard=None,
+        operation_tag="untagged",
         failure_text="provider refused {job_id}",
+        registered_tags=None,
+        tagged_calls=None,
+        delay=0.0,
     ):
         self.board = board_name
         super().__init__(fixture_dir=fixture_dir, config=config)
         self.calls = calls if calls is not None else []
         self.fail_ids = frozenset(fail_ids)
-        self.guard = guard or nullcontext()
+        self.guard = guard
+        # The operation tag is captured at adapter construction and passed
+        # explicitly into the guard: Collector executes discover/fetch inside
+        # its own thread pools, so thread-locals would lose the identity.
+        self.operation_tag = operation_tag
+        if registered_tags is not None:
+            registered_tags.append(operation_tag)
+        self.tagged_calls = tagged_calls if tagged_calls is not None else []
+        # A bounded provider delay keeps each explicit-tag guard section open
+        # long enough that any lost board-lock serialization would necessarily
+        # overlap and increment violations instead of passing vacuously.
+        self.delay = delay
         self.failure_text = failure_text
 
+    def _record(self, kind, detail):
+        self.calls.append((kind, self.board, detail))
+        self.tagged_calls.append((self.operation_tag, kind, self.board, detail))
+
     def discover(self, search_terms, live=False):
-        with self.guard:
-            self.calls.append(("discover", self.board, tuple(search_terms)))
+        with (
+            self.guard.enter(self.operation_tag)
+            if self.guard is not None
+            else contextlib.nullcontext()
+        ):
+            self._record("discover", tuple(search_terms))
+            if self.delay:
+                time.sleep(self.delay)
             rows = list(super().discover(search_terms, live=False))
         yield from rows
 
     def fetch(self, job_url, live=False):
-        with self.guard:
-            self.calls.append(("fetch", self.board, job_url.job_id))
+        with (
+            self.guard.enter(self.operation_tag)
+            if self.guard is not None
+            else contextlib.nullcontext()
+        ):
+            self._record("fetch", job_url.job_id)
+            if self.delay:
+                time.sleep(self.delay)
             if job_url.job_id in self.fail_ids:
                 raise RuntimeError(
                     self.failure_text.format(job_id=job_url.job_id, board=self.board)
@@ -92,44 +124,42 @@ class FixtureBoard(Adapter):
 class OverlapGuard:
     """Fails when provider calls of two different operations overlap.
 
-    Active calls are tracked as per-operation reference counts: parallel
-    fetches inside one operation each increment and decrement dict[tag], so an
-    operation stays visible until its LAST provider call returns. A violation
-    is recorded exactly when a call enters while any other tag has a positive
-    count.
+    Active calls are tracked as explicit per-operation reference counts:
+    parallel fetches inside one operation each increment and decrement
+    ``active[tag]``, so an operation stays visible until its LAST provider
+    call returns. A violation is recorded exactly when a call enters while
+    any other tag has a positive count. The tag is captured when each adapter
+    is constructed and passed explicitly to :meth:`enter`, because Collector
+    runs discover/fetch inside its own thread pools where thread-locals from
+    the contender thread are invisible.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.active: dict[str, int] = {}
         self.violations = 0
-        self.local = threading.local()
-
-    def _tag(self):
-        return getattr(self.local, "tag", None)
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:
             return dict(self.active)
 
-    def __enter__(self) -> "OverlapGuard":
-        tag = self._tag()
+    @contextlib.contextmanager
+    def enter(self, tag: str):
         with self._lock:
             for other, count in self.active.items():
                 if other != tag and count > 0:
                     self.violations += 1
                     break
             self.active[tag] = self.active.get(tag, 0) + 1
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        tag = self._tag()
-        with self._lock:
-            count = self.active.get(tag, 0)
-            if count <= 1:
-                self.active.pop(tag, None)
-            else:
-                self.active[tag] = count - 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                count = self.active.get(tag, 0)
+                if count <= 1:
+                    self.active.pop(tag, None)
+                else:
+                    self.active[tag] = count - 1
 
 
 def _write_board_fixtures(root: Path, board: str, entries) -> None:
@@ -196,6 +226,16 @@ def _rehashed(record: dict, **overrides) -> dict:
     return forged
 
 
+def _discovers_by_board_tag(tagged_calls: list[tuple]) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for tag, kind, board, _detail in tagged_calls:
+        if kind != "discover":
+            continue
+        counts.setdefault(tag, {})
+        counts[tag][board] = counts[tag].get(board, 0) + 1
+    return counts
+
+
 class IngestCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
@@ -220,7 +260,7 @@ class IngestCliTests(unittest.TestCase):
         ]
 
     def _patched(self, calls: list, fail_ids=(), guard: OverlapGuard | None = None,
-                 failure_text="provider refused {job_id}"):
+                 failure_text="provider refused {job_id}", operation_tag="untagged"):
         fixture_dir = self.root / "fixtures"
         return mock.patch(
             "market_aligner.collectors.engine.load_adapter",
@@ -231,6 +271,7 @@ class IngestCliTests(unittest.TestCase):
                 calls=calls,
                 fail_ids=fail_ids,
                 guard=guard,
+                operation_tag=operation_tag,
                 failure_text=failure_text,
             ),
         )
@@ -448,25 +489,68 @@ class IngestCliTests(unittest.TestCase):
         # Contenders run in real threads against the canonical handler through
         # its injected capture streams: nothing touches the process-global
         # sys.stdout/sys.stderr, so per-contender attribution stays exact.
+        # ONE shared patch covers the whole concurrent run; the factory reads
+        # an immutable per-operation tag embedded in each contender's distinct
+        # config file. A shared deterministic source_due=True seam forces BOTH
+        # contenders provider-eligible after serialization, and the bounded
+        # provider delay keeps every explicit-tag guard section open long
+        # enough that losing board-lock serialization would necessarily overlap
+        # delayed sections and increment violations instead of passing vacuously.
         from market_aligner.cli import _ingest_command, build_parser
+        fixture_dir = self.root / "fixtures"
+        adapter_tags: list[str] = []
+        tagged_calls: list[tuple] = []
+        contenders = (
+            ("op-concurrent-a", self._write_board_config(
+                "conc-a", ["fixtureboard"], operation_tag="op-concurrent-a")),
+            ("op-concurrent-b", self._write_board_config(
+                "conc-b", ["fixtureboard"], operation_tag="op-concurrent-b")),
+        )
 
-        def contender(operation_id: str) -> None:
-            guard.local.tag = operation_id
-            args = build_parser().parse_args(self._argv(operation_id))
+        def factory(board, config=None):
+            tag = str((config or {}).get("operation_tag") or f"unmarked:{board}")
+            return FixtureBoard(
+                board_name=board,
+                fixture_dir=fixture_dir,
+                config=config,
+                calls=calls,
+                guard=guard,
+                operation_tag=tag,
+                registered_tags=adapter_tags,
+                tagged_calls=tagged_calls,
+                delay=0.03,
+            )
+
+        def contender(operation_id: str, config_path: Path) -> None:
+            args = build_parser().parse_args([
+                "ingest", "--operation-id", operation_id,
+                "--config", str(config_path), "--data-home", str(self.root),
+            ])
             out, err = io.StringIO(), io.StringIO()
             code = _ingest_command(args, out=out, err=err)
             with lock:
                 outcomes[operation_id] = (code, out.getvalue(), err.getvalue())
 
         threads = [
-            threading.Thread(target=contender, args=(name,))
-            for name in ("op-concurrent-a", "op-concurrent-b")
+            threading.Thread(target=contender, args=pair) for pair in contenders
         ]
-        with self._patched(calls, guard=guard):
+        with mock.patch(
+            "market_aligner.collectors.engine.load_adapter", side_effect=factory
+        ), mock.patch.object(JobDatabase, "source_due", autospec=True, return_value=True):
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
+
+        # Both exact contenders constructed real adapters and both reached the
+        # shared board's discover sequentially under their own distinct tags.
+        self.assertEqual({"op-concurrent-a", "op-concurrent-b"}, set(adapter_tags))
+        discovers_by_tag: dict[str, int] = {}
+        for tag, kind, _board, _detail in tagged_calls:
+            if kind == "discover":
+                discovers_by_tag[tag] = discovers_by_tag.get(tag, 0) + 1
+        self.assertEqual({"op-concurrent-a": 1, "op-concurrent-b": 1}, discovers_by_tag)
+        self.assertEqual(0, guard.violations)
 
         self.assertEqual({0}, {code for code, _out, _err in outcomes.values()})
         ok_payloads = {}
@@ -483,7 +567,7 @@ class IngestCliTests(unittest.TestCase):
             self.assertEqual("ok", payload["status"])
             ok_payloads[operation_id] = payload
         # Serialized execution: exactly one run ever sees fresh postings; the
-        # other observes the first one's rows and fetches nothing.
+        # forced-due loser re-discovers the same rows and fetches nothing.
         fresh = [
             payload
             for payload in ok_payloads.values()
@@ -494,7 +578,7 @@ class IngestCliTests(unittest.TestCase):
             result = payload["result"]
             if result["fetched"] == 0:
                 self.assertEqual(
-                    {"seen": 0, "new": 0, "fetched": 0, "errors": 0, "database_total": 3},
+                    {"seen": 3, "new": 0, "fetched": 0, "errors": 0, "database_total": 3},
                     result,
                 )
         self.assertEqual(0, guard.violations)
@@ -878,22 +962,29 @@ class IngestCliTests(unittest.TestCase):
     # -- mandatory R2 amendment tests ---------------------------------------------
     def test_overlap_guard_reference_counting(self) -> None:
         guard = OverlapGuard()
-        guard.local.tag = "op-a"
-        guard.__enter__()
-        guard.__enter__()  # second parallel provider call of the same operation
-        # First call returns: operation A must stay visible with one active call.
-        guard.__exit__()
-        self.assertEqual({"op-a": 1}, guard.snapshot())
-        self.assertEqual(0, guard.violations)
-        # A different operation entering now is detected and prevented.
-        guard.local.tag = "op-b"
-        guard.__enter__()
-        self.assertEqual(1, guard.violations)
-        guard.__exit__()
-        guard.local.tag = "op-a"
-        guard.__exit__()
+        with guard.enter("op-a"):
+            with guard.enter("op-a"):  # second parallel call of the same operation
+                self.assertEqual({"op-a": 2}, guard.snapshot())
+            # First call returned: A stays visible with one active call.
+            self.assertEqual({"op-a": 1}, guard.snapshot())
+            self.assertEqual(0, guard.violations)
+            # A different adapter tag entering now is detected and prevented.
+            with guard.enter("op-b"):
+                self.assertEqual(1, guard.violations)
+                self.assertEqual({"op-a": 1, "op-b": 1}, guard.snapshot())
+        # Parallel same-tag calls never count as cross-operation overlap even
+        # when they interleave with another tag's sequential calls; a genuinely
+        # different tag entering while another is active still counts exactly.
+        first_violations = guard.violations
+        with guard.enter("op-c"):
+            with guard.enter("op-c"):
+                self.assertEqual(guard.snapshot()["op-c"], 2)
+                self.assertEqual(first_violations, guard.violations)
+            self.assertEqual(1, guard.snapshot()["op-c"])
+            with guard.enter("op-b"):
+                self.assertEqual(first_violations + 1, guard.violations)
         self.assertEqual({}, guard.snapshot())
-        self.assertEqual(1, guard.violations)
+        self.assertEqual(first_violations + 1, guard.violations)
 
     def test_simultaneous_same_id_replays_after_lock_wait(self) -> None:
         calls: list = []
@@ -901,10 +992,32 @@ class IngestCliTests(unittest.TestCase):
         outcomes: list[tuple[int, str, str]] = []
         lock = threading.Lock()
         from market_aligner.cli import _ingest_command, build_parser
+        fixture_dir = self.root / "fixtures"
+        twin_config = self._write_board_config(
+            "twins", ["fixtureboard"], operation_tag="op-twins"
+        )
+        adapter_tags: list[str] = []
+        tagged_calls: list[tuple] = []
+
+        def factory(board, config=None):
+            tag = str((config or {}).get("operation_tag") or f"unmarked:{board}")
+            return FixtureBoard(
+                board_name=board,
+                fixture_dir=fixture_dir,
+                config=config,
+                calls=calls,
+                guard=guard,
+                operation_tag=tag,
+                registered_tags=adapter_tags,
+                tagged_calls=tagged_calls,
+                delay=0.03,
+            )
 
         def contender(operation_id: str) -> None:
-            guard.local.tag = f"{operation_id}:{threading.get_ident()}"
-            args = build_parser().parse_args(self._argv(operation_id))
+            args = build_parser().parse_args([
+                "ingest", "--operation-id", operation_id,
+                "--config", str(twin_config), "--data-home", str(self.root),
+            ])
             out, err = io.StringIO(), io.StringIO()
             code = _ingest_command(args, out=out, err=err)
             with lock:
@@ -914,11 +1027,17 @@ class IngestCliTests(unittest.TestCase):
             threading.Thread(target=contender, args=("op-twins",)),
             threading.Thread(target=contender, args=("op-twins",)),
         ]
-        with self._patched(calls, guard=guard):
+        with mock.patch(
+            "market_aligner.collectors.engine.load_adapter", side_effect=factory
+        ), mock.patch.object(JobDatabase, "source_due", autospec=True, return_value=True):
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
+        # Same-ID contenders intentionally share exactly one immutable tag and
+        # execute exactly one external cycle in total.
+        self.assertEqual({"op-twins"}, set(adapter_tags))
+        self.assertEqual(1, sum(1 for call in tagged_calls if call[1] == "discover"))
 
         payloads: dict[str, dict] = {}
         refused: list[dict] = []
@@ -948,25 +1067,57 @@ class IngestCliTests(unittest.TestCase):
         self.assertEqual(payloads["ok"]["receipt_id"], record["receipt_id"])
         self.assertEqual(0, guard.violations)
 
-    def _write_board_config(self, name: str, boards: list[str]) -> Path:
+    def _write_board_config(
+        self, name: str, boards: list[str], operation_tag: str | None = None
+    ) -> Path:
         cfg = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         cfg["boards"] = {"enabled": boards}
+        for board in boards:
+            section = dict(cfg.get(board) or {})
+            if operation_tag is not None:
+                # Immutable per-operation marker read by the shared adapter
+                # factory; distinct files carry distinct tags while same-ID
+                # twins share one file and therefore one tag.
+                section["operation_tag"] = operation_tag
+            cfg[board] = section
         path = self.root / f"{name}.yaml"
         path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
         return path
 
     def test_intersecting_scopes_serialize_and_block_on_unresolved(self) -> None:
-        full_config = self._write_board_config("full", ["fixtureboard", SECOND_BOARD])
-        sub_config = self._write_board_config("sub", ["fixtureboard"])
-        disjoint_config = self._write_board_config("disjoint", [SECOND_BOARD])
         calls: list = []
         guard = OverlapGuard()
         outcomes: dict[str, int] = {}
         lock = threading.Lock()
+        adapter_tags: list[str] = []
+        tagged_calls: list[tuple] = []
         from market_aligner.cli import _ingest_command, build_parser
+        fixture_dir = self.root / "fixtures"
+        full_config = self._write_board_config(
+            "full", ["fixtureboard", SECOND_BOARD], operation_tag="op-superset"
+        )
+        sub_config = self._write_board_config(
+            "sub", ["fixtureboard"], operation_tag="op-subset"
+        )
+        disjoint_config = self._write_board_config(
+            "disjoint", [SECOND_BOARD], operation_tag="op-disjoint"
+        )
+
+        def factory(board, config=None):
+            tag = str((config or {}).get("operation_tag") or f"unmarked:{board}")
+            return FixtureBoard(
+                board_name=board,
+                fixture_dir=fixture_dir,
+                config=config,
+                calls=calls,
+                guard=guard,
+                operation_tag=tag,
+                registered_tags=adapter_tags,
+                tagged_calls=tagged_calls,
+                delay=0.03,
+            )
 
         def contender(operation_id: str, config_path: Path) -> None:
-            guard.local.tag = operation_id
             argv = [
                 "ingest",
                 "--operation-id",
@@ -982,11 +1133,13 @@ class IngestCliTests(unittest.TestCase):
             with lock:
                 outcomes[operation_id] = code
 
-        with self._patched(calls, guard=guard):
-            threads = [
-                threading.Thread(target=contender, args=("op-superset", full_config)),
-                threading.Thread(target=contender, args=("op-subset", sub_config)),
-            ]
+        threads = [
+            threading.Thread(target=contender, args=("op-superset", full_config)),
+            threading.Thread(target=contender, args=("op-subset", sub_config)),
+        ]
+        with mock.patch(
+            "market_aligner.collectors.engine.load_adapter", side_effect=factory
+        ), mock.patch.object(JobDatabase, "source_due", autospec=True, return_value=True):
             for thread in threads:
                 thread.start()
             for thread in threads:
@@ -994,6 +1147,17 @@ class IngestCliTests(unittest.TestCase):
 
         self.assertEqual({0}, set(outcomes.values()))
         self.assertEqual(0, guard.violations)
+        # Both operations reach the shared board provider sequentially with
+        # distinct explicit tags; the superset also covers its extra board.
+        self.assertEqual({"op-superset", "op-subset"}, set(adapter_tags))
+        shared_discovers = {
+            tag: count
+            for tag, count in _discovers_by_board_tag(tagged_calls).items()
+            if tag in {"op-superset", "op-subset"} and "fixtureboard" in count
+        }
+        self.assertEqual(2, len(shared_discovers))
+        for tag, boards in shared_discovers.items():
+            self.assertGreaterEqual(boards.get("fixtureboard", 0), 1, tag)
         total, fetched = _db_counts(self.root)
         self.assertEqual((4, 4), (total, fetched))
 
@@ -1231,6 +1395,188 @@ class IngestCliTests(unittest.TestCase):
         self.assertEqual(record["error"], replay["error"])
         self.assertEqual(calls_snapshot, calls)
         self.assertEqual(failed_bytes, self.journal.record_path("op-unicode").read_bytes())
+
+    # -- lock substitution refusals before provider -----------------------------
+    def test_preexisting_board_lock_substitutions_fail_closed(self) -> None:
+        board_lock = self.journal.board_lock_path(str(self.root), "fixtureboard")
+
+        def scenario(mode_or_link):
+            if mode_or_link == "broken":
+                os.symlink(self.root / "no-target", board_lock)
+            else:
+                board_lock.write_text("")
+                os.chmod(board_lock, mode_or_link)
+            try:
+                calls: list = []
+                with self._patched(calls):
+                    code, out, err = _run(self._argv("op-boardlock"))
+                self.assertEqual(2, code)
+                self.assertEqual("", out.strip())
+                self.assertEqual("unsafe_journal_file", _stderr_json(err)["reason"])
+                self.assertEqual([], calls)
+                # The unsafe entry itself is preserved for inspection.
+                self.assertTrue(os.path.lexists(board_lock))
+            finally:
+                if os.path.lexists(board_lock) and not (
+                    board_lock.is_symlink() is False and board_lock.stat().st_nlink > 1
+                ):
+                    pass
+                os.remove(board_lock) if os.path.lexists(board_lock) else None
+                self.assertFalse(os.path.lexists(board_lock))
+
+        scenario(0o664)
+        scenario("broken")
+
+    def test_preexisting_operation_lock_substitutions_fail_before_provider(self) -> None:
+        operation_id = "op-lockguard"
+        op_lock = self.journal._lock_path(operation_id)
+
+        def scenario(kind):
+            if kind == "symlink":
+                os.symlink(self.root / "no-target", op_lock)
+            elif kind == "hardlink":
+                witness = self.journal_root / "witness.txt"
+                witness.write_text("shared", encoding="utf-8")
+                os.link(witness, op_lock)
+            else:
+                op_lock.write_text("")
+                os.chmod(op_lock, kind)
+            try:
+                calls: list = []
+                with self._patched(calls):
+                    code, out, err = _run(self._argv(operation_id))
+                self.assertEqual(2, code)
+                self.assertEqual("", out.strip())
+                refusal = _stderr_json(err)
+                self.assertEqual("unsafe_journal_file", refusal["reason"])
+                self.assertEqual(operation_id, refusal["operation_id"])
+                self.assertEqual([], calls)
+                self.assertFalse(os.path.lexists(self.journal.record_path(operation_id)))
+                self.assertTrue(os.path.lexists(op_lock))
+            finally:
+                if os.path.lexists(op_lock):
+                    os.unlink(op_lock)
+
+        scenario(0o644)
+        scenario(0o664)
+        scenario("symlink")
+        scenario("hardlink")
+
+    def test_same_id_disjoint_scopes_return_precise_binding_refusal(self) -> None:
+        config_a = self._write_board_config(
+            "race-a", ["fixtureboard"], operation_tag="op-racepair"
+        )
+        config_b = self._write_board_config(
+            "race-b", [SECOND_BOARD], operation_tag="op-racepair"
+        )
+        calls: list = []
+        adapter_tags: list[str] = []
+        tagged_calls: list[tuple] = []
+        from market_aligner.cli import _ingest_command, build_parser
+        fixture_dir = self.root / "fixtures"
+
+        def factory(board, config=None):
+            tag = str((config or {}).get("operation_tag") or f"unmarked:{board}")
+            return FixtureBoard(
+                board_name=board,
+                fixture_dir=fixture_dir,
+                config=config,
+                calls=calls,
+                guard=None,
+                operation_tag=tag,
+                registered_tags=adapter_tags,
+                tagged_calls=tagged_calls,
+            )
+
+        results: list[tuple[int, str, str]] = []
+        start = threading.Barrier(2)
+
+        def contender(config_path: Path) -> None:
+            args = build_parser().parse_args([
+                "ingest", "--operation-id", "op-racepair",
+                "--config", str(config_path), "--data-home", str(self.root),
+            ])
+            out, err = io.StringIO(), io.StringIO()
+            start.wait()
+            code = _ingest_command(args, out=out, err=err)
+            results.append((code, out.getvalue(), err.getvalue()))
+
+        threads = [
+            threading.Thread(target=contender, args=(config_a,)),
+            threading.Thread(target=contender, args=(config_b,)),
+        ]
+        with mock.patch(
+            "market_aligner.collectors.engine.load_adapter", side_effect=factory
+        ):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        codes = sorted(code for code, _out, _err in results)
+        self.assertEqual([0, 2], codes)
+        ok_payloads = [
+            json.loads(line)
+            for _code, out, _err in results
+            for line in out.splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(1, len(ok_payloads))
+        winner_scope = set(ok_payloads[0]["source_scope"])
+        loser_reasons = [
+            json.loads(line)["reason"]
+            for _code, _out, err in results
+            for line in err.splitlines()
+            if line.strip().startswith("{")
+        ]
+        # The loser reports the FIRST precisely changed binding (the distinct
+        # per-contender config path), never a generic in_progress.
+        self.assertEqual(1, len(loser_reasons))
+        self.assertIn(
+            loser_reasons[0], {"binding_config_source", "binding_source_scope"}
+        )
+        # Zero second provider access: every contacted board belongs only to
+        # the winner's scope; the loser's disjoint board was never touched.
+        touched_boards = {board for _tag, kind, board, _d in tagged_calls}
+        self.assertTrue(touched_boards.issubset(winner_scope), touched_boards)
+        record = json.loads(self.journal.record_path("op-racepair").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(winner_scope), record["source_scope"])
+        self.assertEqual("completed", record["disposition"])
+
+    def test_reversed_enabled_order_canonicalizes_scope_deterministically(self) -> None:
+        reversed_config = self._write_board_config(
+            "reversed", [SECOND_BOARD, "fixtureboard"], operation_tag="op-reversed"
+        )
+        calls: list = []
+        with mock.patch.object(JobDatabase, "source_due", autospec=True, return_value=True):
+            with self._patched(calls):
+                first_code, first_out, _err = _run(
+                    self._argv("op-rev-first", reversed_config)
+                )
+                second_code, second_out, _err = _run(
+                    self._argv("op-rev-second", reversed_config)
+                )
+        self.assertEqual(0, first_code)
+        self.assertEqual(0, second_code)
+        for payload in (_json_out(first_out), _json_out(second_out)):
+            # Canonicalization happens exactly once in Collector.plan: the
+            # reversed configured order binds as sorted unique scope.
+            self.assertEqual(
+                ["fixtureboard", SECOND_BOARD], payload["source_scope"], payload
+            )
+        self.assertEqual(4, _json_out(first_out)["result"]["seen"])
+        first_result = _json_out(first_out)["result"]
+        second_result = _json_out(second_out)["result"]
+        self.assertEqual(4, first_result["new"])
+        self.assertEqual(0, second_result["new"])
+        discovers = [call for call in calls if call[0] == "discover"]
+        self.assertEqual(
+            {"fixtureboard": 2, SECOND_BOARD: 2},
+            {
+                board: sum(1 for call in discovers if call[1] == board)
+                for board in {call[1] for call in discovers}
+            },
+        )
 
     # -- existing CLI behaviour unchanged -------------------------------------------
     def test_profiles_and_assess_cli_behaviour_unchanged(self) -> None:

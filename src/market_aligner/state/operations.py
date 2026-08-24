@@ -569,22 +569,36 @@ class OperationJournal:
         return descriptor
 
     def acquire_board_locks(self, data_home: str, source_scope: list[str]) -> list[int]:
-        """Lock every board of the scope in canonical order and hold them all.
+        """Lock every board of the scope and hold them all through the run.
 
-        Different operation ids serialize on every intersecting board; sorted
-        acquisition order prevents deadlock across subset/superset scopes.
+        ``source_scope`` arrives already canonically ordered from
+        :meth:`market_aligner.collectors.Collector.plan`, so acquisition order
+        is deterministic and deadlock-free across subset/superset scopes. On
+        any failure every already-bound lock is released while an unsafe entry
+        itself is left untouched for structured inspection.
         """
         self._verify_root()
         descriptors: list[int] = []
         try:
-            for board in sorted(str(board) for board in source_scope):
+            for board in source_scope:
                 descriptor = self._open_lock(self.board_lock_path(data_home, board))
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
                 descriptors.append(descriptor)
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            return descriptors
         except BaseException:
             self.release_locks(descriptors)
             raise
-        return descriptors
+
+    def open_operation_lock(self, operation_id: str) -> int:
+        """Open, verify and exclusively hold this operation's own lock.
+
+        Called before any claim or provider access so a substituted
+        (06xx-mode, symlinked or hardlinked) lock fails closed with zero
+        provider calls and cannot strand an in_flight claim. The returned
+        descriptor stays held through claim/cycle/seal and is reused by
+        :meth:`cas_replace`, avoiding self-deadlock.
+        """
+        return self._locked(operation_id)
 
     @staticmethod
     def release_locks(descriptors: list[int]) -> None:
@@ -685,17 +699,25 @@ class OperationJournal:
         expected_prior_bytes: bytes,
         *,
         operation_id: str,
+        operation_lock_fd: int | None = None,
     ) -> None:
-        """Owner-only compare-and-set publish under an exclusive lock.
+        """Owner-only compare-and-set publish under the held operation lock.
 
         The on-disk record must still be byte-for-byte the owner's expected
         prior record; otherwise nothing is written and :class:`SealConflict`
-        fails closed.
+        fails closed. When ``operation_lock_fd`` is supplied it must already
+        be held exclusively (opened via :meth:`open_operation_lock`) and is
+        reused instead of re-locking, which would self-deadlock.
         """
         self._verify_root()
         verify_record(record)
         payload = canonical_json(record).encode("utf-8")
-        lock = self._locked(operation_id)
+        if operation_lock_fd is not None:
+            # Caller-owned: never unlocked or closed here; the single outer
+            # finally in the command handler releases it exactly once.
+            lock = operation_lock_fd
+        else:
+            lock = self._locked(operation_id)
         try:
             path = self.record_path(operation_id)
             if not path.exists() or read_record_bytes(path) != expected_prior_bytes:
@@ -708,8 +730,9 @@ class OperationJournal:
                 )
             self._publish(path, payload)
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-            os.close(lock)
+            if operation_lock_fd is None:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                os.close(lock)
 
     def scan_unresolved_scope_blockers(
         self, data_home: str, source_scope: list[str], *, exclude_operation_id: str | None = None

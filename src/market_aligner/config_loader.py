@@ -6,6 +6,12 @@ verified nofollow single-link regular-file open, parsed from those bytes, and
 re-read afterwards to prove nothing changed during the load. A concurrent
 replacement rejects before any provider or journal activity, so semantic
 configuration A is never executed while recording raw identity from file B.
+
+Honest identity note: file identity is CONTENT and RESOLVED-PATH based
+(SHA-256 over bytes, keyed by resolved path). It is deliberately not
+inode-bound, so it is portable across restores and copies; it therefore does
+not detect an same-UID in-place rewrite that preserves path and recomputes
+identity at next load — see the journal's integrity boundary statement.
 """
 
 from __future__ import annotations

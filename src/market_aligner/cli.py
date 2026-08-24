@@ -113,39 +113,6 @@ def _assess_command(args: argparse.Namespace) -> int:
     print(json.dumps(output, ensure_ascii=False, sort_keys=True, default=str))
     return 0
 
-def _emit_refusal(exc: OperationRefused, err=None) -> int:
-    payload = {"command": "ingest", "status": "refused", **exc.payload}
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=err or sys.stderr)
-    return 2
-
-
-def _emit_ingest(payload: dict, code: int, out=None) -> int:
-    payload.setdefault("command", "ingest")
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=out or sys.stdout)
-    return code
-
-
-def _binding_refusals(existing: dict, *, kind, config_source, config_file_sha256,
-                      config_sha256, scope, data_home) -> OperationRefused | None:
-    """Same operation id with any changed binding must never reach a provider."""
-    checks = (
-        ("kind", existing["kind"], kind),
-        ("config_source", existing["config_source"], str(config_source)),
-        ("config_file_sha256", existing["config_file_sha256"], config_file_sha256),
-        ("config_sha256", existing["config_sha256"], config_sha256),
-        ("source_scope", existing["source_scope"], scope),
-        ("data_home", existing["data_home"], data_home),
-    )
-    for field, recorded, current in checks:
-        if recorded != current:
-            return OperationRefused(
-                f"binding_{field}",
-                f"journal binds a different {field} for this operation id",
-                operation_id=existing["operation_id"],
-                disposition=existing["disposition"],
-            )
-    return None
-
 
 def _emit_refusal(exc: OperationRefused, err=None) -> int:
     payload = {"command": "ingest", "status": "refused", **exc.payload}
@@ -313,7 +280,12 @@ def _ingest_command(args: argparse.Namespace, *, out=None, err=None) -> int:
     # Per-board locks span reload, blocker scan, claim, provider cycle and
     # seal, acquired in canonical order so intersecting scopes serialize on
     # exactly their shared boards.
-    locks = journal.acquire_board_locks(str(paths.root), scope)
+    try:
+        locks = journal.acquire_board_locks(str(paths.root), scope)
+    except OperationRefused as exc:
+        return _refuse(exc)
+
+    operation_lock_fd = None
     try:
         try:
             blockers = journal.scan_unresolved_scope_blockers(str(paths.root), scope)
@@ -330,9 +302,26 @@ def _ingest_command(args: argparse.Namespace, *, out=None, err=None) -> int:
                 )
             )
 
-        # A same-ID twin that observed absence before waiting must re-load and
-        # strictly verify inside the held lock: after the winner sealed, the
-        # loser replays truthfully with zero second provider access.
+        # The typed operation lock is verified and held before any claim or
+        # provider access: substituted (06xx/symlink/hardlink) entries fail
+        # closed here with zero provider calls and cannot strand in_flight.
+        # It is also the final serializer for same-ID races with disjoint
+        # scopes, whose board locks do not intersect.
+        try:
+            operation_lock_fd = journal.open_operation_lock(operation_id)
+        except OperationRefused as exc:
+            enriched = OperationRefused(
+                exc.reason,
+                str(exc),
+                operation_id=operation_id,
+                disposition='in_flight',
+            )
+            return _refuse(enriched)
+
+        # Re-load strictly under both lock families. A twin that observed
+        # absence earlier now sees the winner's record: precise changed-binding
+        # refusals for differing configs/scopes, truthful terminal replay when
+        # every binding matches — never a second provider fetch.
         try:
             current = journal.load(operation_id)
         except OperationRefused as exc:
@@ -412,10 +401,15 @@ def _ingest_command(args: argparse.Namespace, *, out=None, err=None) -> int:
             )
             try:
                 journal.cas_replace(
-                    failed, expected_prior_bytes=claim_bytes, operation_id=operation_id
+                    failed,
+                    expected_prior_bytes=claim_bytes,
+                    operation_id=operation_id,
+                    operation_lock_fd=operation_lock_fd,
                 )
             except SealConflict as conflict:
                 return _refuse(conflict)
+            except OperationRefused as exc:
+                return _refuse(exc)
             return _refuse(
                 OperationRefused(
                     "provider_failure",
@@ -442,11 +436,20 @@ def _ingest_command(args: argparse.Namespace, *, out=None, err=None) -> int:
         )
         try:
             journal.cas_replace(
-                completed, expected_prior_bytes=claim_bytes, operation_id=operation_id
+                completed,
+                expected_prior_bytes=claim_bytes,
+                operation_id=operation_id,
+                operation_lock_fd=operation_lock_fd,
             )
         except SealConflict as conflict:
             return _refuse(conflict)
+        except OperationRefused as exc:
+            return _refuse(exc)
     finally:
+        # Exactly one release point: the caller-owned operation-lock descriptor
+        # (cas_replace never unlocks or closes it) plus every board lock.
+        if operation_lock_fd is not None:
+            OperationJournal.release_locks([operation_lock_fd])
         OperationJournal.release_locks(locks)
 
     return _emit(

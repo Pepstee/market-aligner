@@ -41,30 +41,34 @@ market-aligner profiles list
 market-aligner profiles create-synthetic
 market-aligner profiles import --format evidence-led --source /private/profile.yaml
 market-aligner assess --profile-id prf_<opaque-id> --request /private/request.json
-market-aligner ingest --config /private/collection.yaml
+market-aligner ingest --config /private/collection.yaml \
+  --operation-id nightly-2026-08-24
 ```
 
 `ingest` runs exactly one bounded official collection cycle from the exact
 configuration file given, against the established external data home, and emits
 one canonical JSON result. Every run requires an explicit stable
-`--operation-id`: the journal binds that id to the resolved config path, config
-file identity, merged config hash, source scope and data home, rejects any
-changed binding before provider access, and returns an already-sealed terminal
-receipt verbatim (`replayed=true`, zero provider calls). Different operation
-ids bound to the same data home and source scope are serialized by a scope
-lock and may run sequentially; only same-id live contenders are refused while
-the owner runs. An interrupted run stays explicitly unresolved, keeps failing
-closed, and blocks new same-scope operations — there is deliberately no
+`--operation-id`: the journal binds that id to the resolved config path, the
+coherent config-file closure identity (root plus every `extends` dependency),
+the merged config hash, the canonicalized sorted-unique source scope and the
+data home; it rejects any changed binding before provider access and returns an
+already-sealed terminal receipt verbatim (`replayed=true`, zero provider
+calls). Locking is per board inside the data home: operations holding any
+common board run strictly sequentially, subset/superset scopes serialize on
+exactly their intersecting boards, same-id live contenders are refused while
+the owner runs, and an interrupted owner stays explicitly unresolved — failing
+closed and blocking new intersecting-scope operations, with deliberately no
 reconciliation capability in this slice. Provider failures preserve the last
 good database and raw cache, and every configured collector path is enforced
 to stay inside the data home.
 
 Integrity boundary: owner-private directories, single-link 0600 files and
 unkeyed SHA-256 binding give receipts canonical identity and detect accidental
-or noncoherent corruption. They do not authenticate against a malicious
-same-UID rewrite that changes content and recomputes every public hash;
-root-owned or signature-backed admission remains a separately governed future
-authority slice.
+or noncoherent corruption; configuration file identity is content/path based,
+not inode-bound. None of this authenticates against a malicious same-UID
+rewrite that changes content and recomputes every public hash; root-owned or
+signature-backed admission remains a separately governed future authority
+slice.
 
 Live collection configuration is external and injected into adapters. The automatic Scrapling
 fallback uses static then dynamic fetching; stealth/challenge-solving capabilities require an

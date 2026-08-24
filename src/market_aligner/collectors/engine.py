@@ -186,7 +186,10 @@ class Collector:
             ),
             "raw_cache_roots": raw_cache_roots,
             "runtime_root": runtime_root,
-            "boards": [str(board) for board in enabled],
+            # Canonical source scope: sorted unique, produced exactly once here
+            # and consumed unchanged by CLI bindings, per-board locks, journal
+            # receipts and the collector's own board loop.
+            "boards": sorted({str(board) for board in enabled}),
             "collection": collection,
             "scrapling": scrapling,
         }
