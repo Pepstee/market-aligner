@@ -2202,6 +2202,9 @@ class IngestCliTests(unittest.TestCase):
         # Supplied canonical fd is UNHELD; R8 misread an injected EINTR on the
         # first shared probe as contention and accepted the unheld fd as
         # authority. R9 must refuse structurally for EINTR and EIO alike.
+        # The independent SH observation happens INSIDE the supplied-fd
+        # lifetime: an illegitimate EX upgrade would block the probe while
+        # the fd is open, and closing first would silently release it.
         op1 = "op-eintr-auth"
         record1 = make_record(operation_id=op1, disposition="in_flight", **base)
         self.journal.claim(record1)
@@ -2224,12 +2227,56 @@ class IngestCliTests(unittest.TestCase):
                         )
                 self.assertEqual("unsafe_journal_file", caught.exception.reason)
                 self.assertIn("without lock contention", str(caught.exception))
+                # Observed BEFORE any unlock/close of the supplied fd.
+                self.assertTrue(free_sh_probe(op1))
+                self.assertEqual(before_bytes, path1.read_bytes())
             finally:
                 os.close(unheld_fd)
-            # The supplied fd stayed non-authoritative and the lock itself is
-            # independently SH-probeable (nothing was upgraded or left held).
-            self.assertEqual(before_bytes, path1.read_bytes())
-            self.assertTrue(free_sh_probe(op1))
+
+        # Same falsifier against exact nlink2 final + matching claim-temp
+        # state: refusal must leave residue untouched with the supplied fd
+        # still open and independently SH-probeable.
+        op3 = "op-eintr-residue"
+        record3 = make_record(operation_id=op3, disposition="in_flight", **base)
+        payload3 = canonical_json(record3).encode("utf-8")
+        descriptor3, temp3 = tempfile.mkstemp(prefix=f".claim-{op3}-", dir=self.journal_root)
+        with os.fdopen(descriptor3, "wb") as handle:
+            handle.write(payload3)
+        final3 = self.journal.record_path(op3)
+        os.link(temp3, final3)
+        seeding3 = self.journal.open_operation_lock(op3)
+        OperationJournal.release_locks([seeding3])
+        try:
+            for injected_errno in (errno.EINTR, errno.EIO):
+                unheld_fd = os.open(
+                    self.journal._lock_path(op3), os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+                )
+                try:
+                    with mock.patch.object(
+                        operations_module.fcntl,
+                        "flock",
+                        first_flock_raises(injected_errno),
+                    ):
+                        with self.assertRaises(OperationRefused) as caught:
+                            self.journal._settled_record_bytes(
+                                op3, final3, operation_lock_fd=unheld_fd
+                            )
+                    self.assertEqual("unsafe_journal_file", caught.exception.reason)
+                    self.assertIn("without lock contention", str(caught.exception))
+                    # In-lifetime observations: no upgrade happened and the
+                    # two-link residue was not mutated or settled.
+                    self.assertTrue(free_sh_probe(op3))
+                    self.assertEqual(2, os.lstat(final3).st_nlink)
+                    self.assertNotEqual([], list(self.journal_root.glob(f".claim-{op3}-*")))
+                    self.assertEqual(payload3, Path(temp3).read_bytes())
+                    self.assertEqual(payload3, final3.read_bytes())
+                finally:
+                    os.close(unheld_fd)
+        finally:
+            for entry in (final3, temp3):
+                if os.path.lexists(entry):
+                    os.unlink(entry)
+            operations_module.fsync_directory(self.journal_root)
 
         # wait=False seam: EINTR/EIO must refuse, never silently skip as if a
         # live publisher held the lock.
