@@ -404,18 +404,16 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return mapping
 
 
-def _verify_regular_file(
-    info: os.stat_result, name: str, *, allow_pending_link: bool = False
-) -> None:
-    """Exact owner, mode and link-count enforcement for journal files.
+def _verify_regular_file(info: os.stat_result, name: str) -> None:
+    """Exact owner, mode and single-link enforcement for journal files.
 
-    ``allow_pending_link`` tolerates exactly the transient two-link window of
-    a live no-replace publication whose owner demonstrably holds the
-    operation lock; it never relaxes regular-file, owner or mode rules.
+    Record bytes are parsed only when the final entry is provably a single
+    link; transient publication windows are handled by the authority-based
+    settlement seam, never by lenient verification.
     """
     if not stat.S_ISREG(info.st_mode):
         raise OperationRefused("unsafe_journal_file", f"{name} must be a regular file")
-    if info.st_nlink != 1 and not (allow_pending_link and info.st_nlink == 2):
+    if info.st_nlink != 1:
         raise OperationRefused(
             "unsafe_journal_file",
             f"{name} must be a single-link file without hardlinks "
@@ -453,20 +451,19 @@ def _verify_directory(path: Path, expected_mode: int, name: str, *, allow_missin
         )
 
 
-def read_record_bytes(path: Path, *, allow_pending_link: bool = False) -> bytes:
+def read_record_bytes(path: Path) -> bytes:
     """Open one record strictly: nofollow, single link, exact owner and mode.
 
-    ``allow_pending_link`` accepts exactly the transient two-link state of a
-    live publication whose owner holds the operation lock.
+    There is deliberately no lenient mode: bytes of a multi-link final are
+    never parsed. Publication windows are resolved by the authority-based
+    settlement seam before this function is called.
     """
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as exc:
         raise OperationRefused("unsafe_journal_file", f"cannot open {path.name}: {exc}") from exc
     try:
-        _verify_regular_file(
-            os.fstat(descriptor), path.name, allow_pending_link=allow_pending_link
-        )
+        _verify_regular_file(os.fstat(descriptor), path.name)
         with os.fdopen(descriptor, "rb") as handle:
             return handle.read()
     except OSError as exc:
@@ -624,29 +621,125 @@ class OperationJournal:
                 os.close(descriptor)
 
     # -- lifecycle ------------------------------------------------------------ #
-    def load(self, operation_id: str) -> dict[str, Any] | None:
+    def load(
+        self, operation_id: str, *, operation_lock_fd: int | None = None
+    ) -> dict[str, Any] | None:
         """Reopen, verify and return the current record, or None if absent.
 
         Broken symlinks are not absence: ``lexists`` gates the read so a
-        substituted entry fails closed instead of looking missing. A two-link
-        final is a live publication window while the owner holds its operation
-        lock — readers verify content leniently and never mutate the
-        publisher's staging temp; only a provably abandoned publication (the
-        operation lock is free) is settled by completing the unlink.
+        substituted entry fails closed instead of looking missing. A final
+        with more than one link is never parsed: the reader waits for and
+        acquires the exact typed operation lock (unless it already holds it
+        via ``operation_lock_fd``), settles an exactly-shaped abandoned
+        publication under that authority, and only then performs a strict
+        single-link read. Anything else fails closed.
         """
         self._verify_root()
         path = self.record_path(operation_id)
         if not os.path.lexists(path):
             return None
-        raw_bytes = self._settled_record_bytes(operation_id, path)
+        raw_bytes = self._settled_record_bytes(
+            operation_id, path, operation_lock_fd=operation_lock_fd
+        )
         return parse_record(raw_bytes, operation_id, path.name)
 
-    def _operation_lock_is_free(self, operation_id: str) -> bool:
-        """True only when no live owner holds this operation's lock.
+    def _verify_supplied_authority(self, operation_id: str, fd: int) -> None:
+        """Fail closed unless fd IS this operation's exclusively-held lock.
 
-        A non-blocking exclusive flock succeeds exclusively when the owner
-        process is gone (kernel releases flock on death), which is the proof
-        that an in-progress link publication is abandoned.
+        The descriptor must be a 0600 single-link regular file owned by the
+        current user, dev+ino-equal to the lstat of the canonical operation
+        lock path (symlinks never qualify), and it must already hold the
+        exclusive flock on its own open description. Re-running LOCK_EX|NB on
+        an already-held description is idempotent; anything unheld or
+        contended refuses.
+        """
+        expected = self._lock_path(operation_id)
+        try:
+            expected_info = os.lstat(expected)
+            info = os.fstat(fd)
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"supplied authority fd is not verifiable against the operation "
+                f"lock {expected.name}: {exc}",
+            ) from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise OperationRefused(
+                "unsafe_journal_file", "supplied authority fd must be a regular file"
+            )
+        if info.st_nlink != 1:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"supplied authority fd must be single-link (nlink={info.st_nlink})",
+            )
+        if info.st_uid != os.getuid():
+            raise OperationRefused(
+                "unsafe_journal_file", "supplied authority fd must be owned by the current user"
+            )
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"supplied authority fd must have exactly 0600 permissions "
+                f"(got {oct(stat.S_IMODE(info.st_mode))})",
+            )
+        if (info.st_dev, info.st_ino) != (expected_info.st_dev, expected_info.st_ino):
+            raise OperationRefused(
+                "unsafe_journal_file",
+                "supplied authority fd is not this operation's lock file",
+            )
+        # Prove the supplied description ALREADY holds the exclusive flock.
+        # A second descriptor must fail to acquire (something holds it), and
+        # re-locking the supplied fd must succeed idempotently (it is the
+        # holder). A fresh unheld fd would let both checks pass/fail in a way
+        # that betrays it: the probe acquires freely, so authority is denied
+        # before any read or mutation.
+        try:
+            probe = os.open(expected, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"operation lock {expected.name} is not probeable: {exc}",
+            ) from exc
+        try:
+            held_by_anyone = False
+            try:
+                probe_info = os.fstat(probe)
+                if (probe_info.st_dev, probe_info.st_ino) != (
+                    expected_info.st_dev,
+                    expected_info.st_ino,
+                ):
+                    raise OperationRefused(
+                        "unsafe_journal_file",
+                        "operation lock changed identity while probing authority",
+                    )
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(probe, fcntl.LOCK_UN)
+            except OperationRefused:
+                raise
+            except OSError:
+                # Contention is only trusted once the probe descriptor is
+                # proven to reference the very same canonical inode.
+                held_by_anyone = True
+        finally:
+            os.close(probe)
+        if not held_by_anyone:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                "supplied authority fd does not hold the exclusive operation lock",
+            )
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"supplied authority fd does not hold the exclusive operation lock: {exc}",
+            ) from exc
+
+    def _operation_lock_is_free(self, operation_id: str) -> bool:
+        """Non-blocking liveness probe for tests and diagnostics.
+
+        Settlement authority is holding the lock itself, never the mere
+        observation that it happens to be free at probe time.
         """
         descriptor = self._open_lock(self._lock_path(operation_id))
         try:
@@ -659,38 +752,128 @@ class OperationJournal:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
 
-    def _settle_publication(self, operation_id: str, final: Path) -> bool:
-        """Complete cleanup only when abandonment is proven by a free lock.
+    def _settle_abandoned_publication(self, final: Path) -> None:
+        """Complete cleanup under held authority, with an exact pre-state.
 
-        Returns True when the final record is single-linked. A held operation
-        lock means a live publisher owns the transient two-link window; the
-        reader must not touch its temp.
+        Allowed only when the current pre-state is EXACTLY nlink==2 with
+        EXACTLY ONE matching same-inode claim temp; then unlink that temp,
+        fsync the parent and revalidate the SAME final inode back to a single
+        link. Any other shape — nlink>2, foreign hardlinks, missing or excess
+        matching temps — is refused without mutating either extra link.
         """
-        info = os.lstat(final)
+        try:
+            info = os.lstat(final)
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"final record {final.name} vanished during settlement: {exc}",
+            ) from exc
         if info.st_nlink == 1:
-            return True
-        if not self._operation_lock_is_free(operation_id):
-            return False
+            return
+        matches = []
         for candidate in sorted(self.root.glob(self._temp_prefix(final.stem) + "*")):
-            candidate_info = os.lstat(candidate)
+            try:
+                candidate_info = os.lstat(candidate)
+            except OSError as exc:
+                raise OperationRefused(
+                    "unsafe_journal_file",
+                    f"candidate residue {candidate.name} is not statable: {exc}",
+                ) from exc
             if (
                 candidate_info.st_dev == info.st_dev
                 and candidate_info.st_ino == info.st_ino
                 and stat.S_ISREG(candidate_info.st_mode)
             ):
-                os.unlink(candidate)
-                fsync_directory(self.root)
-                return os.lstat(final).st_nlink == 1
-        raise OperationRefused(
-            "unsafe_journal_file",
-            f"{final.name} has unexpected additional links",
-        )
+                matches.append(candidate)
+        if info.st_nlink != 2 or len(matches) != 1:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"{final.name} has unresolved additional links "
+                f"(nlink={info.st_nlink}, matching_temps={len(matches)}); "
+                "refusing without mutation",
+            )
+        try:
+            os.unlink(matches[0])
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"matching residue {matches[0].name} could not be removed: {exc}",
+            ) from exc
+        try:
+            fsync_directory(self.root)
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"journal directory could not be fsynced after settlement: {exc}",
+            ) from exc
+        try:
+            settled = os.lstat(final)
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"settled final {final.name} is not statable: {exc}",
+            ) from exc
+        if settled.st_ino != info.st_ino or settled.st_nlink != 1:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"{final.name} did not settle to a single link",
+            )
 
-    def _settled_record_bytes(self, operation_id: str, path: Path) -> bytes:
-        """Settle if provably abandoned, then read with correct strictness."""
-        self._settle_publication(operation_id, path)
-        pending_live_link = os.lstat(path).st_nlink != 1
-        return read_record_bytes(path, allow_pending_link=pending_live_link)
+    def _settled_record_bytes(
+        self,
+        operation_id: str,
+        path: Path,
+        *,
+        operation_lock_fd: int | None = None,
+        wait: bool = True,
+    ) -> bytes | None:
+        """Authority-based settlement then a strict single-link read.
+
+        Any supplied ``operation_lock_fd`` is verified as this exact
+        operation's owned, held, 0600, single-link canonical lock BEFORE any
+        read path is taken — wrong, closed, missing, symlinked, substituted
+        or unrelated descriptors refuse without reading or mutating anything.
+        Supplied authority prevents self-deadlock; exactly one release happens
+        for a lock this method acquires itself. With ``wait=False`` a live
+        publisher yields a ``None`` result instead of blocking (scope-scan
+        skip). Multi-link bytes are never parsed: settlement requires the
+        exact pre-state of nlink==2 with exactly one matching same-inode temp.
+        """
+        if operation_lock_fd is not None:
+            self._verify_supplied_authority(operation_id, operation_lock_fd)
+        try:
+            single = os.lstat(path).st_nlink == 1
+        except OSError as exc:
+            raise OperationRefused(
+                "unsafe_journal_file",
+                f"final record {path.name} is not statable: {exc}",
+            ) from exc
+        if single:
+            return read_record_bytes(path)
+        owned_here = False
+        fd = operation_lock_fd
+        if fd is None:
+            descriptor = self._open_lock(self._lock_path(operation_id))
+            try:
+                flags = fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB
+                fcntl.flock(descriptor, flags)
+            except OSError as exc:
+                os.close(descriptor)
+                if not wait:
+                    return None  # live publisher holds the authority lock
+                raise OperationRefused(
+                    "unsafe_journal_file",
+                    f"could not acquire publication authority for {path.name}: {exc}",
+                ) from exc
+            fd = descriptor
+            owned_here = True
+        try:
+            self._settle_abandoned_publication(path)
+            return read_record_bytes(path)
+        finally:
+            if owned_here:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
     def claim(self, record: dict[str, Any]) -> bool:
         """Publish the owner's in_flight claim atomically; False if taken.
@@ -698,11 +881,12 @@ class OperationJournal:
         The payload is written completely into a private 0600 temp, fsynced,
         then published by true no-replace ``os.link`` plus parent fsync. The
         staging temp belongs to this publisher alone and is removed by it;
-        concurrent readers recognise the transient two-link window via the
-        held operation lock and never mutate it. A short write, kill or
+        concurrent readers never parse multi-link bytes: they wait for and
+        acquire this exact operation lock and then settle only an
+        exact-shaped abandoned publication. A short write, kill or
         pre-publication failure leaves no final record, performs zero provider
         calls and permits a same-ID retry; post-publication residue is settled
-        only under the free-lock proof described in :meth:`load`.
+        only under that acquired authority, never by inference.
         """
         self._verify_root()
         verify_record(record)
@@ -747,7 +931,10 @@ class OperationJournal:
         prior record; otherwise nothing is written and :class:`SealConflict`
         fails closed. When ``operation_lock_fd`` is supplied it must already
         be held exclusively (opened via :meth:`open_operation_lock`) and is
-        reused instead of re-locking, which would self-deadlock.
+        reused instead of re-locking, which would self-deadlock. Without a
+        supplied fd this method acquires the lock itself and passes that
+        acquired descriptor to the settlement seam, so the prior-bytes read
+        never re-locks and never parses multi-link bytes.
         """
         self._verify_root()
         verify_record(record)
@@ -767,9 +954,11 @@ class OperationJournal:
                     operation_id=operation_id,
                     disposition=record["disposition"],
                 )
-            # Coherent publication seam: settle if provably abandoned and
-            # tolerate the live two-link window of a concurrent publisher.
-            current_bytes = self._settled_record_bytes(operation_id, path)
+            # Coherent authority seam: settle an exactly-shaped abandoned
+            # publication under THIS held lock, then strict single-link read.
+            current_bytes = self._settled_record_bytes(
+                operation_id, path, operation_lock_fd=lock
+            )
             if current_bytes != expected_prior_bytes:
                 raise SealConflict(
                     "seal_conflict",
@@ -795,7 +984,9 @@ class OperationJournal:
             candidate = path.name[: -len(".json")]
             if candidate == exclude_operation_id:
                 continue
-            raw_bytes = self._settled_record_bytes(candidate, path)
+            raw_bytes = self._settled_record_bytes(candidate, path, wait=False)
+            if raw_bytes is None:
+                continue  # live publisher of another scope; never parsed
             record = parse_record(raw_bytes, candidate, path.name)
             if (
                 record["data_home"] == data_home

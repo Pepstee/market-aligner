@@ -1591,7 +1591,7 @@ class IngestCliTests(unittest.TestCase):
         )
         return config_a, config_b
 
-    def test_link_before_unlink_window_is_lenient_and_never_mutated(self) -> None:
+    def test_link_before_unlink_window_blocks_loser_then_exact_scope(self) -> None:
         operation_id = "op-linkwin"
         config_a, config_b = self._race_pair_configs("linkwin", "op-linkwin")
         calls: list = []
@@ -1603,8 +1603,8 @@ class IngestCliTests(unittest.TestCase):
         real_unlink = os.unlink
         state = {"gated": False}
 
-        # Publication barrier: the first staging-temp unlink of this operation
-        # publisher stalls after os.link, holding the two-link window open.
+        # Publication barrier: the first staging-temp unlink of the publisher
+        # stalls after os.link, holding the transient two-link window open.
         def gated_unlink(path, *args, **kwargs):
             if f".claim-{operation_id}-" in str(path) and not state["gated"]:
                 state["gated"] = True
@@ -1616,9 +1616,6 @@ class IngestCliTests(unittest.TestCase):
         fixture_dir = self.root / "fixtures"
         adapter_tags: list[str] = []
 
-        # ONE shared load_adapter patch spans both threads; ONE shared unlink
-        # barrier patch holds the publication window. Tags derive from the
-        # immutable per-config marker.
         def factory(board, config=None):
             tag = str((config or {}).get("operation_tag") or f"unmarked:{board}")
             return FixtureBoard(
@@ -1649,6 +1646,7 @@ class IngestCliTests(unittest.TestCase):
             target=contender, args=("loser", config_b)
         )
 
+        final = self.journal.record_path(operation_id)
         with mock.patch(
             "market_aligner.collectors.engine.load_adapter", side_effect=factory
         ), mock.patch(
@@ -1658,53 +1656,220 @@ class IngestCliTests(unittest.TestCase):
         ):
             winner_thread.start()
             self.assertTrue(linked.wait(10), "publisher never reached two-link window")
+            self.assertEqual(2, os.lstat(final).st_nlink)
+
+            # The loser waits for publication authority; nothing is mutated.
             loser_thread.start()
-            loser_thread.join(30)
-            self.assertFalse(loser_thread.is_alive())
+            loser_thread.join(0.6)
+            self.assertTrue(loser_thread.is_alive(), "loser must wait for authority")
+            self.assertEqual(1, len(list(self.journal_root.glob(f".claim-{operation_id}-*"))))
+            self.assertEqual(2, os.lstat(final).st_nlink)
 
-            code_b, out_b, err_b = results["loser"]
-            self.assertEqual(2, code_b)
-            refusal = json.loads(
-                [line for line in err_b.splitlines() if line.strip().startswith("{")][-1]
-            )
-            self.assertEqual("binding_source_scope", refusal["reason"])
-            # The loser read a genuinely claimed in_flight record, so the
-            # truthful in_flight disposition is legitimate here (the R4
-            # null-disposition rule covers only pre-claim unsafe locks).
-            self.assertNotIn("unsafe_journal_file", err_b)
-            self.assertNotIn("claim_publication_failed", err_b)
-            self.assertEqual("", out_b.strip())
-            # The reader left the live publisher's staging temp untouched.
-            self.assertEqual(
-                1, len(list(self.journal_root.glob(f".claim-{operation_id}-*")))
-            )
-            interim = self.journal.load(operation_id)
-            self.assertIsNotNone(interim)
-            self.assertEqual(["fixtureboard"], interim["source_scope"])
-
-            # Release the publisher and let it finish INSIDE the shared patch
-            # context: its provider execution must keep using this run's
-            # adapter factory and source_due seam.
             proceed.set()
             winner_thread.join(30)
+            loser_thread.join(30)
             self.assertFalse(winner_thread.is_alive())
+            self.assertFalse(loser_thread.is_alive())
 
         code_a, out_a, err_a = results["winner"]
+        code_b, out_b, err_b = results["loser"]
         self.assertEqual(0, code_a)
+        self.assertEqual(2, code_b)
         payload = json.loads(out_a)
         self.assertEqual("ok", payload["status"])
         self.assertEqual(3, payload["result"]["fetched"])
         self.assertNotIn("claim_publication_failed", err_a)
         self.assertNotIn("unsafe_journal_file", err_a)
-        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
-        record = json.loads(
-            self.journal.record_path(operation_id).read_text(encoding="utf-8")
+        refusal = json.loads(
+            [line for line in err_b.splitlines() if line.strip().startswith("{")][-1]
         )
+        self.assertEqual("binding_source_scope", refusal["reason"])
+        self.assertNotIn("unsafe_journal_file", err_b)
+        self.assertNotIn("claim_publication_failed", err_b)
+        self.assertEqual("", out_b.strip())
+        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+        record = json.loads(final.read_text(encoding="utf-8"))
         self.assertEqual("completed", record["disposition"])
         self.assertEqual(payload["receipt_id"], record["receipt_id"])
         # Provider evidence: only the winning scope ran, exactly one cycle.
         self.assertEqual({"op-linkwin-a"}, set(adapter_tags))
         self.assertEqual(1, sum(1 for call in tagged_calls if call[1] == "discover"))
+
+    def test_settlement_rejects_foreign_and_composite_residue_without_mutation(self) -> None:
+        base_record = make_record(
+            operation_id="op-residue",
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="in_flight",
+            owner_id=new_owner_id(),
+        )
+        payload = canonical_json(base_record).encode("utf-8")
+
+        # Foreign hardlink only (nlink=2, no matching claim temp), free lock:
+        # settlement refuses without mutating either extra link.
+        descriptor, foreign = tempfile.mkstemp(
+            prefix="foreign-", dir=self.journal_root
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        final = self.journal.record_path("op-residue")
+        os.link(foreign, final)
+        try:
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal._settled_record_bytes("op-residue", final)
+            self.assertIn("unresolved additional links", str(caught.exception))
+            self.assertEqual(2, os.lstat(final).st_nlink)
+            self.assertTrue(os.path.lexists(foreign))
+        finally:
+            os.unlink(foreign)
+            os.unlink(final)
+
+        # Composite residue: own exact temp + final + foreign hardlink starts
+        # at nlink=3 and must reject WITHOUT removing either extra link.
+        descriptor, own_temp = tempfile.mkstemp(
+            prefix=f".claim-op-residue-", dir=self.journal_root
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        os.link(own_temp, final)
+        foreign2 = self.journal_root / "foreign-hardlink"
+        os.link(own_temp, foreign2)
+        self.assertEqual(3, os.lstat(final).st_nlink)
+        try:
+            held = self.journal.open_operation_lock("op-residue")
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal._settled_record_bytes(
+                    "op-residue", final, operation_lock_fd=held
+                )
+            self.assertIn("nlink=3", str(caught.exception))
+            self.assertEqual(3, os.lstat(final).st_nlink)
+            self.assertTrue(os.path.lexists(own_temp))
+            self.assertTrue(os.path.lexists(foreign2))
+            OperationJournal.release_locks([held])
+        finally:
+            for entry in (final, foreign2, own_temp):
+                if os.path.lexists(entry):
+                    os.unlink(entry)
+
+        # Excess matching temps: two names sharing the published inode refuse.
+        descriptor, temp_one = tempfile.mkstemp(
+            prefix=f".claim-op-excess-", dir=self.journal_root
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        temp_two = self.journal_root / ".claim-op-excess-second"
+        os.link(temp_one, temp_two)
+        final_excess = self.journal.record_path("op-excess")
+        os.link(temp_one, final_excess)
+        try:
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal._settled_record_bytes("op-excess", final_excess)
+            self.assertIn("matching_temps=2", str(caught.exception))
+            self.assertEqual(3, os.lstat(final_excess).st_nlink)
+        finally:
+            for entry in (final_excess, temp_two, temp_one):
+                if os.path.lexists(entry):
+                    os.unlink(entry)
+
+    def test_live_publisher_holds_authority_reader_waits_then_rejects(self) -> None:
+        # Foreign hardlink final while a live owner demonstrably holds the
+        # typed lock: a reader blocks without mutating, and only after the
+        # lock is released does it fail closed on the uncleanable residue.
+        operation_id = "op-heldforeign"
+        staged = make_record(
+            operation_id=operation_id,
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="in_flight",
+            owner_id=new_owner_id(),
+        )
+        payload = canonical_json(staged).encode("utf-8")
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".claim-{operation_id}-x", dir=self.journal_root
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        final = self.journal.record_path(operation_id)
+        foreign = self.journal_root / f"{operation_id}-foreign"
+        os.link(temporary, final)   # publisher window shape...
+        os.link(temporary, foreign)  # ...plus a foreign third name? nlink counts names.
+        os.unlink(temporary)         # leave final+foreign exactly two links, no temp
+        self.assertEqual(2, os.lstat(final).st_nlink)
+
+        held = self.journal.open_operation_lock(operation_id)
+        outcome: list = []
+
+        def reader() -> None:
+            try:
+                outcome.append(self.journal.load(operation_id))
+            except BaseException as exc:
+                outcome.append(exc)
+
+        reader_thread = threading.Thread(target=reader)
+        reader_thread.start()
+        reader_thread.join(0.6)
+        self.assertTrue(reader_thread.is_alive(), "reader must wait for authority")
+        self.assertEqual(2, os.lstat(final).st_nlink)
+        self.assertTrue(os.path.lexists(foreign))
+        OperationJournal.release_locks([held])
+        reader_thread.join(10)
+        self.assertFalse(reader_thread.is_alive())
+        self.assertEqual(1, len(outcome))
+        self.assertIsInstance(outcome[0], OperationRefused)
+        self.assertEqual("unsafe_journal_file", outcome[0].reason)
+        self.assertEqual(2, os.lstat(final).st_nlink)
+        for entry in (final, foreign):
+            if os.path.lexists(entry):
+                os.unlink(entry)
+
+    def test_dead_owner_composite_temp_settles_to_single_link(self) -> None:
+        # Genuine dead post-link owner: exact own temp + final (nlink=2),
+        # free lock -> settlement removes the temp and strict read succeeds.
+        operation_id = "op-deadowner"
+        staged = make_record(
+            operation_id=operation_id,
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="in_flight",
+            owner_id=new_owner_id(),
+        )
+        payload = canonical_json(staged).encode("utf-8")
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".claim-{operation_id}-", dir=self.journal_root
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        final = self.journal.record_path(operation_id)
+        os.link(temporary, final)
+        self.assertEqual(2, os.lstat(final).st_nlink)
+        loaded = self.journal.load(operation_id)
+        self.assertEqual("in_flight", loaded["disposition"])
+        self.assertEqual(1, os.lstat(final).st_nlink)
+        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+        calls: list = []
+        with self._patched(calls):
+            code, _out, err = _run(self._argv(operation_id))
+        self.assertEqual(2, code)
+        self.assertEqual("in_progress", _stderr_json(err)["reason"])
+        self.assertEqual([], calls)
 
     def test_operation_lock_freedom_is_thread_accurate(self) -> None:
         descriptor = self.journal.open_operation_lock("op-freecheck")
@@ -1722,7 +1887,9 @@ class IngestCliTests(unittest.TestCase):
             OperationJournal.release_locks([descriptor])
         self.assertTrue(self.journal._operation_lock_is_free("op-freecheck"))
 
-    def test_abandoned_publication_recovers_only_under_free_lock_proof(self) -> None:
+    def test_abandoned_publication_settles_only_after_owner_release(self) -> None:
+        from market_aligner.state.operations import fsync_directory
+
         operation_id = "op-abandon"
         staged = make_record(
             operation_id=operation_id,
@@ -1747,28 +1914,291 @@ class IngestCliTests(unittest.TestCase):
         os.link(temporary, final)
         self.assertEqual(2, os.lstat(final).st_nlink)
 
-        # While an owner demonstrably holds the lock, readers stay lenient and
-        # never mutate the staging temp.
+        # While the owner holds the authority lock, a concurrent reader must
+        # block without ever parsing or mutating the two-link publication.
         held = self.journal.open_operation_lock(operation_id)
-        loaded_while_held = self.journal.load(operation_id)
-        self.assertEqual("in_flight", loaded_while_held["disposition"])
+        started = threading.Event()
+        observed: dict = {}
+
+        def reader() -> None:
+            started.set()
+            try:
+                observed["record"] = self.journal.load(operation_id)
+            except BaseException as exc:
+                observed["error"] = exc
+
+        worker = threading.Thread(target=reader)
+        worker.start()
+        self.assertTrue(started.wait(5))
+        time.sleep(0.25)
+        self.assertNotIn("record", observed)
+        self.assertNotIn("error", observed)
         self.assertEqual(2, os.lstat(final).st_nlink)
         self.assertNotEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
-        OperationJournal.release_locks([held])
 
-        # Free lock proves abandonment: settlement completes the publication.
-        self.assertTrue(self.journal._operation_lock_is_free(operation_id))
-        settled = self.journal.load(operation_id)
-        self.assertEqual("in_flight", settled["disposition"])
+        # The owner finishes its publication (removes the staging temp) and
+        # only then releases authority; the parked reader completes exactly.
+        os.unlink(temporary)
+        fsync_directory(self.journal_root)
+        OperationJournal.release_locks([held])
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", observed)
+        self.assertEqual("in_flight", observed["record"]["disposition"])
         self.assertEqual(1, os.lstat(final).st_nlink)
         self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
 
-        calls: list = []
-        with self._patched(calls):
-            code, _out, err = _run(self._argv(operation_id))
-        self.assertEqual(2, code)
-        self.assertEqual("in_progress", _stderr_json(err)["reason"])
-        self.assertEqual([], calls)
+    def test_supplied_authority_fd_rejects_wrong_closed_unheld_and_substituted(self) -> None:
+        operation_id = "op-fdproof"
+        record = make_record(
+            operation_id=operation_id,
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="in_flight",
+            owner_id=new_owner_id(),
+        )
+        self.journal.claim(record)
+        path = self.journal.record_path(operation_id)
+        lock_path = Path(self.journal._lock_path(operation_id))
+        # Seed then RELEASE the canonical lock file so the unheld/closed
+        # negatives run against a genuinely free authority, not an anchor.
+        seeding_fd = self.journal.open_operation_lock(operation_id)
+        OperationJournal.release_locks([seeding_fd])
+
+        def refuse(fd: int) -> OperationRefused:
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal._settled_record_bytes(operation_id, path, operation_lock_fd=fd)
+            return caught.exception
+
+        # Unrelated regular file: correct shape, wrong identity.
+        unrelated_fd, unrelated_name = tempfile.mkstemp(dir=self.root)
+        try:
+            refusal = refuse(unrelated_fd)
+            self.assertEqual("unsafe_journal_file", refusal.reason)
+            self.assertIn("not this operation's lock", str(refusal))
+        finally:
+            os.close(unrelated_fd)
+            os.unlink(unrelated_name)
+
+        # Another operation's genuine held lock fd: still refused.
+        other_fd = self.journal.open_operation_lock("op-wronglock")
+        try:
+            refusal = refuse(other_fd)
+            self.assertEqual("unsafe_journal_file", refusal.reason)
+        finally:
+            OperationJournal.release_locks([other_fd])
+
+        # Closed descriptor: raw EBADF is translated to a structured refusal.
+        closed_fd = os.open(lock_path, os.O_RDWR | os.O_CLOEXEC)
+        os.close(closed_fd)
+        refusal = refuse(closed_fd)
+        self.assertEqual("unsafe_journal_file", refusal.reason)
+
+        # Correct canonical path but never flocked: unheld fds grant nothing.
+        plain_fd = os.open(lock_path, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            refusal = refuse(plain_fd)
+            self.assertEqual("unsafe_journal_file", refusal.reason)
+            self.assertIn("does not hold", str(refusal))
+        finally:
+            os.close(plain_fd)
+
+        # Substituted lock file: the held fd refers to the ORIGINAL inode.
+        substituted_fd = self.journal.open_operation_lock(operation_id)
+        original_ino = os.fstat(substituted_fd).st_ino
+        lock_path.unlink()
+        replacement_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(replacement_fd)
+        try:
+            self.assertNotEqual(original_ino, os.lstat(lock_path).st_ino)
+            refusal = refuse(substituted_fd)
+            self.assertEqual("unsafe_journal_file", refusal.reason)
+            # The unlinked original inode fails verification outright.
+            self.assertIn("single-link (nlink=0)", str(refusal))
+        finally:
+            OperationJournal.release_locks([substituted_fd])
+            os.unlink(lock_path)
+
+        # The genuine held fd remains authoritative for settlement reads.
+        genuine_fd = self.journal.open_operation_lock(operation_id)
+        try:
+            settled_bytes = self.journal._settled_record_bytes(
+                operation_id, path, operation_lock_fd=genuine_fd
+            )
+            self.assertEqual(record["operation_id"], json.loads(settled_bytes)["operation_id"])
+        finally:
+            OperationJournal.release_locks([genuine_fd])
+
+    def test_cas_replace_without_supplied_fd_settles_exact_residue_without_deadlock(
+        self,
+    ) -> None:
+        from market_aligner.cli import _ingest_command, build_parser  # noqa: F401
+        from market_aligner.state.operations import fsync_directory
+
+        operation_id = "op-casresidue"
+        staged = make_record(
+            operation_id=operation_id,
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="in_flight",
+            owner_id=new_owner_id(),
+        )
+        prior_bytes = canonical_json(staged).encode("utf-8")
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".claim-{operation_id}-", dir=self.journal_root
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(prior_bytes)
+        final = self.journal.record_path(operation_id)
+        os.link(temporary, final)
+        self.assertEqual(2, os.lstat(final).st_nlink)
+
+        sealed = make_record(
+            operation_id=operation_id,
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="completed",
+            owner_id=staged["owner_id"],
+            started_at=staged["started_at"],
+            finished_at=staged["started_at"],
+            result={"seen": 1, "new": 0, "fetched": 0, "errors": 0, "database_total": 1},
+        )
+        # No supplied fd: cas_replace acquires its own lock and passes THAT
+        # acquired descriptor into settlement; re-locking itself would hang.
+        self.journal.cas_replace(sealed, prior_bytes, operation_id=operation_id)
+
+        self.assertEqual(1, os.lstat(final).st_nlink)
+        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+        on_disk = json.loads(final.read_text(encoding="utf-8"))
+        self.assertEqual("completed", on_disk["disposition"])
+
+    def test_settlement_lstat_races_refuse_structurally_without_mutation(self) -> None:
+        import market_aligner.state.operations as operations_module
+        from market_aligner.state.operations import fsync_directory
+
+        operation_id = "op-lsttrace"
+        staged = make_record(
+            operation_id=operation_id,
+            kind=INGEST_CYCLE_KIND,
+            config_source=str(self.config_path),
+            config_file_sha256=closure_identity(snapshot_config(self.config_path)[1]),
+            config_sha256=content_sha256(
+                yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+            ),
+            source_scope=["fixtureboard"],
+            data_home=str(self.root),
+            disposition="in_flight",
+            owner_id=new_owner_id(),
+        )
+        payload = canonical_json(staged).encode("utf-8")
+
+        def stage_residue() -> tuple[Path, Path]:
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".claim-{operation_id}-", dir=self.journal_root
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+            final = self.journal.record_path(operation_id)
+            os.link(temporary, final)
+            return final, Path(temporary)
+
+        real_lstat = operations_module.os.lstat
+
+        # Race 1: the final record disappears before the initial lstat.
+        missing = self.journal.record_path("op-lsttrace-missing")
+        with mock.patch.object(
+            operations_module.os, "lstat", side_effect=OSError("vanished")
+        ):
+            with self.assertRaises(OperationRefused) as caught:
+                self.journal._settled_record_bytes(operation_id, missing)
+        self.assertEqual("unsafe_journal_file", caught.exception.reason)
+
+        # Race 2: the matching candidate vanishes between glob and lstat.
+        final, temporary = stage_residue()
+        calls = {"n": 0}
+
+        def flaky_candidate(target, *args, **kwargs):
+            result = real_lstat(target, *args, **kwargs)
+            if Path(target).name.startswith(".claim-") and calls["n"] == 0:
+                calls["n"] += 1
+                raise OSError("candidate raced away")
+            return result
+
+        held = self.journal.open_operation_lock(operation_id)
+        try:
+            with mock.patch.object(operations_module.os, "lstat", flaky_candidate):
+                with self.assertRaises(OperationRefused) as caught:
+                    self.journal._settled_record_bytes(
+                        operation_id, final, operation_lock_fd=held
+                    )
+            self.assertEqual("unsafe_journal_file", caught.exception.reason)
+            self.assertIn("not statable", str(caught.exception))
+            # No mutation happened despite the race.
+            self.assertEqual(2, os.lstat(final).st_nlink)
+            self.assertNotEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+        finally:
+            OperationJournal.release_locks([held])
+            # Deterministic cleanup so the next stage starts from a clean root.
+            os.unlink(temporary)
+            os.unlink(final)
+            fsync_directory(self.journal_root)
+        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
+
+        # Race 3: the final vanishes after the temp was already unlinked —
+        # the revalidation lstat (third final lstat: seam entry, settle entry,
+        # post-unlink) is also structured, never raw.
+        final2, temporary2 = stage_residue()
+        final_stats = {"n": 0}
+
+        def vanish_after_unlink(target, *args, **kwargs):
+            result = real_lstat(target, *args, **kwargs)
+            if Path(target) == final2:
+                final_stats["n"] += 1
+                if final_stats["n"] >= 3:
+                    raise FileNotFoundError("final replaced mid-settlement")
+            return result
+
+        held2 = self.journal.open_operation_lock(operation_id)
+        try:
+            with mock.patch.object(operations_module.os, "lstat", vanish_after_unlink):
+                with self.assertRaises(OperationRefused) as caught:
+                    self.journal._settled_record_bytes(
+                        operation_id, final2, operation_lock_fd=held2
+                    )
+            self.assertEqual("unsafe_journal_file", caught.exception.reason)
+            self.assertIn("final replaced mid-settlement", str(caught.exception))
+            # The intended branch was reached: the matching temp was already
+            # removed by settlement before the post-unlink revalidation died.
+            self.assertGreaterEqual(final_stats["n"], 3)
+            self.assertFalse(os.path.lexists(temporary2))
+            self.assertTrue(os.path.lexists(final2))
+        finally:
+            OperationJournal.release_locks([held2])
+            # Deterministic cleanup of whatever residue survived the mocks.
+            if os.path.lexists(temporary2):
+                os.unlink(temporary2)
+            if os.path.lexists(final2):
+                os.unlink(final2)
+            fsync_directory(self.journal_root)
+        self.assertEqual([], list(self.journal_root.glob(f".claim-{operation_id}-*")))
 
     def test_high_count_same_id_disjoint_stress_keeps_exact_refusals(self) -> None:
         from market_aligner.cli import _ingest_command, build_parser

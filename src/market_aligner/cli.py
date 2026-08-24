@@ -330,7 +330,7 @@ def _ingest_command(args: argparse.Namespace, *, out=None, err=None) -> int:
         # refusals for differing configs/scopes, truthful terminal replay when
         # every binding matches — never a second provider fetch.
         try:
-            current = journal.load(operation_id)
+            current = journal.load(operation_id, operation_lock_fd=operation_lock_fd)
         except OperationRefused as exc:
             return _refuse(exc)
         if current is not None:
