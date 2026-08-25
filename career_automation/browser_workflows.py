@@ -1626,7 +1626,6 @@ class BrowserWorkflowStore:
             review = build_deterministic_preflight_quality_review(
                 quality_input,
                 prior_cover_letter_shingles=prior_shingles,
-                ats_answer_authority_verified=False,
             )
             document_json = _canonical_json(review.to_dict())
             review_sha256 = review.content_sha256

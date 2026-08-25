@@ -12,6 +12,10 @@ from .application_artifacts import (
     verify_application_artifact_receipt,
 )
 from .application_compiler import ApplicationSource, verify_application_source
+from .ats_application_authority import (
+    AtsApplicationAuthority,
+    verify_ats_application_authority,
+)
 from .browser_workflows import (
     ApplicationPreflightQualityReview,
     ApplicationQualityIssue,
@@ -158,6 +162,7 @@ class ApplicationQualityInput:
     publication_receipt: PublishedArtifactReceipt
     field_answers_bytes: bytes
     form_inventory_bytes: bytes
+    ats_application_authority: AtsApplicationAuthority | None = None
 
     def __post_init__(self) -> None:
         _require_digest(self.candidate_authority_sha256, "candidate authority hash")
@@ -167,6 +172,10 @@ class ApplicationQualityInput:
             raise TypeError("quality input artifacts must be typed")
         if not isinstance(self.publication_receipt, PublishedArtifactReceipt):
             raise TypeError("quality input publication receipt must be typed")
+        if self.ats_application_authority is not None and type(
+            self.ats_application_authority
+        ) is not AtsApplicationAuthority:
+            raise TypeError("quality input ATS authority must use the exact type")
         _captured_bytes(self.field_answers_bytes, "field answers", allow_empty=True)
         _captured_bytes(self.form_inventory_bytes, "form inventory", allow_empty=False)
 
@@ -211,7 +220,6 @@ def build_deterministic_preflight_quality_review(
     quality_input: ApplicationQualityInput,
     *,
     prior_cover_letter_shingles: Iterable[Iterable[str]] = (),
-    ats_answer_authority_verified: bool = False,
 ) -> ApplicationPreflightQualityReview:
     """Recompute quality from exact source/artifact evidence with no score inputs."""
     if not isinstance(quality_input, ApplicationQualityInput):
@@ -237,8 +245,24 @@ def build_deterministic_preflight_quality_review(
         "form inventory",
         allow_empty=False,
     )
-    if field_answers != artifacts.editable.answers_text.encode("utf-8"):
-        raise ValueError("captured field answers differ from the application source")
+    authority = quality_input.ats_application_authority
+    if authority is None:
+        if field_answers != artifacts.editable.answers_text.encode("utf-8"):
+            raise ValueError("captured field answers differ from the application source")
+        ats_answer_authority_verified = False
+    else:
+        verify_ats_application_authority(
+            authority,
+            candidate_authority_sha256=quality_input.candidate_authority_sha256,
+            source=source,
+            artifacts=artifacts,
+            publication_receipt=quality_input.publication_receipt,
+        )
+        if field_answers != authority.answer_bytes:
+            raise ValueError("captured field answers differ from exact ATS authority")
+        if inventory != authority.inventory_bytes:
+            raise ValueError("captured form inventory differs from exact ATS authority")
+        ats_answer_authority_verified = True
 
     issues: list[ApplicationQualityIssue] = []
     letter_text = artifacts.editable.cover_letter_text

@@ -18,6 +18,12 @@ from career_automation.application_quality import (
     QUALITY_POLICY_SHA256,
     build_deterministic_preflight_quality_review,
 )
+from career_automation.ats_application_authority import (
+    AtsFieldPlan,
+    AtsFormInventory,
+    AtsObservedField,
+    build_ats_application_authority,
+)
 from career_automation.browser_workflows import QualityReviewDisposition
 from career_automation.rendering import render_pdf_artifacts
 from test_jaa07_independent_acceptance import _sentence, _slot, _source
@@ -142,6 +148,83 @@ def _quality_input(tmp_path: Path, source: ApplicationSource) -> ApplicationQual
     )
 
 
+def _quality_input_with_ats(
+    tmp_path: Path,
+    source: ApplicationSource,
+) -> ApplicationQualityInput:
+    quality_input = _quality_input(tmp_path, source)
+    inventory = AtsFormInventory(
+        provider="fixture",
+        application_url="https://jobs.example.test/application/quality",
+        captured_at=quality_input.reviewed_at,
+        page_snapshot_sha256="1" * 64,
+        screenshot_sha256s=("2" * 64,),
+        fields=(
+            AtsObservedField("full_name", "text", "Full name", True, True),
+            AtsObservedField(
+                "delivery",
+                "textarea",
+                "Describe a relevant delivery example",
+                True,
+                True,
+            ),
+            AtsObservedField("cv", "file", "CV", True, True),
+            AtsObservedField(
+                "robot_check",
+                "hidden",
+                "",
+                False,
+                False,
+                automation_role="honeypot",
+            ),
+        ),
+    )
+    authority = build_ats_application_authority(
+        reviewed_at=quality_input.reviewed_at,
+        candidate_authority_sha256=quality_input.candidate_authority_sha256,
+        source=source,
+        artifacts=quality_input.artifacts,
+        publication_receipt=quality_input.publication_receipt,
+        inventory=inventory,
+        reviewed_inventory=replace(
+            inventory,
+            captured_at="2026-08-26T12:00:00Z",
+            page_snapshot_sha256="3" * 64,
+            screenshot_sha256s=("4" * 64,),
+            fields=(
+                replace(
+                    inventory.fields[0],
+                    current_value=source.contact.full_name,
+                ),
+                replace(
+                    inventory.fields[1],
+                    current_value=(
+                        "A concise example follows.\n"
+                        "Delivered reliable services with tested evidence."
+                    ),
+                ),
+                replace(
+                    inventory.fields[2],
+                    current_value=quality_input.artifacts.cv_pdf.pdf_sha256,
+                ),
+                inventory.fields[3],
+            ),
+        ),
+        plans=(
+            AtsFieldPlan("full_name", "fill", "contact.full_name"),
+            AtsFieldPlan("delivery", "fill", "answer.delivery-example"),
+            AtsFieldPlan("cv", "upload", "artifact.cv"),
+            AtsFieldPlan("robot_check", "omit", "none"),
+        ),
+    )
+    return replace(
+        quality_input,
+        field_answers_bytes=authority.answer_bytes,
+        form_inventory_bytes=authority.inventory_bytes,
+        ats_application_authority=authority,
+    )
+
+
 def _codes(review) -> set[str]:
     return {row.code for row in review.issues}
 
@@ -150,8 +233,7 @@ def test_natural_exact_pack_passes_document_policy_with_typed_ats_authority(
     tmp_path: Path,
 ) -> None:
     review = build_deterministic_preflight_quality_review(
-        _quality_input(tmp_path, _quality_source()),
-        ats_answer_authority_verified=True,
+        _quality_input_with_ats(tmp_path, _quality_source()),
     )
     assert review.disposition is QualityReviewDisposition.ACCEPTED
     assert review.quality_policy_sha256 == QUALITY_POLICY_SHA256
@@ -196,23 +278,18 @@ def test_deterministic_prose_and_factual_consistency_issues_block_release(
     expected_code: str,
 ) -> None:
     review = build_deterministic_preflight_quality_review(
-        _quality_input(tmp_path, source()),
-        ats_answer_authority_verified=True,
+        _quality_input_with_ats(tmp_path, source()),
     )
     assert review.disposition is QualityReviewDisposition.NEEDS_REMEDIATION
     assert expected_code in _codes(review)
 
 
 def test_prior_letter_similarity_cannot_be_omitted_from_the_result(tmp_path: Path) -> None:
-    quality_input = _quality_input(tmp_path, _quality_source())
-    first = build_deterministic_preflight_quality_review(
-        quality_input,
-        ats_answer_authority_verified=True,
-    )
+    quality_input = _quality_input_with_ats(tmp_path, _quality_source())
+    first = build_deterministic_preflight_quality_review(quality_input)
     repeated = build_deterministic_preflight_quality_review(
         quality_input,
         prior_cover_letter_shingles=(first.cover_letter_shingle_sha256s,),
-        ats_answer_authority_verified=True,
     )
     assert repeated.maximum_prior_similarity_bp == 10_000
     assert "prior_cover_letter_too_similar" in _codes(repeated)
@@ -250,4 +327,14 @@ def test_artifact_source_receipt_and_answer_substitution_fail_before_review(
     with pytest.raises(ValueError, match="field answers"):
         build_deterministic_preflight_quality_review(
             replace(quality_input, field_answers_bytes=b"substituted\n")
+        )
+
+    ats_input = _quality_input_with_ats(tmp_path / "ats", _quality_source())
+    with pytest.raises(ValueError, match="exact ATS authority"):
+        build_deterministic_preflight_quality_review(
+            replace(ats_input, field_answers_bytes=b"substituted\n")
+        )
+    with pytest.raises(ValueError, match="exact ATS authority"):
+        build_deterministic_preflight_quality_review(
+            replace(ats_input, form_inventory_bytes=b"substituted\n")
         )

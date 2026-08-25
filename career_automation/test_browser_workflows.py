@@ -37,7 +37,11 @@ from career_automation.browser_workflows import (
     WorkflowError,
 )
 from career_automation.database import CareerDatabase
-from test_application_quality import _quality_input, _quality_source
+from test_application_quality import (
+    _quality_input,
+    _quality_input_with_ats,
+    _quality_source,
+)
 
 
 class FakeClock:
@@ -754,16 +758,39 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 run_id,
                 _preflight_review(disposition=QualityReviewDisposition.ACCEPTED),
             )
+        accepted_input = _quality_input_with_ats(
+            Path(self.temporary.name) / "quality-with-ats",
+            source,
+        )
+        self.assertTrue(
+            self.store.record_application_preflight_quality_review(
+                run_id,
+                accepted_input,
+            )
+        )
+        self.assertTrue(
+            self.store.authorize_release(
+                run_id,
+                token=token,
+                authorization_reference="RELEASE_POLICY_42",
+                idempotency_key="release_accepted_ats_review",
+            )
+        )
+        with self.assertRaisesRegex(WorkflowError, "cannot change after release"):
+            self.store.record_application_preflight_quality_review(
+                run_id,
+                accepted_input,
+            )
         snapshot = self.store.canary_snapshot(run_id)
         self.assertEqual(
             snapshot["latest_preflight_quality_review"]["disposition"],
-            QualityReviewDisposition.NEEDS_REMEDIATION.value,
+            QualityReviewDisposition.ACCEPTED.value,
         )
         self.assertEqual(
             snapshot["latest_preflight_quality_review"]["scores"]["role_targeting"],
             10,
         )
-        self.assertFalse(
+        self.assertTrue(
             snapshot["latest_preflight_quality_review"][
                 "ats_answer_authority_verified"
             ]
