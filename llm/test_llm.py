@@ -159,6 +159,40 @@ def run() -> int:
         assert calls_after_second == 1, (
             f"CACHE MISS: backend called {calls_after_second} times, expected 1"
         )
+        cache_file = next((tmp / "sub" / "cache").glob("*.json"))
+        for path, expected_mode in (
+            (tmp / "sub" / "cache", 0o700),
+            (cache_file, 0o600),
+            (tmp / "sub" / "usage.jsonl", 0o600),
+        ):
+            status = path.stat()
+            assert stat.S_IMODE(status.st_mode) == expected_mode, (
+                path,
+                oct(stat.S_IMODE(status.st_mode)),
+            )
+            if path.is_file():
+                assert status.st_nlink == 1, (path, status.st_nlink)
+        cache_file.chmod(0o644)
+        try:
+            try:
+                caps.extract_job(FIXTURE_RAW, client=client2)
+            except LLMError as exc:
+                assert "unsafe" in str(exc), str(exc)
+            else:
+                raise AssertionError("unsafe cache mode was accepted")
+        finally:
+            cache_file.chmod(0o600)
+        cache_alias = tmp / "sub" / "cache-hardlink.json"
+        os.link(cache_file, cache_alias)
+        try:
+            try:
+                caps.extract_job(FIXTURE_RAW, client=client2)
+            except LLMError as exc:
+                assert "unsafe" in str(exc), str(exc)
+            else:
+                raise AssertionError("hard-linked cache entry was accepted")
+        finally:
+            cache_alias.unlink()
         print(f"[4] cache HIT verified: backend.call_count stayed at "
               f"{calls_after_second} across two identical calls")
         passed += 1
@@ -189,7 +223,11 @@ def run() -> int:
             f"unknown term should hit the model once (calls={backend3.call_count})"
         )
         assert merge_log.exists(), "LLM-fallback merge was not logged for review"
-        logged = [json.loads(l) for l in merge_log.read_text().splitlines() if l.strip()]
+        logged = [
+            json.loads(line)
+            for line in merge_log.read_text().splitlines()
+            if line.strip()
+        ]
         assert logged and logged[-1]["term"] == "zbrush", logged
         print(f"[5] normalise_skill: '블렌더'->'{cid}' by RULE (0 model calls); "
               f"'UE5'->'unreal'; unknown 'zbrush' -> LLM fallback logged "

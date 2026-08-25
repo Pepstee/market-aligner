@@ -27,6 +27,7 @@ import re
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -46,6 +47,35 @@ _CONFIG_PATH = _REPO_ROOT / "skeleton" / "config.yaml"
 
 class LLMError(RuntimeError):
     """Any client-level failure (backend exhausted retries, bad structured output)."""
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    status = path.lstat()
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
+        raise LLMError(f"LLM runtime directory is unsafe: {path}")
+    if stat.S_IMODE(status.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
+def _require_private_file(path: Path, descriptor: int) -> None:
+    status = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_uid != os.getuid()
+        or status.st_nlink != 1
+        or stat.S_IMODE(status.st_mode) != 0o600
+    ):
+        raise LLMError(f"LLM runtime file is unsafe: {path}")
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written < 1:
+            raise LLMError("LLM runtime file write made no progress")
+        offset += written
 
 
 # --------------------------------------------------------------------------- #
@@ -514,8 +544,8 @@ class LLMClient:
     def __post_init__(self) -> None:
         self.cache_dir = Path(self.cache_dir)
         self.usage_log = Path(self.usage_log)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.usage_log.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_private_directory(self.cache_dir)
+        _ensure_private_directory(self.usage_log.parent)
 
     # -- factory: build from skeleton/config.yaml --------------------------- #
     @classmethod
@@ -563,28 +593,58 @@ class LLMClient:
         p = self._cache_path(key)
         if not p.exists():
             return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-            return LLMResponse(**d)
-        except Exception:
+            descriptor = os.open(p, flags)
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            raise LLMError(f"LLM cache entry cannot be opened safely: {p}") from exc
+        try:
+            _require_private_file(p, descriptor)
+            with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as handle:
+                document = json.load(handle)
+            return LLMResponse(**document)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise LLMError(f"LLM cache entry is invalid: {p}") from exc
+        finally:
+            os.close(descriptor)
 
     def _cache_put(self, key: str, resp: LLMResponse) -> None:
         if not self.cache_enabled:
             return
         p = self._cache_path(key)
-        p.write_text(
-            json.dumps(
-                {
-                    "text": resp.text,
-                    "prompt_tokens": resp.prompt_tokens,
-                    "completion_tokens": resp.completion_tokens,
-                    "model": resp.model,
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+        payload = json.dumps(
+            {
+                "text": resp.text,
+                "prompt_tokens": resp.prompt_tokens,
+                "completion_tokens": resp.completion_tokens,
+                "model": resp.model,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(p, flags, 0o600)
+        except FileExistsError:
+            try:
+                descriptor = os.open(
+                    p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                )
+            except OSError as exc:
+                raise LLMError(f"LLM cache entry cannot be opened safely: {p}") from exc
+            try:
+                _require_private_file(p, descriptor)
+            finally:
+                os.close(descriptor)
+            return
+        try:
+            os.fchmod(descriptor, 0o600)
+            _require_private_file(p, descriptor)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     # -- usage / cost log --------------------------------------------------- #
     def _log_usage(self, task: str, resp: LLMResponse, cache_hit: bool) -> None:
@@ -599,8 +659,36 @@ class LLMClient:
             "total_tokens": resp.total_tokens,
             "cost_usd": round(self._cost(resp), 6),
         }
-        with self.usage_log.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        payload = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+        create_flags = (
+            os.O_WRONLY
+            | os.O_APPEND
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        created = False
+        try:
+            descriptor = os.open(self.usage_log, create_flags, 0o600)
+            created = True
+        except FileExistsError:
+            try:
+                descriptor = os.open(
+                    self.usage_log,
+                    os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except OSError as exc:
+                raise LLMError(
+                    f"LLM usage log cannot be opened safely: {self.usage_log}"
+                ) from exc
+        try:
+            if created:
+                os.fchmod(descriptor, 0o600)
+            _require_private_file(self.usage_log, descriptor)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def _cost(self, resp: LLMResponse) -> float:
         return (
