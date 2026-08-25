@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 
+from career_automation.canary_forensic_evidence import archive_exact_canary_evidence
 from career_automation.browser_workflows import (
     ActionKind,
     ApplicationPreflightQualityReview,
@@ -90,13 +91,19 @@ def _workflow(*, submit: bool = False) -> BrowserWorkflow:
     return BrowserWorkflow("example_application", tuple(actions))
 
 
-def _artifact(seed: str, *, kind: str = "provider_snapshot") -> CanaryEvidenceArtifact:
+def _artifact(
+    seed: str,
+    *,
+    kind: str = "provider_snapshot",
+    forensic_receipt_sha256: str = "c" * 64,
+) -> CanaryEvidenceArtifact:
     return CanaryEvidenceArtifact(
         kind=kind,
         path=f"output/evidence/{seed}.json",
         sha256=seed * 64,
         size_bytes=100,
         media_type="application/json",
+        forensic_receipt_sha256=forensic_receipt_sha256,
     )
 
 
@@ -106,6 +113,7 @@ def _terminal_failure(
     job_key: str = "ashby:example:low-priority",
     outcome: CanaryOutcomeKind = CanaryOutcomeKind.INELIGIBLE,
     final_click_attempted: bool = False,
+    artifacts: tuple[CanaryEvidenceArtifact, ...] | None = None,
 ) -> CanaryTerminalObservation:
     return CanaryTerminalObservation(
         observed_at="2026-08-26T12:00:00Z",
@@ -123,7 +131,7 @@ def _terminal_failure(
         provider_confirmed=False,
         provider_receipt_sha256=None,
         provider_screenshot_sha256=None,
-        artifacts=(_artifact("b"),),
+        artifacts=artifacts or (_artifact("b"),),
         next_engineering_action="Preserve the eligibility refusal and select a lower-risk vacancy.",
     )
 
@@ -277,11 +285,41 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.path = Path(self.temporary.name) / "career.sqlite3"
+        self.repository = Path(self.temporary.name) / "repository"
+        self.repository.mkdir()
+        self.forensics = Path(self.temporary.name) / "forensics"
         self.clock = FakeClock()
-        self.store = BrowserWorkflowStore(self.path, clock=self.clock)
+        self.store = BrowserWorkflowStore(
+            self.path,
+            clock=self.clock,
+            forensic_evidence_root=self.forensics,
+            repository_root=self.repository,
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _forensic_artifact(
+        self, seed: str, *, kind: str = "provider_snapshot"
+    ) -> CanaryEvidenceArtifact:
+        path = self.repository / f"{seed}.json"
+        body = (seed.encode("ascii") * 100)[:100]
+        path.write_bytes(body)
+        path.chmod(0o600)
+        receipt = archive_exact_canary_evidence(
+            path,
+            root=self.forensics,
+            repository_root=self.repository,
+            media_type="application/json",
+        )
+        return CanaryEvidenceArtifact(
+            kind=kind,
+            path=str(path),
+            sha256=receipt.exact_sha256,
+            size_bytes=receipt.exact_size_bytes,
+            media_type=receipt.media_type,
+            forensic_receipt_sha256=receipt.receipt_sha256,
+        )
 
     def test_store_coexists_with_career_database(self) -> None:
         CareerDatabase(self.path)
@@ -293,6 +331,18 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             }
         self.assertIn("pipeline_jobs", tables)
         self.assertIn("browser_workflow_runs", tables)
+
+    def test_canary_creation_requires_private_forensic_archive_configuration(self) -> None:
+        unconfigured = BrowserWorkflowStore(self.path, clock=self.clock)
+        with self.assertRaisesRegex(WorkflowError, "private forensic archive"):
+            unconfigured.create_canary_run(
+                _workflow(),
+                profile_id="profile_one",
+                job_key="ashby:example:low-priority",
+                vacancy_rank=50,
+                vacancy_sha256="a" * 64,
+                idempotency_key="canary_without_forensics",
+            )
 
     def test_resume_skips_checkpoints_and_exact_retries_are_idempotent(self) -> None:
         workflow = _workflow()
@@ -553,13 +603,16 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 idempotency_key="canary_49",
             )
 
-        observation = _terminal_failure()
+        observation = _terminal_failure(artifacts=(self._forensic_artifact("b"),))
         self.assertTrue(self.store.record_canary_terminal_observation(run_id, observation))
         self.assertFalse(self.store.record_canary_terminal_observation(run_id, observation))
         with self.assertRaises(IdempotencyConflictError):
             self.store.record_canary_terminal_observation(
                 run_id,
-                _terminal_failure(outcome=CanaryOutcomeKind.VACANCY_CLOSED),
+                _terminal_failure(
+                    outcome=CanaryOutcomeKind.VACANCY_CLOSED,
+                    artifacts=(self._forensic_artifact("b"),),
+                ),
             )
         with self.assertRaisesRegex(WorkflowError, "requires a sealed quality review"):
             self.store.create_canary_run(
@@ -620,7 +673,7 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             vacancy_sha256="a" * 64,
             idempotency_key="canary_blocked",
         )
-        observation = _terminal_failure()
+        observation = _terminal_failure(artifacts=(self._forensic_artifact("b"),))
         self.store.record_canary_terminal_observation(run_id, observation)
         self.store.record_application_quality_review(
             run_id,
@@ -635,6 +688,24 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 vacancy_sha256="c" * 64,
                 idempotency_key="canary_after_blocker",
             )
+
+    def test_terminal_canary_rejects_unverified_forensic_evidence(self) -> None:
+        run_id = self.store.create_canary_run(
+            _workflow(),
+            profile_id="profile_one",
+            job_key="ashby:example:low-priority",
+            vacancy_rank=50,
+            vacancy_sha256="a" * 64,
+            idempotency_key="canary_unverified_evidence",
+        )
+        artifact = self._forensic_artifact("b")
+        substituted = CanaryEvidenceArtifact(
+            **{**artifact.__dict__, "forensic_receipt_sha256": "f" * 64}
+        )
+        observation = _terminal_failure(artifacts=(substituted,))
+        with self.assertRaisesRegex(WorkflowError, "forensic evidence is invalid"):
+            self.store.record_canary_terminal_observation(run_id, observation)
+        self.assertEqual(self.store.canary_snapshot(run_id)["state"], "active")
 
     def test_canary_release_requires_the_latest_accepted_preflight_review(self) -> None:
         run_id = self.store.create_canary_run(
@@ -716,7 +787,12 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
         barrier = Barrier(2)
 
         def create(index: int) -> str:
-            store = BrowserWorkflowStore(self.path, clock=self.clock)
+            store = BrowserWorkflowStore(
+                self.path,
+                clock=self.clock,
+                forensic_evidence_root=self.forensics,
+                repository_root=self.repository,
+            )
             barrier.wait(timeout=5)
             return store.create_canary_run(
                 workflow,
@@ -771,8 +847,8 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             step_id="open",
             result=StepResult({"url_loaded": True}),
         )
-        receipt = _artifact("d", kind="provider_receipt")
-        screenshot = _artifact("e", kind="provider_screenshot")
+        receipt = self._forensic_artifact("d", kind="provider_receipt")
+        screenshot = self._forensic_artifact("e", kind="provider_screenshot")
         claimed_success = CanaryTerminalObservation(
             observed_at="2026-08-26T12:00:00Z",
             stage=CanaryStage.PROVIDER_CONFIRMATION,
@@ -800,6 +876,7 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 _terminal_failure(
                     outcome=CanaryOutcomeKind.OUTCOME_UNKNOWN,
                     final_click_attempted=True,
+                    artifacts=(self._forensic_artifact("f"),),
                 ),
             )
 
@@ -812,7 +889,7 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             vacancy_sha256="a" * 64,
             idempotency_key="canary_immutable",
         )
-        observation = _terminal_failure()
+        observation = _terminal_failure(artifacts=(self._forensic_artifact("b"),))
         review = _failure_review(observation)
         self.store.record_application_preflight_quality_review(
             run_id,

@@ -20,6 +20,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterator, Mapping, Sequence
 
+from career_automation.canary_forensic_evidence import (
+    CanaryForensicEvidenceError,
+    verify_exact_canary_evidence,
+)
+
 
 _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -526,19 +531,24 @@ class SubmissionProof:
 
 @dataclass(frozen=True)
 class CanaryEvidenceArtifact:
-    """Content identity of sanitized evidence retained outside the workflow DB."""
+    """Content identity of exact private evidence retained outside the workflow DB."""
 
     kind: str
     path: str
     sha256: str
     size_bytes: int
     media_type: str
+    forensic_receipt_sha256: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, str) or not _IDENTIFIER.fullmatch(self.kind):
             raise ValueError("artifact kind must be a stable identifier")
         _require_text(self.path, "artifact path", maximum=4096)
         _require_sha256(self.sha256, "artifact sha256")
+        _require_sha256(
+            self.forensic_receipt_sha256,
+            "artifact forensic_receipt_sha256",
+        )
         if not isinstance(self.size_bytes, int) or isinstance(self.size_bytes, bool) or self.size_bytes < 0:
             raise ValueError("artifact size_bytes must be a non-negative integer")
         _require_text(self.media_type, "artifact media_type", maximum=256)
@@ -550,6 +560,7 @@ class CanaryEvidenceArtifact:
             "sha256": self.sha256,
             "size_bytes": self.size_bytes,
             "media_type": self.media_type,
+            "forensic_receipt_sha256": self.forensic_receipt_sha256,
         }
 
 
@@ -1210,12 +1221,54 @@ END;
 class BrowserWorkflowStore:
     """SQLite repository and scheduler for external browser executors."""
 
-    def __init__(self, path: str | Path, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clock: Callable[[], float] = time.time,
+        forensic_evidence_root: str | Path | None = None,
+        repository_root: str | Path | None = None,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._clock = clock
+        self._forensic_evidence_root = (
+            Path(forensic_evidence_root) if forensic_evidence_root is not None else None
+        )
+        self._repository_root = Path(repository_root) if repository_root is not None else None
+        if (self._forensic_evidence_root is None) != (self._repository_root is None):
+            raise ValueError("forensic evidence root and repository root must be configured together")
         with self.connection() as conn:
             conn.executescript(SCHEMA)
+
+    def _verify_canary_evidence_artifacts(
+        self, artifacts: tuple[CanaryEvidenceArtifact, ...]
+    ) -> None:
+        if self._forensic_evidence_root is None or self._repository_root is None:
+            raise WorkflowError("canary terminal evidence requires the private forensic archive")
+        for artifact in artifacts:
+            try:
+                receipt, exact_bytes = verify_exact_canary_evidence(
+                    self._forensic_evidence_root,
+                    self._repository_root,
+                    artifact.forensic_receipt_sha256,
+                )
+            except (CanaryForensicEvidenceError, OSError, ValueError) as exc:
+                raise WorkflowError("canary terminal forensic evidence is invalid") from exc
+            nominal_path = Path(artifact.path)
+            if not nominal_path.is_absolute():
+                nominal_path = self._repository_root / nominal_path
+            source_locator_sha256 = hashlib.sha256(
+                str(nominal_path.absolute()).encode("utf-8")
+            ).hexdigest()
+            if (
+                receipt.source_locator_sha256 != source_locator_sha256
+                or receipt.exact_sha256 != artifact.sha256
+                or receipt.exact_size_bytes != artifact.size_bytes
+                or receipt.media_type != artifact.media_type
+                or len(exact_bytes) != artifact.size_bytes
+            ):
+                raise WorkflowError("canary terminal artifact differs from forensic receipt")
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
@@ -1399,6 +1452,8 @@ class BrowserWorkflowStore:
         run_id: str | None = None,
     ) -> str:
         """Create the sole active canary after the prior terminal review is admitted."""
+        if self._forensic_evidence_root is None or self._repository_root is None:
+            raise WorkflowError("canary runs require the private forensic archive")
         if not isinstance(profile_id, str) or not _IDENTIFIER.fullmatch(profile_id):
             raise ValueError("profile_id must be a stable identifier")
         _require_text(job_key, "job_key", maximum=512)
@@ -2322,6 +2377,7 @@ class BrowserWorkflowStore:
         """Seal one terminal outcome; a final click is never success without provider proof."""
         if not isinstance(observation, CanaryTerminalObservation):
             raise TypeError("observation must be CanaryTerminalObservation")
+        self._verify_canary_evidence_artifacts(observation.artifacts)
         document_json = _canonical_json(observation.to_dict())
         observation_sha256 = observation.content_sha256
         if observation_sha256 != _sha256(document_json):
