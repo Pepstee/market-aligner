@@ -22,6 +22,8 @@ from typing import Any, Callable, Collection, Iterator, Mapping, Sequence
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 def _canonical_json(value: Any) -> str:
@@ -31,6 +33,20 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _require_sha256(value: str | None, field_name: str, *, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise ValueError(f"{field_name} must be lowercase SHA-256")
+
+
+def _require_text(value: str, field_name: str, *, maximum: int) -> None:
+    if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > maximum:
+        raise ValueError(f"{field_name} must be non-empty UTF-8 text within {maximum} bytes")
+    if "\x00" in value:
+        raise ValueError(f"{field_name} cannot contain NUL")
 
 
 def fixture_submit_event_sha256(
@@ -112,6 +128,46 @@ class SelectorOutcome(str, Enum):
 class ValueSource(str, Enum):
     EVIDENCE = "evidence"
     PLACEHOLDER = "placeholder"
+
+
+class CanaryStage(str, Enum):
+    OFFICIAL_ROUTE = "official_route"
+    ELIGIBILITY = "eligibility"
+    ATS_INVENTORY = "ats_inventory"
+    APPLICATION_PACKAGE = "application_package"
+    PREFLIGHT_REVIEW = "preflight_review"
+    RELEASE = "release"
+    SUBMIT = "submit"
+    PROVIDER_CONFIRMATION = "provider_confirmation"
+    POST_SUBMISSION_REVIEW = "post_submission_review"
+
+
+class CanaryOutcomeKind(str, Enum):
+    PROVIDER_CONFIRMED_SUBMISSION = "provider_confirmed_submission"
+    VACANCY_CLOSED = "vacancy_closed"
+    INELIGIBLE = "ineligible"
+    UNSUPPORTED_ATS = "unsupported_ats"
+    SCHEMA_DRIFT = "schema_drift"
+    BOT_CHALLENGE = "bot_challenge"
+    SPAM_FILTER_REFUSAL = "spam_filter_refusal"
+    AUTHENTICATION_REQUIRED = "authentication_required"
+    OPERATOR_ANSWER_REQUIRED = "operator_answer_required"
+    TECHNICAL_FAILURE = "technical_failure"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    CANCELLED = "cancelled"
+
+
+class QualityIssueSeverity(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+class QualityReviewDisposition(str, Enum):
+    ACCEPTED = "accepted"
+    NEEDS_REMEDIATION = "needs_remediation"
+    NOT_SUBMITTED = "not_submitted"
 
 
 @dataclass(frozen=True)
@@ -468,6 +524,271 @@ class SubmissionProof:
                 )
 
 
+@dataclass(frozen=True)
+class CanaryEvidenceArtifact:
+    """Content identity of sanitized evidence retained outside the workflow DB."""
+
+    kind: str
+    path: str
+    sha256: str
+    size_bytes: int
+    media_type: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not _IDENTIFIER.fullmatch(self.kind):
+            raise ValueError("artifact kind must be a stable identifier")
+        _require_text(self.path, "artifact path", maximum=4096)
+        _require_sha256(self.sha256, "artifact sha256")
+        if not isinstance(self.size_bytes, int) or isinstance(self.size_bytes, bool) or self.size_bytes < 0:
+            raise ValueError("artifact size_bytes must be a non-negative integer")
+        _require_text(self.media_type, "artifact media_type", maximum=256)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "path": self.path,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+            "media_type": self.media_type,
+        }
+
+
+@dataclass(frozen=True)
+class CanaryTerminalObservation:
+    """Immutable terminal provider/application observation for one canary."""
+
+    observed_at: str
+    stage: CanaryStage
+    outcome: CanaryOutcomeKind
+    ats: str
+    official_url: str
+    job_key: str
+    vacancy_sha256: str
+    reason_code: str
+    summary: str
+    technical_detail: str
+    applicant_data_exposed: bool
+    final_click_attempted: bool
+    provider_confirmed: bool
+    provider_receipt_sha256: str | None
+    provider_screenshot_sha256: str | None
+    artifacts: tuple[CanaryEvidenceArtifact, ...]
+    next_engineering_action: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "artifacts", tuple(self.artifacts))
+        if not isinstance(self.observed_at, str) or not _RFC3339_UTC.fullmatch(self.observed_at):
+            raise ValueError("observed_at must be second-precision RFC3339 UTC")
+        if not isinstance(self.stage, CanaryStage):
+            raise TypeError("stage must be CanaryStage")
+        if not isinstance(self.outcome, CanaryOutcomeKind):
+            raise TypeError("outcome must be CanaryOutcomeKind")
+        _require_text(self.ats, "ats", maximum=128)
+        if not isinstance(self.official_url, str) or not re.fullmatch(r"https://[^\s\x00]+", self.official_url):
+            raise ValueError("official_url must be an HTTPS URL")
+        _require_text(self.job_key, "job_key", maximum=512)
+        _require_sha256(self.vacancy_sha256, "vacancy_sha256")
+        if not isinstance(self.reason_code, str) or not _IDENTIFIER.fullmatch(self.reason_code):
+            raise ValueError("reason_code must be a stable identifier")
+        _require_text(self.summary, "summary", maximum=8192)
+        _require_text(self.technical_detail, "technical_detail", maximum=32768)
+        _require_text(self.next_engineering_action, "next_engineering_action", maximum=8192)
+        for field_name in (
+            "applicant_data_exposed",
+            "final_click_attempted",
+            "provider_confirmed",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise TypeError(f"{field_name} must be bool")
+        _require_sha256(
+            self.provider_receipt_sha256,
+            "provider_receipt_sha256",
+            nullable=True,
+        )
+        _require_sha256(
+            self.provider_screenshot_sha256,
+            "provider_screenshot_sha256",
+            nullable=True,
+        )
+        if not self.artifacts or not all(
+            isinstance(artifact, CanaryEvidenceArtifact) for artifact in self.artifacts
+        ):
+            raise ValueError("terminal observation requires typed evidence artifacts")
+        artifact_keys = [(artifact.kind, artifact.sha256) for artifact in self.artifacts]
+        if len(artifact_keys) != len(set(artifact_keys)):
+            raise ValueError("terminal evidence artifacts must be unique")
+        successful = self.outcome is CanaryOutcomeKind.PROVIDER_CONFIRMED_SUBMISSION
+        if successful != self.provider_confirmed:
+            raise ValueError("provider-confirmed outcome and flag must agree")
+        if successful and (
+            not self.final_click_attempted
+            or self.provider_receipt_sha256 is None
+            or self.provider_screenshot_sha256 is None
+        ):
+            raise ValueError("provider-confirmed submission requires click, receipt and screenshot")
+        if not successful and self.provider_receipt_sha256 is not None:
+            raise ValueError("non-success outcome cannot claim a provider receipt")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "jaa.browser-canary-terminal-observation.v1",
+            "observed_at": self.observed_at,
+            "stage": self.stage.value,
+            "outcome": self.outcome.value,
+            "ats": self.ats,
+            "official_url": self.official_url,
+            "job_key": self.job_key,
+            "vacancy_sha256": self.vacancy_sha256,
+            "reason_code": self.reason_code,
+            "summary": self.summary,
+            "technical_detail": self.technical_detail,
+            "applicant_data_exposed": self.applicant_data_exposed,
+            "final_click_attempted": self.final_click_attempted,
+            "provider_confirmed": self.provider_confirmed,
+            "provider_receipt_sha256": self.provider_receipt_sha256,
+            "provider_screenshot_sha256": self.provider_screenshot_sha256,
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "next_engineering_action": self.next_engineering_action,
+        }
+
+    @property
+    def content_sha256(self) -> str:
+        return _sha256(_canonical_json(self.to_dict()))
+
+
+@dataclass(frozen=True)
+class ApplicationQualityIssue:
+    code: str
+    severity: QualityIssueSeverity
+    category: str
+    release_blocking: bool
+    enforceable_by_code: bool
+    summary: str
+    evidence: str
+    remediation: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.code, str) or not _IDENTIFIER.fullmatch(self.code):
+            raise ValueError("quality issue code must be a stable identifier")
+        if not isinstance(self.severity, QualityIssueSeverity):
+            raise TypeError("quality issue severity must be typed")
+        if not isinstance(self.category, str) or not _IDENTIFIER.fullmatch(self.category):
+            raise ValueError("quality issue category must be a stable identifier")
+        if not isinstance(self.release_blocking, bool) or not isinstance(self.enforceable_by_code, bool):
+            raise TypeError("quality issue flags must be bool")
+        _require_text(self.summary, "quality issue summary", maximum=4096)
+        _require_text(self.evidence, "quality issue evidence", maximum=16384)
+        _require_text(self.remediation, "quality issue remediation", maximum=8192)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "severity": self.severity.value,
+            "category": self.category,
+            "release_blocking": self.release_blocking,
+            "enforceable_by_code": self.enforceable_by_code,
+            "summary": self.summary,
+            "evidence": self.evidence,
+            "remediation": self.remediation,
+        }
+
+
+@dataclass(frozen=True)
+class ApplicationQualityReview:
+    """Exact post-terminal review required before another canary may start."""
+
+    reviewed_at: str
+    terminal_observation_sha256: str
+    disposition: QualityReviewDisposition
+    factual_accuracy_score: int | None
+    role_targeting_score: int | None
+    natural_voice_score: int | None
+    evidence_capture_score: int
+    technical_execution_score: int
+    application_source_sha256: str | None
+    artifact_receipt_sha256: str | None
+    cv_sha256: str | None
+    cover_letter_sha256: str | None
+    field_answers_sha256: str | None
+    form_inventory_sha256: str | None
+    provider_receipt_sha256: str | None
+    issues: tuple[ApplicationQualityIssue, ...]
+    summary: str
+    next_cycle_decision: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "issues", tuple(self.issues))
+        if not isinstance(self.reviewed_at, str) or not _RFC3339_UTC.fullmatch(self.reviewed_at):
+            raise ValueError("reviewed_at must be second-precision RFC3339 UTC")
+        _require_sha256(self.terminal_observation_sha256, "terminal_observation_sha256")
+        if not isinstance(self.disposition, QualityReviewDisposition):
+            raise TypeError("quality review disposition must be typed")
+        for field_name in (
+            "factual_accuracy_score",
+            "role_targeting_score",
+            "natural_voice_score",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10
+            ):
+                raise ValueError(f"{field_name} must be null or an integer from 0 to 10")
+        for field_name in ("evidence_capture_score", "technical_execution_score"):
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10:
+                raise ValueError(f"{field_name} must be an integer from 0 to 10")
+        for field_name in (
+            "application_source_sha256",
+            "artifact_receipt_sha256",
+            "cv_sha256",
+            "cover_letter_sha256",
+            "field_answers_sha256",
+            "form_inventory_sha256",
+            "provider_receipt_sha256",
+        ):
+            _require_sha256(getattr(self, field_name), field_name, nullable=True)
+        if not all(isinstance(issue, ApplicationQualityIssue) for issue in self.issues):
+            raise TypeError("quality review issues must be ApplicationQualityIssue")
+        issue_codes = [issue.code for issue in self.issues]
+        if len(issue_codes) != len(set(issue_codes)):
+            raise ValueError("quality review issue codes must be unique")
+        if self.disposition is QualityReviewDisposition.ACCEPTED and any(
+            issue.release_blocking for issue in self.issues
+        ):
+            raise ValueError("accepted review cannot contain a release-blocking issue")
+        _require_text(self.summary, "quality review summary", maximum=16384)
+        _require_text(self.next_cycle_decision, "next_cycle_decision", maximum=8192)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "jaa.application-quality-review.v1",
+            "reviewed_at": self.reviewed_at,
+            "terminal_observation_sha256": self.terminal_observation_sha256,
+            "disposition": self.disposition.value,
+            "scores": {
+                "factual_accuracy": self.factual_accuracy_score,
+                "role_targeting": self.role_targeting_score,
+                "natural_voice": self.natural_voice_score,
+                "evidence_capture": self.evidence_capture_score,
+                "technical_execution": self.technical_execution_score,
+            },
+            "application_source_sha256": self.application_source_sha256,
+            "artifact_receipt_sha256": self.artifact_receipt_sha256,
+            "cv_sha256": self.cv_sha256,
+            "cover_letter_sha256": self.cover_letter_sha256,
+            "field_answers_sha256": self.field_answers_sha256,
+            "form_inventory_sha256": self.form_inventory_sha256,
+            "provider_receipt_sha256": self.provider_receipt_sha256,
+            "issues": [issue.to_dict() for issue in self.issues],
+            "summary": self.summary,
+            "next_cycle_decision": self.next_cycle_decision,
+        }
+
+    @property
+    def content_sha256(self) -> str:
+        return _sha256(_canonical_json(self.to_dict()))
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -544,6 +865,44 @@ CREATE TABLE IF NOT EXISTS browser_submit_dispatches (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS browser_canary_runs (
+  run_id TEXT PRIMARY KEY REFERENCES browser_workflow_runs(run_id) ON DELETE RESTRICT,
+  profile_id TEXT NOT NULL,
+  job_key TEXT NOT NULL,
+  vacancy_rank INTEGER NOT NULL CHECK(vacancy_rank>0),
+  vacancy_sha256 TEXT NOT NULL CHECK(length(vacancy_sha256)=64),
+  state TEXT NOT NULL CHECK(state IN ('active','terminal','reviewed')),
+  terminal_observation_sha256 TEXT,
+  quality_review_sha256 TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK(
+    (state='active' AND terminal_observation_sha256 IS NULL AND quality_review_sha256 IS NULL)
+    OR (state='terminal' AND terminal_observation_sha256 IS NOT NULL AND quality_review_sha256 IS NULL)
+    OR (state='reviewed' AND terminal_observation_sha256 IS NOT NULL AND quality_review_sha256 IS NOT NULL)
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS browser_canary_one_active
+  ON browser_canary_runs((1)) WHERE state='active';
+CREATE UNIQUE INDEX IF NOT EXISTS browser_canary_identity
+  ON browser_canary_runs(profile_id,job_key,vacancy_sha256);
+
+CREATE TABLE IF NOT EXISTS browser_canary_terminal_observations (
+  observation_sha256 TEXT PRIMARY KEY CHECK(length(observation_sha256)=64),
+  run_id TEXT NOT NULL UNIQUE REFERENCES browser_canary_runs(run_id) ON DELETE RESTRICT,
+  document_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS browser_application_quality_reviews (
+  review_sha256 TEXT PRIMARY KEY CHECK(length(review_sha256)=64),
+  run_id TEXT NOT NULL UNIQUE REFERENCES browser_canary_runs(run_id) ON DELETE RESTRICT,
+  terminal_observation_sha256 TEXT NOT NULL
+    REFERENCES browser_canary_terminal_observations(observation_sha256) ON DELETE RESTRICT,
+  document_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TRIGGER IF NOT EXISTS browser_submit_dispatches_guard_insert
 BEFORE INSERT ON browser_submit_dispatches
 WHEN NEW.state<>'prepared'
@@ -560,6 +919,58 @@ WHEN NEW.state<>'prepared'
   )
 BEGIN
   SELECT RAISE(ABORT, 'browser submit dispatch insert is invalid');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_canary_runs_guard_update
+BEFORE UPDATE ON browser_canary_runs
+WHEN NEW.run_id<>OLD.run_id
+  OR NEW.profile_id<>OLD.profile_id
+  OR NEW.job_key<>OLD.job_key
+  OR NEW.vacancy_rank<>OLD.vacancy_rank
+  OR NEW.vacancy_sha256<>OLD.vacancy_sha256
+  OR NEW.created_at<>OLD.created_at
+  OR NOT (
+    (OLD.state='active' AND NEW.state='terminal'
+      AND OLD.terminal_observation_sha256 IS NULL
+      AND NEW.terminal_observation_sha256 IS NOT NULL
+      AND NEW.quality_review_sha256 IS NULL)
+    OR (OLD.state='terminal' AND NEW.state='reviewed'
+      AND NEW.terminal_observation_sha256=OLD.terminal_observation_sha256
+      AND OLD.quality_review_sha256 IS NULL
+      AND NEW.quality_review_sha256 IS NOT NULL)
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'browser canary transition is invalid');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_canary_runs_immutable_delete
+BEFORE DELETE ON browser_canary_runs
+BEGIN
+  SELECT RAISE(ABORT, 'browser canary runs are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_canary_terminal_immutable_update
+BEFORE UPDATE ON browser_canary_terminal_observations
+BEGIN
+  SELECT RAISE(ABORT, 'browser canary terminal observations are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_canary_terminal_immutable_delete
+BEFORE DELETE ON browser_canary_terminal_observations
+BEGIN
+  SELECT RAISE(ABORT, 'browser canary terminal observations are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_application_quality_reviews_immutable_update
+BEFORE UPDATE ON browser_application_quality_reviews
+BEGIN
+  SELECT RAISE(ABORT, 'browser application quality reviews are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_application_quality_reviews_immutable_delete
+BEFORE DELETE ON browser_application_quality_reviews
+BEGIN
+  SELECT RAISE(ABORT, 'browser application quality reviews are immutable');
 END;
 
 CREATE TRIGGER IF NOT EXISTS browser_submit_dispatches_guard_update
@@ -808,6 +1219,132 @@ class BrowserWorkflowStore:
                 event_type="run_created",
                 idempotency_key=event_key or f"browser-run-created:{selected_id}",
                 payload={"workflow_hash": workflow.content_hash, "version": workflow.version},
+            )
+            return selected_id
+
+    @staticmethod
+    def _assert_previous_canary_review_allows_progress(conn: sqlite3.Connection) -> None:
+        pending = conn.execute(
+            "SELECT run_id FROM browser_canary_runs WHERE state='terminal' LIMIT 1"
+        ).fetchone()
+        if pending is not None:
+            raise WorkflowError(
+                f"canary {pending['run_id']} requires a sealed quality review before progression"
+            )
+        latest = conn.execute(
+            """SELECT r.document_json
+               FROM browser_canary_runs c
+               JOIN browser_application_quality_reviews r
+                 ON r.review_sha256=c.quality_review_sha256
+               WHERE c.state='reviewed'
+               ORDER BY c.rowid DESC LIMIT 1"""
+        ).fetchone()
+        if latest is None:
+            return
+        try:
+            document = json.loads(str(latest["document_json"]))
+            blocked = document["disposition"] == QualityReviewDisposition.NEEDS_REMEDIATION.value
+            blocked = blocked or any(
+                bool(issue["release_blocking"]) for issue in document["issues"]
+            )
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise WorkflowError("stored canary quality review is invalid") from exc
+        if blocked:
+            raise WorkflowError("previous canary has unresolved release-blocking quality issues")
+
+    def create_canary_run(
+        self,
+        workflow: BrowserWorkflow,
+        *,
+        profile_id: str,
+        job_key: str,
+        vacancy_rank: int,
+        vacancy_sha256: str,
+        idempotency_key: str,
+        run_id: str | None = None,
+    ) -> str:
+        """Create the sole active canary after the prior terminal review is admitted."""
+        if not isinstance(profile_id, str) or not _IDENTIFIER.fullmatch(profile_id):
+            raise ValueError("profile_id must be a stable identifier")
+        _require_text(job_key, "job_key", maximum=512)
+        if not isinstance(vacancy_rank, int) or isinstance(vacancy_rank, bool) or vacancy_rank < 1:
+            raise ValueError("vacancy_rank must be a positive integer")
+        _require_sha256(vacancy_sha256, "vacancy_sha256")
+        if not isinstance(idempotency_key, str) or not _IDENTIFIER.fullmatch(idempotency_key):
+            raise ValueError("canary idempotency_key must be a stable identifier")
+        event_key = f"browser-canary-created:{idempotency_key}"
+        with self.transaction() as conn:
+            prior = conn.execute(
+                """SELECT e.run_id,e.payload_json,c.profile_id,c.job_key,c.vacancy_rank,
+                          c.vacancy_sha256,r.workflow_hash
+                   FROM browser_workflow_events e
+                   JOIN browser_canary_runs c ON c.run_id=e.run_id
+                   JOIN browser_workflow_runs r ON r.run_id=e.run_id
+                   WHERE e.idempotency_key=?""",
+                (event_key,),
+            ).fetchone()
+            if prior is not None:
+                expected = (
+                    profile_id,
+                    job_key,
+                    vacancy_rank,
+                    vacancy_sha256,
+                    workflow.content_hash,
+                )
+                actual = (
+                    str(prior["profile_id"]),
+                    str(prior["job_key"]),
+                    int(prior["vacancy_rank"]),
+                    str(prior["vacancy_sha256"]),
+                    str(prior["workflow_hash"]),
+                )
+                if actual != expected:
+                    raise IdempotencyConflictError(
+                        "canary creation key reused with different authority"
+                    )
+                return str(prior["run_id"])
+            active = conn.execute(
+                "SELECT run_id FROM browser_canary_runs WHERE state='active'"
+            ).fetchone()
+            if active is not None:
+                raise WorkflowError(f"canary {active['run_id']} is already active")
+            self._assert_previous_canary_review_allows_progress(conn)
+            previous = conn.execute(
+                """SELECT vacancy_rank FROM browser_canary_runs
+                   WHERE state='reviewed' ORDER BY rowid DESC LIMIT 1"""
+            ).fetchone()
+            if previous is not None and vacancy_rank >= int(previous["vacancy_rank"]):
+                raise WorkflowError(
+                    "next canary must move upward from the previously reviewed worst-first rank"
+                )
+            self._register(conn, workflow)
+            selected_id = run_id or str(uuid.uuid4())
+            if conn.execute(
+                "SELECT 1 FROM browser_workflow_runs WHERE run_id=?", (selected_id,)
+            ).fetchone() is not None:
+                raise IdempotencyConflictError("run ID already exists")
+            conn.execute(
+                "INSERT INTO browser_workflow_runs(run_id,workflow_hash) VALUES(?,?)",
+                (selected_id, workflow.content_hash),
+            )
+            conn.execute(
+                """INSERT INTO browser_canary_runs(
+                     run_id,profile_id,job_key,vacancy_rank,vacancy_sha256,state
+                   ) VALUES(?,?,?,?,?,'active')""",
+                (selected_id, profile_id, job_key, vacancy_rank, vacancy_sha256),
+            )
+            self._insert_event(
+                conn,
+                run_id=selected_id,
+                event_type="canary_created",
+                idempotency_key=event_key,
+                payload={
+                    "profile_id": profile_id,
+                    "job_key": job_key,
+                    "vacancy_rank": vacancy_rank,
+                    "vacancy_sha256": vacancy_sha256,
+                    "workflow_hash": workflow.content_hash,
+                },
             )
             return selected_id
 
@@ -1541,6 +2078,258 @@ class BrowserWorkflowStore:
                     (run_id,),
                 )
             return True
+
+    def record_canary_terminal_observation(
+        self,
+        run_id: str,
+        observation: CanaryTerminalObservation,
+    ) -> bool:
+        """Seal one terminal outcome; a final click is never success without provider proof."""
+        if not isinstance(observation, CanaryTerminalObservation):
+            raise TypeError("observation must be CanaryTerminalObservation")
+        document_json = _canonical_json(observation.to_dict())
+        observation_sha256 = observation.content_sha256
+        if observation_sha256 != _sha256(document_json):
+            raise WorkflowError("terminal observation identity is inconsistent")
+        with self.transaction() as conn:
+            canary = conn.execute(
+                "SELECT * FROM browser_canary_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if canary is None:
+                raise KeyError(run_id)
+            existing = conn.execute(
+                """SELECT observation_sha256,document_json
+                   FROM browser_canary_terminal_observations WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["observation_sha256"]) == observation_sha256
+                    and str(existing["document_json"]) == document_json
+                ):
+                    return False
+                raise IdempotencyConflictError("terminal canary observation cannot be overwritten")
+            if str(canary["state"]) != "active":
+                raise WorkflowError("only an active canary may become terminal")
+            if (
+                str(canary["job_key"]) != observation.job_key
+                or str(canary["vacancy_sha256"]) != observation.vacancy_sha256
+            ):
+                raise WorkflowError("terminal observation differs from canary vacancy authority")
+            run = conn.execute(
+                "SELECT * FROM browser_workflow_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            dispatch = conn.execute(
+                "SELECT * FROM browser_submit_dispatches WHERE run_id=?", (run_id,)
+            ).fetchone()
+            artifact_hashes = {artifact.sha256 for artifact in observation.artifacts}
+            if observation.provider_screenshot_sha256 is not None and (
+                observation.provider_screenshot_sha256 not in artifact_hashes
+            ):
+                raise WorkflowError("provider screenshot is absent from terminal evidence")
+            if observation.provider_receipt_sha256 is not None and (
+                observation.provider_receipt_sha256 not in artifact_hashes
+            ):
+                raise WorkflowError("provider receipt is absent from terminal evidence")
+            if observation.provider_confirmed:
+                if str(run["status"]) != "completed":
+                    raise WorkflowError("provider-confirmed canary must be a completed workflow")
+                if (
+                    dispatch is None
+                    or str(dispatch["state"]) != "receipt_recorded"
+                    or str(dispatch["receipt_payload_hash"])
+                    != observation.provider_receipt_sha256
+                    or str(dispatch["screenshot_hash"])
+                    != observation.provider_screenshot_sha256
+                ):
+                    raise WorkflowError("provider-confirmed outcome differs from submit receipt")
+            else:
+                if dispatch is not None and str(dispatch["state"]) == "receipt_recorded":
+                    raise WorkflowError("recorded provider receipt cannot be relabelled as failure")
+                if observation.final_click_attempted and (
+                    dispatch is None or str(dispatch["state"]) != "click_started"
+                ):
+                    raise WorkflowError("final-click failure lacks a durable submit dispatch")
+                if not observation.final_click_attempted and dispatch is not None and (
+                    str(dispatch["state"]) in {"click_started", "receipt_recorded"}
+                ):
+                    raise WorkflowError("terminal observation omits a durable final-click attempt")
+            conn.execute(
+                """INSERT INTO browser_canary_terminal_observations(
+                     observation_sha256,run_id,document_json
+                   ) VALUES(?,?,?)""",
+                (observation_sha256, run_id, document_json),
+            )
+            conn.execute(
+                """UPDATE browser_canary_runs
+                   SET state='terminal',terminal_observation_sha256=?,
+                       updated_at=CURRENT_TIMESTAMP WHERE run_id=?""",
+                (observation_sha256, run_id),
+            )
+            if not observation.provider_confirmed:
+                status = (
+                    "cancelled"
+                    if observation.outcome is CanaryOutcomeKind.CANCELLED
+                    else "failed"
+                )
+                conn.execute(
+                    """UPDATE browser_workflow_runs
+                       SET status=?,lease_owner=NULL,lease_until_epoch=NULL,
+                           updated_at=CURRENT_TIMESTAMP WHERE run_id=?""",
+                    (status, run_id),
+                )
+            self._insert_event(
+                conn,
+                run_id=run_id,
+                event_type="canary_terminal_observation_recorded",
+                idempotency_key=f"browser-canary-terminal:{run_id}",
+                payload={
+                    "observation_sha256": observation_sha256,
+                    "stage": observation.stage.value,
+                    "outcome": observation.outcome.value,
+                    "provider_confirmed": observation.provider_confirmed,
+                    "final_click_attempted": observation.final_click_attempted,
+                },
+                actor_kind="external",
+            )
+            return True
+
+    def record_application_quality_review(
+        self,
+        run_id: str,
+        review: ApplicationQualityReview,
+    ) -> bool:
+        """Seal the post-terminal quality review that controls next-canary admission."""
+        if not isinstance(review, ApplicationQualityReview):
+            raise TypeError("review must be ApplicationQualityReview")
+        document_json = _canonical_json(review.to_dict())
+        review_sha256 = review.content_sha256
+        if review_sha256 != _sha256(document_json):
+            raise WorkflowError("quality review identity is inconsistent")
+        with self.transaction() as conn:
+            canary = conn.execute(
+                "SELECT * FROM browser_canary_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if canary is None:
+                raise KeyError(run_id)
+            existing = conn.execute(
+                """SELECT review_sha256,document_json
+                   FROM browser_application_quality_reviews WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["review_sha256"]) == review_sha256
+                    and str(existing["document_json"]) == document_json
+                ):
+                    return False
+                raise IdempotencyConflictError("application quality review cannot be overwritten")
+            if str(canary["state"]) != "terminal":
+                raise WorkflowError("quality review requires a terminal canary")
+            if str(canary["terminal_observation_sha256"]) != review.terminal_observation_sha256:
+                raise WorkflowError("quality review differs from terminal observation")
+            terminal_row = conn.execute(
+                """SELECT document_json FROM browser_canary_terminal_observations
+                   WHERE observation_sha256=? AND run_id=?""",
+                (review.terminal_observation_sha256, run_id),
+            ).fetchone()
+            if terminal_row is None:
+                raise WorkflowError("terminal observation authority is absent")
+            try:
+                terminal = json.loads(str(terminal_row["document_json"]))
+            except json.JSONDecodeError as exc:
+                raise WorkflowError("terminal observation is invalid JSON") from exc
+            successful = bool(terminal.get("provider_confirmed"))
+            if successful:
+                required_hashes = (
+                    review.application_source_sha256,
+                    review.artifact_receipt_sha256,
+                    review.cv_sha256,
+                    review.field_answers_sha256,
+                    review.form_inventory_sha256,
+                    review.provider_receipt_sha256,
+                )
+                if any(value is None for value in required_hashes):
+                    raise WorkflowError("submitted application review lacks exact content authority")
+                if any(
+                    value is None
+                    for value in (
+                        review.factual_accuracy_score,
+                        review.role_targeting_score,
+                        review.natural_voice_score,
+                    )
+                ):
+                    raise WorkflowError("submitted application review lacks quality scores")
+                if review.provider_receipt_sha256 != terminal.get("provider_receipt_sha256"):
+                    raise WorkflowError("quality review differs from provider receipt")
+                if review.disposition is QualityReviewDisposition.NOT_SUBMITTED:
+                    raise WorkflowError("submitted application cannot be reviewed as not submitted")
+            else:
+                if review.disposition is not QualityReviewDisposition.NOT_SUBMITTED:
+                    raise WorkflowError("non-submitted canary requires not_submitted review disposition")
+                if review.provider_receipt_sha256 is not None:
+                    raise WorkflowError("non-submitted review cannot claim a provider receipt")
+            conn.execute(
+                """INSERT INTO browser_application_quality_reviews(
+                     review_sha256,run_id,terminal_observation_sha256,document_json
+                   ) VALUES(?,?,?,?)""",
+                (
+                    review_sha256,
+                    run_id,
+                    review.terminal_observation_sha256,
+                    document_json,
+                ),
+            )
+            conn.execute(
+                """UPDATE browser_canary_runs
+                   SET state='reviewed',quality_review_sha256=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE run_id=?""",
+                (review_sha256, run_id),
+            )
+            self._insert_event(
+                conn,
+                run_id=run_id,
+                event_type="application_quality_review_recorded",
+                idempotency_key=f"browser-application-quality-review:{run_id}",
+                payload={
+                    "review_sha256": review_sha256,
+                    "terminal_observation_sha256": review.terminal_observation_sha256,
+                    "disposition": review.disposition.value,
+                    "release_blocking_issue_count": sum(
+                        issue.release_blocking for issue in review.issues
+                    ),
+                },
+                actor_kind="reviewer",
+            )
+            return True
+
+    def canary_snapshot(self, run_id: str) -> dict[str, Any]:
+        with self.connection() as conn:
+            canary = conn.execute(
+                "SELECT * FROM browser_canary_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if canary is None:
+                raise KeyError(run_id)
+            result = dict(canary)
+            terminal = conn.execute(
+                """SELECT document_json FROM browser_canary_terminal_observations
+                   WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+            review = conn.execute(
+                """SELECT document_json FROM browser_application_quality_reviews
+                   WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+        result["terminal_observation"] = (
+            json.loads(str(terminal["document_json"])) if terminal is not None else None
+        )
+        result["quality_review"] = (
+            json.loads(str(review["document_json"])) if review is not None else None
+        )
+        return result
 
     def checkpoint_outputs(self, run_id: str) -> dict[str, dict[str, Any]]:
         with self.connection() as conn:

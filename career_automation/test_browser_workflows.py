@@ -3,16 +3,26 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 from career_automation.browser_workflows import (
     ActionKind,
+    ApplicationQualityIssue,
+    ApplicationQualityReview,
     ApprovalRequiredError,
     ApprovedValue,
     BrowserAction,
     BrowserWorkflow,
     BrowserWorkflowStore,
+    CanaryEvidenceArtifact,
+    CanaryOutcomeKind,
+    CanaryStage,
+    CanaryTerminalObservation,
     IdempotencyConflictError,
+    QualityIssueSeverity,
+    QualityReviewDisposition,
     ReleaseGateError,
     SelectorCandidate,
     SelectorOutcome,
@@ -21,6 +31,7 @@ from career_automation.browser_workflows import (
     StepResult,
     ValueReference,
     ValueSource,
+    WorkflowError,
 )
 from career_automation.database import CareerDatabase
 
@@ -76,6 +87,82 @@ def _workflow(*, submit: bool = False) -> BrowserWorkflow:
             )
         )
     return BrowserWorkflow("example_application", tuple(actions))
+
+
+def _artifact(seed: str, *, kind: str = "provider_snapshot") -> CanaryEvidenceArtifact:
+    return CanaryEvidenceArtifact(
+        kind=kind,
+        path=f"output/evidence/{seed}.json",
+        sha256=seed * 64,
+        size_bytes=100,
+        media_type="application/json",
+    )
+
+
+def _terminal_failure(
+    *,
+    vacancy_sha256: str = "a" * 64,
+    job_key: str = "ashby:example:low-priority",
+    outcome: CanaryOutcomeKind = CanaryOutcomeKind.INELIGIBLE,
+    final_click_attempted: bool = False,
+) -> CanaryTerminalObservation:
+    return CanaryTerminalObservation(
+        observed_at="2026-08-26T12:00:00Z",
+        stage=CanaryStage.ELIGIBILITY,
+        outcome=outcome,
+        ats="Ashby",
+        official_url="https://jobs.example/low-priority",
+        job_key=job_key,
+        vacancy_sha256=vacancy_sha256,
+        reason_code="essential_requirements_absent",
+        summary="The official vacancy requires evidence that is absent.",
+        technical_detail="Official vacancy bytes were evaluated before applicant-data entry.",
+        applicant_data_exposed=False,
+        final_click_attempted=final_click_attempted,
+        provider_confirmed=False,
+        provider_receipt_sha256=None,
+        provider_screenshot_sha256=None,
+        artifacts=(_artifact("b"),),
+        next_engineering_action="Preserve the eligibility refusal and select a lower-risk vacancy.",
+    )
+
+
+def _failure_review(
+    observation: CanaryTerminalObservation,
+    *,
+    release_blocking: bool = False,
+) -> ApplicationQualityReview:
+    return ApplicationQualityReview(
+        reviewed_at="2026-08-26T12:01:00Z",
+        terminal_observation_sha256=observation.content_sha256,
+        disposition=QualityReviewDisposition.NOT_SUBMITTED,
+        factual_accuracy_score=None,
+        role_targeting_score=None,
+        natural_voice_score=None,
+        evidence_capture_score=9,
+        technical_execution_score=10,
+        application_source_sha256=None,
+        artifact_receipt_sha256=None,
+        cv_sha256=None,
+        cover_letter_sha256=None,
+        field_answers_sha256=None,
+        form_inventory_sha256=None,
+        provider_receipt_sha256=None,
+        issues=(
+            ApplicationQualityIssue(
+                code="eligibility_refusal",
+                severity=QualityIssueSeverity.INFO,
+                category="eligibility",
+                release_blocking=release_blocking,
+                enforceable_by_code=True,
+                summary="The vacancy was rejected before applicant-data entry.",
+                evidence="The terminal observation binds the official vacancy snapshot.",
+                remediation="Keep essential-requirement admission enabled for later canaries.",
+            ),
+        ),
+        summary="No application was sent; the refusal was truthful and well evidenced.",
+        next_cycle_decision="Proceed only when no release-blocking issue remains.",
+    )
 
 
 class BrowserWorkflowModelTests(unittest.TestCase):
@@ -384,6 +471,239 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             with self.store.connection() as conn:
                 conn.execute(
                     "UPDATE browser_workflow_events SET event_type='changed' WHERE run_id=?",
+                    (run_id,),
+                )
+
+    def test_canary_requires_terminal_review_before_the_next_canary(self) -> None:
+        workflow = _workflow()
+        run_id = self.store.create_canary_run(
+            workflow,
+            profile_id="profile_one",
+            job_key="ashby:example:low-priority",
+            vacancy_rank=50,
+            vacancy_sha256="a" * 64,
+            idempotency_key="canary_50",
+        )
+        self.assertEqual(
+            run_id,
+            self.store.create_canary_run(
+                workflow,
+                profile_id="profile_one",
+                job_key="ashby:example:low-priority",
+                vacancy_rank=50,
+                vacancy_sha256="a" * 64,
+                idempotency_key="canary_50",
+            ),
+        )
+        with self.assertRaisesRegex(WorkflowError, "already active"):
+            self.store.create_canary_run(
+                workflow,
+                profile_id="profile_one",
+                job_key="ashby:example:other",
+                vacancy_rank=49,
+                vacancy_sha256="c" * 64,
+                idempotency_key="canary_49",
+            )
+
+        observation = _terminal_failure()
+        self.assertTrue(self.store.record_canary_terminal_observation(run_id, observation))
+        self.assertFalse(self.store.record_canary_terminal_observation(run_id, observation))
+        with self.assertRaises(IdempotencyConflictError):
+            self.store.record_canary_terminal_observation(
+                run_id,
+                _terminal_failure(outcome=CanaryOutcomeKind.VACANCY_CLOSED),
+            )
+        with self.assertRaisesRegex(WorkflowError, "requires a sealed quality review"):
+            self.store.create_canary_run(
+                workflow,
+                profile_id="profile_one",
+                job_key="ashby:example:other",
+                vacancy_rank=49,
+                vacancy_sha256="c" * 64,
+                idempotency_key="canary_49",
+            )
+
+        review = _failure_review(observation)
+        self.assertTrue(self.store.record_application_quality_review(run_id, review))
+        self.assertFalse(self.store.record_application_quality_review(run_id, review))
+        with self.assertRaises(IdempotencyConflictError):
+            self.store.record_application_quality_review(
+                run_id,
+                ApplicationQualityReview(
+                    **{**review.__dict__, "summary": "Substituted review text."}
+                ),
+            )
+        with self.assertRaisesRegex(WorkflowError, "move upward"):
+            self.store.create_canary_run(
+                workflow,
+                profile_id="profile_one",
+                job_key="ashby:example:not-worse-first",
+                vacancy_rank=50,
+                vacancy_sha256="d" * 64,
+                idempotency_key="canary_not_worse_first",
+            )
+        next_run = self.store.create_canary_run(
+            workflow,
+            profile_id="profile_one",
+            job_key="ashby:example:other",
+            vacancy_rank=49,
+            vacancy_sha256="c" * 64,
+            idempotency_key="canary_49",
+        )
+        self.assertNotEqual(run_id, next_run)
+        snapshot = self.store.canary_snapshot(run_id)
+        self.assertEqual(snapshot["state"], "reviewed")
+        self.assertEqual(
+            snapshot["terminal_observation"]["outcome"],
+            CanaryOutcomeKind.INELIGIBLE.value,
+        )
+        self.assertEqual(
+            snapshot["quality_review"]["disposition"],
+            QualityReviewDisposition.NOT_SUBMITTED.value,
+        )
+
+    def test_release_blocking_quality_issue_holds_the_cycle(self) -> None:
+        workflow = _workflow()
+        run_id = self.store.create_canary_run(
+            workflow,
+            profile_id="profile_one",
+            job_key="ashby:example:low-priority",
+            vacancy_rank=50,
+            vacancy_sha256="a" * 64,
+            idempotency_key="canary_blocked",
+        )
+        observation = _terminal_failure()
+        self.store.record_canary_terminal_observation(run_id, observation)
+        self.store.record_application_quality_review(
+            run_id,
+            _failure_review(observation, release_blocking=True),
+        )
+        with self.assertRaisesRegex(WorkflowError, "unresolved release-blocking"):
+            self.store.create_canary_run(
+                workflow,
+                profile_id="profile_one",
+                job_key="ashby:example:next",
+                vacancy_rank=49,
+                vacancy_sha256="c" * 64,
+                idempotency_key="canary_after_blocker",
+            )
+
+    def test_concurrent_canary_creation_admits_exactly_one_active_run(self) -> None:
+        workflow = _workflow()
+        barrier = Barrier(2)
+
+        def create(index: int) -> str:
+            store = BrowserWorkflowStore(self.path, clock=self.clock)
+            barrier.wait(timeout=5)
+            return store.create_canary_run(
+                workflow,
+                profile_id="profile_one",
+                job_key=f"ashby:example:concurrent-{index}",
+                vacancy_rank=50 - index,
+                vacancy_sha256=("a" if index == 0 else "b") * 64,
+                idempotency_key=f"concurrent_canary_{index}",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(create, index) for index in range(2)]
+            results: list[str] = []
+            errors: list[Exception] = []
+            for future in futures:
+                try:
+                    results.append(future.result(timeout=10))
+                except Exception as exc:  # noqa: BLE001 - exact competing outcome is asserted
+                    errors.append(exc)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], WorkflowError)
+        with self.store.connection() as conn:
+            active = conn.execute(
+                "SELECT COUNT(*) FROM browser_canary_runs WHERE state='active'"
+            ).fetchone()[0]
+        self.assertEqual(active, 1)
+
+    def test_click_or_claim_alone_cannot_be_provider_confirmed(self) -> None:
+        workflow = BrowserWorkflow(
+            "official_overview",
+            (
+                BrowserAction(
+                    "open",
+                    ActionKind.NAVIGATE,
+                    target_url="https://jobs.example/low-priority",
+                ),
+            ),
+        )
+        run_id = self.store.create_canary_run(
+            workflow,
+            profile_id="profile_one",
+            job_key="ashby:example:low-priority",
+            vacancy_rank=50,
+            vacancy_sha256="a" * 64,
+            idempotency_key="canary_no_dispatch",
+        )
+        self.store.claim_run("worker", run_id=run_id)
+        self.store.complete_step(
+            run_id,
+            "worker",
+            step_id="open",
+            result=StepResult({"url_loaded": True}),
+        )
+        receipt = _artifact("d", kind="provider_receipt")
+        screenshot = _artifact("e", kind="provider_screenshot")
+        claimed_success = CanaryTerminalObservation(
+            observed_at="2026-08-26T12:00:00Z",
+            stage=CanaryStage.PROVIDER_CONFIRMATION,
+            outcome=CanaryOutcomeKind.PROVIDER_CONFIRMED_SUBMISSION,
+            ats="Ashby",
+            official_url="https://jobs.example/low-priority",
+            job_key="ashby:example:low-priority",
+            vacancy_sha256="a" * 64,
+            reason_code="provider_success",
+            summary="A click was followed by a claimed success state.",
+            technical_detail="The claim intentionally lacks a durable submit dispatch.",
+            applicant_data_exposed=True,
+            final_click_attempted=True,
+            provider_confirmed=True,
+            provider_receipt_sha256=receipt.sha256,
+            provider_screenshot_sha256=screenshot.sha256,
+            artifacts=(receipt, screenshot),
+            next_engineering_action="Reject success without exact provider proof.",
+        )
+        with self.assertRaisesRegex(WorkflowError, "submit receipt"):
+            self.store.record_canary_terminal_observation(run_id, claimed_success)
+        with self.assertRaisesRegex(WorkflowError, "durable submit dispatch"):
+            self.store.record_canary_terminal_observation(
+                run_id,
+                _terminal_failure(
+                    outcome=CanaryOutcomeKind.OUTCOME_UNKNOWN,
+                    final_click_attempted=True,
+                ),
+            )
+
+    def test_canary_terminal_and_review_rows_are_physically_immutable(self) -> None:
+        run_id = self.store.create_canary_run(
+            _workflow(),
+            profile_id="profile_one",
+            job_key="ashby:example:low-priority",
+            vacancy_rank=50,
+            vacancy_sha256="a" * 64,
+            idempotency_key="canary_immutable",
+        )
+        observation = _terminal_failure()
+        review = _failure_review(observation)
+        self.store.record_canary_terminal_observation(run_id, observation)
+        self.store.record_application_quality_review(run_id, review)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            with self.store.connection() as conn:
+                conn.execute(
+                    """UPDATE browser_canary_terminal_observations
+                       SET document_json='{}' WHERE run_id=?""",
+                    (run_id,),
+                )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            with self.store.connection() as conn:
+                conn.execute(
+                    "DELETE FROM browser_application_quality_reviews WHERE run_id=?",
                     (run_id,),
                 )
 
