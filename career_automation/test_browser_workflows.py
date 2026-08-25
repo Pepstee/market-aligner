@@ -9,6 +9,7 @@ from threading import Barrier
 
 from career_automation.browser_workflows import (
     ActionKind,
+    ApplicationPreflightQualityReview,
     ApplicationQualityIssue,
     ApplicationQualityReview,
     ApprovalRequiredError,
@@ -162,6 +163,53 @@ def _failure_review(
         ),
         summary="No application was sent; the refusal was truthful and well evidenced.",
         next_cycle_decision="Proceed only when no release-blocking issue remains.",
+    )
+
+
+def _preflight_review(
+    *,
+    disposition: QualityReviewDisposition,
+    vacancy_sha256: str = "a" * 64,
+) -> ApplicationPreflightQualityReview:
+    accepted = disposition is QualityReviewDisposition.ACCEPTED
+    return ApplicationPreflightQualityReview(
+        reviewed_at="2026-08-26T11:59:00Z",
+        vacancy_sha256=vacancy_sha256,
+        candidate_authority_sha256="1" * 64,
+        application_source_sha256="2" * 64,
+        artifact_receipt_sha256="3" * 64,
+        cv_sha256="4" * 64,
+        cover_letter_sha256="5" * 64,
+        field_answers_sha256="6" * 64,
+        form_inventory_sha256="7" * 64,
+        quality_policy_sha256="8" * 64,
+        reviewer_receipt_sha256="9" * 64,
+        disposition=disposition,
+        factual_accuracy_score=10 if accepted else 7,
+        role_targeting_score=8 if accepted else 4,
+        natural_voice_score=7 if accepted else 4,
+        cross_application_consistency_score=10 if accepted else 6,
+        evidence_capture_score=10 if accepted else 8,
+        technical_execution_score=10 if accepted else 8,
+        issues=()
+        if accepted
+        else (
+            ApplicationQualityIssue(
+                code="generic_cover_letter",
+                severity=QualityIssueSeverity.ERROR,
+                category="prose_quality",
+                release_blocking=True,
+                enforceable_by_code=True,
+                summary="The cover letter is insufficiently role-specific.",
+                evidence="The reviewer receipt records a failed company-specificity check.",
+                remediation="Rebuild the package and obtain a fresh exact preflight review.",
+            ),
+        ),
+        summary=(
+            "The exact package passed every pre-release quality threshold."
+            if accepted
+            else "The exact package requires remediation before release."
+        ),
     )
 
 
@@ -588,6 +636,81 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 idempotency_key="canary_after_blocker",
             )
 
+    def test_canary_release_requires_the_latest_accepted_preflight_review(self) -> None:
+        run_id = self.store.create_canary_run(
+            _workflow(submit=True),
+            profile_id="profile_one",
+            job_key="ashby:example:low-priority",
+            vacancy_rank=50,
+            vacancy_sha256="a" * 64,
+            idempotency_key="canary_preflight",
+        )
+        token = "a-release-token-with-enough-entropy"
+        with self.assertRaisesRegex(ReleaseGateError, "preflight quality review"):
+            self.store.authorize_release(
+                run_id,
+                token=token,
+                authorization_reference="RELEASE_POLICY_42",
+                idempotency_key="release_before_review",
+            )
+
+        needs_work = _preflight_review(
+            disposition=QualityReviewDisposition.NEEDS_REMEDIATION
+        )
+        self.assertTrue(
+            self.store.record_application_preflight_quality_review(run_id, needs_work)
+        )
+        self.assertFalse(
+            self.store.record_application_preflight_quality_review(run_id, needs_work)
+        )
+        with self.assertRaisesRegex(ReleaseGateError, "does not admit release"):
+            self.store.authorize_release(
+                run_id,
+                token=token,
+                authorization_reference="RELEASE_POLICY_42",
+                idempotency_key="release_failed_review",
+            )
+
+        accepted = _preflight_review(disposition=QualityReviewDisposition.ACCEPTED)
+        self.assertTrue(
+            self.store.record_application_preflight_quality_review(run_id, accepted)
+        )
+        self.assertTrue(
+            self.store.authorize_release(
+                run_id,
+                token=token,
+                authorization_reference="RELEASE_POLICY_42",
+                idempotency_key="release_accepted_review",
+            )
+        )
+        with self.assertRaisesRegex(WorkflowError, "cannot change after release"):
+            self.store.record_application_preflight_quality_review(
+                run_id,
+                ApplicationPreflightQualityReview(
+                    **{
+                        **accepted.__dict__,
+                        "reviewed_at": "2026-08-26T12:00:00Z",
+                        "reviewer_receipt_sha256": "f" * 64,
+                    }
+                ),
+            )
+        snapshot = self.store.canary_snapshot(run_id)
+        self.assertEqual(
+            snapshot["latest_preflight_quality_review"]["disposition"],
+            QualityReviewDisposition.ACCEPTED.value,
+        )
+
+    def test_accepted_preflight_requires_exact_deterministic_scores(self) -> None:
+        accepted = _preflight_review(disposition=QualityReviewDisposition.ACCEPTED)
+        with self.assertRaisesRegex(ValueError, "exact deterministic quality scores"):
+            ApplicationPreflightQualityReview(
+                **{**accepted.__dict__, "factual_accuracy_score": 9}
+            )
+        with self.assertRaisesRegex(ValueError, "minimum targeting"):
+            ApplicationPreflightQualityReview(
+                **{**accepted.__dict__, "role_targeting_score": 5}
+            )
+
     def test_concurrent_canary_creation_admits_exactly_one_active_run(self) -> None:
         workflow = _workflow()
         barrier = Barrier(2)
@@ -691,8 +814,19 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
         )
         observation = _terminal_failure()
         review = _failure_review(observation)
+        self.store.record_application_preflight_quality_review(
+            run_id,
+            _preflight_review(disposition=QualityReviewDisposition.ACCEPTED),
+        )
         self.store.record_canary_terminal_observation(run_id, observation)
         self.store.record_application_quality_review(run_id, review)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            with self.store.connection() as conn:
+                conn.execute(
+                    """UPDATE browser_application_preflight_quality_reviews
+                       SET document_json='{}' WHERE run_id=?""",
+                    (run_id,),
+                )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
             with self.store.connection() as conn:
                 conn.execute(

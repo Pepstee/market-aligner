@@ -694,6 +694,120 @@ class ApplicationQualityIssue:
 
 
 @dataclass(frozen=True)
+class ApplicationPreflightQualityReview:
+    """Exact pre-release quality authority for one prepared application."""
+
+    reviewed_at: str
+    vacancy_sha256: str
+    candidate_authority_sha256: str
+    application_source_sha256: str
+    artifact_receipt_sha256: str
+    cv_sha256: str
+    cover_letter_sha256: str | None
+    field_answers_sha256: str
+    form_inventory_sha256: str
+    quality_policy_sha256: str
+    reviewer_receipt_sha256: str
+    disposition: QualityReviewDisposition
+    factual_accuracy_score: int
+    role_targeting_score: int
+    natural_voice_score: int
+    cross_application_consistency_score: int
+    evidence_capture_score: int
+    technical_execution_score: int
+    issues: tuple[ApplicationQualityIssue, ...]
+    summary: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "issues", tuple(self.issues))
+        if not isinstance(self.reviewed_at, str) or not _RFC3339_UTC.fullmatch(self.reviewed_at):
+            raise ValueError("reviewed_at must be second-precision RFC3339 UTC")
+        for field_name in (
+            "vacancy_sha256",
+            "candidate_authority_sha256",
+            "application_source_sha256",
+            "artifact_receipt_sha256",
+            "cv_sha256",
+            "field_answers_sha256",
+            "form_inventory_sha256",
+            "quality_policy_sha256",
+            "reviewer_receipt_sha256",
+        ):
+            _require_sha256(getattr(self, field_name), field_name)
+        _require_sha256(
+            self.cover_letter_sha256,
+            "cover_letter_sha256",
+            nullable=True,
+        )
+        if self.disposition not in {
+            QualityReviewDisposition.ACCEPTED,
+            QualityReviewDisposition.NEEDS_REMEDIATION,
+        }:
+            raise ValueError("preflight review disposition is unsupported")
+        for field_name in (
+            "factual_accuracy_score",
+            "role_targeting_score",
+            "natural_voice_score",
+            "cross_application_consistency_score",
+            "evidence_capture_score",
+            "technical_execution_score",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10:
+                raise ValueError(f"{field_name} must be an integer from 0 to 10")
+        if not all(isinstance(issue, ApplicationQualityIssue) for issue in self.issues):
+            raise TypeError("preflight issues must be ApplicationQualityIssue")
+        issue_codes = [issue.code for issue in self.issues]
+        if len(issue_codes) != len(set(issue_codes)):
+            raise ValueError("preflight issue codes must be unique")
+        if self.disposition is QualityReviewDisposition.ACCEPTED:
+            exact_scores = (
+                self.factual_accuracy_score,
+                self.cross_application_consistency_score,
+                self.evidence_capture_score,
+                self.technical_execution_score,
+            )
+            if exact_scores != (10, 10, 10, 10):
+                raise ValueError("accepted preflight requires exact deterministic quality scores")
+            if self.role_targeting_score < 6 or self.natural_voice_score < 6:
+                raise ValueError("accepted preflight fails minimum targeting or natural-voice score")
+            if any(issue.release_blocking for issue in self.issues):
+                raise ValueError("accepted preflight cannot contain a release-blocking issue")
+        _require_text(self.summary, "preflight quality summary", maximum=16384)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "jaa.application-preflight-quality-review.v1",
+            "reviewed_at": self.reviewed_at,
+            "vacancy_sha256": self.vacancy_sha256,
+            "candidate_authority_sha256": self.candidate_authority_sha256,
+            "application_source_sha256": self.application_source_sha256,
+            "artifact_receipt_sha256": self.artifact_receipt_sha256,
+            "cv_sha256": self.cv_sha256,
+            "cover_letter_sha256": self.cover_letter_sha256,
+            "field_answers_sha256": self.field_answers_sha256,
+            "form_inventory_sha256": self.form_inventory_sha256,
+            "quality_policy_sha256": self.quality_policy_sha256,
+            "reviewer_receipt_sha256": self.reviewer_receipt_sha256,
+            "disposition": self.disposition.value,
+            "scores": {
+                "factual_accuracy": self.factual_accuracy_score,
+                "role_targeting": self.role_targeting_score,
+                "natural_voice": self.natural_voice_score,
+                "cross_application_consistency": self.cross_application_consistency_score,
+                "evidence_capture": self.evidence_capture_score,
+                "technical_execution": self.technical_execution_score,
+            },
+            "issues": [issue.to_dict() for issue in self.issues],
+            "summary": self.summary,
+        }
+
+    @property
+    def content_sha256(self) -> str:
+        return _sha256(_canonical_json(self.to_dict()))
+
+
+@dataclass(frozen=True)
 class ApplicationQualityReview:
     """Exact post-terminal review required before another canary may start."""
 
@@ -894,6 +1008,15 @@ CREATE TABLE IF NOT EXISTS browser_canary_terminal_observations (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS browser_application_preflight_quality_reviews (
+  review_sha256 TEXT PRIMARY KEY CHECK(length(review_sha256)=64),
+  run_id TEXT NOT NULL REFERENCES browser_canary_runs(run_id) ON DELETE RESTRICT,
+  document_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS browser_application_preflight_quality_reviews_run
+  ON browser_application_preflight_quality_reviews(run_id);
+
 CREATE TABLE IF NOT EXISTS browser_application_quality_reviews (
   review_sha256 TEXT PRIMARY KEY CHECK(length(review_sha256)=64),
   run_id TEXT NOT NULL UNIQUE REFERENCES browser_canary_runs(run_id) ON DELETE RESTRICT,
@@ -959,6 +1082,18 @@ CREATE TRIGGER IF NOT EXISTS browser_canary_terminal_immutable_delete
 BEFORE DELETE ON browser_canary_terminal_observations
 BEGIN
   SELECT RAISE(ABORT, 'browser canary terminal observations are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_application_preflight_reviews_immutable_update
+BEFORE UPDATE ON browser_application_preflight_quality_reviews
+BEGIN
+  SELECT RAISE(ABORT, 'browser application preflight quality reviews are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS browser_application_preflight_reviews_immutable_delete
+BEFORE DELETE ON browser_application_preflight_quality_reviews
+BEGIN
+  SELECT RAISE(ABORT, 'browser application preflight quality reviews are immutable');
 END;
 
 CREATE TRIGGER IF NOT EXISTS browser_application_quality_reviews_immutable_update
@@ -1348,6 +1483,72 @@ class BrowserWorkflowStore:
             )
             return selected_id
 
+    def record_application_preflight_quality_review(
+        self,
+        run_id: str,
+        review: ApplicationPreflightQualityReview,
+    ) -> bool:
+        """Append a package review; only the latest accepted review may release."""
+        if not isinstance(review, ApplicationPreflightQualityReview):
+            raise TypeError("review must be ApplicationPreflightQualityReview")
+        document_json = _canonical_json(review.to_dict())
+        review_sha256 = review.content_sha256
+        if review_sha256 != _sha256(document_json):
+            raise WorkflowError("preflight quality review identity is inconsistent")
+        with self.transaction() as conn:
+            canary = conn.execute(
+                """SELECT c.*,r.release_gate_hash
+                   FROM browser_canary_runs c
+                   JOIN browser_workflow_runs r ON r.run_id=c.run_id
+                   WHERE c.run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if canary is None:
+                raise KeyError(run_id)
+            if str(canary["state"]) != "active":
+                raise WorkflowError("preflight quality review requires an active canary")
+            if canary["release_gate_hash"] is not None:
+                raise WorkflowError("preflight quality review cannot change after release authorization")
+            if str(canary["vacancy_sha256"]) != review.vacancy_sha256:
+                raise WorkflowError("preflight quality review differs from canary vacancy")
+            existing = conn.execute(
+                """SELECT run_id,document_json
+                   FROM browser_application_preflight_quality_reviews
+                   WHERE review_sha256=?""",
+                (review_sha256,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["run_id"]) == run_id and str(existing["document_json"]) == document_json:
+                    return False
+                raise IdempotencyConflictError("preflight review identity belongs to different content")
+            conn.execute(
+                """INSERT INTO browser_application_preflight_quality_reviews(
+                     review_sha256,run_id,document_json
+                   ) VALUES(?,?,?)""",
+                (review_sha256, run_id, document_json),
+            )
+            self._insert_event(
+                conn,
+                run_id=run_id,
+                event_type="application_preflight_quality_review_recorded",
+                idempotency_key=f"browser-application-preflight-quality-review:{review_sha256}",
+                payload={
+                    "review_sha256": review_sha256,
+                    "application_source_sha256": review.application_source_sha256,
+                    "artifact_receipt_sha256": review.artifact_receipt_sha256,
+                    "field_answers_sha256": review.field_answers_sha256,
+                    "form_inventory_sha256": review.form_inventory_sha256,
+                    "quality_policy_sha256": review.quality_policy_sha256,
+                    "reviewer_receipt_sha256": review.reviewer_receipt_sha256,
+                    "disposition": review.disposition.value,
+                    "release_blocking_issue_count": sum(
+                        issue.release_blocking for issue in review.issues
+                    ),
+                },
+                actor_kind="reviewer",
+            )
+            return True
+
     def claim_run(
         self,
         worker_id: str,
@@ -1470,6 +1671,40 @@ class BrowserWorkflowStore:
                 if payload.get("release_gate_hash") != token_hash:
                     raise IdempotencyConflictError("release authorization key reused with another token")
                 return False
+            canary = conn.execute(
+                "SELECT * FROM browser_canary_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if canary is not None:
+                if str(canary["state"]) != "active":
+                    raise ReleaseGateError("only an active canary may receive release authority")
+                preflight = conn.execute(
+                    """SELECT review_sha256,document_json
+                       FROM browser_application_preflight_quality_reviews
+                       WHERE run_id=? ORDER BY rowid DESC LIMIT 1""",
+                    (run_id,),
+                ).fetchone()
+                if preflight is None:
+                    raise ReleaseGateError("canary release requires a preflight quality review")
+                try:
+                    preflight_document = json.loads(str(preflight["document_json"]))
+                    expected_preflight_sha256 = _sha256(
+                        _canonical_json(preflight_document)
+                    )
+                    release_blocking = any(
+                        bool(issue["release_blocking"])
+                        for issue in preflight_document["issues"]
+                    )
+                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    raise ReleaseGateError("preflight quality review is invalid") from exc
+                if (
+                    str(preflight["review_sha256"]) != expected_preflight_sha256
+                    or preflight_document.get("vacancy_sha256")
+                    != str(canary["vacancy_sha256"])
+                    or preflight_document.get("disposition")
+                    != QualityReviewDisposition.ACCEPTED.value
+                    or release_blocking
+                ):
+                    raise ReleaseGateError("latest preflight quality review does not admit release")
             if row["status"] in {"completed", "failed", "cancelled"} or row["release_gate_used_at"]:
                 raise ReleaseGateError("run cannot be authorized for submission")
             conn.execute(
@@ -2323,11 +2558,19 @@ class BrowserWorkflowStore:
                    WHERE run_id=?""",
                 (run_id,),
             ).fetchone()
+            preflight = conn.execute(
+                """SELECT document_json FROM browser_application_preflight_quality_reviews
+                   WHERE run_id=? ORDER BY rowid DESC LIMIT 1""",
+                (run_id,),
+            ).fetchone()
         result["terminal_observation"] = (
             json.loads(str(terminal["document_json"])) if terminal is not None else None
         )
         result["quality_review"] = (
             json.loads(str(review["document_json"])) if review is not None else None
+        )
+        result["latest_preflight_quality_review"] = (
+            json.loads(str(preflight["document_json"])) if preflight is not None else None
         )
         return result
 
