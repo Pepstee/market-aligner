@@ -551,6 +551,23 @@ def _inventories_share_shape(
     )
 
 
+def is_ats_omitted_value_empty(
+    control_kind: str,
+    value: str | bool | int | None,
+) -> bool:
+    """Exact kind-aware emptiness for an omitted applicant field.
+
+    Provider-neutral: an omitted checkbox is empty only when its exact
+    value is ``False`` (an unchecked control is exact DOM state, not an
+    absence); every other omitted field is empty only when it holds exactly
+    ``None`` or the empty string.  An omitted checkbox holding ``True`` is
+    never empty.
+    """
+    if control_kind == "checkbox":
+        return value is False
+    return value in (None, "")
+
+
 def _verify_reviewed_values(
     observed_inventory: AtsFormInventory,
     reviewed_inventory: AtsFormInventory,
@@ -573,7 +590,9 @@ def _verify_reviewed_values(
         elif answer.action in {"fill", "upload"}:
             if reviewed.current_value != answer.final_value:
                 raise ValueError("reviewed ATS value differs from exact answer authority")
-        elif reviewed.current_value not in (None, ""):
+        elif not is_ats_omitted_value_empty(
+            observed.control_kind, reviewed.current_value
+        ):
             raise ValueError("omitted ATS field contains an unapproved reviewed value")
 
 
@@ -687,6 +706,31 @@ def _build_entries(
     return tuple(entries)
 
 
+def compile_ats_answer_entries(
+    *,
+    inventory: AtsFormInventory,
+    plans: Iterable[AtsFieldPlan],
+    source: ApplicationSource,
+    artifacts: ApplicationArtifacts,
+) -> tuple[AtsAnswerEntry, ...]:
+    """Pure exact answer-compilation seam between observation and action.
+
+    Verifies the exact typed inventory, plans, source and artifacts and
+    returns immutable :class:`AtsAnswerEntry` rows.  It grants no external
+    action of any kind: no browser, network, filesystem, release or
+    submission capability passes through this seam.
+    """
+    if type(inventory) is not AtsFormInventory:
+        raise TypeError("ATS authority requires the exact inventory type")
+    if type(source) is not ApplicationSource:
+        raise TypeError("ATS answers require the exact application source type")
+    if type(artifacts) is not ApplicationArtifacts:
+        raise TypeError("ATS answers require the exact artifact set type")
+    verify_application_source(source)
+    verify_application_artifacts(artifacts)
+    return _build_entries(inventory, plans, source, artifacts)
+
+
 def build_ats_application_authority(
     *,
     reviewed_at: str,
@@ -701,18 +745,19 @@ def build_ats_application_authority(
     """Build a closed, non-release ATS authority from exact application objects."""
     _require_time(reviewed_at, "ATS authority review time")
     _require_sha256(candidate_authority_sha256, "candidate authority hash")
-    verify_application_source(source)
-    verify_application_artifacts(artifacts)
-    verify_application_artifact_receipt(source, artifacts, publication_receipt)
-    if type(inventory) is not AtsFormInventory:
-        raise TypeError("ATS authority requires the exact inventory type")
+    entries = compile_ats_answer_entries(
+        inventory=inventory,
+        plans=plans,
+        source=source,
+        artifacts=artifacts,
+    )
     if type(reviewed_inventory) is not AtsFormInventory:
         raise TypeError("ATS authority requires the exact reviewed inventory type")
     if not _inventories_share_shape(inventory, reviewed_inventory):
         raise ValueError("reviewed ATS inventory differs from the observed form shape")
     if reviewed_at < reviewed_inventory.captured_at:
         raise ValueError("ATS authority predates the reviewed inventory")
-    entries = _build_entries(inventory, plans, source, artifacts)
+    verify_application_artifact_receipt(source, artifacts, publication_receipt)
     _verify_reviewed_values(inventory, reviewed_inventory, entries)
     values = {
         "reviewed_at": reviewed_at,

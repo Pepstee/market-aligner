@@ -6,11 +6,14 @@ import pytest
 
 from career_automation.ats_application_authority import (
     ATS_AUTHORITY_POLICY_SHA256,
+    AtsAnswerEntry,
     AtsFieldOption,
     AtsFieldPlan,
     AtsFormInventory,
     AtsObservedField,
     build_ats_application_authority,
+    compile_ats_answer_entries,
+    is_ats_omitted_value_empty,
     verify_ats_application_authority,
 )
 from test_application_quality import _quality_input, _quality_source
@@ -296,3 +299,158 @@ def test_reviewed_values_must_equal_exact_answers_and_preserve_provider_state(
                 reviewed_inventory=replace(authority.reviewed_inventory, fields=fields),
                 plans=_plans(),
             )
+
+
+def test_compilation_seam_matches_build_and_grants_no_external_action(
+    tmp_path,
+) -> None:
+    quality_input, authority = _build(tmp_path)
+    entries = compile_ats_answer_entries(
+        inventory=authority.inventory,
+        plans=_plans(),
+        source=quality_input.source,
+        artifacts=quality_input.artifacts,
+    )
+    assert entries == authority.answers
+    assert all(type(row) is AtsAnswerEntry for row in entries)
+    with pytest.raises(Exception):
+        entries[0].action = "omit"
+    with pytest.raises(Exception):
+        entries[0].final_value = "substituted"
+
+
+def test_compilation_seam_refuses_substituted_or_untyped_objects(
+    tmp_path,
+) -> None:
+    quality_input, authority = _build(tmp_path)
+    with pytest.raises(TypeError, match="exact inventory type"):
+        compile_ats_answer_entries(
+            inventory=dict(authority.inventory.document()),
+            plans=_plans(),
+            source=quality_input.source,
+            artifacts=quality_input.artifacts,
+        )
+    tampered_source = replace(
+        quality_input.source, content_sha256="f" * 64
+    )
+    with pytest.raises(ValueError, match="identity differs"):
+        compile_ats_answer_entries(
+            inventory=authority.inventory,
+            plans=_plans(),
+            source=tampered_source,
+            artifacts=quality_input.artifacts,
+        )
+    tampered_artifacts = replace(
+        quality_input.artifacts,
+        editable=replace(
+            quality_input.artifacts.editable,
+            cover_letter_text="substituted\n",
+        ),
+    )
+    with pytest.raises(ValueError, match="editable artifact"):
+        compile_ats_answer_entries(
+            inventory=authority.inventory,
+            plans=_plans(),
+            source=quality_input.source,
+            artifacts=tampered_artifacts,
+        )
+
+
+def _checkbox_pack(tmp_path, *, reviewed_checkbox_value):
+    """Observed/reviewed pack with one optional applicant checkbox."""
+    quality_input = _quality_input(tmp_path, _quality_source())
+    fields = (
+        AtsObservedField("full_name", "text", "Full name", True, True),
+        AtsObservedField(
+            "right_to_work",
+            "checkbox",
+            "Optional yes/no question",
+            False,
+            True,
+            current_value=False,
+        ),
+    )
+    observed = AtsFormInventory(
+        provider="fixture",
+        application_url="https://jobs.example.test/application/one",
+        captured_at=quality_input.reviewed_at,
+        page_snapshot_sha256="1" * 64,
+        screenshot_sha256s=("2" * 64,),
+        fields=fields,
+    )
+    reviewed = replace(
+        observed,
+        page_snapshot_sha256="3" * 64,
+        screenshot_sha256s=("4" * 64,),
+        fields=(
+            replace(
+                fields[0],
+                current_value=quality_input.source.contact.full_name,
+            ),
+            replace(fields[1], current_value=reviewed_checkbox_value),
+        ),
+    )
+    plans = (
+        AtsFieldPlan("full_name", "fill", "contact.full_name"),
+        AtsFieldPlan("right_to_work", "omit", "none", False),
+    )
+    return quality_input, observed, reviewed, plans
+
+
+def test_kind_aware_empty_predicate_is_exact_per_control_kind() -> None:
+    assert is_ats_omitted_value_empty("checkbox", False)
+    assert not is_ats_omitted_value_empty("checkbox", True)
+    assert not is_ats_omitted_value_empty("checkbox", None)
+    assert not is_ats_omitted_value_empty("checkbox", "")
+    assert is_ats_omitted_value_empty("text", None)
+    assert is_ats_omitted_value_empty("text", "")
+    assert not is_ats_omitted_value_empty("text", "x")
+    assert is_ats_omitted_value_empty("file", None)
+
+
+def test_omitted_optional_checkbox_retains_exact_false_through_replay(
+    tmp_path,
+) -> None:
+    quality_input, observed, reviewed, plans = _checkbox_pack(
+        tmp_path, reviewed_checkbox_value=False
+    )
+    authority = build_ats_application_authority(
+        reviewed_at=quality_input.reviewed_at,
+        candidate_authority_sha256=quality_input.candidate_authority_sha256,
+        source=quality_input.source,
+        artifacts=quality_input.artifacts,
+        publication_receipt=quality_input.publication_receipt,
+        inventory=observed,
+        reviewed_inventory=reviewed,
+        plans=plans,
+    )
+    omitted = authority.answers[-1]
+    assert omitted.action == "omit"
+    assert omitted.observed_value is False
+    assert omitted.final_value is None
+    reviewed_row = authority.reviewed_inventory.fields[-1]
+    assert reviewed_row.current_value is False
+    assert verify_ats_application_authority(
+        authority,
+        candidate_authority_sha256=quality_input.candidate_authority_sha256,
+        source=quality_input.source,
+        artifacts=quality_input.artifacts,
+        publication_receipt=quality_input.publication_receipt,
+    ) is authority
+
+
+def test_true_omitted_checkbox_rejects(tmp_path) -> None:
+    quality_input, observed, reviewed, plans = _checkbox_pack(
+        tmp_path, reviewed_checkbox_value=True
+    )
+    with pytest.raises(ValueError, match="omitted ATS field"):
+        build_ats_application_authority(
+            reviewed_at=quality_input.reviewed_at,
+            candidate_authority_sha256=quality_input.candidate_authority_sha256,
+            source=quality_input.source,
+            artifacts=quality_input.artifacts,
+            publication_receipt=quality_input.publication_receipt,
+            inventory=observed,
+            reviewed_inventory=reviewed,
+            plans=plans,
+        )
