@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -36,6 +37,7 @@ from career_automation.browser_workflows import (
     WorkflowError,
 )
 from career_automation.database import CareerDatabase
+from test_application_quality import _quality_input, _quality_source
 
 
 class FakeClock:
@@ -199,6 +201,9 @@ def _preflight_review(
         cross_application_consistency_score=10 if accepted else 6,
         evidence_capture_score=10 if accepted else 8,
         technical_execution_score=10 if accepted else 8,
+        cover_letter_shingle_sha256s=("a" * 64,),
+        maximum_prior_similarity_bp=0,
+        ats_answer_authority_verified=accepted,
         issues=()
         if accepted
         else (
@@ -707,13 +712,14 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             self.store.record_canary_terminal_observation(run_id, observation)
         self.assertEqual(self.store.canary_snapshot(run_id)["state"], "active")
 
-    def test_canary_release_requires_the_latest_accepted_preflight_review(self) -> None:
+    def test_canary_release_requires_store_derived_quality_and_exact_ats_authority(self) -> None:
+        source = _quality_source()
         run_id = self.store.create_canary_run(
             _workflow(submit=True),
             profile_id="profile_one",
-            job_key="ashby:example:low-priority",
+            job_key=source.job_key,
             vacancy_rank=50,
-            vacancy_sha256="a" * 64,
+            vacancy_sha256=source.vacancy_sha256,
             idempotency_key="canary_preflight",
         )
         token = "a-release-token-with-enough-entropy"
@@ -725,14 +731,15 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 idempotency_key="release_before_review",
             )
 
-        needs_work = _preflight_review(
-            disposition=QualityReviewDisposition.NEEDS_REMEDIATION
+        quality_input = _quality_input(
+            Path(self.temporary.name) / "quality",
+            source,
         )
         self.assertTrue(
-            self.store.record_application_preflight_quality_review(run_id, needs_work)
+            self.store.record_application_preflight_quality_review(run_id, quality_input)
         )
         self.assertFalse(
-            self.store.record_application_preflight_quality_review(run_id, needs_work)
+            self.store.record_application_preflight_quality_review(run_id, quality_input)
         )
         with self.assertRaisesRegex(ReleaseGateError, "does not admit release"):
             self.store.authorize_release(
@@ -742,33 +749,24 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
                 idempotency_key="release_failed_review",
             )
 
-        accepted = _preflight_review(disposition=QualityReviewDisposition.ACCEPTED)
-        self.assertTrue(
-            self.store.record_application_preflight_quality_review(run_id, accepted)
-        )
-        self.assertTrue(
-            self.store.authorize_release(
-                run_id,
-                token=token,
-                authorization_reference="RELEASE_POLICY_42",
-                idempotency_key="release_accepted_review",
-            )
-        )
-        with self.assertRaisesRegex(WorkflowError, "cannot change after release"):
+        with self.assertRaisesRegex(TypeError, "ApplicationQualityInput"):
             self.store.record_application_preflight_quality_review(
                 run_id,
-                ApplicationPreflightQualityReview(
-                    **{
-                        **accepted.__dict__,
-                        "reviewed_at": "2026-08-26T12:00:00Z",
-                        "reviewer_receipt_sha256": "f" * 64,
-                    }
-                ),
+                _preflight_review(disposition=QualityReviewDisposition.ACCEPTED),
             )
         snapshot = self.store.canary_snapshot(run_id)
         self.assertEqual(
             snapshot["latest_preflight_quality_review"]["disposition"],
-            QualityReviewDisposition.ACCEPTED.value,
+            QualityReviewDisposition.NEEDS_REMEDIATION.value,
+        )
+        self.assertEqual(
+            snapshot["latest_preflight_quality_review"]["scores"]["role_targeting"],
+            10,
+        )
+        self.assertFalse(
+            snapshot["latest_preflight_quality_review"][
+                "ats_answer_authority_verified"
+            ]
         )
 
     def test_accepted_preflight_requires_exact_deterministic_scores(self) -> None:
@@ -781,6 +779,59 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             ApplicationPreflightQualityReview(
                 **{**accepted.__dict__, "role_targeting_score": 5}
             )
+
+    def test_store_includes_every_prior_letter_in_similarity_review(self) -> None:
+        source = _quality_source()
+        first_run = self.store.create_canary_run(
+            _workflow(),
+            profile_id="profile_one",
+            job_key=source.job_key,
+            vacancy_rank=50,
+            vacancy_sha256=source.vacancy_sha256,
+            idempotency_key="first_similarity_canary",
+        )
+        self.store.record_application_preflight_quality_review(
+            first_run,
+            _quality_input(Path(self.temporary.name) / "first-quality", source),
+        )
+        observation = _terminal_failure(
+            vacancy_sha256=source.vacancy_sha256,
+            job_key=source.job_key,
+            artifacts=(self._forensic_artifact("d"),),
+        )
+        self.store.record_canary_terminal_observation(first_run, observation)
+        self.store.record_application_quality_review(
+            first_run,
+            _failure_review(observation),
+        )
+
+        second_source = _quality_source(
+            job_key="example:software-engineer-second",
+            vacancy_sha256=hashlib.sha256(b"second-vacancy").hexdigest(),
+        )
+        second_run = self.store.create_canary_run(
+            _workflow(),
+            profile_id="profile_one",
+            job_key=second_source.job_key,
+            vacancy_rank=49,
+            vacancy_sha256=second_source.vacancy_sha256,
+            idempotency_key="second_similarity_canary",
+        )
+        self.store.record_application_preflight_quality_review(
+            second_run,
+            _quality_input(
+                Path(self.temporary.name) / "second-quality",
+                second_source,
+            ),
+        )
+        review = self.store.canary_snapshot(second_run)[
+            "latest_preflight_quality_review"
+        ]
+        self.assertEqual(review["maximum_prior_similarity_bp"], 10_000)
+        self.assertIn(
+            "prior_cover_letter_too_similar",
+            {row["code"] for row in review["issues"]},
+        )
 
     def test_concurrent_canary_creation_admits_exactly_one_active_run(self) -> None:
         workflow = _workflow()
@@ -881,19 +932,24 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
             )
 
     def test_canary_terminal_and_review_rows_are_physically_immutable(self) -> None:
+        source = _quality_source()
         run_id = self.store.create_canary_run(
             _workflow(),
             profile_id="profile_one",
-            job_key="ashby:example:low-priority",
+            job_key=source.job_key,
             vacancy_rank=50,
-            vacancy_sha256="a" * 64,
+            vacancy_sha256=source.vacancy_sha256,
             idempotency_key="canary_immutable",
         )
-        observation = _terminal_failure(artifacts=(self._forensic_artifact("b"),))
+        observation = _terminal_failure(
+            vacancy_sha256=source.vacancy_sha256,
+            job_key=source.job_key,
+            artifacts=(self._forensic_artifact("b"),),
+        )
         review = _failure_review(observation)
         self.store.record_application_preflight_quality_review(
             run_id,
-            _preflight_review(disposition=QualityReviewDisposition.ACCEPTED),
+            _quality_input(Path(self.temporary.name) / "immutable-quality", source),
         )
         self.store.record_canary_terminal_observation(run_id, observation)
         self.store.record_application_quality_review(run_id, review)

@@ -125,7 +125,14 @@ def _letter_paragraphs(source: ApplicationSource) -> tuple[str, ...]:
     )
     if not paragraphs[0].casefold().startswith("dear "):
         paragraphs = ("Dear Hiring Manager,", *paragraphs)
-    if not paragraphs[-1].casefold().startswith(("kind regards", "sincerely")):
+    closing = paragraphs[-1]
+    if closing.casefold().startswith(("kind regards", "sincerely")):
+        if source.contact.full_name not in closing.splitlines():
+            salutation = "Kind regards," if closing.casefold().startswith(
+                "kind regards"
+            ) else "Sincerely,"
+            paragraphs = (*paragraphs[:-1], f"{salutation}\n{source.contact.full_name}")
+    else:
         paragraphs = (*paragraphs, f"Kind regards,\n{source.contact.full_name}")
     return paragraphs
 

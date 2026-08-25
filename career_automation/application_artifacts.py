@@ -337,3 +337,17 @@ def verify_published_application_artifacts(
     if actual != expected:
         raise ValueError("published artifact receipt differs from exact artifacts")
     return actual
+
+
+def verify_application_artifact_receipt(
+    source: ApplicationSource,
+    artifacts: ApplicationArtifacts,
+    receipt: PublishedArtifactReceipt,
+) -> None:
+    """Verify a retained publication receipt against exact in-memory artifacts."""
+    if not isinstance(receipt, PublishedArtifactReceipt):
+        raise TypeError("artifact publication receipt must be typed")
+    payloads = _artifact_payloads(source, artifacts)
+    expected = _receipt(source, artifacts, payloads)
+    if receipt != expected:
+        raise ValueError("artifact publication receipt differs from exact artifacts")

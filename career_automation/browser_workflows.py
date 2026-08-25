@@ -726,11 +726,19 @@ class ApplicationPreflightQualityReview:
     cross_application_consistency_score: int
     evidence_capture_score: int
     technical_execution_score: int
+    cover_letter_shingle_sha256s: tuple[str, ...]
+    maximum_prior_similarity_bp: int
+    ats_answer_authority_verified: bool
     issues: tuple[ApplicationQualityIssue, ...]
     summary: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "issues", tuple(self.issues))
+        object.__setattr__(
+            self,
+            "cover_letter_shingle_sha256s",
+            tuple(self.cover_letter_shingle_sha256s),
+        )
         if not isinstance(self.reviewed_at, str) or not _RFC3339_UTC.fullmatch(self.reviewed_at):
             raise ValueError("reviewed_at must be second-precision RFC3339 UTC")
         for field_name in (
@@ -768,6 +776,22 @@ class ApplicationPreflightQualityReview:
                 raise ValueError(f"{field_name} must be an integer from 0 to 10")
         if not all(isinstance(issue, ApplicationQualityIssue) for issue in self.issues):
             raise TypeError("preflight issues must be ApplicationQualityIssue")
+        if (
+            len(self.cover_letter_shingle_sha256s) > 8192
+            or tuple(sorted(set(self.cover_letter_shingle_sha256s)))
+            != self.cover_letter_shingle_sha256s
+        ):
+            raise ValueError("cover-letter shingle identities must be unique and ordered")
+        for value in self.cover_letter_shingle_sha256s:
+            _require_sha256(value, "cover-letter shingle hash")
+        if (
+            not isinstance(self.maximum_prior_similarity_bp, int)
+            or isinstance(self.maximum_prior_similarity_bp, bool)
+            or not 0 <= self.maximum_prior_similarity_bp <= 10_000
+        ):
+            raise ValueError("maximum prior similarity must be basis points")
+        if not isinstance(self.ats_answer_authority_verified, bool):
+            raise TypeError("ATS answer-authority verification must be bool")
         issue_codes = [issue.code for issue in self.issues]
         if len(issue_codes) != len(set(issue_codes)):
             raise ValueError("preflight issue codes must be unique")
@@ -784,11 +808,13 @@ class ApplicationPreflightQualityReview:
                 raise ValueError("accepted preflight fails minimum targeting or natural-voice score")
             if any(issue.release_blocking for issue in self.issues):
                 raise ValueError("accepted preflight cannot contain a release-blocking issue")
+            if not self.ats_answer_authority_verified:
+                raise ValueError("accepted preflight requires exact ATS answer authority")
         _require_text(self.summary, "preflight quality summary", maximum=16384)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "jaa.application-preflight-quality-review.v1",
+            "schema_version": "jaa.application-preflight-quality-review.v2",
             "reviewed_at": self.reviewed_at,
             "vacancy_sha256": self.vacancy_sha256,
             "candidate_authority_sha256": self.candidate_authority_sha256,
@@ -809,6 +835,11 @@ class ApplicationPreflightQualityReview:
                 "evidence_capture": self.evidence_capture_score,
                 "technical_execution": self.technical_execution_score,
             },
+            "cover_letter_shingle_sha256s": list(
+                self.cover_letter_shingle_sha256s
+            ),
+            "maximum_prior_similarity_bp": self.maximum_prior_similarity_bp,
+            "ats_answer_authority_verified": self.ats_answer_authority_verified,
             "issues": [issue.to_dict() for issue in self.issues],
             "summary": self.summary,
         }
@@ -1541,15 +1572,16 @@ class BrowserWorkflowStore:
     def record_application_preflight_quality_review(
         self,
         run_id: str,
-        review: ApplicationPreflightQualityReview,
+        quality_input: object,
     ) -> bool:
-        """Append a package review; only the latest accepted review may release."""
-        if not isinstance(review, ApplicationPreflightQualityReview):
-            raise TypeError("review must be ApplicationPreflightQualityReview")
-        document_json = _canonical_json(review.to_dict())
-        review_sha256 = review.content_sha256
-        if review_sha256 != _sha256(document_json):
-            raise WorkflowError("preflight quality review identity is inconsistent")
+        """Recompute and append a package review from exact application evidence."""
+        from .application_quality import (
+            ApplicationQualityInput,
+            build_deterministic_preflight_quality_review,
+        )
+
+        if not isinstance(quality_input, ApplicationQualityInput):
+            raise TypeError("quality input must be ApplicationQualityInput")
         with self.transaction() as conn:
             canary = conn.execute(
                 """SELECT c.*,r.release_gate_hash
@@ -1564,8 +1596,42 @@ class BrowserWorkflowStore:
                 raise WorkflowError("preflight quality review requires an active canary")
             if canary["release_gate_hash"] is not None:
                 raise WorkflowError("preflight quality review cannot change after release authorization")
-            if str(canary["vacancy_sha256"]) != review.vacancy_sha256:
+            if str(canary["vacancy_sha256"]) != quality_input.source.vacancy_sha256:
                 raise WorkflowError("preflight quality review differs from canary vacancy")
+            if str(canary["job_key"]) != quality_input.source.job_key:
+                raise WorkflowError("preflight quality review differs from canary job")
+            prior_shingles: list[tuple[str, ...]] = []
+            for row in conn.execute(
+                """SELECT q.document_json
+                   FROM browser_application_preflight_quality_reviews q
+                   WHERE q.run_id<>? ORDER BY q.rowid""",
+                (run_id,),
+            ).fetchall():
+                try:
+                    prior_document = json.loads(str(row["document_json"]))
+                    if (
+                        prior_document.get("schema_version")
+                        != "jaa.application-preflight-quality-review.v2"
+                    ):
+                        continue
+                    values = prior_document["cover_letter_shingle_sha256s"]
+                    if not isinstance(values, list) or any(
+                        not isinstance(value, str) or _SHA256.fullmatch(value) is None
+                        for value in values
+                    ):
+                        raise ValueError
+                    prior_shingles.append(tuple(values))
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise WorkflowError("prior preflight quality evidence is invalid") from exc
+            review = build_deterministic_preflight_quality_review(
+                quality_input,
+                prior_cover_letter_shingles=prior_shingles,
+                ats_answer_authority_verified=False,
+            )
+            document_json = _canonical_json(review.to_dict())
+            review_sha256 = review.content_sha256
+            if review_sha256 != _sha256(document_json):
+                raise WorkflowError("preflight quality review identity is inconsistent")
             existing = conn.execute(
                 """SELECT run_id,document_json
                    FROM browser_application_preflight_quality_reviews
@@ -1600,7 +1666,7 @@ class BrowserWorkflowStore:
                         issue.release_blocking for issue in review.issues
                     ),
                 },
-                actor_kind="reviewer",
+                actor_kind="deterministic",
             )
             return True
 
@@ -1730,6 +1796,8 @@ class BrowserWorkflowStore:
                 "SELECT * FROM browser_canary_runs WHERE run_id=?", (run_id,)
             ).fetchone()
             if canary is not None:
+                from .application_quality import QUALITY_POLICY_SHA256
+
                 if str(canary["state"]) != "active":
                     raise ReleaseGateError("only an active canary may receive release authority")
                 preflight = conn.execute(
@@ -1749,14 +1817,36 @@ class BrowserWorkflowStore:
                         bool(issue["release_blocking"])
                         for issue in preflight_document["issues"]
                     )
+                    scores = preflight_document["scores"]
                 except (KeyError, TypeError, json.JSONDecodeError) as exc:
                     raise ReleaseGateError("preflight quality review is invalid") from exc
                 if (
                     str(preflight["review_sha256"]) != expected_preflight_sha256
+                    or preflight_document.get("schema_version")
+                    != "jaa.application-preflight-quality-review.v2"
                     or preflight_document.get("vacancy_sha256")
                     != str(canary["vacancy_sha256"])
+                    or preflight_document.get("quality_policy_sha256")
+                    != QUALITY_POLICY_SHA256
+                    or preflight_document.get("ats_answer_authority_verified")
+                    is not True
                     or preflight_document.get("disposition")
                     != QualityReviewDisposition.ACCEPTED.value
+                    or not isinstance(scores, dict)
+                    or tuple(
+                        scores.get(value)
+                        for value in (
+                            "factual_accuracy",
+                            "cross_application_consistency",
+                            "evidence_capture",
+                            "technical_execution",
+                        )
+                    )
+                    != (10, 10, 10, 10)
+                    or not isinstance(scores.get("role_targeting"), int)
+                    or scores["role_targeting"] < 6
+                    or not isinstance(scores.get("natural_voice"), int)
+                    or scores["natural_voice"] < 6
                     or release_blocking
                 ):
                     raise ReleaseGateError("latest preflight quality review does not admit release")
