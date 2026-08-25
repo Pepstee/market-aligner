@@ -99,6 +99,37 @@ def _join_section(
     return "\n".join(values)
 
 
+def _join_letter_paragraph(
+    source: ApplicationSource,
+    sentence_ids: tuple[str, ...],
+    style_slot_ids: tuple[str, ...],
+) -> str:
+    facts = {row.sentence_id: row.text for row in source.facts}
+    slots = {row.slot_id: row.text for row in source.style_slots}
+    return " ".join(
+        (
+            *(slots[slot_id] for slot_id in style_slot_ids),
+            *(facts[sentence_id] for sentence_id in sentence_ids),
+        )
+    )
+
+
+def _letter_paragraphs(source: ApplicationSource) -> tuple[str, ...]:
+    paragraphs = tuple(
+        _join_letter_paragraph(
+            source,
+            section.sentence_ids,
+            section.style_slot_ids,
+        )
+        for section in source.letter_sections
+    )
+    if not paragraphs[0].casefold().startswith("dear "):
+        paragraphs = ("Dear Hiring Manager,", *paragraphs)
+    if not paragraphs[-1].casefold().startswith(("kind regards", "sincerely")):
+        paragraphs = (*paragraphs, f"Kind regards,\n{source.contact.full_name}")
+    return paragraphs
+
+
 def render_editable_text(source: ApplicationSource) -> EditableArtifacts:
     """Render plain, single-column editable sources with stable ordering."""
     verify_application_source(source)
@@ -133,15 +164,7 @@ def render_editable_text(source: ApplicationSource) -> EditableArtifacts:
     letter = "\n\n".join(
         (
             letter_header,
-            *(
-                _join_section(
-                    source,
-                    section.heading,
-                    section.sentence_ids,
-                    section.style_slot_ids,
-                )
-                for section in source.letter_sections
-            ),
+            *_letter_paragraphs(source),
         )
     ) + "\n"
     facts = {row.sentence_id: row.text for row in source.facts}
@@ -360,15 +383,9 @@ def render_pdf_artifacts(source: ApplicationSource) -> ApplicationArtifacts:
             section_values(tuple(range(split, len(source.cv_sections))))
         ),
     )
-    letter_values: list[str] = [
-        *contact_values,
-        source.role_title,
-        source.company_name,
-    ]
-    for section in source.letter_sections:
-        letter_values.append(section.heading)
-        letter_values.extend(slots[value] for value in section.style_slot_ids)
-        letter_values.extend(facts[value] for value in section.sentence_ids)
+    letter_values: list[str] = [*contact_values, source.role_title, source.company_name]
+    for paragraph in _letter_paragraphs(source):
+        letter_values.extend(paragraph.splitlines())
     letter_pages = (_wrapped_lines(letter_values),)
     cv_pdf = _artifact("cv", cv_pages)
     letter_pdf = _artifact("cover_letter", letter_pages)
