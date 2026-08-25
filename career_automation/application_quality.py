@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 from .application_artifacts import (
     PublishedArtifactReceipt,
@@ -31,6 +31,7 @@ from .rendering import (
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _WORD = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
 _INTERNAL_HEADINGS = frozenset({"Opening", "Evidence Match", "Company Fit", "Close"})
 _GENERIC_OR_AI_PATTERNS = (
@@ -77,9 +78,21 @@ _SENSITIVE_QUESTION_MARKERS = (
 )
 _MAX_CAPTURE_BYTES = 4_194_304
 _SIMILARITY_BLOCK_BP = 4_500
+_EDITORIAL_SKILL_POLICIES = (
+    (
+        "resume-cover-letter",
+        "content-addressed",
+        "adaa35a36ae0bfa6b1ce14104aebcbfe8a51c65434087056facf4f8f45217b96",
+    ),
+    (
+        "humanizer",
+        "2.8.2",
+        "243aecdafecb5e11c2d45e2e088b7876e3f6eee34aa50c53f624d8468039afa8",
+    ),
+)
 
 QUALITY_POLICY = {
-    "schema_version": "jaa.deterministic-application-quality-policy.v1",
+    "schema_version": "jaa.deterministic-application-quality-policy.v2",
     "cover_letter": {
         "substantive_paragraphs": [3, 4],
         "maximum_words": 500,
@@ -105,6 +118,14 @@ QUALITY_POLICY = {
     },
     "sensitive_answers": "approved factual sentences only; no style slots",
     "ats_authority": "required before acceptance",
+    "editorial_skill_reviews": [
+        {
+            "skill_name": name,
+            "skill_version": version,
+            "skill_sha256": skill_sha256,
+        }
+        for name, version, skill_sha256 in _EDITORIAL_SKILL_POLICIES
+    ],
     "generic_or_ai_patterns": list(_GENERIC_OR_AI_PATTERNS),
     "stale_education_patterns": list(_STALE_EDUCATION_PATTERNS),
 }
@@ -151,6 +172,162 @@ def _similarity_bp(first: Iterable[str], second: Iterable[str]) -> int:
     return len(left & right) * 10_000 // len(left | right)
 
 
+def _editorial_review_input_body(
+    *,
+    candidate_authority_sha256: str,
+    source: ApplicationSource,
+    artifacts: ApplicationArtifacts,
+    publication_receipt: PublishedArtifactReceipt,
+    field_answers_bytes: bytes,
+    form_inventory_bytes: bytes,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "jaa.editorial-skill-review-input.v1",
+        "candidate_authority_sha256": candidate_authority_sha256,
+        "application_source_sha256": source.source_id,
+        "vacancy_sha256": source.vacancy_sha256,
+        "artifact_set_sha256": artifacts.artifact_set_sha256,
+        "artifact_receipt_sha256": publication_receipt.receipt_sha256,
+        "cv_editable_sha256": artifacts.editable.cv_sha256,
+        "cover_letter_editable_sha256": artifacts.editable.cover_letter_sha256,
+        "answers_editable_sha256": artifacts.editable.answers_sha256,
+        "cv_pdf_sha256": artifacts.cv_pdf.pdf_sha256,
+        "cover_letter_pdf_sha256": artifacts.cover_letter_pdf.pdf_sha256,
+        "field_answers_sha256": _sha256_bytes(field_answers_bytes),
+        "form_inventory_sha256": _sha256_bytes(form_inventory_bytes),
+    }
+
+
+def editorial_review_input_sha256(
+    quality_input: ApplicationQualityInput,
+) -> str:
+    """Bind both skill reviews to the exact final application pack."""
+    if not isinstance(quality_input, ApplicationQualityInput):
+        raise TypeError("quality input must be ApplicationQualityInput")
+    body = _editorial_review_input_body(
+        candidate_authority_sha256=quality_input.candidate_authority_sha256,
+        source=quality_input.source,
+        artifacts=quality_input.artifacts,
+        publication_receipt=quality_input.publication_receipt,
+        field_answers_bytes=quality_input.field_answers_bytes,
+        form_inventory_bytes=quality_input.form_inventory_bytes,
+    )
+    return hashlib.sha256(canonical_json(body).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class EditorialSkillReviewReceipt:
+    """Operator-recorded proof that one pinned editorial skill reviewed an exact pack."""
+
+    reviewed_at: str
+    skill_name: str
+    skill_version: str
+    skill_sha256: str
+    provider: str
+    model: str
+    input_sha256: str
+    decision: str
+    findings: tuple[ApplicationQualityIssue, ...]
+    receipt_sha256: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "findings", tuple(self.findings))
+        if not isinstance(self.reviewed_at, str) or not _RFC3339_UTC.fullmatch(
+            self.reviewed_at
+        ):
+            raise ValueError("editorial review time must be second-precision RFC3339 UTC")
+        policy = next(
+            (row for row in _EDITORIAL_SKILL_POLICIES if row[0] == self.skill_name),
+            None,
+        )
+        if policy is None or (self.skill_version, self.skill_sha256) != policy[1:]:
+            raise ValueError("editorial review skill identity differs from pinned policy")
+        for value, label in (
+            (self.skill_sha256, "editorial skill hash"),
+            (self.input_sha256, "editorial review input hash"),
+            (self.receipt_sha256, "editorial review receipt hash"),
+        ):
+            _require_digest(value, label)
+        for value, label in ((self.provider, "provider"), (self.model, "model")):
+            if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                raise ValueError(f"editorial review {label} must be bounded text")
+        if self.decision not in {"pass", "block"}:
+            raise ValueError("editorial review decision is unsupported")
+        if not all(type(row) is ApplicationQualityIssue for row in self.findings):
+            raise TypeError("editorial review findings must use the exact issue type")
+        if self.decision == "pass" and self.findings:
+            raise ValueError("passing editorial review cannot contain findings")
+        if self.decision == "block" and not self.findings:
+            raise ValueError("blocking editorial review requires detailed findings")
+        if any(not row.release_blocking for row in self.findings):
+            raise ValueError("editorial review findings must block release")
+        if self.receipt_sha256 != self.content_sha256:
+            raise ValueError("editorial review receipt identity is inconsistent")
+
+    def to_dict(self, *, include_receipt_sha256: bool = True) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "schema_version": "jaa.editorial-skill-review-receipt.v1",
+            "reviewed_at": self.reviewed_at,
+            "skill_name": self.skill_name,
+            "skill_version": self.skill_version,
+            "skill_sha256": self.skill_sha256,
+            "provider": self.provider,
+            "model": self.model,
+            "input_sha256": self.input_sha256,
+            "decision": self.decision,
+            "findings": [row.to_dict() for row in self.findings],
+        }
+        if include_receipt_sha256:
+            body["receipt_sha256"] = self.receipt_sha256
+        return body
+
+    @property
+    def content_sha256(self) -> str:
+        return hashlib.sha256(
+            canonical_json(self.to_dict(include_receipt_sha256=False)).encode()
+        ).hexdigest()
+
+
+def build_editorial_skill_review_receipt(
+    quality_input: ApplicationQualityInput,
+    *,
+    skill_name: str,
+    provider: str,
+    model: str,
+    decision: str = "pass",
+    findings: Iterable[ApplicationQualityIssue] = (),
+) -> EditorialSkillReviewReceipt:
+    """Create a content-addressed receipt after the named skill has actually run."""
+    policy = next((row for row in _EDITORIAL_SKILL_POLICIES if row[0] == skill_name), None)
+    if policy is None:
+        raise ValueError("editorial skill is not admitted by policy")
+    exact_findings = tuple(findings)
+    body = {
+        "schema_version": "jaa.editorial-skill-review-receipt.v1",
+        "reviewed_at": quality_input.reviewed_at,
+        "skill_name": skill_name,
+        "skill_version": policy[1],
+        "skill_sha256": policy[2],
+        "provider": provider,
+        "model": model,
+        "input_sha256": editorial_review_input_sha256(quality_input),
+        "decision": decision,
+        "findings": [row.to_dict() for row in exact_findings],
+    }
+    return EditorialSkillReviewReceipt(
+        reviewed_at=body["reviewed_at"],
+        skill_name=skill_name,
+        skill_version=policy[1],
+        skill_sha256=policy[2],
+        provider=provider,
+        model=model,
+        input_sha256=body["input_sha256"],
+        decision=decision,
+        findings=exact_findings,
+        receipt_sha256=hashlib.sha256(canonical_json(body).encode()).hexdigest(),
+    )
+
+
 @dataclass(frozen=True)
 class ApplicationQualityInput:
     """Exact application objects assessed by the workflow store, not caller scores."""
@@ -163,6 +340,7 @@ class ApplicationQualityInput:
     field_answers_bytes: bytes
     form_inventory_bytes: bytes
     ats_application_authority: AtsApplicationAuthority | None = None
+    editorial_skill_reviews: tuple[EditorialSkillReviewReceipt, ...] = ()
 
     def __post_init__(self) -> None:
         _require_digest(self.candidate_authority_sha256, "candidate authority hash")
@@ -176,6 +354,12 @@ class ApplicationQualityInput:
             self.ats_application_authority
         ) is not AtsApplicationAuthority:
             raise TypeError("quality input ATS authority must use the exact type")
+        object.__setattr__(self, "editorial_skill_reviews", tuple(self.editorial_skill_reviews))
+        if not all(
+            type(row) is EditorialSkillReviewReceipt
+            for row in self.editorial_skill_reviews
+        ):
+            raise TypeError("quality input editorial reviews must use the exact receipt type")
         _captured_bytes(self.field_answers_bytes, "field answers", allow_empty=True)
         _captured_bytes(self.form_inventory_bytes, "form inventory", allow_empty=False)
 
@@ -265,6 +449,30 @@ def build_deterministic_preflight_quality_review(
         ats_answer_authority_verified = True
 
     issues: list[ApplicationQualityIssue] = []
+    review_input_sha256 = editorial_review_input_sha256(quality_input)
+    editorial_reviews = quality_input.editorial_skill_reviews
+    expected_names = tuple(row[0] for row in _EDITORIAL_SKILL_POLICIES)
+    observed_names = tuple(row.skill_name for row in editorial_reviews)
+    if len(observed_names) != len(set(observed_names)):
+        raise ValueError("editorial skill review names must be unique")
+    if observed_names != tuple(name for name in expected_names if name in observed_names):
+        raise ValueError("editorial skill reviews differ from the required order")
+    if any(row.input_sha256 != review_input_sha256 for row in editorial_reviews):
+        raise ValueError("editorial skill review differs from the exact application pack")
+    for name in expected_names:
+        if name not in observed_names:
+            issues.append(
+                _issue(
+                    f"{name.replace('-', '_')}_review_missing",
+                    summary=f"The exact application pack lacks a {name} skill review.",
+                    evidence="No content-addressed review receipt is bound to the final pack.",
+                    remediation=f"Run the pinned {name} skill and attach its exact review receipt.",
+                    category="editorial_skill",
+                )
+            )
+    for receipt in editorial_reviews:
+        if receipt.decision == "block":
+            issues.extend(receipt.findings)
     letter_text = artifacts.editable.cover_letter_text
     letter_body, body_blocks, substantive = _letter_blocks(letter_text)
     body_folded = letter_body.casefold()
@@ -471,7 +679,7 @@ def build_deterministic_preflight_quality_review(
     )
     issue_rows = tuple(sorted(issues, key=lambda row: row.code))
     assessment_body = {
-        "schema_version": "jaa.deterministic-application-quality-assessment.v1",
+        "schema_version": "jaa.deterministic-application-quality-assessment.v2",
         "reviewed_at": quality_input.reviewed_at,
         "vacancy_sha256": source.vacancy_sha256,
         "candidate_authority_sha256": quality_input.candidate_authority_sha256,
@@ -485,6 +693,11 @@ def build_deterministic_preflight_quality_review(
         "cover_letter_shingle_sha256s": list(shingles),
         "maximum_prior_similarity_bp": maximum_similarity_bp,
         "ats_answer_authority_verified": ats_answer_authority_verified,
+        "editorial_skill_review_sha256s": [
+            row.receipt_sha256 for row in editorial_reviews
+        ],
+        "editorial_skill_reviews_verified": observed_names == expected_names
+        and all(row.decision == "pass" for row in editorial_reviews),
         "scores": {
             "factual_accuracy": 10,
             "role_targeting": targeting,
@@ -521,6 +734,11 @@ def build_deterministic_preflight_quality_review(
         cover_letter_shingle_sha256s=shingles,
         maximum_prior_similarity_bp=maximum_similarity_bp,
         ats_answer_authority_verified=ats_answer_authority_verified,
+        editorial_skill_review_sha256s=tuple(
+            row.receipt_sha256 for row in editorial_reviews
+        ),
+        editorial_skill_reviews_verified=observed_names == expected_names
+        and all(row.decision == "pass" for row in editorial_reviews),
         issues=issue_rows,
         summary=(
             "The exact application pack passed every deterministic quality gate."

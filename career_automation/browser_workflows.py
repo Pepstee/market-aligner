@@ -729,6 +729,8 @@ class ApplicationPreflightQualityReview:
     cover_letter_shingle_sha256s: tuple[str, ...]
     maximum_prior_similarity_bp: int
     ats_answer_authority_verified: bool
+    editorial_skill_review_sha256s: tuple[str, ...]
+    editorial_skill_reviews_verified: bool
     issues: tuple[ApplicationQualityIssue, ...]
     summary: str
 
@@ -738,6 +740,11 @@ class ApplicationPreflightQualityReview:
             self,
             "cover_letter_shingle_sha256s",
             tuple(self.cover_letter_shingle_sha256s),
+        )
+        object.__setattr__(
+            self,
+            "editorial_skill_review_sha256s",
+            tuple(self.editorial_skill_review_sha256s),
         )
         if not isinstance(self.reviewed_at, str) or not _RFC3339_UTC.fullmatch(self.reviewed_at):
             raise ValueError("reviewed_at must be second-precision RFC3339 UTC")
@@ -792,6 +799,16 @@ class ApplicationPreflightQualityReview:
             raise ValueError("maximum prior similarity must be basis points")
         if not isinstance(self.ats_answer_authority_verified, bool):
             raise TypeError("ATS answer-authority verification must be bool")
+        if not isinstance(self.editorial_skill_reviews_verified, bool):
+            raise TypeError("editorial skill review verification must be bool")
+        if len(self.editorial_skill_review_sha256s) not in {0, 2}:
+            raise ValueError("editorial skill review identities must be empty or complete")
+        for value in self.editorial_skill_review_sha256s:
+            _require_sha256(value, "editorial skill review hash")
+        if len(set(self.editorial_skill_review_sha256s)) != len(
+            self.editorial_skill_review_sha256s
+        ):
+            raise ValueError("editorial skill review identities must be unique")
         issue_codes = [issue.code for issue in self.issues]
         if len(issue_codes) != len(set(issue_codes)):
             raise ValueError("preflight issue codes must be unique")
@@ -810,11 +827,16 @@ class ApplicationPreflightQualityReview:
                 raise ValueError("accepted preflight cannot contain a release-blocking issue")
             if not self.ats_answer_authority_verified:
                 raise ValueError("accepted preflight requires exact ATS answer authority")
+            if (
+                not self.editorial_skill_reviews_verified
+                or len(self.editorial_skill_review_sha256s) != 2
+            ):
+                raise ValueError("accepted preflight requires exact editorial skill reviews")
         _require_text(self.summary, "preflight quality summary", maximum=16384)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "jaa.application-preflight-quality-review.v2",
+            "schema_version": "jaa.application-preflight-quality-review.v3",
             "reviewed_at": self.reviewed_at,
             "vacancy_sha256": self.vacancy_sha256,
             "candidate_authority_sha256": self.candidate_authority_sha256,
@@ -840,6 +862,10 @@ class ApplicationPreflightQualityReview:
             ),
             "maximum_prior_similarity_bp": self.maximum_prior_similarity_bp,
             "ats_answer_authority_verified": self.ats_answer_authority_verified,
+            "editorial_skill_review_sha256s": list(
+                self.editorial_skill_review_sha256s
+            ),
+            "editorial_skill_reviews_verified": self.editorial_skill_reviews_verified,
             "issues": [issue.to_dict() for issue in self.issues],
             "summary": self.summary,
         }
@@ -1611,7 +1637,10 @@ class BrowserWorkflowStore:
                     prior_document = json.loads(str(row["document_json"]))
                     if (
                         prior_document.get("schema_version")
-                        != "jaa.application-preflight-quality-review.v2"
+                        not in {
+                            "jaa.application-preflight-quality-review.v2",
+                            "jaa.application-preflight-quality-review.v3",
+                        }
                     ):
                         continue
                     values = prior_document["cover_letter_shingle_sha256s"]
@@ -1822,13 +1851,24 @@ class BrowserWorkflowStore:
                 if (
                     str(preflight["review_sha256"]) != expected_preflight_sha256
                     or preflight_document.get("schema_version")
-                    != "jaa.application-preflight-quality-review.v2"
+                    != "jaa.application-preflight-quality-review.v3"
                     or preflight_document.get("vacancy_sha256")
                     != str(canary["vacancy_sha256"])
                     or preflight_document.get("quality_policy_sha256")
                     != QUALITY_POLICY_SHA256
                     or preflight_document.get("ats_answer_authority_verified")
                     is not True
+                    or preflight_document.get("editorial_skill_reviews_verified")
+                    is not True
+                    or not isinstance(
+                        preflight_document.get("editorial_skill_review_sha256s"), list
+                    )
+                    or len(preflight_document["editorial_skill_review_sha256s"]) != 2
+                    or any(
+                        not isinstance(value, str)
+                        or _SHA256.fullmatch(value) is None
+                        for value in preflight_document["editorial_skill_review_sha256s"]
+                    )
                     or preflight_document.get("disposition")
                     != QualityReviewDisposition.ACCEPTED.value
                     or not isinstance(scores, dict)

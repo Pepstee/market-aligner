@@ -16,6 +16,7 @@ from career_automation.application_compiler import (
 from career_automation.application_quality import (
     ApplicationQualityInput,
     QUALITY_POLICY_SHA256,
+    build_editorial_skill_review_receipt,
     build_deterministic_preflight_quality_review,
 )
 from career_automation.ats_application_authority import (
@@ -24,7 +25,11 @@ from career_automation.ats_application_authority import (
     AtsObservedField,
     build_ats_application_authority,
 )
-from career_automation.browser_workflows import QualityReviewDisposition
+from career_automation.browser_workflows import (
+    ApplicationQualityIssue,
+    QualityIssueSeverity,
+    QualityReviewDisposition,
+)
 from career_automation.rendering import render_pdf_artifacts
 from test_jaa07_independent_acceptance import _sentence, _slot, _source
 
@@ -217,12 +222,30 @@ def _quality_input_with_ats(
             AtsFieldPlan("robot_check", "omit", "none"),
         ),
     )
-    return replace(
+    return _with_editorial_reviews(replace(
         quality_input,
         field_answers_bytes=authority.answer_bytes,
         form_inventory_bytes=authority.inventory_bytes,
         ats_application_authority=authority,
+    ))
+
+
+def _with_editorial_reviews(
+    quality_input: ApplicationQualityInput,
+) -> ApplicationQualityInput:
+    first = build_editorial_skill_review_receipt(
+        quality_input,
+        skill_name="resume-cover-letter",
+        provider="codex",
+        model="gpt-5",
     )
+    second = build_editorial_skill_review_receipt(
+        quality_input,
+        skill_name="humanizer",
+        provider="codex",
+        model="gpt-5",
+    )
+    return replace(quality_input, editorial_skill_reviews=(first, second))
 
 
 def _codes(review) -> set[str]:
@@ -242,16 +265,96 @@ def test_natural_exact_pack_passes_document_policy_with_typed_ats_authority(
     assert review.cross_application_consistency_score == 10
     assert review.evidence_capture_score == 10
     assert review.ats_answer_authority_verified is True
+    assert review.editorial_skill_reviews_verified is True
+    assert len(review.editorial_skill_review_sha256s) == 2
     assert review.issues == ()
 
 
 def test_missing_ats_mapping_is_retained_as_a_release_blocker(tmp_path: Path) -> None:
     review = build_deterministic_preflight_quality_review(
-        _quality_input(tmp_path, _quality_source())
+        _with_editorial_reviews(_quality_input(tmp_path, _quality_source()))
     )
     assert review.disposition is QualityReviewDisposition.NEEDS_REMEDIATION
     assert _codes(review) == {"ats_answer_authority_missing"}
     assert review.evidence_capture_score == 8
+
+
+def test_missing_editorial_skill_reviews_are_detailed_release_blockers(
+    tmp_path: Path,
+) -> None:
+    quality_input = _quality_input_with_ats(tmp_path, _quality_source())
+    review = build_deterministic_preflight_quality_review(
+        replace(quality_input, editorial_skill_reviews=())
+    )
+    assert review.disposition is QualityReviewDisposition.NEEDS_REMEDIATION
+    assert _codes(review) == {
+        "resume_cover_letter_review_missing",
+        "humanizer_review_missing",
+    }
+    assert review.editorial_skill_reviews_verified is False
+
+
+def test_editorial_skill_review_order_input_and_identity_are_fail_closed(
+    tmp_path: Path,
+) -> None:
+    quality_input = _quality_input_with_ats(tmp_path, _quality_source())
+    first, second = quality_input.editorial_skill_reviews
+    with pytest.raises(ValueError, match="required order"):
+        build_deterministic_preflight_quality_review(
+            replace(quality_input, editorial_skill_reviews=(second, first))
+        )
+    foreign_first = build_editorial_skill_review_receipt(
+        replace(quality_input, candidate_authority_sha256="e" * 64),
+        skill_name="resume-cover-letter",
+        provider="codex",
+        model="gpt-5",
+    )
+    with pytest.raises(ValueError, match="exact application pack"):
+        build_deterministic_preflight_quality_review(
+            replace(
+                quality_input,
+                editorial_skill_reviews=(foreign_first, second),
+            )
+        )
+    with pytest.raises(ValueError, match="skill identity"):
+        replace(first, skill_version="substituted")
+    with pytest.raises(ValueError, match="receipt identity"):
+        replace(first, receipt_sha256="f" * 64)
+
+
+def test_blocking_skill_findings_remain_detailed_in_the_preflight_review(
+    tmp_path: Path,
+) -> None:
+    quality_input = _quality_input_with_ats(tmp_path, _quality_source())
+    _, humanizer = quality_input.editorial_skill_reviews
+    finding = ApplicationQualityIssue(
+        code="resume_role_evidence_is_weak",
+        severity=QualityIssueSeverity.ERROR,
+        category="editorial_skill",
+        release_blocking=True,
+        enforceable_by_code=True,
+        summary="The CV does not foreground the strongest exact role evidence.",
+        evidence="The pinned resume review found the approved evidence too deeply nested.",
+        remediation="Reorder the approved evidence and obtain both fresh skill receipts.",
+    )
+    resume_review = build_editorial_skill_review_receipt(
+        quality_input,
+        skill_name="resume-cover-letter",
+        provider="codex",
+        model="gpt-5",
+        decision="block",
+        findings=(finding,),
+    )
+    review = build_deterministic_preflight_quality_review(
+        replace(
+            quality_input,
+            editorial_skill_reviews=(resume_review, humanizer),
+        )
+    )
+    assert review.disposition is QualityReviewDisposition.NEEDS_REMEDIATION
+    assert _codes(review) == {finding.code}
+    assert review.issues[0].evidence == finding.evidence
+    assert review.editorial_skill_reviews_verified is False
 
 
 @pytest.mark.parametrize(

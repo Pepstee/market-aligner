@@ -208,6 +208,8 @@ def _preflight_review(
         cover_letter_shingle_sha256s=("a" * 64,),
         maximum_prior_similarity_bp=0,
         ats_answer_authority_verified=accepted,
+        editorial_skill_review_sha256s=(("b" * 64, "c" * 64) if accepted else ()),
+        editorial_skill_reviews_verified=accepted,
         issues=()
         if accepted
         else (
@@ -805,6 +807,14 @@ class BrowserWorkflowStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "minimum targeting"):
             ApplicationPreflightQualityReview(
                 **{**accepted.__dict__, "role_targeting_score": 5}
+            )
+        with self.assertRaisesRegex(ValueError, "editorial skill reviews"):
+            ApplicationPreflightQualityReview(
+                **{
+                    **accepted.__dict__,
+                    "editorial_skill_review_sha256s": (),
+                    "editorial_skill_reviews_verified": False,
+                }
             )
 
     def test_store_includes_every_prior_letter_in_similarity_review(self) -> None:
