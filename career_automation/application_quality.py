@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
+from pathlib import Path
 from typing import Any, Iterable
+
+from llm.client import LLMClient
 
 from .application_artifacts import (
     PublishedArtifactReceipt,
@@ -78,6 +84,11 @@ _SENSITIVE_QUESTION_MARKERS = (
 )
 _MAX_CAPTURE_BYTES = 4_194_304
 _SIMILARITY_BLOCK_BP = 4_500
+_MAX_SKILL_BYTES = 131_072
+_EDITORIAL_FINDING_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_EDITORIAL_RUNTIME_PROVIDER = "codex_cli"
+_EDITORIAL_RUNTIME_CONFIGURED_MODEL = "codex-cli-default"
+_EDITORIAL_RUNTIME_MODEL = "codex-default"
 _EDITORIAL_SKILL_POLICIES = (
     (
         "resume-cover-letter",
@@ -90,6 +101,32 @@ _EDITORIAL_SKILL_POLICIES = (
         "243aecdafecb5e11c2d45e2e088b7876e3f6eee34aa50c53f624d8468039afa8",
     ),
 )
+_EDITORIAL_REVIEW_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "findings"],
+    "properties": {
+        "decision": {"type": "string", "enum": ["pass", "block"]},
+        "findings": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["code", "summary", "evidence", "remediation"],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    },
+                    "summary": {"type": "string", "maxLength": 4096},
+                    "evidence": {"type": "string", "maxLength": 16384},
+                    "remediation": {"type": "string", "maxLength": 8192},
+                },
+            },
+        },
+    },
+}
 
 QUALITY_POLICY = {
     "schema_version": "jaa.deterministic-application-quality-policy.v2",
@@ -126,6 +163,11 @@ QUALITY_POLICY = {
         }
         for name, version, skill_sha256 in _EDITORIAL_SKILL_POLICIES
     ],
+    "editorial_skill_runtime": {
+        "provider": _EDITORIAL_RUNTIME_PROVIDER,
+        "configured_model": _EDITORIAL_RUNTIME_CONFIGURED_MODEL,
+        "model": _EDITORIAL_RUNTIME_MODEL,
+    },
     "generic_or_ai_patterns": list(_GENERIC_OR_AI_PATTERNS),
     "stale_education_patterns": list(_STALE_EDUCATION_PATTERNS),
 }
@@ -198,6 +240,221 @@ def _editorial_review_input_body(
     }
 
 
+def _open_directory_component(parent_fd: int, name: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISDIR(status.st_mode):
+            raise ValueError("editorial skill ancestry is not a directory")
+        if status.st_uid not in {0, os.getuid()} or status.st_mode & 0o022:
+            raise ValueError("editorial skill ancestry is not trusted")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _stable_stat_identity(status: os.stat_result) -> tuple[int, ...]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_uid,
+        status.st_gid,
+        status.st_nlink,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
+def _load_pinned_skill_document(skill_name: str, skill_sha256: str) -> bytes:
+    """Read one installed skill through a no-follow descriptor chain."""
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    path = codex_home / "skills" / skill_name / "SKILL.md"
+    absolute = path.absolute()
+    descriptors: list[int] = []
+    current = os.open("/", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    descriptors.append(current)
+    try:
+        for component in absolute.parts[1:-1]:
+            current = _open_directory_component(current, component)
+            descriptors.append(current)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        file_descriptor = os.open(absolute.name, flags, dir_fd=current)
+        descriptors.append(file_descriptor)
+        status = os.fstat(file_descriptor)
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or status.st_uid != os.getuid()
+            or status.st_nlink != 1
+            or status.st_mode & 0o022
+            or status.st_size < 1
+            or status.st_size > _MAX_SKILL_BYTES
+        ):
+            raise ValueError("editorial skill file is not an exact trusted authority")
+        chunks: list[bytes] = []
+        remaining = status.st_size
+        offset = 0
+        while remaining:
+            chunk = os.pread(file_descriptor, min(65_536, remaining), offset)
+            if not chunk:
+                raise ValueError("editorial skill file changed during bounded read")
+            chunks.append(chunk)
+            offset += len(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if _stable_stat_identity(os.fstat(file_descriptor)) != _stable_stat_identity(
+            status
+        ):
+            raise ValueError("editorial skill file changed during bounded read")
+        if hashlib.sha256(payload).hexdigest() != skill_sha256:
+            raise ValueError("editorial skill bytes differ from pinned policy")
+        payload.decode("utf-8", errors="strict")
+        return payload
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _editorial_skill_system_prompt(skill_name: str, skill_document: bytes) -> str:
+    return (
+        f"[[task:editorial_skill_{skill_name.replace('-', '_')}_review]]\n"
+        "Execute the exact pinned skill document below as a review of the supplied "
+        "final application pack. Do not edit files, browse, add facts, infer missing "
+        "qualifications, or rewrite the application. Return pass only when no concrete "
+        "skill-defined issue remains. Otherwise return detailed findings whose evidence "
+        "identifies the exact text problem without adding new candidate claims.\n\n"
+        "PINNED SKILL DOCUMENT:\n"
+        + skill_document.decode("utf-8", errors="strict")
+    )
+
+
+def _editorial_skill_user_payload(
+    quality_input: ApplicationQualityInput,
+    *,
+    skill_name: str,
+) -> str:
+    source = quality_input.source
+    artifacts = quality_input.artifacts
+    return canonical_json(
+        {
+            "schema_version": "jaa.editorial-skill-runtime-request.v1",
+            "skill_name": skill_name,
+            "review_input_sha256": editorial_review_input_sha256(quality_input),
+            "role_title": source.role_title,
+            "company_name": source.company_name,
+            "approved_facts": [
+                {
+                    "document_kind": row.document_kind,
+                    "fact_kind": row.fact_kind,
+                    "text": row.text,
+                }
+                for row in source.facts
+            ],
+            "final_application": {
+                "cv": artifacts.editable.cv_text,
+                "cover_letter": artifacts.editable.cover_letter_text,
+                "field_answers": quality_input.field_answers_bytes.decode(
+                    "utf-8", errors="strict"
+                ),
+            },
+        }
+    )
+
+
+def _issues_from_skill_result(
+    *,
+    skill_name: str,
+    result: dict[str, Any],
+) -> tuple[str, tuple[ApplicationQualityIssue, ...]]:
+    if set(result) != {"decision", "findings"}:
+        raise ValueError("editorial skill response has unknown or missing fields")
+    decision = result["decision"]
+    rows = result["findings"]
+    if decision not in {"pass", "block"} or not isinstance(rows, list):
+        raise ValueError("editorial skill response has invalid decision data")
+    if len(rows) > 32:
+        raise ValueError("editorial skill response contains too many findings")
+    findings: list[ApplicationQualityIssue] = []
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "code",
+            "summary",
+            "evidence",
+            "remediation",
+        }:
+            raise ValueError("editorial skill finding has unknown or missing fields")
+        code = row["code"]
+        if not isinstance(code, str) or _EDITORIAL_FINDING_CODE.fullmatch(code) is None:
+            raise ValueError("editorial skill finding code is invalid")
+        findings.append(
+            _issue(
+                f"{skill_name.replace('-', '_')}.{code}",
+                summary=row["summary"],
+                evidence=row["evidence"],
+                remediation=row["remediation"],
+                category="editorial_skill",
+            )
+        )
+    if decision == "pass" and findings:
+        raise ValueError("passing editorial skill response contains findings")
+    if decision == "block" and not findings:
+        raise ValueError("blocking editorial skill response lacks findings")
+    codes = tuple(row.code for row in findings)
+    if len(codes) != len(set(codes)):
+        raise ValueError("editorial skill response contains duplicate findings")
+    return decision, tuple(findings)
+
+
+def run_pinned_editorial_skill_reviews(
+    quality_input: ApplicationQualityInput,
+    *,
+    client: LLMClient | None = None,
+) -> ApplicationQualityInput:
+    """Actually run both installed skills and return the pack with exact receipts."""
+    if not isinstance(quality_input, ApplicationQualityInput):
+        raise TypeError("quality input must be ApplicationQualityInput")
+    if quality_input.editorial_skill_reviews:
+        raise ValueError("editorial skill runtime requires an unreviewed exact pack")
+    runtime_client = client if client is not None else LLMClient.from_config()
+    if type(runtime_client) is not LLMClient:
+        raise TypeError("editorial skill runtime requires the exact LLM client")
+    if (
+        runtime_client.backend.name != _EDITORIAL_RUNTIME_PROVIDER
+        or runtime_client.model != _EDITORIAL_RUNTIME_CONFIGURED_MODEL
+    ):
+        raise ValueError("editorial skill runtime differs from pinned policy")
+    receipts: list[EditorialSkillReviewReceipt] = []
+    for skill_name, _version, skill_sha256 in _EDITORIAL_SKILL_POLICIES:
+        skill_document = _load_pinned_skill_document(skill_name, skill_sha256)
+        result, response = runtime_client.complete_json_with_response(
+            _editorial_skill_system_prompt(skill_name, skill_document),
+            _editorial_skill_user_payload(quality_input, skill_name=skill_name),
+            schema=_EDITORIAL_REVIEW_RESPONSE_SCHEMA,
+            task=f"editorial_skill_{skill_name.replace('-', '_')}_review",
+        )
+        decision, findings = _issues_from_skill_result(
+            skill_name=skill_name,
+            result=result,
+        )
+        receipts.append(
+            build_editorial_skill_review_receipt(
+                quality_input,
+                skill_name=skill_name,
+                provider=runtime_client.backend.name,
+                model=response.model,
+                decision=decision,
+                findings=findings,
+            )
+        )
+    return dataclass_replace(
+        quality_input,
+        editorial_skill_reviews=tuple(receipts),
+    )
+
+
 def editorial_review_input_sha256(
     quality_input: ApplicationQualityInput,
 ) -> str:
@@ -251,6 +508,11 @@ class EditorialSkillReviewReceipt:
         for value, label in ((self.provider, "provider"), (self.model, "model")):
             if not isinstance(value, str) or not value.strip() or len(value) > 256:
                 raise ValueError(f"editorial review {label} must be bounded text")
+        if (
+            self.provider != _EDITORIAL_RUNTIME_PROVIDER
+            or self.model != _EDITORIAL_RUNTIME_MODEL
+        ):
+            raise ValueError("editorial review runtime differs from pinned policy")
         if self.decision not in {"pass", "block"}:
             raise ValueError("editorial review decision is unsupported")
         if not all(type(row) is ApplicationQualityIssue for row in self.findings):

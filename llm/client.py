@@ -646,6 +646,24 @@ class LLMClient:
         task: str = "generic",
         json_attempts: int = 2,
     ) -> dict[str, Any]:
+        data, _response = self.complete_json_with_response(
+            system,
+            user,
+            schema=schema,
+            task=task,
+            json_attempts=json_attempts,
+        )
+        return data
+
+    def complete_json_with_response(
+        self,
+        system: str,
+        user: str,
+        *,
+        schema: Optional[dict[str, Any]] = None,
+        task: str = "generic",
+        json_attempts: int = 2,
+    ) -> tuple[dict[str, Any], LLMResponse]:
         """Complete, parse JSON (leniently), validate against `schema`.
 
         The schema is included in the model request, not merely applied after
@@ -681,7 +699,9 @@ class LLMClient:
                 data = _coerce_json(resp.text)
                 if schema is not None:
                     validate_json(data, schema)
-                return data
+                if not isinstance(data, dict):
+                    raise LLMError("structured output root must be an object")
+                return data, resp
             except (json.JSONDecodeError, LLMError) as exc:
                 last_err = str(exc)
                 preview = repr((resp.text or "")[:200])

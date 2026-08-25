@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
+from llm.client import LLMClient, MockBackend
+
+import career_automation.application_quality as application_quality
 from career_automation.application_artifacts import publish_application_artifacts
 from career_automation.application_compiler import (
     ApplicationSource,
@@ -18,6 +22,7 @@ from career_automation.application_quality import (
     QUALITY_POLICY_SHA256,
     build_editorial_skill_review_receipt,
     build_deterministic_preflight_quality_review,
+    run_pinned_editorial_skill_reviews,
 )
 from career_automation.ats_application_authority import (
     AtsFieldPlan,
@@ -32,6 +37,15 @@ from career_automation.browser_workflows import (
 )
 from career_automation.rendering import render_pdf_artifacts
 from test_jaa07_independent_acceptance import _sentence, _slot, _source
+
+
+class _FixtureCodexBackend(MockBackend):
+    name = "codex_cli"
+
+    def complete(self, system: str, user: str, temperature: float):
+        response = super().complete(system, user, temperature)
+        response.model = "codex-default"
+        return response
 
 
 def _quality_source(
@@ -236,14 +250,14 @@ def _with_editorial_reviews(
     first = build_editorial_skill_review_receipt(
         quality_input,
         skill_name="resume-cover-letter",
-        provider="codex",
-        model="gpt-5",
+        provider="codex_cli",
+        model="codex-default",
     )
     second = build_editorial_skill_review_receipt(
         quality_input,
         skill_name="humanizer",
-        provider="codex",
-        model="gpt-5",
+        provider="codex_cli",
+        model="codex-default",
     )
     return replace(quality_input, editorial_skill_reviews=(first, second))
 
@@ -306,8 +320,8 @@ def test_editorial_skill_review_order_input_and_identity_are_fail_closed(
     foreign_first = build_editorial_skill_review_receipt(
         replace(quality_input, candidate_authority_sha256="e" * 64),
         skill_name="resume-cover-letter",
-        provider="codex",
-        model="gpt-5",
+        provider="codex_cli",
+        model="codex-default",
     )
     with pytest.raises(ValueError, match="exact application pack"):
         build_deterministic_preflight_quality_review(
@@ -340,8 +354,8 @@ def test_blocking_skill_findings_remain_detailed_in_the_preflight_review(
     resume_review = build_editorial_skill_review_receipt(
         quality_input,
         skill_name="resume-cover-letter",
-        provider="codex",
-        model="gpt-5",
+        provider="codex_cli",
+        model="codex-default",
         decision="block",
         findings=(finding,),
     )
@@ -355,6 +369,150 @@ def test_blocking_skill_findings_remain_detailed_in_the_preflight_review(
     assert _codes(review) == {finding.code}
     assert review.issues[0].evidence == finding.evidence
     assert review.editorial_skill_reviews_verified is False
+
+
+def _runtime_client(tmp_path: Path, backend: MockBackend) -> LLMClient:
+    return LLMClient(
+        backend=backend,
+        model="codex-cli-default",
+        temperature=0.0,
+        max_retries=1,
+        cache_enabled=False,
+        cache_dir=tmp_path / "cache",
+        usage_log=tmp_path / "usage.jsonl",
+    )
+
+
+def test_pinned_editorial_runtime_calls_both_skills_in_order_and_admits_pass(
+    tmp_path: Path,
+) -> None:
+    backend = _FixtureCodexBackend()
+    backend.register(
+        "editorial_skill_resume_cover_letter_review",
+        lambda _payload: {"decision": "pass", "findings": []},
+    )
+    backend.register(
+        "editorial_skill_humanizer_review",
+        lambda _payload: {"decision": "pass", "findings": []},
+    )
+    quality_input = _quality_input_with_ats(tmp_path / "pack", _quality_source())
+    quality_input = replace(quality_input, editorial_skill_reviews=())
+    with mock.patch.object(
+        application_quality,
+        "_load_pinned_skill_document",
+        side_effect=lambda name, _sha256: f"# {name}\nExact fixture skill.\n".encode(),
+    ) as loader:
+        reviewed = run_pinned_editorial_skill_reviews(
+            quality_input,
+            client=_runtime_client(tmp_path, backend),
+        )
+    assert backend.call_count == 2
+    assert [row.skill_name for row in reviewed.editorial_skill_reviews] == [
+        "resume-cover-letter",
+        "humanizer",
+    ]
+    assert loader.call_args_list == [
+        mock.call(
+            "resume-cover-letter",
+            "adaa35a36ae0bfa6b1ce14104aebcbfe8a51c65434087056facf4f8f45217b96",
+        ),
+        mock.call(
+            "humanizer",
+            "243aecdafecb5e11c2d45e2e088b7876e3f6eee34aa50c53f624d8468039afa8",
+        ),
+    ]
+    review = build_deterministic_preflight_quality_review(reviewed)
+    assert review.disposition is QualityReviewDisposition.ACCEPTED
+    assert review.editorial_skill_reviews_verified is True
+
+
+def test_pinned_editorial_runtime_persists_model_findings_as_release_blockers(
+    tmp_path: Path,
+) -> None:
+    backend = _FixtureCodexBackend()
+    backend.register(
+        "editorial_skill_resume_cover_letter_review",
+        lambda _payload: {"decision": "pass", "findings": []},
+    )
+    backend.register(
+        "editorial_skill_humanizer_review",
+        lambda _payload: {
+            "decision": "block",
+            "findings": [
+                {
+                    "code": "generic_transition",
+                    "summary": "The closing transition sounds generic.",
+                    "evidence": "The final paragraph uses a reusable transition.",
+                    "remediation": "Recompose that connective without changing factual atoms.",
+                }
+            ],
+        },
+    )
+    quality_input = _quality_input_with_ats(tmp_path / "pack", _quality_source())
+    quality_input = replace(quality_input, editorial_skill_reviews=())
+    with mock.patch.object(
+        application_quality,
+        "_load_pinned_skill_document",
+        return_value=b"# Exact fixture skill\n",
+    ):
+        reviewed = run_pinned_editorial_skill_reviews(
+            quality_input,
+            client=_runtime_client(tmp_path, backend),
+        )
+    review = build_deterministic_preflight_quality_review(reviewed)
+    assert review.disposition is QualityReviewDisposition.NEEDS_REMEDIATION
+    assert _codes(review) == {"humanizer.generic_transition"}
+    assert review.issues[0].evidence == (
+        "The final paragraph uses a reusable transition."
+    )
+
+
+def test_pinned_editorial_runtime_rejects_unreviewed_or_malformed_model_claims(
+    tmp_path: Path,
+) -> None:
+    unreviewed = replace(
+        _quality_input_with_ats(tmp_path / "wrong-runtime", _quality_source()),
+        editorial_skill_reviews=(),
+    )
+    with pytest.raises(ValueError, match="runtime differs from pinned policy"):
+        run_pinned_editorial_skill_reviews(
+            unreviewed,
+            client=_runtime_client(tmp_path / "wrong-client", MockBackend()),
+        )
+    backend = _FixtureCodexBackend()
+    backend.register(
+        "editorial_skill_resume_cover_letter_review",
+        lambda _payload: {
+            "decision": "pass",
+            "findings": [
+                {
+                    "code": "contradiction",
+                    "summary": "A finding cannot accompany pass.",
+                    "evidence": "The response contradicts itself.",
+                    "remediation": "Return a truthful blocking decision.",
+                }
+            ],
+        },
+    )
+    quality_input = replace(
+        _quality_input_with_ats(tmp_path / "pack", _quality_source()),
+        editorial_skill_reviews=(),
+    )
+    with mock.patch.object(
+        application_quality,
+        "_load_pinned_skill_document",
+        return_value=b"# Exact fixture skill\n",
+    ):
+        with pytest.raises(ValueError, match="passing editorial skill response"):
+            run_pinned_editorial_skill_reviews(
+                quality_input,
+                client=_runtime_client(tmp_path, backend),
+            )
+    with pytest.raises(ValueError, match="unreviewed exact pack"):
+        run_pinned_editorial_skill_reviews(
+            _quality_input_with_ats(tmp_path / "reviewed", _quality_source()),
+            client=_runtime_client(tmp_path / "second", _FixtureCodexBackend()),
+        )
 
 
 @pytest.mark.parametrize(
