@@ -1785,9 +1785,11 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
             return self._context.__exit__(*arguments)
 
     monkeypatch.setattr(playwright_api, "sync_playwright", RoutedContext)
+    observation_root = tmp_path / "provider-observation"
+    observation_root.mkdir(mode=0o700)
     observation = capture_greenhouse_observation(
         source_url=source_url,
-        archive_root=tmp_path / "provider-observation",
+        archive_root=observation_root,
         repository_root=JAA_ROOT,
     )
     inventory = json.loads(observation.form_inventory)
@@ -1797,8 +1799,10 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
     assert observed_names == ("full_name", "email", "resume")
     assert inventory["url"] == source_url
 
+    market_jaa_root = tmp_path / "market-jaa"
+    market_jaa_root.mkdir(mode=0o700)
     fixture = _canonical_market_jaa_materialization(
-        tmp_path / "market-jaa",
+        market_jaa_root,
         capsys,
         monkeypatch,
         source_url=source_url,
