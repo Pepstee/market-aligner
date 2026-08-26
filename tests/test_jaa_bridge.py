@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -11,6 +12,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
+import market_aligner.applications.jaa as jaa_module
 
 from market_aligner.applications.jaa import (
     ATSForensicRecorder,
@@ -31,6 +34,7 @@ from market_aligner.applications.jaa import (
     observe_ats_form_or_recover,
     record_canary_learning_event,
     sha256,
+    verify_and_consume_market_observation_acceptance,
     verify_canary_learning_event,
 )
 from market_aligner.cli import main as cli_main
@@ -97,6 +101,104 @@ def observation_authority(
         **fields,
         authority_sha256=sha256(canonical_json(fields).encode()),
     )
+
+
+def public_observation_request(
+    value: ApplicationSource,
+    *,
+    url: str = "https://jobs.example.test/apply/1000001",
+) -> AtsObservationAuthority:
+    return observation_authority(
+        value,
+        url=url,
+        state="pending",
+        local_fixture_only=False,
+    )
+
+
+def observation_signing_key(tmp_path: Path, monkeypatch):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    external_root = tmp_path / "external-authority"
+    external_root.mkdir(mode=0o700)
+    public_path = external_root / "test-observation-public.pem"
+    public_path.write_bytes(public_key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ))
+    public_path.chmod(0o644)
+    public_der = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    monkeypatch.setattr(jaa_module, "MARKET_OBSERVATION_KEY_ID", "market-observation-test-key")
+    monkeypatch.setattr(
+        jaa_module,
+        "MARKET_OBSERVATION_PUBLIC_DER_SHA256",
+        sha256(public_der),
+    )
+    monkeypatch.setattr(jaa_module, "_utc_now", lambda: "2026-08-27T12:00:00Z")
+    return private_key, public_path, external_root
+
+
+def write_signed_observation_acceptance(
+    external_root: Path,
+    private_key,
+    authority: AtsObservationAuthority,
+    *,
+    consumption_root: Path,
+    acceptance_id: str = "observation-acceptance-001",
+    nonce: str = "1" * 64,
+    key_id: str = "market-observation-test-key",
+    not_before: str = "2026-08-27T11:59:00Z",
+    expires_at: str = "2026-08-27T12:05:00Z",
+    signing_key=None,
+) -> tuple[Path, dict[str, object]]:
+    if not consumption_root.exists():
+        consumption_root.mkdir(mode=0o700)
+    consumption_store = consumption_root / "observation-acceptance-consumptions"
+    if not consumption_store.exists():
+        consumption_store.mkdir(mode=0o700)
+    fields = {
+        "schema_version": "market-aligner.ats-observation-acceptance.v1",
+        "acceptance_id": acceptance_id,
+        "nonce": nonce,
+        "request_sha256": authority.authority_sha256,
+        "consumption_root_sha256": jaa_module.market_observation_consumption_root_sha256(
+            consumption_root
+        ),
+        "job_key": authority.job_key,
+        "application_url": authority.application_url,
+        "timeout_ms": authority.timeout_ms,
+        "max_network_events": authority.max_network_events,
+        "max_snapshot_bytes": authority.max_snapshot_bytes,
+        "not_before": not_before,
+        "expires_at": expires_at,
+        "key_id": key_id,
+        "read_only_navigation": True,
+        "sanitized_hash_only_evidence": True,
+        "login_authority": False,
+        "cookie_authority": False,
+        "identity_authority": False,
+        "vault_authority": False,
+        "fill_authority": False,
+        "upload_authority": False,
+        "click_authority": False,
+        "submission_authority": False,
+    }
+    signature = (signing_key or private_key).sign(canonical_json(fields).encode())
+    document = fields | {"signature_b64": base64.b64encode(signature).decode("ascii")}
+    document["envelope_sha256"] = sha256(canonical_json(document).encode())
+    acceptances = external_root / "acceptances"
+    acceptances.mkdir(mode=0o700, exist_ok=True)
+    acceptances.chmod(0o700)
+    path = acceptances / f"{acceptance_id}.json"
+    path.write_bytes((canonical_json(document) + "\n").encode())
+    path.chmod(0o600)
+    return path, document
 
 
 def pre_submit_authority(observation, values: dict[str, bytes]) -> AtsFixturePreSubmitAuthority:
@@ -568,3 +670,356 @@ def test_real_market_eligibility_receipt_flows_through_service_and_cli(
         "--application-id", "application-cli-0001",
     ]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "prepared"
+
+
+def test_signed_observation_acceptance_consumes_once_and_replays_exactly(tmp_path, monkeypatch):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    envelope_path, envelope = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+    )
+
+    first = verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+    receipt_path = runtime_root / "observation-acceptance-consumptions" / f"{envelope['nonce']}.json"
+    original = receipt_path.read_bytes()
+    original_mtime = receipt_path.stat().st_mtime_ns
+    monkeypatch.setattr(jaa_module, "_utc_now", lambda: "2026-08-28T12:00:00Z")
+    replay = verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+
+    assert replay == first
+    assert receipt_path.read_bytes() == original
+    assert receipt_path.stat().st_mtime_ns == original_mtime
+    assert first.request_sha256 == authority.authority_sha256
+    assert first.envelope_sha256 == envelope["envelope_sha256"]
+    assert first.signature_sha256 == sha256(base64.b64decode(envelope["signature_b64"]))
+    assert first.consumption_root_sha256 == envelope["consumption_root_sha256"]
+    assert first.not_before == envelope["not_before"]
+    assert first.expires_at == envelope["expires_at"]
+    assert first.key_id == "market-observation-test-key"
+    assert first.public_der_sha256 == jaa_module.MARKET_OBSERVATION_PUBLIC_DER_SHA256
+    assert first.diagnostic_only is True
+    assert first.raw_payloads_persisted is False
+    assert first.identity_authority is False
+    assert first.vault_authority is False
+    assert first.release_authority is False
+    assert first.submission_authority is False
+    assert len(list(receipt_path.parent.iterdir())) == 1
+
+
+@pytest.mark.parametrize("attack", ["forged_self_hash", "unknown_key", "wrong_target", "expired", "future"])
+def test_signed_observation_acceptance_refuses_invalid_authority(tmp_path, monkeypatch, attack):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    call_authority = authority
+    runtime_root = tmp_path / "runtime"
+    kwargs = {}
+    if attack == "forged_self_hash":
+        kwargs["signing_key"] = Ed25519PrivateKey.generate()
+    elif attack == "unknown_key":
+        kwargs["key_id"] = "unknown-observation-key"
+    elif attack == "wrong_target":
+        call_authority = public_observation_request(
+            source(),
+            url="https://jobs.example.test/apply/another-target",
+        )
+    elif attack == "expired":
+        kwargs.update(not_before="2026-08-27T11:00:00Z", expires_at="2026-08-27T11:59:59Z")
+    elif attack == "future":
+        kwargs.update(not_before="2026-08-27T12:00:01Z", expires_at="2026-08-27T13:00:00Z")
+    envelope_path, _ = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+        **kwargs,
+    )
+
+    with pytest.raises(ValueError):
+        verify_and_consume_market_observation_acceptance(
+            call_authority,
+            envelope_path=envelope_path,
+            public_key_path=public_path,
+            consumption_root=runtime_root,
+        )
+    assert not list((runtime_root / "observation-acceptance-consumptions").iterdir())
+
+
+def test_signed_observation_acceptance_refuses_duplicate_nonce_drift(tmp_path, monkeypatch):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    first_authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    first_path, first_envelope = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        first_authority,
+        consumption_root=runtime_root,
+        nonce="2" * 64,
+    )
+    verify_and_consume_market_observation_acceptance(
+        first_authority,
+        envelope_path=first_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+    receipt_path = runtime_root / "observation-acceptance-consumptions" / f"{first_envelope['nonce']}.json"
+    original = receipt_path.read_bytes()
+    drifted_authority = public_observation_request(
+        source(),
+        url="https://jobs.example.test/apply/another-target",
+    )
+    drifted_path, _ = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        drifted_authority,
+        consumption_root=runtime_root,
+        acceptance_id="observation-acceptance-002",
+        nonce="2" * 64,
+    )
+
+    with pytest.raises(ValueError, match="different evidence"):
+        verify_and_consume_market_observation_acceptance(
+            drifted_authority,
+            envelope_path=drifted_path,
+            public_key_path=public_path,
+            consumption_root=runtime_root,
+        )
+    assert receipt_path.read_bytes() == original
+
+
+def test_signed_observation_acceptance_cannot_switch_replay_root(tmp_path, monkeypatch):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    first_root = tmp_path / "runtime-one"
+    second_root = tmp_path / "runtime-two"
+    envelope_path, _ = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=first_root,
+        nonce="3" * 64,
+    )
+    verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_path,
+        consumption_root=first_root,
+    )
+    second_root.mkdir(mode=0o700)
+    (second_root / "observation-acceptance-consumptions").mkdir(mode=0o700)
+
+    with pytest.raises(ValueError, match="replay domain"):
+        verify_and_consume_market_observation_acceptance(
+            authority,
+            envelope_path=envelope_path,
+            public_key_path=public_path,
+            consumption_root=second_root,
+        )
+    assert not list((second_root / "observation-acceptance-consumptions").iterdir())
+
+
+@pytest.mark.parametrize("attack", ["symlink", "hardlink", "mode"])
+def test_signed_observation_acceptance_refuses_unsafe_envelope(tmp_path, monkeypatch, attack):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    envelope_path, _ = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+    )
+    attacked_path = envelope_path
+    if attack == "symlink":
+        attacked_path = envelope_path.with_name("acceptance-symlink.json")
+        attacked_path.symlink_to(envelope_path.name)
+    elif attack == "hardlink":
+        attacked_path = envelope_path.with_name("acceptance-hardlink.json")
+        os.link(envelope_path, attacked_path)
+    else:
+        envelope_path.chmod(0o644)
+
+    with pytest.raises(ValueError):
+        verify_and_consume_market_observation_acceptance(
+            authority,
+            envelope_path=attacked_path,
+            public_key_path=public_path,
+            consumption_root=runtime_root,
+        )
+    assert not list((runtime_root / "observation-acceptance-consumptions").iterdir())
+
+
+@pytest.mark.parametrize("attack", ["root_symlink", "root_mode"])
+def test_signed_observation_acceptance_refuses_unsafe_consumption_root(tmp_path, monkeypatch, attack):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    envelope_path, _ = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+    )
+    if attack == "root_symlink":
+        real_root = tmp_path / "real-runtime"
+        runtime_root.rename(real_root)
+        runtime_root.symlink_to(real_root, target_is_directory=True)
+    else:
+        runtime_root.chmod(0o755)
+
+    with pytest.raises(ValueError):
+        verify_and_consume_market_observation_acceptance(
+            authority,
+            envelope_path=envelope_path,
+            public_key_path=public_path,
+            consumption_root=runtime_root,
+        )
+
+
+@pytest.mark.parametrize("attack", ["hardlink", "mode", "root_substitution", "store_substitution"])
+def test_signed_observation_acceptance_refuses_consumption_evidence_drift(tmp_path, monkeypatch, attack):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    envelope_path, envelope = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+    )
+    verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+    receipt_path = runtime_root / "observation-acceptance-consumptions" / f"{envelope['nonce']}.json"
+    if attack == "hardlink":
+        os.link(receipt_path, receipt_path.with_name("receipt-hardlink.json"))
+    elif attack == "mode":
+        receipt_path.chmod(0o644)
+    elif attack == "root_substitution":
+        runtime_root.rename(tmp_path / "original-runtime")
+        runtime_root.mkdir(mode=0o700)
+        (runtime_root / "observation-acceptance-consumptions").mkdir(mode=0o700)
+    else:
+        store = runtime_root / "observation-acceptance-consumptions"
+        store.rename(runtime_root / "original-observation-acceptance-consumptions")
+        store.mkdir(mode=0o700)
+
+    with pytest.raises(ValueError):
+        verify_and_consume_market_observation_acceptance(
+            authority,
+            envelope_path=envelope_path,
+            public_key_path=public_path,
+            consumption_root=runtime_root,
+        )
+
+
+def test_signed_observation_acceptance_requires_exact_authority_type(tmp_path, monkeypatch):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    envelope_path, _ = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+    )
+
+    class DerivedAuthority(AtsObservationAuthority):
+        pass
+
+    derived = DerivedAuthority(**authority.__dict__)
+    with pytest.raises(TypeError, match="canonical authority type"):
+        verify_and_consume_market_observation_acceptance(
+            derived,
+            envelope_path=envelope_path,
+            public_key_path=public_path,
+            consumption_root=runtime_root,
+        )
+    assert not list((runtime_root / "observation-acceptance-consumptions").iterdir())
+
+
+def test_signed_observation_acceptance_recovers_crash_publish_link(tmp_path, monkeypatch):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    envelope_path, envelope = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+    )
+    original = verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+    receipt_path = runtime_root / "observation-acceptance-consumptions" / f"{envelope['nonce']}.json"
+    crash_link = receipt_path.with_name(f".{receipt_path.name}.{'a' * 32}.tmp")
+    os.link(receipt_path, crash_link)
+    assert receipt_path.stat().st_nlink == 2
+
+    recovered = verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+
+    assert recovered == original
+    assert receipt_path.stat().st_nlink == 1
+    assert not crash_link.exists()
+
+
+def test_signed_observation_acceptance_parent_swap_refuses_before_publication(tmp_path, monkeypatch):
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    authority = public_observation_request(source())
+    runtime_root = tmp_path / "runtime"
+    envelope_path, envelope = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+    )
+    original_writer = jaa_module._write_acceptance_once
+
+    def swap_parent_then_write(store, name, data, *, prepublish_check):
+        original_parent = envelope_path.parent.with_name("acceptances-original")
+        envelope_path.parent.rename(original_parent)
+        envelope_path.parent.mkdir(mode=0o700)
+        return original_writer(
+            store,
+            name,
+            data,
+            prepublish_check=prepublish_check,
+        )
+
+    monkeypatch.setattr(jaa_module, "_write_acceptance_once", swap_parent_then_write)
+    with pytest.raises(ValueError, match="parent path changed"):
+        verify_and_consume_market_observation_acceptance(
+            authority,
+            envelope_path=envelope_path,
+            public_key_path=public_path,
+            consumption_root=runtime_root,
+        )
+    receipts = runtime_root / "observation-acceptance-consumptions"
+    assert not (receipts / f"{envelope['nonce']}.json").exists()
+    assert not list(receipts.glob("*.tmp"))

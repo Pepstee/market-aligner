@@ -1,6 +1,7 @@
 """Faceless internal JAA preparation and deterministic no-submit evidence."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -8,7 +9,7 @@ import re
 import stat
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -31,6 +32,12 @@ _ATS_CAPTURE_TIME = re.compile(r"^(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12
 _OBSERVATION_SCHEMA = "market-aligner.read-only-ats-observation.v1"
 _OBSERVATION_CHECKPOINT = "read_only_ats_observation"
 _PRE_SUBMIT_CHECKPOINT = "fixture_pre_submit"
+MARKET_OBSERVATION_KEY_ID = "market-observation-operator-2026-08-27"
+MARKET_OBSERVATION_PUBLIC_DER_SHA256 = "1f852ff70c3e7faf34e75c89e2dca9f067a045927967d069ac2bc544dd0bff1e"
+_OBSERVATION_ACCEPTANCE_SCHEMA = "market-aligner.ats-observation-acceptance.v1"
+_OBSERVATION_ACCEPTANCE_RECEIPT_SCHEMA = "market-aligner.ats-observation-acceptance-receipt.v1"
+_OBSERVATION_ACCEPTANCE_DIRECTORY = "observation-acceptance-consumptions"
+_ACCEPTANCE_NONCE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 
 
 def canonical_json(value: object) -> str:
@@ -311,6 +318,232 @@ class AtsObservationAuthority:
             raise ValueError("local fixture authority must bind localhost exactly")
 
 
+@dataclass(frozen=True)
+class AtsObservationAcceptance:
+    """Externally signed, observation-only acceptance for one public request."""
+
+    acceptance_id: str
+    nonce: str
+    request_sha256: str
+    consumption_root_sha256: str
+    job_key: str
+    application_url: str
+    timeout_ms: int
+    max_network_events: int
+    max_snapshot_bytes: int
+    not_before: str
+    expires_at: str
+    key_id: str
+    signature_b64: str
+    envelope_sha256: str
+    schema_version: str = _OBSERVATION_ACCEPTANCE_SCHEMA
+    read_only_navigation: bool = True
+    sanitized_hash_only_evidence: bool = True
+    login_authority: bool = False
+    cookie_authority: bool = False
+    identity_authority: bool = False
+    vault_authority: bool = False
+    fill_authority: bool = False
+    upload_authority: bool = False
+    click_authority: bool = False
+    submission_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if self.schema_version != _OBSERVATION_ACCEPTANCE_SCHEMA:
+            raise ValueError("ATS observation acceptance schema differs")
+        _id(self.acceptance_id, "ATS observation acceptance ID")
+        if not isinstance(self.nonce, str) or not _ACCEPTANCE_NONCE.fullmatch(self.nonce):
+            raise ValueError("ATS observation acceptance nonce must be a lowercase SHA-256 value")
+        _digest(self.request_sha256, "ATS observation request SHA-256")
+        _digest(self.consumption_root_sha256, "ATS observation consumption root SHA-256")
+        _job_key(self.job_key)
+        if _observation_url(self.application_url) != self.application_url:
+            raise ValueError("ATS observation acceptance URL is non-canonical")
+        for name in ("timeout_ms", "max_network_events", "max_snapshot_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65_536:
+                raise ValueError(f"ATS observation acceptance {name} is outside policy")
+        for value in (self.not_before, self.expires_at):
+            _ats_time(value)
+        if datetime.strptime(self.not_before, "%Y-%m-%dT%H:%M:%SZ") >= datetime.strptime(
+            self.expires_at, "%Y-%m-%dT%H:%M:%SZ"
+        ):
+            raise ValueError("ATS observation acceptance time window is empty")
+        _id(self.key_id, "ATS observation acceptance key ID")
+        exact = {
+            "read_only_navigation": True,
+            "sanitized_hash_only_evidence": True,
+            "login_authority": False,
+            "cookie_authority": False,
+            "identity_authority": False,
+            "vault_authority": False,
+            "fill_authority": False,
+            "upload_authority": False,
+            "click_authority": False,
+            "submission_authority": False,
+        }
+        if any(type(getattr(self, name)) is not bool for name in exact):
+            raise TypeError("ATS observation acceptance authority fields must be bool")
+        if any(getattr(self, name) is not value for name, value in exact.items()):
+            raise ValueError("ATS observation acceptance exceeds read-only scope")
+        if not isinstance(self.signature_b64, str):
+            raise TypeError("ATS observation acceptance signature must be base64 text")
+        try:
+            signature = base64.b64decode(self.signature_b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("ATS observation acceptance signature is malformed") from exc
+        if len(signature) != 64 or base64.b64encode(signature).decode("ascii") != self.signature_b64:
+            raise ValueError("ATS observation acceptance signature is non-canonical")
+        _digest(self.envelope_sha256, "ATS observation acceptance envelope SHA-256")
+        if self.envelope_sha256 != sha256(canonical_json(self.document(include_hash=False)).encode()):
+            raise ValueError("ATS observation acceptance envelope identity differs")
+
+    def signed_document(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "acceptance_id": self.acceptance_id,
+            "nonce": self.nonce,
+            "request_sha256": self.request_sha256,
+            "consumption_root_sha256": self.consumption_root_sha256,
+            "job_key": self.job_key,
+            "application_url": self.application_url,
+            "timeout_ms": self.timeout_ms,
+            "max_network_events": self.max_network_events,
+            "max_snapshot_bytes": self.max_snapshot_bytes,
+            "not_before": self.not_before,
+            "expires_at": self.expires_at,
+            "key_id": self.key_id,
+            "read_only_navigation": self.read_only_navigation,
+            "sanitized_hash_only_evidence": self.sanitized_hash_only_evidence,
+            "login_authority": self.login_authority,
+            "cookie_authority": self.cookie_authority,
+            "identity_authority": self.identity_authority,
+            "vault_authority": self.vault_authority,
+            "fill_authority": self.fill_authority,
+            "upload_authority": self.upload_authority,
+            "click_authority": self.click_authority,
+            "submission_authority": self.submission_authority,
+        }
+
+    def document(self, *, include_hash: bool = True) -> dict[str, object]:
+        value = self.signed_document() | {"signature_b64": self.signature_b64}
+        if include_hash:
+            value["envelope_sha256"] = self.envelope_sha256
+        return value
+
+
+@dataclass(frozen=True)
+class AtsObservationAcceptanceReceipt:
+    """Immutable proof that one signed acceptance nonce was consumed once."""
+
+    acceptance_id: str
+    nonce: str
+    request_sha256: str
+    envelope_sha256: str
+    signature_sha256: str
+    consumption_root_sha256: str
+    job_key: str
+    application_url: str
+    timeout_ms: int
+    max_network_events: int
+    max_snapshot_bytes: int
+    not_before: str
+    expires_at: str
+    key_id: str
+    public_der_sha256: str
+    consumed_at: str
+    root_identity: tuple[int, int]
+    store_identity: tuple[int, int]
+    receipt_sha256: str
+    schema_version: str = _OBSERVATION_ACCEPTANCE_RECEIPT_SCHEMA
+    diagnostic_only: bool = True
+    raw_payloads_persisted: bool = False
+    identity_authority: bool = False
+    vault_authority: bool = False
+    release_authority: bool = False
+    submission_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if self.schema_version != _OBSERVATION_ACCEPTANCE_RECEIPT_SCHEMA:
+            raise ValueError("ATS observation acceptance receipt schema differs")
+        _id(self.acceptance_id, "ATS observation acceptance ID")
+        if not isinstance(self.nonce, str) or not _ACCEPTANCE_NONCE.fullmatch(self.nonce):
+            raise ValueError("ATS observation acceptance receipt nonce differs")
+        for name in (
+            "request_sha256", "envelope_sha256", "signature_sha256",
+            "consumption_root_sha256", "public_der_sha256",
+        ):
+            _digest(getattr(self, name), name)
+        _job_key(self.job_key)
+        if _observation_url(self.application_url) != self.application_url:
+            raise ValueError("ATS observation acceptance receipt URL differs")
+        for name in ("timeout_ms", "max_network_events", "max_snapshot_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65_536:
+                raise ValueError(f"ATS observation acceptance receipt {name} differs")
+        _ats_time(self.not_before)
+        _ats_time(self.expires_at)
+        if self.not_before >= self.expires_at:
+            raise ValueError("ATS observation acceptance receipt time window differs")
+        _id(self.key_id, "ATS observation acceptance key ID")
+        _ats_time(self.consumed_at)
+        for name in ("root_identity", "store_identity"):
+            identity = getattr(self, name)
+            if (
+                not isinstance(identity, tuple)
+                or len(identity) != 2
+                or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in identity)
+            ):
+                raise ValueError(f"ATS observation acceptance {name.replace('_', ' ')} differs")
+        exact = {
+            "diagnostic_only": True,
+            "raw_payloads_persisted": False,
+            "identity_authority": False,
+            "vault_authority": False,
+            "release_authority": False,
+            "submission_authority": False,
+        }
+        if any(type(getattr(self, name)) is not bool for name in exact):
+            raise TypeError("ATS observation acceptance receipt authority fields must be bool")
+        if any(getattr(self, name) is not value for name, value in exact.items()):
+            raise ValueError("ATS observation acceptance receipt exceeds read-only scope")
+        _digest(self.receipt_sha256, "ATS observation acceptance receipt SHA-256")
+        if self.receipt_sha256 != sha256(canonical_json(self.document(include_hash=False)).encode()):
+            raise ValueError("ATS observation acceptance receipt identity differs")
+
+    def document(self, *, include_hash: bool = True) -> dict[str, object]:
+        value = {
+            "schema_version": self.schema_version,
+            "acceptance_id": self.acceptance_id,
+            "nonce": self.nonce,
+            "request_sha256": self.request_sha256,
+            "envelope_sha256": self.envelope_sha256,
+            "signature_sha256": self.signature_sha256,
+            "consumption_root_sha256": self.consumption_root_sha256,
+            "job_key": self.job_key,
+            "application_url": self.application_url,
+            "timeout_ms": self.timeout_ms,
+            "max_network_events": self.max_network_events,
+            "max_snapshot_bytes": self.max_snapshot_bytes,
+            "not_before": self.not_before,
+            "expires_at": self.expires_at,
+            "key_id": self.key_id,
+            "public_der_sha256": self.public_der_sha256,
+            "consumed_at": self.consumed_at,
+            "root_identity": list(self.root_identity),
+            "store_identity": list(self.store_identity),
+            "diagnostic_only": self.diagnostic_only,
+            "raw_payloads_persisted": self.raw_payloads_persisted,
+            "identity_authority": self.identity_authority,
+            "vault_authority": self.vault_authority,
+            "release_authority": self.release_authority,
+            "submission_authority": self.submission_authority,
+        }
+        if include_hash:
+            value["receipt_sha256"] = self.receipt_sha256
+        return value
+
+
 def _inventory_from_document(value: object) -> AtsFormInventory:
     if not isinstance(value, dict):
         raise ValueError("ATS observation inventory is malformed")
@@ -532,6 +765,624 @@ def _write_once(directory: Path, name: str, data: bytes) -> None:
             raise FileExistsError("attempt ID already has different evidence")
     finally:
         temporary.unlink(missing_ok=True)
+
+
+@dataclass
+class _ExternalOwnedFile:
+    path: Path
+    mode: int
+    label: str
+    data: bytes
+    parent_fd: int
+    file_fd: int
+    parent_identity: tuple[int, int]
+    file_identity: tuple[int, int, int]
+
+    def verify(self) -> None:
+        parent = os.fstat(self.parent_fd)
+        if (parent.st_dev, parent.st_ino) != self.parent_identity:
+            raise ValueError(f"{self.label} parent descriptor changed")
+        current_parent = os.lstat(self.path.parent)
+        if (current_parent.st_dev, current_parent.st_ino) != self.parent_identity:
+            raise ValueError(f"{self.label} parent path changed")
+        current = os.stat(self.path.name, dir_fd=self.parent_fd, follow_symlinks=False)
+        opened = os.fstat(self.file_fd)
+        identity = (current.st_dev, current.st_ino, current.st_size)
+        if (
+            identity != self.file_identity
+            or (opened.st_dev, opened.st_ino, opened.st_size) != self.file_identity
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.geteuid()
+            or current.st_nlink != 1
+            or stat.S_IMODE(current.st_mode) != self.mode
+            or os.pread(self.file_fd, current.st_size, 0) != self.data
+        ):
+            raise ValueError(f"{self.label} identity changed across acceptance consumption")
+
+    def close(self) -> None:
+        os.close(self.file_fd)
+        os.close(self.parent_fd)
+
+
+def _open_external_owned_file(
+    path_value: str | Path,
+    *,
+    mode: int,
+    label: str,
+) -> _ExternalOwnedFile:
+    path = Path(path_value)
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts[1:]):
+        raise ValueError(f"{label} path must be absolute and canonical")
+    _, parent_identity = _root(path.parent, create=False)
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    file_fd = -1
+    try:
+        parent = os.fstat(parent_fd)
+        if (parent.st_dev, parent.st_ino) != parent_identity:
+            raise ValueError(f"{label} parent changed while opening")
+        before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_size > 65_536
+        ):
+            raise ValueError(f"{label} is unsafe")
+        file_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        opened = os.fstat(file_fd)
+        identity = (before.st_dev, before.st_ino, before.st_size)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != identity:
+            raise ValueError(f"{label} changed while opening")
+        data = b"".join(iter(lambda: os.read(file_fd, 65_536), b""))
+        handle = _ExternalOwnedFile(
+            path=path,
+            mode=mode,
+            label=label,
+            data=data,
+            parent_fd=parent_fd,
+            file_fd=file_fd,
+            parent_identity=parent_identity,
+            file_identity=identity,
+        )
+        handle.verify()
+        return handle
+    except BaseException:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.close(parent_fd)
+        raise
+
+
+def _consumption_root_binding(
+    value: str | Path,
+) -> tuple[Path, tuple[int, int], tuple[int, int], str]:
+    root, root_identity = _root(value, create=False)
+    store = _open_acceptance_store(root, root_identity, create=False)
+    if store is None:
+        raise KeyError("ATS observation acceptance store is missing")
+    try:
+        store_identity = store.directory_identity
+        binding = sha256(canonical_json({
+            "absolute_path": str(root),
+            "root_identity": list(root_identity),
+            "store_identity": list(store_identity),
+        }).encode())
+        return root, root_identity, store_identity, binding
+    finally:
+        store.close()
+
+
+def market_observation_consumption_root_sha256(value: str | Path) -> str:
+    """Describe the pre-existing private replay domain without granting authority."""
+
+    return _consumption_root_binding(value)[3]
+
+
+@dataclass
+class _AcceptanceStore:
+    root: Path
+    root_identity: tuple[int, int]
+    root_fd: int
+    directory_fd: int
+    directory_identity: tuple[int, int]
+
+    def verify(self) -> None:
+        root_path = os.lstat(self.root)
+        root_opened = os.fstat(self.root_fd)
+        if (
+            (root_path.st_dev, root_path.st_ino) != self.root_identity
+            or (root_opened.st_dev, root_opened.st_ino) != self.root_identity
+            or not stat.S_ISDIR(root_path.st_mode)
+            or root_path.st_uid != os.geteuid()
+            or stat.S_IMODE(root_path.st_mode) != 0o700
+        ):
+            raise ValueError("ATS observation consumption root identity changed")
+        directory = os.stat(
+            _OBSERVATION_ACCEPTANCE_DIRECTORY,
+            dir_fd=self.root_fd,
+            follow_symlinks=False,
+        )
+        opened = os.fstat(self.directory_fd)
+        if (
+            (directory.st_dev, directory.st_ino) != self.directory_identity
+            or (opened.st_dev, opened.st_ino) != self.directory_identity
+            or not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+            or stat.S_IMODE(directory.st_mode) != 0o700
+        ):
+            raise ValueError("ATS observation acceptance store identity changed")
+
+    def close(self) -> None:
+        os.close(self.directory_fd)
+        os.close(self.root_fd)
+
+
+def _open_acceptance_store(
+    root: Path,
+    root_identity: tuple[int, int],
+    *,
+    create: bool,
+) -> _AcceptanceStore | None:
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory_fd = -1
+    try:
+        opened_root = os.fstat(root_fd)
+        if (opened_root.st_dev, opened_root.st_ino) != root_identity:
+            raise ValueError("ATS observation consumption root changed while opening")
+        try:
+            directory = os.stat(
+                _OBSERVATION_ACCEPTANCE_DIRECTORY,
+                dir_fd=root_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            if not create:
+                os.close(root_fd)
+                return None
+            try:
+                os.mkdir(_OBSERVATION_ACCEPTANCE_DIRECTORY, mode=0o700, dir_fd=root_fd)
+                os.fsync(root_fd)
+            except FileExistsError:
+                pass
+            directory = os.stat(
+                _OBSERVATION_ACCEPTANCE_DIRECTORY,
+                dir_fd=root_fd,
+                follow_symlinks=False,
+            )
+        if (
+            not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+            or stat.S_IMODE(directory.st_mode) != 0o700
+        ):
+            raise ValueError("ATS observation acceptance store is unsafe")
+        directory_fd = os.open(
+            _OBSERVATION_ACCEPTANCE_DIRECTORY,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+        directory_identity = (directory.st_dev, directory.st_ino)
+        opened_directory = os.fstat(directory_fd)
+        if (opened_directory.st_dev, opened_directory.st_ino) != directory_identity:
+            raise ValueError("ATS observation acceptance store changed while opening")
+        store = _AcceptanceStore(
+            root=root,
+            root_identity=root_identity,
+            root_fd=root_fd,
+            directory_fd=directory_fd,
+            directory_identity=directory_identity,
+        )
+        store.verify()
+        return store
+    except BaseException:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
+        raise
+
+
+def _recover_acceptance_publish(store: _AcceptanceStore, name: str) -> None:
+    target = os.stat(name, dir_fd=store.directory_fd, follow_symlinks=False)
+    if target.st_nlink == 1:
+        return
+    if (
+        target.st_nlink != 2
+        or not stat.S_ISREG(target.st_mode)
+        or target.st_uid != os.geteuid()
+        or stat.S_IMODE(target.st_mode) != 0o600
+    ):
+        raise ValueError("ATS observation acceptance receipt has unsafe links")
+    linked_names: list[str] = []
+    for entry in os.listdir(store.directory_fd):
+        if entry == name:
+            continue
+        entry_info = os.stat(entry, dir_fd=store.directory_fd, follow_symlinks=False)
+        if (entry_info.st_dev, entry_info.st_ino) == (target.st_dev, target.st_ino):
+            linked_names.append(entry)
+    pattern = rf"\.{re.escape(name)}\.[0-9a-f]{{32}}\.tmp"
+    if len(linked_names) != 1 or re.fullmatch(pattern, linked_names[0], re.ASCII) is None:
+        raise ValueError("ATS observation acceptance receipt hardlink is not recoverable")
+    temporary = linked_names[0]
+    temporary_info = os.stat(temporary, dir_fd=store.directory_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(temporary_info.st_mode)
+        or temporary_info.st_uid != os.geteuid()
+        or temporary_info.st_nlink != 2
+        or stat.S_IMODE(temporary_info.st_mode) != 0o600
+    ):
+        raise ValueError("ATS observation acceptance recovery link is unsafe")
+    os.unlink(temporary, dir_fd=store.directory_fd)
+    os.fsync(store.directory_fd)
+
+
+def _read_acceptance_at(store: _AcceptanceStore, name: str) -> bytes:
+    store.verify()
+    before = os.stat(name, dir_fd=store.directory_fd, follow_symlinks=False)
+    if before.st_nlink == 2:
+        _recover_acceptance_publish(store, name)
+        before = os.stat(name, dir_fd=store.directory_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_size > 65_536
+    ):
+        raise ValueError("ATS observation acceptance receipt is unsafe")
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=store.directory_fd)
+    try:
+        opened = os.fstat(fd)
+        identity = (before.st_dev, before.st_ino, before.st_size)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != identity:
+            raise ValueError("ATS observation acceptance receipt changed while opening")
+        data = b"".join(iter(lambda: os.read(fd, 65_536), b""))
+        after = os.stat(name, dir_fd=store.directory_fd, follow_symlinks=False)
+        if (after.st_dev, after.st_ino, after.st_size) != identity:
+            raise ValueError("ATS observation acceptance receipt changed while reading")
+    finally:
+        os.close(fd)
+    store.verify()
+    return data
+
+
+def _write_acceptance_once(
+    store: _AcceptanceStore,
+    name: str,
+    data: bytes,
+    *,
+    prepublish_check,
+) -> bytes:
+    try:
+        existing = _read_acceptance_at(store, name)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        return existing
+    temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=store.directory_fd,
+    )
+    try:
+        offset = 0
+        while offset < len(data):
+            offset += os.write(fd, data[offset:])
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        prepublish_check()
+        store.verify()
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=store.directory_fd,
+                dst_dir_fd=store.directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            pass
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=store.directory_fd)
+        except FileNotFoundError:
+            pass
+        os.fsync(store.directory_fd)
+    stored = _read_acceptance_at(store, name)
+    return stored
+
+
+def _acceptance_from_document(value: object) -> AtsObservationAcceptance:
+    if not isinstance(value, dict):
+        raise ValueError("ATS observation acceptance is malformed")
+    keys = {
+        "schema_version", "acceptance_id", "nonce", "request_sha256", "consumption_root_sha256", "job_key",
+        "application_url", "timeout_ms", "max_network_events", "max_snapshot_bytes",
+        "not_before", "expires_at", "key_id", "read_only_navigation",
+        "sanitized_hash_only_evidence", "login_authority", "cookie_authority",
+        "identity_authority", "vault_authority", "fill_authority", "upload_authority",
+        "click_authority", "submission_authority", "signature_b64", "envelope_sha256",
+    }
+    if set(value) != keys:
+        raise ValueError("ATS observation acceptance schema is not closed")
+    acceptance = AtsObservationAcceptance(**value)
+    if acceptance.document() != value:
+        raise ValueError("ATS observation acceptance is non-canonical")
+    return acceptance
+
+
+def _acceptance_receipt_from_document(value: object) -> AtsObservationAcceptanceReceipt:
+    if not isinstance(value, dict):
+        raise ValueError("ATS observation acceptance receipt is malformed")
+    keys = {
+        "schema_version", "acceptance_id", "nonce", "request_sha256", "envelope_sha256",
+        "signature_sha256", "consumption_root_sha256",
+        "job_key", "application_url", "timeout_ms", "max_network_events",
+        "max_snapshot_bytes", "not_before", "expires_at", "key_id", "public_der_sha256", "consumed_at",
+        "root_identity", "store_identity", "diagnostic_only", "raw_payloads_persisted", "identity_authority",
+        "vault_authority", "release_authority", "submission_authority", "receipt_sha256",
+    }
+    if (
+        set(value) != keys
+        or not isinstance(value["root_identity"], list)
+        or not isinstance(value["store_identity"], list)
+    ):
+        raise ValueError("ATS observation acceptance receipt schema is not closed")
+    receipt = AtsObservationAcceptanceReceipt(
+        **(value | {
+            "root_identity": tuple(value["root_identity"]),
+            "store_identity": tuple(value["store_identity"]),
+        })
+    )
+    if receipt.document() != value:
+        raise ValueError("ATS observation acceptance receipt is non-canonical")
+    return receipt
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _verify_market_observation_signature(
+    acceptance: AtsObservationAcceptance,
+    public_pem: bytes,
+) -> None:
+    if acceptance.key_id != MARKET_OBSERVATION_KEY_ID:
+        raise ValueError("ATS observation acceptance key ID is not trusted")
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError as exc:
+        raise RuntimeError("Ed25519 observation acceptance requires the optional cryptography package") from exc
+    try:
+        public_key = serialization.load_pem_public_key(public_pem)
+    except ValueError as exc:
+        raise ValueError("ATS observation public key is malformed") from exc
+    if not isinstance(public_key, Ed25519PublicKey):
+        raise ValueError("ATS observation public key type differs")
+    public_der = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    if sha256(public_der) != MARKET_OBSERVATION_PUBLIC_DER_SHA256:
+        raise ValueError("ATS observation public key identity differs")
+    signature = base64.b64decode(acceptance.signature_b64, validate=True)
+    try:
+        public_key.verify(signature, canonical_json(acceptance.signed_document()).encode())
+    except InvalidSignature as exc:
+        raise ValueError("ATS observation acceptance signature is invalid") from exc
+
+
+def _acceptance_receipt_matches(
+    receipt: AtsObservationAcceptanceReceipt,
+    acceptance: AtsObservationAcceptance,
+    authority: AtsObservationAuthority,
+    root_identity: tuple[int, int],
+    store_identity: tuple[int, int],
+) -> None:
+    expected = {
+        "acceptance_id": acceptance.acceptance_id,
+        "nonce": acceptance.nonce,
+        "request_sha256": authority.authority_sha256,
+        "envelope_sha256": acceptance.envelope_sha256,
+        "signature_sha256": sha256(base64.b64decode(acceptance.signature_b64, validate=True)),
+        "consumption_root_sha256": acceptance.consumption_root_sha256,
+        "job_key": authority.job_key,
+        "application_url": authority.application_url,
+        "timeout_ms": authority.timeout_ms,
+        "max_network_events": authority.max_network_events,
+        "max_snapshot_bytes": authority.max_snapshot_bytes,
+        "not_before": acceptance.not_before,
+        "expires_at": acceptance.expires_at,
+        "key_id": MARKET_OBSERVATION_KEY_ID,
+        "public_der_sha256": MARKET_OBSERVATION_PUBLIC_DER_SHA256,
+        "root_identity": root_identity,
+        "store_identity": store_identity,
+    }
+    if any(getattr(receipt, name) != value for name, value in expected.items()):
+        raise ValueError("ATS observation acceptance nonce is bound to different evidence")
+
+
+def _consume_verified_observation_acceptance(
+    authority: AtsObservationAuthority,
+    acceptance: AtsObservationAcceptance,
+    root: Path,
+    root_identity: tuple[int, int],
+    store_identity: tuple[int, int],
+    envelope_file: _ExternalOwnedFile,
+    public_key_file: _ExternalOwnedFile,
+) -> AtsObservationAcceptanceReceipt:
+    receipt_name = f"{acceptance.nonce}.json"
+    store = _open_acceptance_store(root, root_identity, create=False)
+    try:
+        if store is None or store.directory_identity != store_identity:
+            raise ValueError("ATS observation acceptance store does not match signed replay domain")
+        try:
+            existing_raw = _read_acceptance_at(store, receipt_name)
+        except FileNotFoundError:
+            existing_raw = None
+        if existing_raw is not None:
+            existing = _acceptance_receipt_from_document(_canonical(existing_raw))
+            _acceptance_receipt_matches(
+                existing,
+                acceptance,
+                authority,
+                root_identity,
+                store_identity,
+            )
+            envelope_file.verify()
+            public_key_file.verify()
+            store.verify()
+            return existing
+        now = _utc_now()
+        _ats_time(now)
+        if not acceptance.not_before <= now < acceptance.expires_at:
+            raise ValueError("ATS observation acceptance is outside its validity window")
+        current_root, current_identity, current_store_identity, current_binding = (
+            _consumption_root_binding(root)
+        )
+        if (
+            current_root != root
+            or current_identity != root_identity
+            or current_store_identity != store_identity
+            or current_binding != acceptance.consumption_root_sha256
+        ):
+            raise ValueError("ATS observation consumption root changed before publication")
+        fields = {
+            "schema_version": _OBSERVATION_ACCEPTANCE_RECEIPT_SCHEMA,
+            "acceptance_id": acceptance.acceptance_id,
+            "nonce": acceptance.nonce,
+            "request_sha256": authority.authority_sha256,
+            "envelope_sha256": acceptance.envelope_sha256,
+            "signature_sha256": sha256(base64.b64decode(acceptance.signature_b64, validate=True)),
+            "consumption_root_sha256": acceptance.consumption_root_sha256,
+            "job_key": authority.job_key,
+            "application_url": authority.application_url,
+            "timeout_ms": authority.timeout_ms,
+            "max_network_events": authority.max_network_events,
+            "max_snapshot_bytes": authority.max_snapshot_bytes,
+            "not_before": acceptance.not_before,
+            "expires_at": acceptance.expires_at,
+            "key_id": MARKET_OBSERVATION_KEY_ID,
+            "public_der_sha256": MARKET_OBSERVATION_PUBLIC_DER_SHA256,
+            "consumed_at": now,
+            "root_identity": list(root_identity),
+            "store_identity": list(store_identity),
+            "diagnostic_only": True,
+            "raw_payloads_persisted": False,
+            "identity_authority": False,
+            "vault_authority": False,
+            "release_authority": False,
+            "submission_authority": False,
+        }
+        receipt = AtsObservationAcceptanceReceipt(
+            **(fields | {
+                "root_identity": root_identity,
+                "store_identity": store_identity,
+                "receipt_sha256": sha256(canonical_json(fields).encode()),
+            })
+        )
+        data = (canonical_json(receipt.document()) + "\n").encode()
+
+        def prepublish_check() -> None:
+            envelope_file.verify()
+            public_key_file.verify()
+            store.verify()
+            _, identity, current_store_identity, binding = _consumption_root_binding(root)
+            if (
+                identity != root_identity
+                or current_store_identity != store_identity
+                or binding != acceptance.consumption_root_sha256
+            ):
+                raise ValueError("ATS observation consumption root changed before publication")
+
+        stored_raw = _write_acceptance_once(
+            store,
+            receipt_name,
+            data,
+            prepublish_check=prepublish_check,
+        )
+        stored = _acceptance_receipt_from_document(_canonical(stored_raw))
+        _acceptance_receipt_matches(
+            stored,
+            acceptance,
+            authority,
+            root_identity,
+            store_identity,
+        )
+        store.verify()
+        return stored
+    finally:
+        if store is not None:
+            store.close()
+
+
+def verify_and_consume_market_observation_acceptance(
+    authority: AtsObservationAuthority,
+    *,
+    envelope_path: str | Path,
+    public_key_path: str | Path,
+    consumption_root: str | Path,
+) -> AtsObservationAcceptanceReceipt:
+    """Authenticate and atomically consume one public observation acceptance.
+
+    The acceptance signs one pre-existing private replay-domain identity. Exact
+    replay returns its immutable first receipt; callers cannot select a new root.
+    """
+
+    if type(authority) is not AtsObservationAuthority:
+        raise TypeError("ATS observation request must use the canonical authority type")
+    if authority.authority_state != "pending" or authority.local_fixture_only is not False:
+        raise ValueError("public ATS observation request must remain a pending descriptor")
+    envelope_file = _open_external_owned_file(
+        envelope_path,
+        mode=0o600,
+        label="ATS observation acceptance envelope",
+    )
+    public_key_file = None
+    try:
+        acceptance = _acceptance_from_document(_canonical(envelope_file.data))
+        bindings = {
+            "request_sha256": authority.authority_sha256,
+            "job_key": authority.job_key,
+            "application_url": authority.application_url,
+            "timeout_ms": authority.timeout_ms,
+            "max_network_events": authority.max_network_events,
+            "max_snapshot_bytes": authority.max_snapshot_bytes,
+        }
+        if any(getattr(acceptance, name) != value for name, value in bindings.items()):
+            raise ValueError("ATS observation acceptance does not bind the exact request")
+        root, root_identity, store_identity, root_binding = _consumption_root_binding(
+            consumption_root
+        )
+        if acceptance.consumption_root_sha256 != root_binding:
+            raise ValueError("ATS observation acceptance does not bind the replay domain")
+        public_key_file = _open_external_owned_file(
+            public_key_path,
+            mode=0o644,
+            label="ATS observation public key",
+        )
+        _verify_market_observation_signature(acceptance, public_key_file.data)
+        envelope_file.verify()
+        public_key_file.verify()
+        return _consume_verified_observation_acceptance(
+            authority,
+            acceptance,
+            root,
+            root_identity,
+            store_identity,
+            envelope_file,
+            public_key_file,
+        )
+    finally:
+        if public_key_file is not None:
+            public_key_file.close()
+        envelope_file.close()
 
 
 @dataclass(frozen=True)
