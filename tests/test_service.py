@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import stat
 import tempfile
 import unittest
+from pathlib import Path
 
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
@@ -10,6 +13,16 @@ from market_aligner.service.api import AssessmentRequest, MarketAlignerService
 
 
 class ServiceTests(unittest.TestCase):
+    def test_fresh_assessment_database_is_owner_private_under_common_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state" / "assessments.sqlite3"
+            previous = os.umask(0o022)
+            try:
+                MarketAlignerService(temporary)
+            finally:
+                os.umask(previous)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
     def test_same_service_code_runs_multiple_profiles_and_new_user(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = ProfileStore(temporary)

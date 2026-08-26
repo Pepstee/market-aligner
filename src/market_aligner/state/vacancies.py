@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from market_aligner.config import owner_private_umask
 from market_aligner.domain.contracts import JobUrl, RawPosting, read_jsonl, write_jsonl
 from market_aligner.state.importers import iter_raw_cache_roots
 
@@ -128,16 +129,17 @@ class JobDatabase:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             conn.executescript(SCHEMA)
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30)
+        with owner_private_umask():
+            conn = sqlite3.connect(self.path, timeout=30)
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def upsert_discovered(self, row: JobUrl) -> bool:
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             existed = conn.execute("SELECT 1 FROM postings WHERE key=?", (row.key,)).fetchone()
             conn.execute(
                 """INSERT INTO postings(key,board,job_id,url,posted_at) VALUES(?,?,?,?,?)
@@ -149,7 +151,7 @@ class JobDatabase:
         return existed is None
 
     def has_raw(self, key: str) -> bool:
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             return conn.execute(
                 "SELECT 1 FROM postings WHERE key=? AND fetch_status='fetched'", (key,)
             ).fetchone() is not None
@@ -158,7 +160,7 @@ class JobDatabase:
         raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
         material = (row.raw_text or "") + (raw_json or "")
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             conn.execute(
                 """UPDATE postings SET fetched_at=?,raw_text=?,raw_json=?,content_hash=?,
                    fetch_status='fetched',fetch_error=NULL WHERE key=?""",
@@ -166,12 +168,12 @@ class JobDatabase:
             )
 
     def record_error(self, key: str, message: str) -> None:
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             conn.execute("UPDATE postings SET fetch_status='error',fetch_error=? WHERE key=?",
                          (message[:2000], key))
 
     def mark_source(self, board: str, error: str | None = None) -> None:
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             conn.execute(
                 """INSERT INTO source_state(board,last_polled_at,last_error)
                    VALUES(?,CURRENT_TIMESTAMP,?) ON CONFLICT(board) DO UPDATE SET
@@ -180,7 +182,7 @@ class JobDatabase:
             )
 
     def source_due(self, board: str, minimum_minutes: float) -> bool:
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             row = conn.execute("SELECT last_polled_at FROM source_state WHERE board=?", (board,)).fetchone()
         if not row or not row[0]:
             return True
@@ -197,7 +199,7 @@ class JobDatabase:
         if not selected:
             return set()
         placeholders = ",".join("?" for _ in selected)
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             rows = conn.execute(
                 f"SELECT DISTINCT board FROM postings WHERE fetch_status='discovered' "
                 f"AND board IN ({placeholders})",
@@ -206,7 +208,7 @@ class JobDatabase:
         return {str(row[0]) for row in rows}
 
     def export_urls(self, path: str | Path) -> int:
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             rows = [JobUrl(board=r[0], job_id=r[1], url=r[2], posted_at=r[3]) for r in
                     conn.execute("SELECT board,job_id,url,posted_at FROM postings ORDER BY first_seen_at,key")]
         return write_jsonl(path, rows)
@@ -239,7 +241,7 @@ class JobDatabase:
         if not source.exists():
             return 0
         count = 0
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             for row in read_jsonl(source):
                 key = f"{row.get('board')}:{row.get('job_id')}"
                 conn.execute(
@@ -251,7 +253,7 @@ class JobDatabase:
         return count
 
     def stats(self) -> dict[str, int]:
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             total = conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0]
             fetched = conn.execute("SELECT COUNT(*) FROM postings WHERE fetch_status='fetched'").fetchone()[0]
             normalized = conn.execute("SELECT COUNT(*) FROM normalised_jobs").fetchone()[0]

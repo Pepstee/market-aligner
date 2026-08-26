@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +17,16 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class CollectionTests(unittest.TestCase):
+    def test_fresh_vacancy_database_is_owner_private_under_common_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state" / "vacancies.sqlite3"
+            previous = os.umask(0o022)
+            try:
+                JobDatabase(path)
+            finally:
+                os.umask(previous)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
     def test_audited_fixture_adapters_retain_contract(self) -> None:
         for board in ("wanted", "saramin", "jobkorea", "notefolio"):
             adapter = load_adapter(board, fixture_dir=FIXTURES)
