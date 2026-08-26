@@ -26,6 +26,8 @@ Implemented local slices include:
 - generic opaque profiles, an external evidence ledger and loss-conscious legacy importers;
 - deterministic normalisation, deduplication, viability, eligibility and scoring;
 - validated semantic extraction/evidence-alignment schemas and content-bound LLM receipts;
+- an evidence-bound, provider-free `process-one` transaction with exact replay and
+  rollback-journal recovery across the vacancy and assessment databases;
 - an opportunity-before-research database gate, leased research workers and cited dossiers;
 - profile-scoped ranking, skill-frequency and interactive opportunity/fit reports;
 - a local service layer and provisional, versioned JAA contracts.
@@ -43,6 +45,10 @@ market-aligner profiles import --format evidence-led --source /private/profile.y
 market-aligner assess --profile-id prf_<opaque-id> --request /private/request.json
 market-aligner ingest --config /private/collection.yaml \
   --operation-id nightly-2026-08-24
+market-aligner process-one --operation-id fit-2026-08-24-001 \
+  --config /private/collection.yaml \
+  --profile-id prf_<opaque-id> --job-key board:job-id --track backend \
+  --processing-envelope <sha256>.json --data-home "$MARKET_ALIGNER_DATA_HOME"
 ```
 
 `ingest` runs exactly one bounded official collection cycle from the exact
@@ -61,6 +67,19 @@ closed and blocking new intersecting-scope operations, with deliberately no
 reconciliation capability in this slice. Provider failures preserve the last
 good database and raw cache, and every configured collector path is enforced
 to stay inside the data home.
+
+`process-one` admits one operator-staged, content-addressed processing envelope
+from the existing private data home. It validates the exact current vacancy,
+committed profile/evidence generation, imported extraction/alignment receipts,
+fixed scoring parameters and deterministic score, then atomically creates or
+exactly reuses the normalized vacancy and assessment while inserting one event
+and its self-validating receipt. Success and replay write the exact stored
+receipt bytes to stdout. Stable refusals write one canonical JSON line to
+stderr. A caught failure after the prospective receipt exists reopens both
+inode-pinned databases, lets SQLite complete legitimate rollback-journal
+recovery, checks integrity and foreign keys, and returns success only if the
+entire exact receipt/projection graph is durable. This command invokes no
+provider, model, browser, research, JAA, release or submission authority.
 
 Integrity boundary: owner-private directories, single-link 0600 files and
 unkeyed SHA-256 binding give receipts canonical identity and detect accidental

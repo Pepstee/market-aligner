@@ -9,13 +9,18 @@ from dataclasses import asdict
 from pathlib import Path
 
 from market_aligner import __version__
+from market_aligner import processing as processing_module
+from market_aligner.assessment.scoring import AssessmentAxes
 from market_aligner.collectors.engine import Collector
 from market_aligner.config import ProductPaths
 from market_aligner.config_loader import closure_identity, snapshot_config
 from market_aligner.profiler.importers import import_evidence_led, import_guided_profile
-from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
+from market_aligner.profiler.schema import (
+    CandidateProfile,
+    TrackProfile,
+    new_profile_id,
+)
 from market_aligner.profiler.store import ProfileStore
-from market_aligner.assessment.scoring import AssessmentAxes
 from market_aligner.service.api import AssessmentRequest, MarketAlignerService
 from market_aligner.state.operations import (
     INGEST_CYCLE_KIND,
@@ -111,6 +116,57 @@ def _assess_command(args: argparse.Namespace) -> int:
     if args.apply_opportunity_gate:
         output["opportunity_gate"] = asdict(service.gate(args.profile_id, request.job_key))
     print(json.dumps(output, ensure_ascii=False, sort_keys=True, default=str))
+    return 0
+
+
+def _write_exact_bytes(sink, payload: bytes) -> None:
+    """Write one exact receipt to a binary or ordinary CLI stdout seam."""
+
+    if hasattr(sink, "buffer"):
+        sink.buffer.write(payload)
+        sink.buffer.flush()
+        return
+    try:
+        sink.write(payload)
+    except TypeError:
+        sink.write(payload.decode("utf-8"))
+    if hasattr(sink, "flush"):
+        sink.flush()
+
+
+def _process_one_command(args: argparse.Namespace, *, out=None, err=None) -> int:
+    """Run the provider-free FIT path with byte-identical success output."""
+
+    sink_out = out if out is not None else sys.stdout
+    sink_err = err if err is not None else sys.stderr
+    try:
+        receipt = MarketAlignerService.process_one(
+            args.data_home,
+            args.processing_envelope,
+            supplied_operation_id=args.operation_id,
+            supplied_config_path=str(args.config),
+            supplied_profile_id=args.profile_id,
+            supplied_job_key=args.job_key,
+            supplied_track=args.track,
+        )
+    except processing_module.ProcessingRefused as exc:
+        refusal = {
+            "command": "process-one",
+            "status": "refused",
+            "reason": exc.reason,
+            "detail": exc.detail,
+        }
+        if exc.reason != processing_module.REASON_OPERATION_ID:
+            refusal["operation_id"] = args.operation_id
+        line = processing_module.canonical_json(refusal) + "\n"
+        try:
+            sink_err.write(line)
+        except TypeError:
+            sink_err.write(line.encode("utf-8"))
+        if hasattr(sink_err, "flush"):
+            sink_err.flush()
+        return 2
+    _write_exact_bytes(sink_out, receipt)
     return 0
 
 
@@ -538,6 +594,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_data_home(ingest)
     ingest.set_defaults(handler=_ingest_command)
+
+    process_one_parser = commands.add_parser(
+        "process-one",
+        help=(
+            "Admit one sealed evidence-bound FIT envelope and atomically "
+            "materialize its deterministic assessment receipt."
+        ),
+    )
+    process_one_parser.add_argument("--operation-id", required=True)
+    process_one_parser.add_argument("--config", type=Path, required=True)
+    process_one_parser.add_argument("--profile-id", required=True)
+    process_one_parser.add_argument("--job-key", required=True)
+    process_one_parser.add_argument("--track", required=True)
+    process_one_parser.add_argument(
+        "--processing-envelope",
+        required=True,
+        help="One direct content-addressed child of state/processing-inbox.",
+    )
+    process_one_parser.add_argument(
+        "--data-home",
+        type=Path,
+        required=True,
+        help="Existing external private-data root; never created by process-one.",
+    )
+    process_one_parser.set_defaults(handler=_process_one_command)
     return parser
 
 

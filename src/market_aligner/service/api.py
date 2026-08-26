@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from market_aligner.assessment.opportunity import OpportunityDecision, apply_gate
-from market_aligner.assessment.scoring import AssessmentAxes, ScoreResult, ScoringParams, score
+from market_aligner.assessment.scoring import (
+    AssessmentAxes,
+    ScoreResult,
+    ScoringParams,
+    score,
+)
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.research.store import AssessmentStore
 
@@ -46,3 +51,34 @@ class MarketAlignerService:
 
     def gate(self, profile_id: str, job_key: str) -> OpportunityDecision:
         return apply_gate(self.assessments, profile_id, job_key)
+
+    @staticmethod
+    def process_one(
+        data_home: Path,
+        envelope_name: str,
+        *,
+        supplied_operation_id: str,
+        supplied_config_path: str,
+        supplied_profile_id: str,
+        supplied_job_key: str,
+        supplied_track: str,
+    ) -> bytes:
+        """Run FIT-001 without constructing the mutating legacy service.
+
+        The processing owner performs its own lazy retained admission over
+        the already-existing stores.  Keeping this as a static service seam
+        prevents ``MarketAlignerService.__init__`` from creating directories,
+        schema, or WAL state during the side-effect-free preflight.
+        """
+
+        from market_aligner.processing import process_one
+
+        return process_one(
+            data_home,
+            envelope_name,
+            supplied_operation_id=supplied_operation_id,
+            supplied_config_path=supplied_config_path,
+            supplied_profile_id=supplied_profile_id,
+            supplied_job_key=supplied_job_key,
+            supplied_track=supplied_track,
+        )
