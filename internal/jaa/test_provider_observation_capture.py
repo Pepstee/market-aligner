@@ -131,6 +131,21 @@ def test_capture_receipt_is_create_only_and_content_addressed(tmp_path: Path) ->
             ],
         }
     )
+    form_inventory = _json_bytes(
+        {
+            "form_state": {
+                "fields": [],
+                "provider": "greenhouse",
+                "schema_version": "jaa.greenhouse-form-state.v1",
+                "title": "Example vacancy",
+                "url": APPLICATION_URL,
+            },
+            "schema_version": "jaa.greenhouse-form-inventory.v1",
+            "select_inventories": [],
+            "title": "Example vacancy",
+            "url": APPLICATION_URL,
+        }
+    )
     receipt = _persist_capture(
         archive_root=tmp_path,
         repository_root=ROOT,
@@ -147,6 +162,7 @@ def test_capture_receipt_is_create_only_and_content_addressed(tmp_path: Path) ->
                 "policy": "test-masked",
             }
         ),
+        form_inventory=form_inventory,
     )
     manifest = json.loads(receipt.manifest_path.read_bytes())
     assert (
@@ -154,6 +170,8 @@ def test_capture_receipt_is_create_only_and_content_addressed(tmp_path: Path) ->
         == hashlib.sha256(receipt.manifest_path.read_bytes()).hexdigest()
     )
     assert receipt.observation_sha256 == hashlib.sha256(observation).hexdigest()
+    assert receipt.form_inventory == form_inventory
+    assert receipt.form_inventory_sha256 == hashlib.sha256(form_inventory).hexdigest()
     assert manifest["collector_identity"] == COLLECTOR_IDENTITY
     assert manifest["source_url"] == APPLICATION_URL
     assert manifest["interaction"] == {
@@ -181,6 +199,7 @@ def test_capture_receipt_is_create_only_and_content_addressed(tmp_path: Path) ->
                 "policy": "test-masked",
             }
         ),
+        form_inventory=form_inventory,
     )
     assert repeated.manifest_sha256 == receipt.manifest_sha256
 

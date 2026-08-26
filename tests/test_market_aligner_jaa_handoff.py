@@ -923,8 +923,158 @@ def _synthetic_candidate_materialization_authority(
     return statements, decision_receipt, (canonical_json(authority) + "\n").encode()
 
 
+def _retarget_market_vector(
+    document: dict[str, object],
+    *,
+    source_url: str,
+    job_key: str,
+    source_job_id: str,
+) -> dict[str, object]:
+    envelope = json.loads(
+        base64.b64decode(document["handoff"]["canonical_base64"], validate=True)
+    )
+    expected = envelope["payload"]
+    old_job_key = expected["job_key"]
+    old_url = expected["vacancy"]["provenance"]["canonical_url"]
+    old_vacancy_sha256 = expected["vacancy"]["vacancy_snapshot_sha256"]
+    entries = {
+        row["metadata"]["reference_key"]: row
+        for row in document["reference_bundle"]["value"]["entries"]
+    }
+
+    def replace(value):
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if value == old_job_key:
+            return job_key
+        if value == old_url:
+            return source_url
+        if value == old_vacancy_sha256:
+            return vacancy_sha256
+        return value
+
+    def load(reference_key: str) -> dict[str, object]:
+        return json.loads(
+            base64.b64decode(entries[reference_key]["object_base64"], validate=True)
+        )
+
+    def save(reference_key: str, value: dict[str, object]) -> str:
+        exact = canonical_json_bytes(value)
+        digest = hashlib.sha256(exact).hexdigest()
+        entries[reference_key]["object_base64"] = base64.b64encode(exact).decode()
+        entries[reference_key]["metadata"]["object_sha256"] = digest
+        return digest
+
+    vacancy_sha256 = old_vacancy_sha256
+    raw_listing = replace(load("vacancy.raw_listing"))
+    raw_listing["adapter"] = "greenhouse"
+    raw_listing["source_job_id"] = source_job_id
+    raw_listing_sha256 = save("vacancy.raw_listing", raw_listing)
+    requirements = replace(load("vacancy.requirements"))
+    requirements_sha256 = save("vacancy.requirements", requirements)
+    location = replace(load("vacancy.location.facts"))
+    location_sha256 = save("vacancy.location.facts", location)
+    vacancy_snapshot = replace(load("vacancy.snapshot"))
+    vacancy_snapshot.update(
+        {
+            "location_facts_sha256": location_sha256,
+            "raw_listing_sha256": raw_listing_sha256,
+            "requirements_sha256": requirements_sha256,
+        }
+    )
+    vacancy_sha256 = save("vacancy.snapshot", vacancy_snapshot)
+
+    evidence_by_code: dict[str, str] = {}
+    for reference_key in tuple(entries):
+        if not reference_key.startswith("eligibility.checks/"):
+            continue
+        evidence = replace(load(reference_key))
+        digest = save(reference_key, evidence)
+        evidence_by_code[reference_key.split("/")[1]] = digest
+
+    expected = replace(expected)
+    expected["job_key"] = job_key
+    expected["vacancy"]["provenance"].update(
+        {
+            "adapter": "greenhouse",
+            "canonical_url": source_url,
+            "source_job_id": source_job_id,
+        }
+    )
+    expected["vacancy"].update(
+        {
+            "location": {
+                **expected["vacancy"]["location"],
+                "facts_sha256": location_sha256,
+            },
+            "raw_listing_sha256": raw_listing_sha256,
+            "requirements_sha256": requirements_sha256,
+            "vacancy_snapshot_sha256": vacancy_sha256,
+        }
+    )
+    for check in expected["eligibility"]["checks"]:
+        check["evidence_sha256"] = evidence_by_code[check["code"]]
+
+    for reference_key in (
+        "assessment.receipt",
+        "selection.receipt",
+        "eligibility.receipt",
+    ):
+        receipt = replace(load(reference_key))
+        if reference_key == "eligibility.receipt":
+            for check in receipt["checks"]:
+                check["evidence_sha256"] = evidence_by_code[check["code"]]
+        digest = save(reference_key, receipt)
+        if reference_key == "assessment.receipt":
+            expected["assessment"]["assessment_receipt_sha256"] = digest
+        elif reference_key == "selection.receipt":
+            expected["selection"]["selection_receipt_sha256"] = digest
+        else:
+            expected["eligibility"]["eligibility_receipt_sha256"] = digest
+
+    for row in entries.values():
+        row["metadata"]["subject"] = replace(row["metadata"]["subject"])
+    return expected
+
+
+def _refresh_market_vector_candidate_intent(
+    document: dict[str, object],
+    expected: dict[str, object],
+    candidate_intent_sha256: str,
+) -> None:
+    entries = {
+        row["metadata"]["reference_key"]: row
+        for row in document["reference_bundle"]["value"]["entries"]
+    }
+    expected["candidate_intent_sha256"] = candidate_intent_sha256
+    for reference_key, target, target_key in (
+        ("assessment.receipt", expected["assessment"], "assessment_receipt_sha256"),
+        ("selection.receipt", expected["selection"], "selection_receipt_sha256"),
+        ("eligibility.receipt", expected["eligibility"], "eligibility_receipt_sha256"),
+    ):
+        row = entries[reference_key]
+        receipt = json.loads(
+            base64.b64decode(row["object_base64"], validate=True)
+        )
+        receipt["candidate_intent_sha256"] = candidate_intent_sha256
+        exact = canonical_json_bytes(receipt)
+        digest = hashlib.sha256(exact).hexdigest()
+        row["object_base64"] = base64.b64encode(exact).decode()
+        row["metadata"]["object_sha256"] = digest
+        target[target_key] = digest
+
+
 def _canonical_market_jaa_materialization(
-    tmp_path, capsys, monkeypatch, *, upload_kind="cv"
+    tmp_path,
+    capsys,
+    monkeypatch,
+    *,
+    upload_kind="cv",
+    source_url: str | None = None,
+    job_key: str | None = None,
+    source_job_id: str | None = None,
 ):
     import career_automation.candidate_application_factory as candidate_factory_module
     from career_automation.application_compiler import CandidateContact
@@ -946,6 +1096,15 @@ def _canonical_market_jaa_materialization(
     expected = json.loads(
         base64.b64decode(document["handoff"]["canonical_base64"], validate=True)
     )["payload"]
+    if any(value is not None for value in (source_url, job_key, source_job_id)):
+        if not all(value is not None for value in (source_url, job_key, source_job_id)):
+            raise ValueError("retargeted Market fixture requires URL, job key, and source ID")
+        expected = _retarget_market_vector(
+            document,
+            source_url=source_url,
+            job_key=job_key,
+            source_job_id=source_job_id,
+        )
     assessment = expected["assessment"]
     statements, decision_receipt, candidate_authority_bytes = (
         _synthetic_candidate_materialization_authority(expected)
@@ -970,6 +1129,9 @@ def _canonical_market_jaa_materialization(
         candidate_intent_bytes
     ).decode()
     candidate_intent_entry["metadata"]["object_sha256"] = candidate_intent_sha256
+    _refresh_market_vector_candidate_intent(
+        document, expected, candidate_intent_sha256
+    )
     authority_entry = next(
         row
         for row in entries
@@ -1497,3 +1659,231 @@ def test_admitted_market_package_real_chrome_readback_never_submits(
     assert (review.source_head, review.source_sha256s) == expected_source_identity
     assert review.consequential_click_authority is False
     assert circuit.journal() == ()
+
+
+def test_greenhouse_identity_retargets_one_market_handoff_and_materialization(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    from market_aligner.applications.handoff import job_key_for
+
+    source_url = "https://job-boards.greenhouse.io/example/jobs/1234567"
+    job_key = job_key_for(
+        adapter="greenhouse",
+        canonical_url=source_url,
+        source_job_id="1234567",
+        strict_strings=True,
+    )
+    fixture = _canonical_market_jaa_materialization(
+        tmp_path,
+        capsys,
+        monkeypatch,
+        source_url=source_url,
+        job_key=job_key,
+        source_job_id="1234567",
+    )
+    verified = fixture["admission_store"].for_boundary(
+        fixture["admission"].application_id, "strategy"
+    )
+    materialization, package, uploads = fixture["package_builder"](verified)
+    assert verified.application_id == fixture["admission"].application_id
+    assert verified.job_key == job_key
+    assert verified.canonical_url == source_url
+    assert materialization.source.job_key == job_key
+    assert materialization.receipt.source_url == source_url
+    assert package.source is materialization.source
+    assert set(uploads) == {"resume"}
+
+
+def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    import career_automation.workable_live_adapter as workable_module
+    import playwright.sync_api as playwright_api
+    from career_automation.provider_observation_capture import (
+        capture_greenhouse_observation,
+    )
+    from career_automation.workable_live_adapter import (
+        SyntheticWorkableFixtureAdapter,
+        WorkableBoundaryError,
+        WorkableField,
+        WorkableOneUseCircuit,
+        WorkablePolicy,
+    )
+    from market_aligner.applications.handoff import job_key_for
+
+    try:
+        expected_source_identity = workable_module._source_identity(JAA_ROOT)
+    except (ValueError, WorkableBoundaryError):
+        pytest.skip("real Chrome proof requires the committed clean candidate tree")
+
+    source_url = "https://job-boards.greenhouse.io/example/jobs/1234567"
+    job_key = job_key_for(
+        adapter="greenhouse",
+        canonical_url=source_url,
+        source_job_id="1234567",
+        strict_strings=True,
+    )
+    greenhouse_html = """<!doctype html><html><head>
+      <title>Synthetic Platform Engineer</title></head><body>
+      <form id="application_form">
+        <label for="full_name">Full name</label>
+        <input id="full_name" name="full_name" type="text" required>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" required>
+        <label for="resume">Resume</label>
+        <input id="resume" name="resume" type="file" required>
+        <button type="submit">Submit application</button>
+      </form>
+      <script>window.__remixContext={
+        "confirmationPath":"/example/jobs/1234567/confirmation",
+        "confirmation_message":"Thank you",
+        "submitPath":"https://boards.greenhouse.io/example/jobs/1234567"
+      };</script></body></html>"""
+    real_sync_playwright = playwright_api.sync_playwright
+
+    class RoutedBrowser:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def new_page(self):
+            page = self._browser.new_page()
+            page.route(
+                "**/*",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body=greenhouse_html,
+                ),
+            )
+            return page
+
+        def close(self):
+            return self._browser.close()
+
+    class RoutedChromium:
+        def __init__(self, chromium):
+            self._chromium = chromium
+
+        def launch(self, **_kwargs):
+            return RoutedBrowser(
+                self._chromium.launch(channel="chrome", headless=True)
+            )
+
+    class RoutedPlaywright:
+        def __init__(self, playwright):
+            self.chromium = RoutedChromium(playwright.chromium)
+
+    class RoutedContext:
+        def __init__(self):
+            self._context = real_sync_playwright()
+
+        def __enter__(self):
+            return RoutedPlaywright(self._context.__enter__())
+
+        def __exit__(self, *arguments):
+            return self._context.__exit__(*arguments)
+
+    monkeypatch.setattr(playwright_api, "sync_playwright", RoutedContext)
+    observation = capture_greenhouse_observation(
+        source_url=source_url,
+        archive_root=tmp_path / "provider-observation",
+        repository_root=JAA_ROOT,
+    )
+    inventory = json.loads(observation.form_inventory)
+    observed_names = tuple(
+        field["name"] for field in inventory["form_state"]["fields"]
+    )
+    assert observed_names == ("full_name", "email", "resume")
+    assert inventory["url"] == source_url
+
+    fixture = _canonical_market_jaa_materialization(
+        tmp_path / "market-jaa",
+        capsys,
+        monkeypatch,
+        source_url=source_url,
+        job_key=job_key,
+        source_job_id="1234567",
+    )
+    policy = WorkablePolicy(
+        tenant="synthetic",
+        vacancy_id="1234567",
+        job_key=job_key,
+        fields=tuple(
+            WorkableField(
+                field["name"],
+                field["type"],
+                field["required"],
+                field["labels"][0],
+            )
+            for field in inventory["form_state"]["fields"]
+        ),
+    )
+    circuit = WorkableOneUseCircuit(tmp_path / "greenhouse-corridor.sqlite3")
+    workable_html = greenhouse_html.replace(
+        "window.__remixContext=", "window.submitClicks=0; window.__remixContext="
+    ).replace(
+        "</script>",
+        "document.querySelector('form').addEventListener('submit', event => {"
+        "event.preventDefault(); window.submitClicks += 1;});</script>",
+    )
+    with real_sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200, content_type="text/html", body=workable_html
+            ),
+        )
+        page.goto(
+            "http://127.0.0.1/fixture/workable/synthetic/j/1234567/apply/",
+            wait_until="domcontentloaded",
+        )
+        page.evaluate("window.__JAA_WORKABLE_FIXTURE__ = true")
+        application, review = SyntheticWorkableFixtureAdapter(
+            circuit, JAA_ROOT
+        ).prepare_admitted_diagnostic_review(
+            page,
+            admission_store=fixture["admission_store"],
+            application_id=fixture["admission"].application_id,
+            package_builder=fixture["package_builder"],
+            policy=policy,
+        )
+        built = fixture["built"]
+        assert page.locator('[name="full_name"]').input_value() == (
+            built["materialization"].source.contact.full_name
+        )
+        assert page.locator('[name="email"]').input_value() == (
+            built["materialization"].source.contact.email
+        )
+        assert page.locator('[name="resume"]').evaluate(
+            "el => ({name: el.files[0].name, size: el.files[0].size})"
+        ) == {
+            "name": built["cv_path"].name,
+            "size": built["cv_path"].stat().st_size,
+        }
+        assert page.evaluate("window.submitClicks") == 0
+        browser.close()
+
+    package_document = application.package_document()
+    assert built["materialization"].receipt.source_url == observation.source_url
+    assert package_document["job_key"] == job_key
+    assert package_document["application_id"] == fixture["admission"].application_id
+    assert (review.source_head, review.source_sha256s) == expected_source_identity
+    assert review.consequential_click_authority is False
+    assert circuit.journal() == ()
+    evidence = {
+        "application_id": fixture["admission"].application_id,
+        "fields_discovered": len(observed_names),
+        "fields_filled": 2,
+        "files_uploaded": 1,
+        "form_inventory_sha256": observation.form_inventory_sha256,
+        "handoff_root_sha256": fixture["admission"].handoff_root_sha256,
+        "materialization_receipt_sha256": built[
+            "materialization"
+        ].receipt.receipt_sha256,
+        "observation_manifest_sha256": observation.manifest_sha256,
+        "submit_clicks": 0,
+    }
+    print("MARKET_JAA_LOCAL_GREENHOUSE " + json.dumps(evidence, sort_keys=True))

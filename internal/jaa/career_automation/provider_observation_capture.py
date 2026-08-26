@@ -194,6 +194,8 @@ class ProviderObservationCaptureReceipt:
     observation: bytes
     observed_at: str
     source_url: str
+    form_inventory_sha256: str | None = None
+    form_inventory: bytes | None = None
 
 
 class ProviderObservationCaptureFailure(RuntimeError):
@@ -406,6 +408,7 @@ def _persist_capture(
     network_events: bytes,
     screenshot: bytes | None,
     screenshot_safety: bytes | None = None,
+    form_inventory: bytes | None = None,
 ) -> ProviderObservationCaptureReceipt:
     """Persist an owned capture as create-only content-addressed objects."""
     root = Path(archive_root).resolve(strict=True)
@@ -439,6 +442,8 @@ def _persist_capture(
         artifacts["screenshot_safety"] = _archive_object(root, screenshot_safety)
     elif screenshot_safety is not None:
         artifacts["screenshot_safety"] = _archive_object(root, screenshot_safety)
+    if form_inventory is not None:
+        artifacts["form_inventory"] = _archive_object(root, form_inventory)
     manifest = {
         "schema_version": "jaa.provider-observation-capture.v1",
         "capture_mode": "production_live",
@@ -468,6 +473,8 @@ def _persist_capture(
         observation=observation,
         observed_at=str(manifest["observed_at"]),
         source_url=source_url,
+        form_inventory_sha256=artifacts.get("form_inventory"),
+        form_inventory=form_inventory,
     )
 
 
@@ -559,6 +566,7 @@ def capture_greenhouse_observation(
     visible_content = b""
     screenshot: bytes | None = None
     screenshot_safety: bytes | None = None
+    form_inventory: bytes | None = None
     final_url: str | None = None
     response_status: int | None = None
     observed_at = datetime.now(timezone.utc).isoformat()
@@ -604,6 +612,10 @@ def capture_greenhouse_observation(
             screenshot_safety = _mask_page_for_screenshot(page)
             stage = "screenshot_capture"
             screenshot = page.screenshot(full_page=True)
+            stage = "form_inventory"
+            from .production_ats_executor import collect_greenhouse_form_inventory
+
+            form_inventory = collect_greenhouse_form_inventory(page)
             final_url = page.url
             stage = "browser_close"
             browser.close()
@@ -700,6 +712,7 @@ def capture_greenhouse_observation(
                 "confirmation_message": confirmation_message,
                 "submitPath": submit_path,
             },
+            "form_inventory_sha256": _sha256(form_inventory),
             "interaction": {
                 "fields_filled": 0,
                 "files_uploaded": 0,
@@ -723,6 +736,7 @@ def capture_greenhouse_observation(
         ),
         screenshot=screenshot,
         screenshot_safety=screenshot_safety,
+        form_inventory=form_inventory,
     )
 
 
