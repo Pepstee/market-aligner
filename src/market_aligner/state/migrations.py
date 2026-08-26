@@ -167,6 +167,8 @@ def _expected_facts(name: str) -> dict[str, tuple] | None:
 
 def _verify_table_facts(connection: sqlite3.Connection, alias: str, name: str) -> None:
     facts = _expected_facts(name)
+    if facts is None and name == "eligibility_receipts":
+        facts = ELIGIBILITY_EXPECTED_FACTS
     if facts is None:
         return
     info_rows = connection.execute(f"PRAGMA {alias}.table_info({name})").fetchall()
@@ -362,3 +364,68 @@ FIT001_PROCESSING_RECEIPTS = Migration(
     name="fit001_processing_receipts_v1",
     statements=(FIT001_RECEIPTS_DDL,),
 )
+ELIGIBILITY_RECEIPTS_DDL = (
+    "CREATE TABLE eligibility_receipts(operation_id TEXT PRIMARY KEY,fit_operation_id TEXT NOT NULL UNIQUE,profile_id TEXT NOT NULL,job_key TEXT NOT NULL,track TEXT NOT NULL,binding_sha256 TEXT NOT NULL UNIQUE,envelope_file_sha256 TEXT NOT NULL,envelope_semantic_sha256 TEXT NOT NULL,fit_receipt_self_hash TEXT NOT NULL,fit_receipt_file_sha256 TEXT NOT NULL,fit_binding_sha256 TEXT NOT NULL,fit_event_id INTEGER NOT NULL,fit_event_payload_sha256 TEXT NOT NULL,fit_raw_snapshot_sha256 TEXT NOT NULL,fit_profile_context_sha256 TEXT NOT NULL,fit_extraction_output_sha256 TEXT NOT NULL,fit_alignment_output_sha256 TEXT NOT NULL,fit_normalized_json_sha256 TEXT NOT NULL,fit_assessment_payload_hash TEXT NOT NULL,candidate_facts_sha256 TEXT NOT NULL,vacancy_facts_sha256 TEXT NOT NULL,decision_policy_sha256 TEXT NOT NULL,decision_input_sha256 TEXT NOT NULL,iso_jurisdiction_set_sha256 TEXT NOT NULL,decision TEXT NOT NULL CHECK(decision IN ('pass','review','reject')),reasons_json TEXT NOT NULL,unknowns_json TEXT NOT NULL,event_id INTEGER NOT NULL,event_payload_sha256 TEXT NOT NULL,receipt_self_hash TEXT NOT NULL,receipt_file_sha256 TEXT NOT NULL UNIQUE,receipt_bytes BLOB NOT NULL,eligibility_authority INTEGER NOT NULL CHECK(eligibility_authority=(decision='pass')),research_authority INTEGER NOT NULL CHECK(research_authority=0),application_authority INTEGER NOT NULL CHECK(application_authority=0),release_authority INTEGER NOT NULL CHECK(release_authority=0),submission_authority INTEGER NOT NULL CHECK(submission_authority=0),created_at TEXT NOT NULL,UNIQUE(profile_id,job_key),FOREIGN KEY(fit_operation_id) REFERENCES processing_receipts(operation_id) ON DELETE RESTRICT,FOREIGN KEY(fit_event_id) REFERENCES assessment_events(id) ON DELETE RESTRICT,FOREIGN KEY(event_id) REFERENCES assessment_events(id) ON DELETE RESTRICT,CHECK(length(binding_sha256)=64 AND binding_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(envelope_file_sha256)=64 AND envelope_file_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(envelope_semantic_sha256)=64 AND envelope_semantic_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_receipt_self_hash)=64 AND fit_receipt_self_hash NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_receipt_file_sha256)=64 AND fit_receipt_file_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_binding_sha256)=64 AND fit_binding_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_event_payload_sha256)=64 AND fit_event_payload_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_raw_snapshot_sha256)=64 AND fit_raw_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_profile_context_sha256)=64 AND fit_profile_context_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_extraction_output_sha256)=64 AND fit_extraction_output_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_alignment_output_sha256)=64 AND fit_alignment_output_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_normalized_json_sha256)=64 AND fit_normalized_json_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(fit_assessment_payload_hash)=64 AND fit_assessment_payload_hash NOT GLOB '*[^0-9a-f]*'),CHECK(length(candidate_facts_sha256)=64 AND candidate_facts_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(vacancy_facts_sha256)=64 AND vacancy_facts_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(decision_policy_sha256)=64 AND decision_policy_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(decision_input_sha256)=64 AND decision_input_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(iso_jurisdiction_set_sha256)=64 AND iso_jurisdiction_set_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(event_payload_sha256)=64 AND event_payload_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(receipt_self_hash)=64 AND receipt_self_hash NOT GLOB '*[^0-9a-f]*'),CHECK(length(receipt_file_sha256)=64 AND receipt_file_sha256 NOT GLOB '*[^0-9a-f]*'),CHECK(length(operation_id) BETWEEN 8 AND 64),CHECK(length(fit_operation_id) BETWEEN 8 AND 64),CHECK(length(profile_id)=36),CHECK(length(job_key) BETWEEN 3 AND 256),CHECK(length(track) BETWEEN 1 AND 128),CHECK(fit_event_id>0),CHECK(event_id>0),CHECK(length(reasons_json) BETWEEN 2 AND 65536),CHECK(length(unknowns_json) BETWEEN 2 AND 65536),CHECK(length(receipt_bytes) BETWEEN 3 AND 8388608),CHECK(length(created_at) BETWEEN 20 AND 64)) STRICT"
+)
+
+ELIGIBILITY_ELIGIBILITY_RECEIPTS = Migration(
+    version=2,
+    name="eligibility001_eligibility_receipts_v1",
+    statements=(ELIGIBILITY_RECEIPTS_DDL,),
+)
+
+
+ELIGIBILITY_EXPECTED_FACTS = {
+    "columns": (
+        ("operation_id", "TEXT", 1, 1),
+        ("fit_operation_id", "TEXT", 1, 0),
+        ("profile_id", "TEXT", 1, 0),
+        ("job_key", "TEXT", 1, 0),
+        ("track", "TEXT", 1, 0),
+        ("binding_sha256", "TEXT", 1, 0),
+        ("envelope_file_sha256", "TEXT", 1, 0),
+        ("envelope_semantic_sha256", "TEXT", 1, 0),
+        ("fit_receipt_self_hash", "TEXT", 1, 0),
+        ("fit_receipt_file_sha256", "TEXT", 1, 0),
+        ("fit_binding_sha256", "TEXT", 1, 0),
+        ("fit_event_id", "INTEGER", 1, 0),
+        ("fit_event_payload_sha256", "TEXT", 1, 0),
+        ("fit_raw_snapshot_sha256", "TEXT", 1, 0),
+        ("fit_profile_context_sha256", "TEXT", 1, 0),
+        ("fit_extraction_output_sha256", "TEXT", 1, 0),
+        ("fit_alignment_output_sha256", "TEXT", 1, 0),
+        ("fit_normalized_json_sha256", "TEXT", 1, 0),
+        ("fit_assessment_payload_hash", "TEXT", 1, 0),
+        ("candidate_facts_sha256", "TEXT", 1, 0),
+        ("vacancy_facts_sha256", "TEXT", 1, 0),
+        ("decision_policy_sha256", "TEXT", 1, 0),
+        ("decision_input_sha256", "TEXT", 1, 0),
+        ("iso_jurisdiction_set_sha256", "TEXT", 1, 0),
+        ("decision", "TEXT", 1, 0),
+        ("reasons_json", "TEXT", 1, 0),
+        ("unknowns_json", "TEXT", 1, 0),
+        ("event_id", "INTEGER", 1, 0),
+        ("event_payload_sha256", "TEXT", 1, 0),
+        ("receipt_self_hash", "TEXT", 1, 0),
+        ("receipt_file_sha256", "TEXT", 1, 0),
+        ("receipt_bytes", "BLOB", 1, 0),
+        ("eligibility_authority", "INTEGER", 1, 0),
+        ("research_authority", "INTEGER", 1, 0),
+        ("application_authority", "INTEGER", 1, 0),
+        ("release_authority", "INTEGER", 1, 0),
+        ("submission_authority", "INTEGER", 1, 0),
+        ("created_at", "TEXT", 1, 0),
+    ),
+    "uniques": (
+        ("binding_sha256",),
+        ("fit_operation_id",),
+        ("profile_id", "job_key"),
+        ("receipt_file_sha256",),
+    ),
+    "foreign_keys": (
+        ("assessment_events", "event_id", "id", "RESTRICT"),
+        ("assessment_events", "fit_event_id", "id", "RESTRICT"),
+        ("processing_receipts", "fit_operation_id", "operation_id",
+         "RESTRICT"),
+    ),
+}

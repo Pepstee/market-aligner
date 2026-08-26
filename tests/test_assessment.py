@@ -176,5 +176,227 @@ class AssessmentTests(unittest.TestCase):
             self.assertEqual("scored", store.assessment(second.profile_id, "board:1")["state"])
 
 
+
+
+def _pol(**kw):
+    return EligibilityPolicy(**kw)
+
+
+
+
+# ==========================================================================
+# ELIGIBILITY-001 pure decision-owner contract (accepted document, section 11)
+# Canonical values only: uppercase ISO members / lowercase contract enum.
+# ==========================================================================
+
+
+
+class EligibilityContractMatrixTests(unittest.TestCase):
+    def _run(self, policy, **facts):
+        d = assess_eligibility(EligibilityInput(**facts), policy)
+        return d.decision, list(d.reasons), list(d.unknowns)
+
+    def test_j1_unknown_jurisdiction_reviews_only(self):
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=frozenset({"DE"})),
+                      work_jurisdiction=None),
+            ("review", [], ["work_jurisdiction_unknown"]))
+
+    def test_j2_exact_match_satisfies_and_sponsorship_irrelevant(self):
+        for rs in (True, False, None):
+            d = assess_eligibility(
+                EligibilityInput(work_jurisdiction="DE"),
+                _pol(authorised_jurisdictions=frozenset({"DE"}),
+                     requires_sponsorship=rs))
+            self.assertEqual((d.decision, list(d.reasons), list(d.unknowns)),
+                             ("pass", [], []), rs)
+
+    def test_known_without_member_routes(self):
+        pol = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                   requires_sponsorship=True)
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="NL", sponsorship_available=True),
+            ("pass", [], []))
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="NL",
+                      sponsorship_available=False),
+            ("reject", ["sponsorship_unavailable"], []))
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="NL",
+                      sponsorship_available=None),
+            ("review", [], ["sponsorship_availability_unknown"]))
+        pol_no_need = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                           requires_sponsorship=False)
+        self.assertEqual(
+            self._run(pol_no_need, work_jurisdiction="NL"),
+            ("reject", ["work_authorisation_mismatch"], []))
+        pol_unknown_need = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                                requires_sponsorship=None)
+        self.assertEqual(
+            self._run(pol_unknown_need, work_jurisdiction="NL"),
+            ("review", [], ["sponsorship_requirement_unknown"]))
+
+    def test_known_empty_set_never_passes_silently(self):
+        pol = _pol(authorised_jurisdictions=frozenset(),
+                   requires_sponsorship=True)
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="DE", sponsorship_available=False),
+            ("reject", ["sponsorship_unavailable"], []))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=frozenset(),
+                           requires_sponsorship=False),
+                      work_jurisdiction="DE"),
+            ("reject", ["work_authorisation_mismatch"], []))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=frozenset(),
+                           requires_sponsorship=None),
+                      work_jurisdiction="DE"),
+            ("review", [], ["sponsorship_requirement_unknown"]))
+
+    def test_unknown_auth_set_routes(self):
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=None,
+                           requires_sponsorship=True),
+                      work_jurisdiction="DE", sponsorship_available=True),
+            ("pass", [], []))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=None,
+                           requires_sponsorship=True),
+                      work_jurisdiction="DE", sponsorship_available=False),
+            ("reject", ["sponsorship_unavailable"], []))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=None,
+                           requires_sponsorship=True),
+                      work_jurisdiction="DE", sponsorship_available=None),
+            ("review", [], ["sponsorship_availability_unknown"]))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=None,
+                           requires_sponsorship=False),
+                      work_jurisdiction="DE"),
+            ("review", [], ["authorised_jurisdictions_unknown"]))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=None,
+                           requires_sponsorship=None),
+                      work_jurisdiction="DE"),
+            ("review", [],
+             ["authorised_jurisdictions_unknown",
+              "sponsorship_requirement_unknown"]))
+
+    def test_residence_rows(self):
+        base = dict(authorised_jurisdictions=frozenset({"DE"}),
+                    current_residence="DE")
+        self.assertEqual(self._run(_pol(**base), work_jurisdiction="DE",
+                                   required_residence="DE"),
+                         ("pass", [], []))
+        self.assertEqual(
+            self._run(_pol(current_residence="FR",
+                           authorised_jurisdictions=frozenset({"DE"})),
+                      work_jurisdiction="DE", required_residence="DE"),
+            ("reject", ["residence_requirement_mismatch"], []))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=frozenset({"DE"})),
+                      work_jurisdiction="DE", required_residence="DE"),
+            ("review", [], ["candidate_residence_unknown"]))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=frozenset({"DE"})),
+                      work_jurisdiction="DE"),
+            ("pass", [], []))
+
+    def test_experience_ceiling_direction(self):
+        pol = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                   maximum_years_required=2.0)
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="DE",
+                      minimum_years_experience=3.0),
+            ("reject", ["experience_requirement_exceeds_policy"], []))
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="DE",
+                      minimum_years_experience=2.0),
+            ("pass", [], []))
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="DE",
+                      minimum_years_experience=1.0),
+            ("pass", [], []))
+        self.assertEqual(
+            self._run(_pol(authorised_jurisdictions=frozenset({"DE"})),
+                      work_jurisdiction="DE",
+                      minimum_years_experience=1.0),
+            ("review", [], ["maximum_experience_ceiling_unknown"]))
+
+    def test_contract_dimension_rows(self):
+        pol = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                   excluded_contract_types=frozenset({"contract"}))
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="DE",
+                      contract_type="contract"),
+            ("reject", ["excluded_contract_type"], []))
+        self.assertEqual(
+            self._run(pol, work_jurisdiction="DE",
+                      contract_type="permanent"),
+            ("pass", [], []))
+        known_empty = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                           excluded_contract_types=frozenset())
+        self.assertEqual(
+            self._run(known_empty, work_jurisdiction="DE",
+                      contract_type="contract"),
+            ("pass", [], []))
+        unknown_excl = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                            excluded_contract_types=None)
+        self.assertEqual(
+            self._run(unknown_excl, work_jurisdiction="DE",
+                      contract_type="contract"),
+            ("review", [], ["excluded_contract_types_unknown"]))
+        absent_contract = _pol(authorised_jurisdictions=frozenset({"DE"}),
+                               excluded_contract_types=None)
+        self.assertEqual(
+            self._run(absent_contract, work_jurisdiction="DE"),
+            ("pass", [], []))
+
+    def test_reject_dominates_and_order_is_ascii_sorted(self):
+        d = assess_eligibility(
+            EligibilityInput(work_jurisdiction="NL",
+                             required_residence="NL",
+                             minimum_years_experience=5.0),
+            _pol(authorised_jurisdictions=frozenset({"DE"}),
+                 current_residence="DE",
+                 requires_sponsorship=False,
+                 maximum_years_required=2.0,
+                 excluded_contract_types=frozenset()))
+        self.assertEqual(d.decision, "reject")
+        self.assertEqual(list(d.reasons),
+                         ["experience_requirement_exceeds_policy",
+                          "residence_requirement_mismatch",
+                          "work_authorisation_mismatch"])
+        self.assertEqual(list(d.unknowns), [])
+
+    def test_policy_types_preserve_unknown_vs_known_empty(self):
+        p = EligibilityPolicy()
+        self.assertIsNone(p.authorised_jurisdictions)
+        self.assertIsNone(p.excluded_contract_types)
+        self.assertIsInstance(
+            EligibilityPolicy(
+                authorised_jurisdictions=frozenset()).authorised_jurisdictions,
+            frozenset)
+
+    def test_worked_example_a_normative(self):
+        d = assess_eligibility(
+            EligibilityInput(work_jurisdiction="NL",
+                             required_residence="NL",
+                             sponsorship_available=False,
+                             minimum_years_experience=3.0,
+                             contract_type="permanent"),
+            _pol(authorised_jurisdictions=frozenset({"DE"}),
+                 current_residence="DE",
+                 requires_sponsorship=True,
+                 maximum_years_required=2.0,
+                 excluded_contract_types=frozenset()))
+        self.assertEqual(d.decision, "reject")
+        self.assertEqual(list(d.reasons),
+                         ["experience_requirement_exceeds_policy",
+                          "residence_requirement_mismatch",
+                          "sponsorship_unavailable"])
+        self.assertEqual(list(d.unknowns), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,11 @@ market-aligner process-one --operation-id fit-2026-08-24-001 \
   --config /private/collection.yaml \
   --profile-id prf_<opaque-id> --job-key board:job-id --track backend \
   --processing-envelope <sha256>.json --data-home "$MARKET_ALIGNER_DATA_HOME"
+
+market-aligner eligibility-one --operation-id elig-2026-08-26-001 \
+  --fit-operation-id fit-2026-08-24-001 --config /private/collection.yaml \
+  --profile-id prf_<opaque-id> --job-key board:job-id --track backend \
+  --eligibility-envelope <sha256>.json --data-home "$MARKET_ALIGNER_DATA_HOME"
 ```
 
 `ingest` runs exactly one bounded official collection cycle from the exact
@@ -80,6 +85,19 @@ inode-pinned databases, lets SQLite complete legitimate rollback-journal
 recovery, checks integrity and foreign keys, and returns success only if the
 entire exact receipt/projection graph is durable. This command invokes no
 provider, model, browser, research, JAA, release or submission authority.
+
+`eligibility-one` admits one operator-staged, content-addressed eligibility
+envelope that binds both stored identities of an already-committed `process-one`
+receipt (self hash and file hash) and seals that entire parsed receipt inside its
+own receipt. It revalidates every evidence-bound candidate fact against the
+committed profile ledger, revalidates vacancy-fact selectors against the committed
+extraction, runs the deterministic hard-eligibility decision owner over exact
+canonical values, then atomically creates or exactly reuses one
+`eligibility_decided` event and its immutable decision receipt. Success and
+replay write the exact stored receipt bytes to stdout; stable refusals write one
+canonical JSON line to stderr. This command invokes no provider, model, browser,
+research, JAA, release or submission authority; final submission and legal consent
+remain operator-gated.
 
 Integrity boundary: owner-private directories, single-link 0600 files and
 unkeyed SHA-256 binding give receipts canonical identity and detect accidental

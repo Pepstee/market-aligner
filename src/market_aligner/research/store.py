@@ -382,6 +382,8 @@ class AssessmentStore:
 # ==========================================================================
 
 _PROCESSING_SCORE_ACCEPTED = "processing_score_accepted"
+_ELIGIBILITY_DECIDED = "eligibility_decided"
+_EVENT_TYPES = frozenset({_PROCESSING_SCORE_ACCEPTED, _ELIGIBILITY_DECIDED})
 _MAX_IDEMPOTENCY_KEY_BYTES = 512
 
 _RFC3339_PATTERN = re.compile(
@@ -1106,11 +1108,11 @@ def plan_processing_event(
     created_at: str,
     event_id: int,
 ) -> ProcessingEventReadPlan:
-    """Read-plan for the processing_score_accepted event family."""
+    """Read-plan for the closed generic event families (C1 seam extension)."""
 
-    if event_type != _PROCESSING_SCORE_ACCEPTED:
+    if event_type not in _EVENT_TYPES:
         raise ProjectionConflict(
-            "event_type must be exactly 'processing_score_accepted'"
+            "event_type must be one of the closed contracted event types"
         )
     if actor_kind != "deterministic":
         raise ProjectionConflict("actor_kind must be exactly 'deterministic'")
@@ -1325,26 +1327,32 @@ def classify_processing_score_event(
     *,
     profile_id: str,
     job_key: str,
+    event_type: str = _PROCESSING_SCORE_ACCEPTED,
 ) -> ProcessingScoreEventClassification:
     """Presence-only event family classifier on a caller-owned connection.
 
     Validates the exact profile/job identity BEFORE any SQL, queries ALL
     rows with the exact explicit event column list for this profile/job
-    and event_type processing_score_accepted, and shape-validates every
-    returned row through the canonical row mapper only. Event contents
-    are never authenticated; no prospective id/timestamp/actor/payload/
-    key is accepted. Zero rows classify insert_required with count 0;
-    one or more rows classify existing with the exact count. SQL errors
-    propagate unchanged and caller row_factory stays untouched.
+    and the supplied contracted ``event_type`` (default preserves the C1
+    processing family), and shape-validates every returned row through the
+    canonical row mapper only. Event contents are never authenticated; no
+    prospective id/timestamp/actor/payload/key is accepted. Zero rows
+    classify insert_required with count 0; one or more rows classify
+    existing with the exact count. SQL errors propagate unchanged and caller
+    row_factory stays untouched.
     """
 
+    if event_type not in _EVENT_TYPES:
+        raise ProjectionConflict(
+            "event_type must be one of the closed contracted event types"
+        )
     require_exact_profile_id(profile_id)
     _require_text(job_key, "job_key", 3, 256)
     rows = connection.execute(
         f"""SELECT {','.join(_EVENT_PROJECTION_COLUMNS)}
             FROM assessment_events
             WHERE profile_id=? AND job_key=? AND event_type=?""",
-        (profile_id, job_key, _PROCESSING_SCORE_ACCEPTED),
+        (profile_id, job_key, event_type),
     ).fetchall()
     for row in rows:
         _row_to_columns(row, _EVENT_PROJECTION_COLUMNS)

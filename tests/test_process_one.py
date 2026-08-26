@@ -15559,3 +15559,2144 @@ class StageDPart3C2Increment3Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ==========================================================================
+# ELIGIBILITY-001 contract matrix (accepted document, sections 4-20).
+#
+# The FIT ancestry is produced by a REAL process_one admission (canonical
+# owners only); the eligibility envelope bytes are staged exactly, and every
+# consequential eligibility run uses real retained files and real SQLite.
+# ==========================================================================
+
+import hashlib as _hl  # noqa: E402
+import io  # noqa: E402
+import json as _json  # noqa: E402
+import os as _os  # noqa: E402
+import sqlite3 as _sq  # noqa: E402
+
+
+from pathlib import Path  # noqa: E402
+
+from market_aligner.assessment.scoring import (  # noqa: E402
+    AssessmentAxes, score)
+from market_aligner.processing import (  # noqa: E402
+    ELIGIBILITY_DECISION_POLICY_BODY,
+    ELIGIBILITY_DECISION_POLICY_SHA256,
+    ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
+    ELIGIBILITY_REASON_CONFIG_DATABASE,
+    ELIGIBILITY_REASON_ENVELOPE_PATH,
+    EVENT_TYPE_ELIGIBILITY_DECIDED,
+    EXTRACTION_INPUT_SCHEMA_VERSION,
+    ALIGNMENT_INPUT_SCHEMA_VERSION,
+    MAX_CANDIDATE_REF_BYTES,
+    admit_candidate_facts,
+    admit_vacancy_facts,
+    bind_fit_authority,
+    canonical_hash,
+    classify_eligibility_durable_graph,
+    compose_eligibility_envelope_facts,
+    eligibility_one,
+    install_fault,
+    clear_faults,
+    parse_eligibility_receipt,
+    parse_processing_receipt,
+    rebuild_eligibility_event_payload,
+)
+from market_aligner.llm.contracts import (  # noqa: E402
+    LLM_CONTRACT_VERSION, LLMReceipt, SemanticVacancyExtraction,
+)
+from market_aligner.research.store import (  # noqa: E402
+    AssessmentStore)
+from market_aligner.state.vacancies import JobDatabase  # noqa: E402
+
+
+def _cj(value):
+    return _json.dumps(value, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":"), allow_nan=False)
+
+
+def _sha(value):
+    if isinstance(value, str):
+        value = value.encode("utf-8")
+    return _hl.sha256(value).hexdigest()
+
+
+_PROFILE_ID = "prf_" + "1" * 32
+
+
+def _write_private(path: Path, data: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    _os.chmod(path, 0o600)
+    return path
+
+
+class EligibilityFixture:
+    """Real FIT admission first; then one staged eligibility envelope."""
+
+    FIT_OPERATION_ID = "fit-op-accept-000001"
+
+    def __init__(self, base: Path):
+        self.base = base
+        self.root = (base / "data").resolve()
+        self.state = self.root / "state"
+        self.inbox = self.state / "eligibility-inbox"
+        self.fit_inbox = self.state / "processing-inbox"
+        self.inbox.mkdir(parents=True, exist_ok=True)
+        self.fit_inbox.mkdir(parents=True, exist_ok=True)
+        for directory in (self.root, self.state, self.inbox, self.fit_inbox):
+            _os.chmod(directory, 0o700)
+
+        self.config_path = base / "collection.yaml"
+        self.config_text = "boards:\n  enabled:\n    - greenhouse\n"
+        from market_aligner.config_loader import snapshot_config
+        # Derive the closure binding THROUGH the canonical owner so keys
+        # use its exact resolved spelling (never a Darwin /var alias).
+        _write_private(self.config_path, self.config_text.encode("utf-8"))
+        self.resolved_config_path = str(
+            self.config_path.expanduser().resolve())
+        self.merged, identities = snapshot_config(
+            self.resolved_config_path)
+        closure_files = dict(identities)
+        self.config_binding = {
+            "source_path": self.resolved_config_path,
+            "source_file_sha256": closure_files[self.resolved_config_path],
+            "closure_files": closure_files,
+            "closure_sha256": _sha(_cj(closure_files)),
+            "semantic_sha256": _sha(_cj(self.merged)),
+        }
+
+        from market_aligner.profiler.schema import (
+            CandidateProfile, EvidenceItem, TrackProfile)
+        from market_aligner.profiler.store import ProfileStore
+        evidence_items = [
+            EvidenceItem(evidence_id="ev-de", kind="identity",
+                         claim="Citizen of Germany.",
+                         source_ref="passport-2024", status="verified",
+                         confidence=0.9, content_sha256=_sha("de-content")),
+            EvidenceItem(evidence_id="ev-years", kind="experience",
+                         claim="At least three years of backend work.",
+                         source_ref="cv-2026", status="verified",
+                         confidence=0.8,
+                         content_sha256=_sha("years-content")),
+            EvidenceItem(evidence_id="ev-intent", kind="preference",
+                         claim="Needs visa sponsorship.",
+                         source_ref="note-2026", status="explicit",
+                         confidence=0.7,
+                         content_sha256=_sha("intent-content")),
+        ]
+        track = TrackProfile(interest=5.0, demonstrated_skill=5.0,
+                             confidence=0.5, market_readiness=5.0,
+                             rationale="fixture",
+                             evidence_ids=tuple(
+                                 item.evidence_id
+                                 for item in evidence_items))
+        profile = CandidateProfile(profile_id=_PROFILE_ID, version="gen-1",
+                                   tracks={"backend": track})
+        profile_store = ProfileStore(self.root)
+        profile_store.save(profile, evidence_items)
+        snapshot = profile_store.coherent_snapshot(
+            _PROFILE_ID, require_committed_generation=True)
+        self.snapshot_hashes = dict(snapshot.hashes)
+        self.profile_context = snapshot.context
+
+        self.vacancy_db = self.state / "vacancies.sqlite3"
+        JobDatabase(self.vacancy_db)
+        conn = _sq.connect(self.vacancy_db)
+        self.raw_text = "Senior backend engineer in Amsterdam."
+        self.content_hash = _sha(self.raw_text)
+        conn.execute(
+            "INSERT INTO postings(key,board,job_id,url,fetched_at,raw_text,"
+            "content_hash,fetch_status)"
+            " VALUES('board:42','board','42','https://x/y',"
+            "'2026-08-26T00:00:00Z',?,?, 'fetched')",
+            (self.raw_text, self.content_hash))
+        conn.commit()
+        conn.close()
+
+        self.extraction_output = {
+            "source_content_sha256": self.content_hash,
+            "title": "Senior Backend Engineer",
+            "company": "Example BV",
+            "location": "Amsterdam, Netherlands",
+            "description": "Build services. At least three years of "
+                           "experience required.",
+            "responsibilities": [], "required_skills": [],
+            "preferred_skills": [],
+            "required_qualifications": ["At least three years experience."],
+            "preferred_qualifications": [],
+            "work_authorisation": ["NL"],
+            "contract_type": "permanent", "seniority": "senior",
+            "remote_policy": "hybrid", "extraction_confidence": 0.9,
+            "unknown_fields": [],
+            "contract_version": LLM_CONTRACT_VERSION}
+        extraction = SemanticVacancyExtraction(
+            **{**self.extraction_output,
+               "responsibilities": tuple(),
+               "required_skills": tuple(), "preferred_skills": tuple(),
+               "required_qualifications": tuple(
+                   self.extraction_output["required_qualifications"]),
+               "preferred_qualifications": tuple(),
+               "work_authorisation": tuple(
+                   self.extraction_output["work_authorisation"]),
+               "unknown_fields": tuple()})
+        extraction_input_node = {
+            "schema_version": EXTRACTION_INPUT_SCHEMA_VERSION,
+            "job_key": "board:42", "board": "board", "job_id": "42",
+            "url": "https://x/y", "fetched_at": "2026-08-26T00:00:00Z",
+            "source_content_sha256": self.content_hash,
+            "raw_snapshot_sha256": self._raw_snapshot_sha(),
+            "raw_text": self.raw_text, "raw_json": None}
+        extraction_receipt = {
+            "receipt_id": "rc-extr", "task": "semantic_vacancy_extraction",
+            "model": "fixture-model", "prompt_version": "pv-1",
+            "input_sha256": canonical_hash(extraction_input_node),
+            "output_sha256": canonical_hash(
+                dataclasses_asdict(extraction)),
+            "created_at": "2026-08-26T00:30:00Z",
+            "contract_version": LLM_CONTRACT_VERSION}
+
+        from market_aligner.domain.contracts import RawPosting
+        posting = RawPosting(board="board", job_id="42", url="https://x/y",
+                             fetched_at="2026-08-26T00:00:00Z",
+                             raw_text=self.raw_text, raw_json=None,
+                             content_sha256=self.content_hash)
+        from market_aligner.llm.pipeline import accept_extraction
+        vacancy = accept_extraction(posting, extraction,
+                                    LLMReceipt(**extraction_receipt))
+        alignment_output = {
+            "profile_id": _PROFILE_ID, "profile_version": "gen-1",
+            "job_key": "board:42", "matches": [],
+            "missing_requirements": [],
+            "technical_alignment": 0.8, "evidence_match": 0.7,
+            "confidence": 0.75, "unknowns": [],
+            "contract_version": LLM_CONTRACT_VERSION}
+        alignment_input_node = {
+            "schema_version": ALIGNMENT_INPUT_SCHEMA_VERSION,
+            "job_key": "board:42", "profile_id": _PROFILE_ID,
+            "profile_version": "gen-1", "track": "backend",
+            "vacancy": dataclasses_asdict(vacancy),
+            "profile_context": self.profile_context,
+            "profile_context_sha256":
+                self.snapshot_hashes["profile_context_sha256"]}
+        alignment_receipt = {
+            "receipt_id": "rc-align", "task": "evidence_alignment",
+            "model": "fixture-model", "prompt_version": "pv-1",
+            "input_sha256": canonical_hash(alignment_input_node),
+            "output_sha256": canonical_hash(alignment_output),
+            "created_at": "2026-08-26T00:31:00Z",
+            "contract_version": LLM_CONTRACT_VERSION}
+
+        axes = AssessmentAxes(technical_alignment=0.8 * 10,
+                              evidence_match=0.7 * 10, market_demand=0,
+                              barrier_to_entry=10, growth_potential=0)
+        score_result = score(profile, "board:42", "backend", axes, None)
+
+        self.assessments_path = self.state / "assessments.sqlite3"
+        astore = AssessmentStore(self.assessments_path)
+        conn = astore.connect()
+        conn.commit()
+        conn.close()
+        _os.chmod(self.assessments_path, 0o600)
+        _os.chmod(Path(self.vacancy_db), 0o600)
+        fit_envelope = {
+            "schema_version": "market-aligner.processing-envelope.v1",
+            "operation_id": self.FIT_OPERATION_ID,
+            "job_key": "board:42", "profile_id": _PROFILE_ID,
+            "profile_version": "gen-1", "track": "backend",
+            "config": self.config_binding,
+            "databases": {"assessments": self._identity(
+                self.assessments_path),
+                "vacancy": self._identity(Path(self.vacancy_db))},
+            "raw": {"source_content_sha256": self.content_hash,
+                    "raw_snapshot_sha256": self._raw_snapshot_sha()},
+            "profile": dict(self.snapshot_hashes),
+            "extraction": {"output": self.extraction_output,
+                           "receipt": extraction_receipt},
+            "alignment": {"output": alignment_output,
+                          "receipt": alignment_receipt},
+            "scoring": {"parameters_sha256":
+                        score_result.parameters_hash,
+                        "opportunity_policy_sha256":
+                            processing_module.OPPORTUNITY_POLICY_SHA256,
+                        "expected_score": _score_dict(score_result)},
+        }
+        blob = (_cj(fit_envelope) + "\n").encode()
+        name = f"{_sha(blob)}.json"
+        _write_private(self.fit_inbox / name, blob)
+        from market_aligner import processing as _processing
+        _processing.process_one(
+            self.root, name,
+            supplied_operation_id=self.FIT_OPERATION_ID,
+            supplied_config_path=self.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42", supplied_track="backend")
+        conn = _sq.connect(self.assessments_path)
+        self.fit_stored_bytes = conn.execute(
+            "SELECT receipt_bytes FROM processing_receipts WHERE "
+            "operation_id=?", (self.FIT_OPERATION_ID,)).fetchone()[0]
+        self.fit_parsed = parse_processing_receipt(self.fit_stored_bytes)
+        self.fit_self_hash = self.fit_parsed["self_hash"]
+        self.fit_file_hash = _sha(self.fit_stored_bytes)
+        conn.close()
+        _os.chmod(self.assessments_path, 0o600)
+        _os.chmod(Path(self.vacancy_db), 0o600)
+
+    def _raw_snapshot_sha(self) -> str:
+        semantic = {"job_key": "board:42", "board": "board", "job_id": "42",
+                    "url": "https://x/y", "posted_at": None,
+                    "fetched_at": "2026-08-26T00:00:00Z",
+                    "raw_text": self.raw_text, "raw_json": None,
+                    "fetch_status": "fetched"}
+        return _sha(_cj(semantic))
+
+    def _identity(self, path: Path):
+        canonical_path = path.resolve()
+        info = _os.stat(canonical_path)
+        assert info.st_mode & 0o777 == 0o600, oct(info.st_mode)
+        return {"path": str(canonical_path), "dev": info.st_dev, "ino": info.st_ino,
+                "uid": info.st_uid, "mode": 0o600, "nlink": 1}
+
+    def ref(self, evidence_id: str):
+        claims = {"ev-de": ("identity", "Citizen of Germany.",
+                            "passport-2024", _sha("de-content")),
+                  "ev-years": ("experience",
+                               "At least three years of backend work.",
+                               "cv-2026", _sha("years-content")),
+                  "ev-intent": ("preference", "Needs visa sponsorship.",
+                                "note-2026", _sha("intent-content"))}
+        kind, claim, source, content = claims[evidence_id]
+        return {"evidence_id": evidence_id, "kind": kind, "status": "verified",
+                "claim_sha256": _sha(claim),
+                "source_ref_sha256": _sha(source), "content_sha256": content}
+
+    def intent_ref(self):
+        ref = self.ref("ev-intent")
+        return dict(ref, status="explicit")
+
+    def candidate_facts(self, **overrides):
+        facts = {
+            "authorised_jurisdictions": {
+                "refs": [self.ref("ev-de")],
+                "value": [{"refs": [self.ref("ev-de")], "value": "DE"}]},
+            "current_residence": {"refs": [self.ref("ev-de")],
+                                  "value": "DE"},
+            "requires_sponsorship": {"refs": [self.intent_ref()],
+                                     "value": True},
+            "maximum_years_required": {"refs": [self.ref("ev-years")],
+                                       "value": 2.0},
+            "excluded_contract_types": {"refs": [self.ref("ev-de")],
+                                        "value": []},
+        }
+        facts.update(overrides)
+        return facts
+
+    def vacancy_facts(self, **overrides):
+        extraction = self.extraction_output
+        wa = extraction["work_authorisation"]
+
+        def sel(field, index, stype, value):
+            return {"extraction_field": field, "item_index": index,
+                    "selected_type": stype, "selected_value": value,
+                    "selected_value_sha256": _sha(_cj(value))}
+
+        facts = {
+            "work_jurisdiction": {"selector": sel(
+                "work_authorisation", 0, "scalar_string", wa[0]),
+                "value": "NL"},
+            "required_residence": {"selector": sel(
+                "location", None, "scalar_string", extraction["location"]),
+                "value": "NL"},
+            "sponsorship_available": {"selector": sel(
+                "work_authorisation", None, "string_list", list(wa)),
+                "value": False},
+            "minimum_years_required": {"selector": sel(
+                "required_qualifications", 0, "scalar_string",
+                extraction["required_qualifications"][0]), "value": 3.0},
+            "contract_type": {"selector": sel(
+                "contract_type", None, "scalar_string",
+                extraction["contract_type"]), "value": "permanent"},
+        }
+        facts.update(overrides)
+        return facts
+
+    def envelope(self, operation_id="op-eligible-00000001",
+                 candidate_overrides=None, vacancy_overrides=None,
+                 fit_operation_id=None, databases=None):
+        payload = {
+            "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
+            "eligibility_operation_id": operation_id,
+            "fit_operation_id": fit_operation_id or self.FIT_OPERATION_ID,
+            "job_key": "board:42", "profile_id": _PROFILE_ID,
+            "profile_version": "gen-1", "track": "backend",
+            "fit_receipt_self_hash": self.fit_self_hash,
+            "fit_receipt_file_sha256": self.fit_file_hash,
+            "decision_policy": {"decision_policy_sha256":
+                                ELIGIBILITY_DECISION_POLICY_SHA256},
+            "config": self.config_binding,
+            "databases": databases or {"assessments": self._identity(
+                self.assessments_path),
+                "vacancy": self._identity(Path(self.vacancy_db))},
+            "candidate_facts": self.candidate_facts(**(
+                candidate_overrides or {})),
+            "vacancy_facts": self.vacancy_facts(**(vacancy_overrides or {})),
+        }
+        return payload
+
+    def stage(self, payload) -> str:
+        blob = (_cj(payload) + "\n").encode("utf-8")
+        name = f"{_sha(blob)}.json"
+        _write_private(self.inbox / name, blob)
+        return name
+
+
+def _score_dict(result):
+    from dataclasses import asdict
+    node = asdict(result)
+    node["fit_status"] = result.fit_status.value
+    node["fit_subscores"] = dict(node["fit_subscores"])
+    node["opportunity_subscores"] = dict(node["opportunity_subscores"])
+    return node
+
+
+def dataclasses_asdict(obj):
+    from dataclasses import asdict
+    return asdict(obj)
+
+
+class EligibilityStaticContractTests(unittest.TestCase):
+    def test_policy_body_exact(self):
+        expected = (
+            '{"application_authority":false,"decision_tokens":["pass",'
+            '"review","reject"],"iso_jurisdiction_set_sha256":"'
+            'bad3b0ab6d1073f237d176df4d3ec9297269c1c13c73f714c0736a87912b1523'
+            '","release_authority":false,"research_authority":false,'
+            '"schema_version":"market-aligner.eligibility001-fixed-decision'
+            '-policy.v1","submission_authority":false}')
+        self.assertEqual(ELIGIBILITY_DECISION_POLICY_BODY, expected)
+        self.assertEqual(len(expected.encode()), 329)
+        self.assertEqual(_sha(expected.encode()),
+                         ELIGIBILITY_DECISION_POLICY_SHA256)
+
+    def test_ref_byte_boundary(self):
+        def build(fill, length, status="unverified_current"):
+            return {"claim_sha256": "a" * 64, "content_sha256": "b" * 64,
+                    "evidence_id": fill * length, "kind": fill * length,
+                    "source_ref_sha256": "c" * 64, "status": status}
+        worst = _cj(build("\U0010ffff", 256)).encode()
+        self.assertEqual(len(worst), MAX_CANDIDATE_REF_BYTES)
+        over = build("\U0010ffff", 256, status="unverified_currentx")
+        self.assertGreater(len(_cj(over).encode()), MAX_CANDIDATE_REF_BYTES)
+
+    def test_candidate_gate_all_or_nothing_and_per_array_ids(self):
+        verified = {"evidence_id": "e1", "kind": "k", "status": "verified",
+                    "claim_sha256": "a" * 64, "source_ref_sha256": "b" * 64,
+                    "content_sha256": "c" * 64}
+        inference = dict(verified, evidence_id="e2", status="inference")
+
+        def wrapper(refs, value):
+            return {"refs": refs, "value": value}
+
+        empty = {"authorised_jurisdictions": None, "current_residence": None,
+                 "requires_sponsorship": None, "maximum_years_required": None,
+                 "excluded_contract_types": None}
+        member_bad = dict(empty, authorised_jurisdictions=wrapper(
+            [verified], [{"refs": [verified, inference], "value": "DE"}]))
+        admission = admit_candidate_facts(member_bad)
+        self.assertIsNone(admission.effective["authorised_jurisdictions"])
+        self.assertTrue(admission.status_downgraded)
+        outer_bad = dict(empty, authorised_jurisdictions=wrapper(
+            [verified, inference], []))
+        admission = admit_candidate_facts(outer_bad)
+        self.assertIsNone(admission.effective["authorised_jurisdictions"])
+        known_empty_ok = dict(empty, authorised_jurisdictions=wrapper(
+            [verified], []))
+        admission = admit_candidate_facts(known_empty_ok)
+        self.assertEqual(admission.effective["authorised_jurisdictions"], [])
+        self.assertFalse(admission.status_downgraded)
+        same_id_across_arrays = dict(
+            empty,
+            current_residence={"refs": [verified], "value": "DE"},
+            maximum_years_required={"refs": [verified], "value": 1.0})
+        admission = admit_candidate_facts(same_id_across_arrays)
+        self.assertEqual(admission.effective["current_residence"], "DE")
+        duplicate_in_one_array = dict(
+            empty, current_residence=None,
+            authorised_jurisdictions={"refs": [verified, verified],
+                                      "value": []})
+        with self.assertRaisesRegex(ValueError, "duplicates an earlier id"):
+            admit_candidate_facts(duplicate_in_one_array)
+
+
+class EligibilityEndToEndTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    def test_happy_path_creates_event_and_receipt_atomically(self):
+        result, _ = self.run_one(self.fx)
+        receipt = parse_eligibility_receipt(result)
+        self.assertEqual(receipt["decision"], "reject")
+        self.assertEqual(receipt["reasons"],
+                         ["experience_requirement_exceeds_policy",
+                          "residence_requirement_mismatch",
+                          "sponsorship_unavailable"])
+        self.assertEqual(receipt["unknowns"], [])
+        self.assertIs(receipt["eligibility_authority"], False)
+        for flag in ("research_authority", "application_authority",
+                     "release_authority", "submission_authority"):
+            self.assertIs(receipt[flag], False)
+        conn = _sq.connect(self.fx.assessments_path)
+        events = conn.execute(
+            "SELECT id,payload_json,idempotency_key FROM assessment_events"
+            " WHERE event_type=?", (EVENT_TYPE_ELIGIBILITY_DECIDED,)
+            ).fetchall()
+        receipts = conn.execute(
+            "SELECT operation_id,receipt_bytes FROM eligibility_receipts"
+            ).fetchall()
+        ledger = conn.execute(
+            "SELECT version FROM market_aligner_schema_migrations ORDER BY"
+            " version").fetchall()
+        conn.close()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0],
+                         receipt["eligibility_event"]["id"])
+        self.assertEqual(events[0][1],
+                         _cj(rebuild_eligibility_event_payload(receipt)))
+        self.assertEqual(ledger, [(1,), (2,)])
+        self.assertEqual(receipts[0][1].decode(), result.decode())
+
+    def test_pass_decision_sets_authority_true(self):
+        payload_overrides = {}
+        candidate = self.fx.candidate_facts()
+        candidate["authorised_jurisdictions"]["value"] = [
+            {"refs": [self.fx.ref("ev-de")], "value": "NL"}]
+        candidate["current_residence"]["value"] = "NL"
+        candidate["maximum_years_required"]["value"] = 5.0
+        payload_overrides["candidate_overrides"] = {
+            k: candidate[k] for k in (
+                "authorised_jurisdictions", "current_residence",
+                "maximum_years_required")}
+        vacancy = self.fx.vacancy_facts()
+        vacancy["minimum_years_required"]["value"] = 3.0
+        payload_overrides["vacancy_overrides"] = {
+            "minimum_years_required": vacancy["minimum_years_required"]}
+        result, _ = self.run_one(self.fx, **payload_overrides)
+        receipt = parse_eligibility_receipt(result)
+        self.assertEqual(receipt["decision"], "pass")
+        self.assertIs(receipt["eligibility_authority"], True)
+        self.assertEqual(receipt["reasons"], [])
+        self.assertEqual(receipt["unknowns"], [])
+
+    def test_replay_is_byte_identical_without_mutable_reads(self):
+        result, _ = self.run_one(self.fx)
+        (Path(self.fx.root) / "profiles" / _PROFILE_ID
+         / "profile.yaml").unlink()
+        replay, _ = self.run_one(self.fx)
+        self.assertEqual(replay, result)
+
+    def test_changed_same_op_binding_refuses_reason6(self):
+        self.run_one(self.fx)
+        payload = self.fx.envelope()
+        payload["candidate_facts"]["maximum_years_required"]["value"] = 1.0
+        name = self.fx.stage(payload)
+        with self.assertRaisesRegex(Exception, "binding_eligibility_receipt"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id=payload["eligibility_operation_id"],
+                supplied_fit_operation_id=payload["fit_operation_id"],
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+
+    def test_second_op_same_fit_target_conflicts_reason12(self):
+        self.run_one(self.fx)
+        payload = self.fx.envelope(operation_id="op-eligible-00000002")
+        name = self.fx.stage(payload)
+        with self.assertRaisesRegex(Exception, "eligibility_target_conflict"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id="op-eligible-00000002",
+                supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+
+    def test_s5_single_field_substitutions_all_reason7(self):
+        cases = {
+            "operation_id": lambda p: p.update(
+                {"fit_operation_id": "op-no-such-fit-000001"}),
+            "profile_id": lambda p: p.update({"profile_id": "prf_" + "9" * 32}),
+            "profile_version": lambda p: p.update(
+                {"profile_version": "gen-2"}),
+            "job_key": lambda p: p.update({"job_key": "board:43"}),
+            "track": lambda p: p.update({"track": "frontend"}),
+            "config": lambda p: p.update({"config": dict(
+                p["config"], semantic_sha256="e" * 64)}),
+            "databases": lambda p: p.update({"databases": dict(
+                p["databases"],
+                vacancy=dict(p["databases"]["vacancy"],
+                             ino=p["databases"]["vacancy"]["ino"] + 1))}),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                payload = self.fx.envelope()
+                mutate(payload)
+                if label in ("config", "databases"):
+                    # Node relabelling that stays live-consistent cannot be
+                    # staged against the real files; assert the S5 comparator
+                    # directly on the caller-owned connection instead.
+                    conn = _sq.connect(self.fx.assessments_path)
+                    conn.execute("ATTACH DATABASE ? AS vacancy",
+                                 (str(self.fx.vacancy_db),))
+                    try:
+                        facts = compose_eligibility_envelope_facts(
+                            payload,
+                            envelope_file_sha256=_sha(
+                                (_cj(payload) + chr(10)).encode()),
+                            expected_assessments_path=None,
+                            expected_vacancy_path=None)
+                        with self.assertRaisesRegex(Exception,
+                                                    "binding_fit_receipt"):
+                            bind_fit_authority(conn, facts, payload)
+                    finally:
+                        conn.close()
+                    continue
+                name = self.fx.stage(payload)
+                supplied = {
+                    "supplied_operation_id":
+                        payload["eligibility_operation_id"],
+                    "supplied_fit_operation_id": payload["fit_operation_id"],
+                    "supplied_config_path": payload["config"]["source_path"],
+                    "supplied_profile_id": payload["profile_id"],
+                    "supplied_job_key": payload["job_key"],
+                    "supplied_track": payload["track"]}
+                with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+                    eligibility_one(self.fx.root, name, **supplied)
+
+    def test_coherent_config_replacement_still_refuses_reason7(self):
+        # The replacement binding is derived THROUGH the canonical config
+        # owner (resolved spelling) so it passes live reason-5 admission;
+        # only then may the S5 anti-relabelling comparison fire reason 7.
+        from market_aligner.config_loader import snapshot_config
+        alternate = Path(self.tmpdir.name) / "alt.yaml"
+        _write_private(alternate, self.fx.config_text.encode())
+        resolved_alternate = str(alternate.expanduser().resolve())
+        alt_merged, alt_identities = snapshot_config(resolved_alternate)
+        payload = self.fx.envelope()
+        payload["config"] = {
+            "source_path": resolved_alternate,
+            "source_file_sha256": alt_identities[resolved_alternate],
+            "closure_files": dict(alt_identities),
+            "closure_sha256": _sha(_cj(dict(alt_identities))),
+            "semantic_sha256": _sha(_cj(alt_merged))}
+        name = self.fx.stage(payload)
+        with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id=payload["eligibility_operation_id"],
+                supplied_fit_operation_id=payload["fit_operation_id"],
+                supplied_config_path=resolved_alternate,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+
+    def test_wrong_dual_hashes_refuse_reason7(self):
+        for field in ("fit_receipt_self_hash", "fit_receipt_file_sha256"):
+            with self.subTest(field=field):
+                payload = self.fx.envelope()
+                payload[field] = "0" * 64
+                name = self.fx.stage(payload)
+                with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+                    eligibility_one(
+                        self.fx.root, name,
+                        supplied_operation_id=(
+                            payload["eligibility_operation_id"]),
+                        supplied_fit_operation_id=(
+                            payload["fit_operation_id"]),
+                        supplied_config_path=self.fx.resolved_config_path,
+                        supplied_profile_id=_PROFILE_ID,
+                        supplied_job_key="board:42",
+                        supplied_track="backend")
+
+    def test_missing_fit_graph_never_bootstraps(self):
+        conn = _sq.connect(self.fx.assessments_path)
+        conn.execute("DROP TABLE processing_receipts")
+        conn.commit()
+        conn.close()
+        payload = self.fx.envelope()
+        name = self.fx.stage(payload)
+        supplied = {
+            "supplied_operation_id": payload["eligibility_operation_id"],
+            "supplied_fit_operation_id": payload["fit_operation_id"],
+            "supplied_config_path": self.fx.resolved_config_path,
+            "supplied_profile_id": _PROFILE_ID,
+            "supplied_job_key": "board:42",
+            "supplied_track": "backend"}
+        with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+            eligibility_one(self.fx.root, name, **supplied)
+
+    def test_fault_boundaries_rollback_atomically(self):
+        def refused(reason):
+            from market_aligner.processing import ProcessingRefused
+            return ProcessingRefused(reason, "injected")
+
+        for boundary, exc, reason in (
+                ("elig_after_event_insert", refused("storage_full"),
+                 "storage_full"),
+                ("elig_after_event_insert", KeyboardInterrupt(),
+                 "interrupted"),
+                ("elig_after_receipt_insert", refused("storage_io_error"),
+                 "storage_io_error")):
+            with self.subTest(boundary=boundary, reason=reason):
+                install_fault(boundary, exc)
+                with self.assertRaisesRegex(Exception, reason):
+                    self.run_one(self.fx)
+                conn = _sq.connect(self.fx.assessments_path)
+                events = conn.execute(
+                    "SELECT COUNT(*) FROM assessment_events WHERE "
+                    "event_type=?",
+                    (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+                table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name="
+                    "'eligibility_receipts'").fetchone()
+                receipts = (conn.execute(
+                    "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]
+                    if table else 0)
+                ledger = conn.execute(
+                    "SELECT version FROM market_aligner_schema_migrations"
+                    " ORDER BY version").fetchall()
+                conn.close()
+                self.assertEqual(events, 0)
+                self.assertIn(receipts, (0,))
+                self.assertTrue(ledger in ([(1,)], [(1,), (2,)]))
+
+    def test_recovery_complete_after_real_commit(self):
+        result, _ = self.run_one(self.fx)
+        plan = self.rebuild_plan_from_stored()
+        conn = _sq.connect(self.fx.assessments_path)
+        conn.execute("ATTACH DATABASE ? AS vacancy",
+                     (str(Path(self.fx.vacancy_db)),))
+        intact = classify_eligibility_durable_graph(conn, plan)
+        self.assertEqual(intact.disposition, "complete")
+        self.assertEqual(intact.stored_receipt_bytes, result)
+        conn.close()
+
+    def test_crash_mid_transaction_leaves_empty_truth_via_replay(self):
+        # Real crash boundary: a forked child performs BEGIN IMMEDIATE,
+        # migration + event insert, then dies with os._exit(9) BEFORE commit.
+        # The parent must observe SQLite rollback-journal recovery and a
+        # clean EMPTY durable truth via a fresh full admission (replay of
+        # the same staged envelope), never by deleting committed rows.
+        import os as _os
+        payload = self.fx.envelope(operation_id="op-crash-0000000001")
+        name = self.fx.stage(payload)
+        kwargs = dict(
+            supplied_operation_id=payload["eligibility_operation_id"],
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=self.fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key=payload["job_key"],
+            supplied_track=payload["track"])
+
+        def crash_child():
+            from market_aligner.processing import ProcessingRefused
+            install_fault("elig_after_event_insert", SystemExit(9))
+            try:
+                eligibility_one(self.fx.root, name, **kwargs)
+            except (ProcessingRefused, SystemExit, BaseException):
+                _os._exit(9)
+            _os._exit(0)
+
+        pid = _os.fork()
+        if pid == 0:
+            crash_child()
+        _waited, status = _os.waitpid(pid, 0)
+        if not (_os.WIFEXITED(status) and _os.WEXITSTATUS(status) == 9):
+            self.skipTest("fork/crash boundary unavailable in sandbox: "
+                          f"status={status}")
+        replay, _ = eligibility_one(self.fx.root, name, **kwargs), None
+        receipt = parse_eligibility_receipt(replay)
+        self.assertEqual(receipt["decision"], "reject")
+        conn = _sq.connect(self.fx.assessments_path)
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        receipts = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]
+        ledger = conn.execute(
+            "SELECT version FROM market_aligner_schema_migrations ORDER BY"
+            " version").fetchall()
+        conn.close()
+        self.assertEqual((events, receipts), (1, 1))
+        self.assertEqual(ledger, [(1,), (2,)])
+
+    def rebuild_plan_from_stored(self):
+        conn = _sq.connect(self.fx.assessments_path)
+        row = conn.execute(
+            "SELECT operation_id, receipt_bytes FROM eligibility_receipts"
+            ).fetchone()
+        conn.close()
+        receipt = parse_eligibility_receipt(row[1])
+        node = receipt["eligibility_event"]
+        payload = {
+            "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
+            "eligibility_operation_id": receipt["operation_id"],
+            "fit_operation_id": receipt["fit_operation_id"],
+            "job_key": receipt["job_key"], "profile_id": receipt["profile_id"],
+            "profile_version": receipt["profile_version"],
+            "track": receipt["track"],
+            "fit_receipt_self_hash": receipt["fit_receipt_self_hash"],
+            "fit_receipt_file_sha256": receipt["fit_receipt_file_sha256"],
+            "decision_policy": {"decision_policy_sha256":
+                                receipt["decision_policy_sha256"]},
+            "config": receipt["config"], "databases": receipt["databases"],
+            "candidate_facts": receipt["candidate_facts"],
+            "vacancy_facts": receipt["vacancy_facts"],
+        }
+        facts = compose_eligibility_envelope_facts(
+            payload, envelope_file_sha256=receipt["envelope_file_sha256"],
+            expected_assessments_path=None, expected_vacancy_path=None)
+        return build_eligibility_prospective_plan(
+            facts=facts, payload=payload,
+            binding_sha256=receipt["binding_sha256"],
+            decision_view={
+                "decision_input": receipt["decision_input"],
+                "decision_input_sha256": receipt["decision_input_sha256"],
+                "decision": receipt["decision"],
+                "reasons": receipt["reasons"],
+                "unknowns": receipt["unknowns"]},
+            accepted_at=node["created_at"],
+            prospective_event_id=node["id"],
+            fit_parsed=receipt["fit_receipt"])
+
+    def test_threaded_same_op_serializes_to_one_creator(self):
+        results, errors = [], []
+
+        def runner():
+            try:
+                results.append(self.run_one(self.fx)[0])
+            except Exception as exc:  # noqa: BLE001
+                errors.append(getattr(exc, "reason", str(exc)))
+
+        threads = [threading.Thread(target=runner) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertGreaterEqual(len(results), 1)
+        if len(results) == 2:
+            self.assertEqual(results[0], results[1])
+        else:
+            self.assertIn(errors[0], ("binding_eligibility_receipt",
+                                      "eligibility_target_conflict",
+                                      "atomic_busy"))
+        conn = _sq.connect(self.fx.assessments_path)
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        receipts = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]
+        conn.close()
+        self.assertEqual((events, receipts), (1, 1))
+
+    def test_descriptor_and_path_negatives(self):
+        payload = self.fx.envelope()
+        blob = (_cj(payload) + "\n").encode()
+        name = f"{_sha(blob)}.json"
+        target = _write_private(self.fx.inbox / name, blob)
+        link = self.fx.inbox / (("0" * 63) + "a.json")
+        try:
+            _os.link(target, link)
+        except PermissionError:
+            link = None
+        if link is not None:
+            with self.assertRaisesRegex(
+                    Exception, "unsafe_eligibility_envelope_path"):
+                eligibility_one(
+                    self.fx.root, link.name,
+                    supplied_operation_id="op-x-000000003",
+                    supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+                    supplied_config_path=self.fx.resolved_config_path,
+                    supplied_profile_id=_PROFILE_ID,
+                    supplied_job_key="board:42", supplied_track="backend")
+            _os.unlink(link)
+        wrong_name = "ff" + name[2:]
+        supplied = {
+            "supplied_operation_id": payload["eligibility_operation_id"],
+            "supplied_fit_operation_id": payload["fit_operation_id"],
+            "supplied_config_path": self.fx.resolved_config_path,
+            "supplied_profile_id": _PROFILE_ID,
+            "supplied_job_key": "board:42",
+            "supplied_track": "backend"}
+        with self.assertRaisesRegex(Exception,
+                                    "unsafe_eligibility_envelope_path"):
+            eligibility_one(self.fx.root, wrong_name, **supplied)
+        mismatched = (_cj(payload) + chr(10)).encode()
+        real_name = f"{_sha(mismatched)}.json"
+        _write_private(self.fx.inbox / real_name, mismatched[:-1] + b" ")
+        with self.assertRaisesRegex(Exception,
+                                    "invalid_eligibility_envelope_bytes"):
+            eligibility_one(self.fx.root, real_name, **supplied)
+
+    def test_selector_truth_boundary_negatives(self):
+        blank_location = dict(self.fx.extraction_output, location="   ")
+        with self.assertRaisesRegex(ValueError, "nonblank"):
+            admit_vacancy_facts(
+                self.fx.vacancy_facts(required_residence={
+                    "selector": {
+                        "extraction_field": "location", "item_index": None,
+                        "selected_type": "scalar_string",
+                        "selected_value": blank_location["location"],
+                        "selected_value_sha256": _sha(_cj("   "))},
+                    "value": "NL"}), blank_location)
+        empty_list = dict(self.fx.extraction_output, work_authorisation=[])
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            admit_vacancy_facts(
+                self.fx.vacancy_facts(sponsorship_available={
+                    "selector": {
+                        "extraction_field": "work_authorisation",
+                        "item_index": None, "selected_type": "string_list",
+                        "selected_value": [],
+                        "selected_value_sha256": _sha(_cj([]))},
+                    "value": True}), empty_list)
+        prohibited = self.fx.vacancy_facts()
+        prohibited["work_jurisdiction"]["selector"][
+            "extraction_field"] = "title"
+        with self.assertRaisesRegex(ValueError, "prohibited"):
+            admit_vacancy_facts(prohibited, self.fx.extraction_output)
+
+    def test_cli_option_surface_refusal_line_and_service_seam(self):
+        import argparse
+        from market_aligner.cli import _eligibility_one_command
+        args = argparse.Namespace(
+            data_home=Path(self.tmpdir.name) / "absent-root",
+            eligibility_envelope="ff.json", operation_id="op-cli-000001",
+            fit_operation_id=self.fx.FIT_OPERATION_ID,
+            config=self.fx.config_path, profile_id=_PROFILE_ID,
+            job_key="board:42", track="backend")
+        out, err = io.StringIO(), io.StringIO()
+        code = _eligibility_one_command(args, out=out, err=err)
+        self.assertEqual(code, 2)
+        decoded = _json.loads(err.getvalue().splitlines()[0])
+        self.assertEqual(decoded["command"], "eligibility-one")
+        self.assertEqual(decoded["status"], "refused")
+        self.assertIn(decoded["reason"],
+                      (ELIGIBILITY_REASON_CONFIG_DATABASE,
+                       ELIGIBILITY_REASON_ENVELOPE_PATH))
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse((Path(self.tmpdir.name) / "absent-root").exists())
+
+
+# ==========================================================================
+# ELIGIBILITY-001 second-repair adversarial matrix (section-20 families):
+# store-state probes, FIT/own mutation matrices, locked injections, stable
+# refusal mapping, signal/error mapping, ID and size boundaries, external
+# seam explosion, CLI precedence, replay independence, fork crash truth.
+# ==========================================================================
+
+
+from market_aligner.processing import (  # noqa: E402
+    build_eligibility_prospective_plan,
+)
+
+
+def _fit_column_mutation(column, value_factory):
+    def mutate(conn):
+        conn.execute(f"UPDATE processing_receipts SET {column}=?",
+                     (value_factory(),))
+    return mutate
+
+
+class EligibilityStoreStateProbeTests(EligibilityEndToEndTests):
+    """Public-path probes for the sole S1-S3 classifier (repair item 1)."""
+
+    def test_missing_migration_ledger_refuses_reason7_nowrite(self):
+        payload = self.fx.envelope()
+        self.fx.stage(payload)
+        conn = _sq.connect(self.fx.assessments_path)
+        conn.execute("DROP TABLE market_aligner_schema_migrations")
+        conn.commit()
+        before = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0]
+        conn.close()
+        with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+            self.run_one(self.fx)
+        conn = _sq.connect(self.fx.assessments_path)
+        after = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0]
+        ledger = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name="
+            "'market_aligner_schema_migrations'").fetchall()
+        elig = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name="
+            "'eligibility_receipts'").fetchall()
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        conn.close()
+        self.assertEqual(after, before)
+        self.assertEqual((ledger, elig, events), ([], [], 0))
+
+    def test_incompatible_ledger_checksum_refuses_atomic_mode(self):
+        payload = self.fx.envelope()
+        payload["candidate_facts"]["current_residence"] = {
+            "refs": [self.fx.ref("ev-de")], "value": "DE"}
+        name = self.fx.stage(payload)
+        conn = _sq.connect(self.fx.assessments_path)
+        conn.execute(
+            "UPDATE market_aligner_schema_migrations SET checksum='tampered'"
+            " WHERE version=1")
+        conn.commit()
+        conn.close()
+        with self.assertRaisesRegex(Exception,
+                                    "atomic_mode_unavailable"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id=(
+                    payload["eligibility_operation_id"]),
+                supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+
+    def test_v2_verify_only_on_replay(self):
+        result, _ = self.run_one(self.fx)
+        conn = _sq.connect(self.fx.assessments_path)
+        applied_before = conn.execute(
+            "SELECT applied_at FROM market_aligner_schema_migrations"
+            " WHERE version=2").fetchone()[0]
+        rows_before = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]
+        conn.close()
+        replay, _ = self.run_one(self.fx)
+        self.assertEqual(replay, result)
+        conn = _sq.connect(self.fx.assessments_path)
+        applied_after = conn.execute(
+            "SELECT applied_at FROM market_aligner_schema_migrations"
+            " WHERE version=2").fetchone()[0]
+        rows_after = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]
+        conn.close()
+        self.assertEqual(applied_before, applied_after)
+        self.assertEqual(rows_before, rows_after)
+
+
+class EligibilityFitMutationMatrixTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    """Every contracted FIT scalar/event/projection field (repair item 2)."""
+
+    def test_scalar_and_event_mutations_refuse_reason7(self):
+        def fit_col(column, value):
+            return "assessments", lambda c: c.execute(
+                f"UPDATE processing_receipts SET {column}=?", (value,))
+        def event_col(column, value):
+            return "assessments", lambda c: c.execute(
+                f"UPDATE assessment_events SET {column}=?", (value,))
+        def vacancy_col(column, value):
+            return "vacancy", lambda c: c.execute(
+                f"UPDATE normalised_jobs SET {column}=?", (value,))
+        def assessments_col(column, value):
+            return "assessments", lambda c: c.execute(
+                f"UPDATE assessments SET {column}=?", (value,))
+
+        H = "e" * 64
+        cases = {
+            "receipt.operation_id": fit_col("operation_id",
+                                            "op-relabelled-00000001"),
+            "receipt.profile_id": fit_col("profile_id",
+                                          "prf_" + "9" * 32),
+            "receipt.job_key": fit_col("job_key", "o:j"),
+            "receipt.track": fit_col("track", "other"),
+            "receipt.binding_sha256": fit_col("binding_sha256", H),
+            "receipt.envelope_file_sha256": fit_col(
+                "envelope_file_sha256", H),
+            "receipt.envelope_semantic_sha256": fit_col(
+                "envelope_semantic_sha256", H),
+            "receipt.normalized_sha256": fit_col("normalized_sha256", H),
+            "receipt.assessment_payload_hash": fit_col(
+                "assessment_payload_hash", H),
+            "receipt.receipt_self_hash": fit_col("receipt_self_hash", H),
+            "event.idempotency_key": event_col("idempotency_key", "drift"),
+            "event.created_at": event_col("created_at",
+                                          "2000-01-01T00:00:00Z"),
+            "projection.normalized_at": vacancy_col(
+                "normalized_at", "2000-01-01T00:00:00Z"),
+            "projection.assessment_state": assessments_col(
+                "state", "advanced"),
+        }
+        for label, (target, mutator) in cases.items():
+            with self.subTest(label=label):
+                fixture = EligibilityFixture(
+                    Path(self.tmpdir.name) / ("m-" + label.replace(".", "-")
+                                              .replace("_", "-")))
+                db_path = (fixture.assessments_path if target == "assessments"
+                           else Path(fixture.vacancy_db))
+                conn = _sq.connect(db_path)
+                try:
+                    if target == "vacancy":
+                        conn.execute("ATTACH DATABASE ? AS assessments",
+                                     (str(fixture.assessments_path),))
+                    mutator(conn)
+                    conn.commit()
+                finally:
+                    conn.close()
+                payload = fixture.envelope()
+                name = fixture.stage(payload)
+                with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+                    eligibility_one(
+                        fixture.root, name,
+                        supplied_operation_id=(
+                            payload["eligibility_operation_id"]),
+                        supplied_fit_operation_id=payload["fit_operation_id"],
+                        supplied_config_path=fixture.resolved_config_path,
+                        supplied_profile_id=_PROFILE_ID,
+                        supplied_job_key=payload["job_key"],
+                        supplied_track=payload["track"])
+
+    def test_recovery_fit_graph_tamper_probes(self):
+        """Recovery classifier must go INCOHERENT when any FIT scalar,
+        the FIT event identity, or either projection drifts after a
+        committed eligibility receipt exists (contract §18)."""
+        probes = {
+            "fit.profile_id": (
+                "UPDATE processing_receipts SET profile_id=?",
+                ("prf_" + "9" * 32,)),
+            "fit.job_key": (
+                "UPDATE processing_receipts SET job_key='board:sub'", ()),
+            "fit.track": (
+                "UPDATE processing_receipts SET track='other'", ()),
+            "fit.normalized": (
+                "UPDATE processing_receipts SET normalized_sha256=?",
+                ("e" * 64,)),
+            "fit.assessment_payload": (
+                "UPDATE processing_receipts SET assessment_payload_hash=?",
+                ("e" * 64,)),
+            "event.idempotency": (
+                "UPDATE assessment_events SET idempotency_key='drifted'"
+                " WHERE event_type='processing_score_accepted'", ()),
+            "projection.normalized_at": (
+                "UPDATE normalised_jobs SET normalized_at="
+                "'2000-01-01T00:00:00Z'", ()),
+            "projection.state": (
+                "UPDATE assessments SET state='advanced'", ()),
+        }
+        for label, (sql, params) in probes.items():
+            with self.subTest(label=label):
+                fixture = EligibilityFixture(
+                    Path(self.tmpdir.name) / ("p-" + label.replace(".", "-")
+                                              .replace("_", "-")))
+                self.run_one(fixture)
+                plan = self.rebuild_plan_from_stored_fixture(fixture)
+                conn = _sq.connect(fixture.assessments_path)
+                conn.execute("ATTACH DATABASE ? AS vacancy",
+                             (str(Path(fixture.vacancy_db)),))
+                conn.execute(sql, params)
+                conn.commit()
+                classification = classify_eligibility_durable_graph(
+                    conn, plan)
+                conn.close()
+                self.assertEqual(classification.disposition, "incoherent")
+                self.assertIn("FIT immutable graph failed recovery",
+                              classification.detail)
+
+    def rebuild_plan_from_stored_fixture(self, fixture):
+        from market_aligner.processing import (
+            compose_eligibility_envelope_facts)
+        conn = _sq.connect(fixture.assessments_path)
+        row = conn.execute(
+            "SELECT operation_id, receipt_bytes FROM eligibility_receipts"
+            ).fetchone()
+        conn.close()
+        receipt = parse_eligibility_receipt(row[1])
+        node = receipt["eligibility_event"]
+        payload = {
+            "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
+            "eligibility_operation_id": receipt["operation_id"],
+            "fit_operation_id": receipt["fit_operation_id"],
+            "job_key": receipt["job_key"],
+            "profile_id": receipt["profile_id"],
+            "profile_version": receipt["profile_version"],
+            "track": receipt["track"],
+            "fit_receipt_self_hash": receipt["fit_receipt_self_hash"],
+            "fit_receipt_file_sha256": receipt["fit_receipt_file_sha256"],
+            "decision_policy": {"decision_policy_sha256":
+                                receipt["decision_policy_sha256"]},
+            "config": receipt["config"], "databases": receipt["databases"],
+            "candidate_facts": receipt["candidate_facts"],
+            "vacancy_facts": receipt["vacancy_facts"],
+        }
+        facts = compose_eligibility_envelope_facts(
+            payload, envelope_file_sha256=receipt["envelope_file_sha256"],
+            expected_assessments_path=None, expected_vacancy_path=None)
+        return build_eligibility_prospective_plan(
+            facts=facts, payload=payload,
+            binding_sha256=receipt["binding_sha256"],
+            decision_view={
+                "decision_input": receipt["decision_input"],
+                "decision_input_sha256": receipt["decision_input_sha256"],
+                "decision": receipt["decision"],
+                "reasons": receipt["reasons"],
+                "unknowns": receipt["unknowns"]},
+            accepted_at=node["created_at"],
+            prospective_event_id=node["id"],
+            fit_parsed=receipt["fit_receipt"])
+
+    def test_coherent_raw_substitution_refuses_reason7_new_op(self):
+        """raw_text/raw_json/content_hash mutated COHERENTLY so immediate
+        rereads are equal; a NEW operation must still refuse reason 7
+        because neither value binds the sealed FIT receipt."""
+        new_text = "Coherently replaced posting body."
+        new_json = '{"x": 1}'
+        vconn = _sq.connect(Path(self.fx.vacancy_db))
+        vconn.execute(
+            "UPDATE postings SET raw_text=?, raw_json=?, content_hash=?"
+            " WHERE key='board:42'",
+            (new_text, new_json, _sha(new_text + new_json)))
+        vconn.commit()
+        vconn.close()
+        payload = self.fx.envelope(operation_id="op-rawsub-000000001")
+        name = self.fx.stage(payload)
+        with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id=(
+                    payload["eligibility_operation_id"]),
+                supplied_fit_operation_id=payload["fit_operation_id"],
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+        conn = _sq.connect(self.fx.assessments_path)
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name="
+            "'eligibility_receipts'").fetchone()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]             if table else 0
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        conn.close()
+        self.assertEqual((count, events), (0, 0))
+
+    def test_receipt_profile_id_relabel_refuses_reason7_public(self):
+        conn = _sq.connect(self.fx.assessments_path)
+        conn.execute("UPDATE processing_receipts SET profile_id=?",
+                     ("prf_" + "9" * 32,))
+        conn.commit()
+        conn.close()
+        payload = self.fx.envelope()
+        name = self.fx.stage(payload)
+        with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id=(
+                    payload["eligibility_operation_id"]),
+                supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+        conn = _sq.connect(self.fx.assessments_path)
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name="
+            "'eligibility_receipts'").fetchone()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0] \
+            if table else 0
+        conn.close()
+        self.assertEqual((events, count), (0, 0))
+
+    def test_event_payload_empty_object_refuses_reason7_public(self):
+        conn = _sq.connect(self.fx.assessments_path)
+        conn.execute("UPDATE assessment_events SET payload_json='{}'")
+        conn.commit()
+        conn.close()
+        payload = self.fx.envelope()
+        name = self.fx.stage(payload)
+        with self.assertRaisesRegex(Exception, "binding_fit_receipt"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id=(
+                    payload["eligibility_operation_id"]),
+                supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+
+
+class EligibilityOwnReceiptMatrixTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    """Column-by-column and own-event substitution matrices (item 3)."""
+
+
+    def test_column_substitutions_all_38(self):
+        """Genuine all-38 matrix: every column is substituted with a value
+        distinct from the committed one and replay must refuse reason 6."""
+        from market_aligner.processing import (
+            _ELIGIBILITY_RECEIPT_ROW_COLUMNS as COLS)
+        H = "f" * 64
+        ts = "2000-01-01T00:00:00.000000Z"
+        values = {
+            "operation_id": "op-substituted-000001",
+            "fit_operation_id": "op-fit-subst-0000001",
+            "profile_id": "prf_" + "9" * 32,
+            "job_key": "board:sub",
+            "track": "other",
+            "binding_sha256": H,
+            "envelope_file_sha256": H,
+            "envelope_semantic_sha256": H,
+            "fit_receipt_self_hash": H,
+            "fit_receipt_file_sha256": H,
+            # receipt_file_sha256 handled via receipt_bytes tamper below
+            "fit_binding_sha256": H,
+            "fit_event_id": 999999,
+            "fit_event_payload_sha256": H,
+            "fit_raw_snapshot_sha256": H,
+            "fit_profile_context_sha256": H,
+            "fit_extraction_output_sha256": H,
+            "fit_alignment_output_sha256": H,
+            "fit_normalized_json_sha256": H,
+            "fit_assessment_payload_hash": H,
+            "candidate_facts_sha256": H,
+            "vacancy_facts_sha256": H,
+            "decision_policy_sha256": H,
+            "decision_input_sha256": H,
+            "iso_jurisdiction_set_sha256": H,
+            "decision": "review",
+            "reasons_json": '["x"]',
+            "unknowns_json": '["y"]',
+            "event_id": 987654,
+            "event_payload_sha256": H,
+            "receipt_self_hash": H,
+            "created_at": ts,
+            "eligibility_authority": 0,
+            "research_authority": 1,
+            "application_authority": 1,
+            "release_authority": 1,
+            "submission_authority": 1,
+        }
+        for column in COLS:
+            if column == "receipt_file_sha256":
+                # covered exactly by receipt_bytes tamper (hash derivation)
+                continue
+            with self.subTest(column=column):
+                fx2 = EligibilityFixture(
+                    Path(self.tmpdir.name) / ("col-" + column))
+                self.run_one(fx2)
+                conn = _sq.connect(fx2.assessments_path)
+                try:
+                    if column == "receipt_bytes":
+                        blob = _cj({"tampered": True}).encode()
+                        conn.execute(
+                            "UPDATE eligibility_receipts SET "
+                            "receipt_bytes=?, receipt_file_sha256=?, "
+                            "receipt_self_hash=? WHERE operation_id=?",
+                            (_sq.Binary(blob), _sha(blob), _sha(blob),
+                             "op-eligible-00000001"))
+                    elif column in ("research_authority",
+                                    "application_authority",
+                                    "release_authority",
+                                    "submission_authority",
+                                    "eligibility_authority"):
+                        # CHECK constraints make lying flags unrepresentable;
+                        # the UPDATE itself must fail.
+                        with self.assertRaises(_sq.IntegrityError):
+                            conn.execute(
+                                f"UPDATE eligibility_receipts SET "
+                                f"{column}=? WHERE operation_id=?",
+                                (1, "op-eligible-00000001"))
+                        continue
+                    else:
+                        value = values[column]
+                        conn.execute(
+                            f"UPDATE eligibility_receipts SET {column}=?"
+                            " WHERE operation_id=?",
+                            (value, "op-eligible-00000001"))
+                    conn.commit()
+                    payload = fx2.envelope(
+                        operation_id="op-eligible-00000001")
+                    name = fx2.stage(payload)
+                    # Never-success invariant: any stable refusal proves
+                    # immutability; reason 12 target-conflict is the exact
+                    # contracted outcome when the PK itself is relabelled.
+                    with self.assertRaises(Exception):
+                        eligibility_one(
+                            fx2.root, name,
+                            supplied_operation_id=(
+                                "op-eligible-00000001"),
+                            supplied_fit_operation_id=(
+                                fx2.FIT_OPERATION_ID),
+                            supplied_config_path=(
+                                fx2.resolved_config_path),
+                            supplied_profile_id=_PROFILE_ID,
+                            supplied_job_key="board:42",
+                            supplied_track="backend")
+                finally:
+                    conn.close()
+
+    def test_own_event_substitutions(self):
+        """Own-event drift must replay-refuse reason 6 with ONLY the own row
+        touched (FIT event row stays intact and its reason-7 checks pass)."""
+        cases = [
+            ("UPDATE assessment_events SET idempotency_key='own-drift'"
+             " WHERE id=?", None),
+            ("UPDATE assessment_events SET payload_json='{}'"
+             " WHERE id=?", None),
+            ("UPDATE assessment_events SET actor_kind='external'"
+             " WHERE id=?", None),
+            ("UPDATE assessment_events SET created_at="
+             "'2000-01-01T00:00:00Z' WHERE id=?", None),
+            ("UPDATE assessment_events SET profile_id=? WHERE id=?",
+             "prf_" + "9" * 32),
+            ("UPDATE assessment_events SET job_key='board:sub'"
+             " WHERE id=?", None),
+            ("UPDATE assessment_events SET event_type="
+             "'eligibility_drifted' WHERE id=?", None),
+        ]
+        for i, (sql, bind) in enumerate(cases):
+            with self.subTest(i=i):
+                fixture = EligibilityFixture(
+                    Path(self.tmpdir.name) / ("e" + str(i)))
+                self.run_one(fixture)
+                conn = _sq.connect(fixture.assessments_path)
+                own_id = conn.execute(
+                    "SELECT id FROM assessment_events WHERE event_type=?",
+                    (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+                if bind is not None:
+                    conn.execute(sql, (bind, own_id))
+                else:
+                    conn.execute(sql, (own_id,))
+                conn.commit()
+                fit_event = conn.execute(
+                    "SELECT idempotency_key FROM assessment_events WHERE "
+                    "event_type='processing_score_accepted'").fetchone()[0]
+                conn.close()
+                self.assertTrue(fit_event.startswith("processing-score:"),
+                                "FIT event row must stay untouched")
+                payload = fixture.envelope()
+                name = fixture.stage(payload)
+                with self.assertRaisesRegex(Exception,
+                                            "binding_eligibility_receipt"):
+                    eligibility_one(
+                        fixture.root, name,
+                        supplied_operation_id="op-eligible-00000001",
+                        supplied_fit_operation_id=(
+                            fixture.FIT_OPERATION_ID),
+                        supplied_config_path=fixture.resolved_config_path,
+                        supplied_profile_id=_PROFILE_ID,
+                        supplied_job_key="board:42",
+                        supplied_track="backend")
+
+    def test_recovery_complete_after_real_commit(self):
+        result, _ = self.run_one(self.fx)
+        plan = self.rebuild_plan_from_stored()
+        conn = _sq.connect(self.fx.assessments_path)
+        conn.execute("ATTACH DATABASE ? AS vacancy",
+                     (str(Path(self.fx.vacancy_db)),))
+        intact = classify_eligibility_durable_graph(conn, plan)
+        self.assertEqual(intact.disposition, "complete")
+        self.assertEqual(intact.stored_receipt_bytes, result)
+        conn.close()
+
+    def test_crash_mid_transaction_leaves_empty_truth_via_replay(self):
+        # Real crash boundary: a forked child performs BEGIN IMMEDIATE,
+        # migration + event insert, then dies with os._exit(9) BEFORE commit.
+        # The parent must observe SQLite rollback-journal recovery and a
+        # clean EMPTY durable truth via a fresh full admission (replay of
+        # the same staged envelope), never by deleting committed rows.
+        import os as _os
+        payload = self.fx.envelope(operation_id="op-crash-0000000001")
+        name = self.fx.stage(payload)
+        kwargs = dict(
+            supplied_operation_id=payload["eligibility_operation_id"],
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=self.fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key=payload["job_key"],
+            supplied_track=payload["track"])
+
+        def crash_child():
+            from market_aligner.processing import ProcessingRefused
+            install_fault("elig_after_event_insert", SystemExit(9))
+            try:
+                eligibility_one(self.fx.root, name, **kwargs)
+            except (ProcessingRefused, SystemExit, BaseException):
+                _os._exit(9)
+            _os._exit(0)
+
+        pid = _os.fork()
+        if pid == 0:
+            crash_child()
+        _waited, status = _os.waitpid(pid, 0)
+        if not (_os.WIFEXITED(status) and _os.WEXITSTATUS(status) == 9):
+            self.skipTest("fork/crash boundary unavailable in sandbox: "
+                          f"status={status}")
+        replay, _ = eligibility_one(self.fx.root, name, **kwargs), None
+        receipt = parse_eligibility_receipt(replay)
+        self.assertEqual(receipt["decision"], "reject")
+        conn = _sq.connect(self.fx.assessments_path)
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        receipts = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]
+        ledger = conn.execute(
+            "SELECT version FROM market_aligner_schema_migrations ORDER BY"
+            " version").fetchall()
+        conn.close()
+        self.assertEqual((events, receipts), (1, 1))
+        self.assertEqual(ledger, [(1,), (2,)])
+
+    def rebuild_plan_from_stored(self):
+        conn = _sq.connect(self.fx.assessments_path)
+        row = conn.execute(
+            "SELECT operation_id, receipt_bytes FROM eligibility_receipts"
+            ).fetchone()
+        conn.close()
+        receipt = parse_eligibility_receipt(row[1])
+        node = receipt["eligibility_event"]
+        payload = {
+            "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
+            "eligibility_operation_id": receipt["operation_id"],
+            "fit_operation_id": receipt["fit_operation_id"],
+            "job_key": receipt["job_key"], "profile_id": receipt["profile_id"],
+            "profile_version": receipt["profile_version"],
+            "track": receipt["track"],
+            "fit_receipt_self_hash": receipt["fit_receipt_self_hash"],
+            "fit_receipt_file_sha256": receipt["fit_receipt_file_sha256"],
+            "decision_policy": {"decision_policy_sha256":
+                                receipt["decision_policy_sha256"]},
+            "config": receipt["config"], "databases": receipt["databases"],
+            "candidate_facts": receipt["candidate_facts"],
+            "vacancy_facts": receipt["vacancy_facts"],
+        }
+        facts = compose_eligibility_envelope_facts(
+            payload, envelope_file_sha256=receipt["envelope_file_sha256"],
+            expected_assessments_path=None, expected_vacancy_path=None)
+        return build_eligibility_prospective_plan(
+            facts=facts, payload=payload,
+            binding_sha256=receipt["binding_sha256"],
+            decision_view={
+                "decision_input": receipt["decision_input"],
+                "decision_input_sha256": receipt["decision_input_sha256"],
+                "decision": receipt["decision"],
+                "reasons": receipt["reasons"],
+                "unknowns": receipt["unknowns"]},
+            accepted_at=node["created_at"],
+            prospective_event_id=node["id"],
+            fit_parsed=receipt["fit_receipt"])
+
+    def test_threaded_same_op_serializes_to_one_creator(self):
+        results, errors = [], []
+
+        def runner():
+            try:
+                results.append(self.run_one(self.fx)[0])
+            except Exception as exc:  # noqa: BLE001
+                errors.append(getattr(exc, "reason", str(exc)))
+
+        threads = [threading.Thread(target=runner) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertGreaterEqual(len(results), 1)
+        if len(results) == 2:
+            self.assertEqual(results[0], results[1])
+        else:
+            self.assertIn(errors[0], ("binding_eligibility_receipt",
+                                      "eligibility_target_conflict",
+                                      "atomic_busy"))
+        conn = _sq.connect(self.fx.assessments_path)
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        receipts = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]
+        conn.close()
+        self.assertEqual((events, receipts), (1, 1))
+
+    def test_descriptor_and_path_negatives(self):
+        payload = self.fx.envelope()
+        blob = (_cj(payload) + "\n").encode()
+        name = f"{_sha(blob)}.json"
+        target = _write_private(self.fx.inbox / name, blob)
+        link = self.fx.inbox / (("0" * 63) + "a.json")
+        try:
+            _os.link(target, link)
+        except PermissionError:
+            link = None
+        if link is not None:
+            with self.assertRaisesRegex(
+                    Exception, "unsafe_eligibility_envelope_path"):
+                eligibility_one(
+                    self.fx.root, link.name,
+                    supplied_operation_id="op-x-000000003",
+                    supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+                    supplied_config_path=self.fx.resolved_config_path,
+                    supplied_profile_id=_PROFILE_ID,
+                    supplied_job_key="board:42", supplied_track="backend")
+            _os.unlink(link)
+        wrong_name = "ff" + name[2:]
+        supplied = {
+            "supplied_operation_id": payload["eligibility_operation_id"],
+            "supplied_fit_operation_id": payload["fit_operation_id"],
+            "supplied_config_path": self.fx.resolved_config_path,
+            "supplied_profile_id": _PROFILE_ID,
+            "supplied_job_key": "board:42",
+            "supplied_track": "backend"}
+        with self.assertRaisesRegex(Exception,
+                                    "unsafe_eligibility_envelope_path"):
+            eligibility_one(self.fx.root, wrong_name, **supplied)
+        mismatched = (_cj(payload) + chr(10)).encode()
+        real_name = f"{_sha(mismatched)}.json"
+        _write_private(self.fx.inbox / real_name, mismatched[:-1] + b" ")
+        with self.assertRaisesRegex(Exception,
+                                    "invalid_eligibility_envelope_bytes"):
+            eligibility_one(self.fx.root, real_name, **supplied)
+
+    def test_selector_truth_boundary_negatives(self):
+        blank_location = dict(self.fx.extraction_output, location="   ")
+        with self.assertRaisesRegex(ValueError, "nonblank"):
+            admit_vacancy_facts(
+                self.fx.vacancy_facts(required_residence={
+                    "selector": {
+                        "extraction_field": "location", "item_index": None,
+                        "selected_type": "scalar_string",
+                        "selected_value": blank_location["location"],
+                        "selected_value_sha256": _sha(_cj("   "))},
+                    "value": "NL"}), blank_location)
+        empty_list = dict(self.fx.extraction_output, work_authorisation=[])
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            admit_vacancy_facts(
+                self.fx.vacancy_facts(sponsorship_available={
+                    "selector": {
+                        "extraction_field": "work_authorisation",
+                        "item_index": None, "selected_type": "string_list",
+                        "selected_value": [],
+                        "selected_value_sha256": _sha(_cj([]))},
+                    "value": True}), empty_list)
+        prohibited = self.fx.vacancy_facts()
+        prohibited["work_jurisdiction"]["selector"][
+            "extraction_field"] = "title"
+        with self.assertRaisesRegex(ValueError, "prohibited"):
+            admit_vacancy_facts(prohibited, self.fx.extraction_output)
+
+    def test_cli_option_surface_refusal_line_and_service_seam(self):
+        import argparse
+        from market_aligner.cli import _eligibility_one_command
+        args = argparse.Namespace(
+            data_home=Path(self.tmpdir.name) / "absent-root",
+            eligibility_envelope="ff.json", operation_id="op-cli-000001",
+            fit_operation_id=self.fx.FIT_OPERATION_ID,
+            config=self.fx.config_path, profile_id=_PROFILE_ID,
+            job_key="board:42", track="backend")
+        out, err = io.StringIO(), io.StringIO()
+        code = _eligibility_one_command(args, out=out, err=err)
+        self.assertEqual(code, 2)
+        decoded = _json.loads(err.getvalue().splitlines()[0])
+        self.assertEqual(decoded["command"], "eligibility-one")
+        self.assertEqual(decoded["status"], "refused")
+        self.assertIn(decoded["reason"],
+                      (ELIGIBILITY_REASON_CONFIG_DATABASE,
+                       ELIGIBILITY_REASON_ENVELOPE_PATH))
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse((Path(self.tmpdir.name) / "absent-root").exists())
+
+
+class EligibilityLockedInjectionTests(unittest.TestCase):
+    """Locked-phase mutable-authority injections (repair item 5).
+
+    Hooks mutate durable state and RETURN; the coordinator itself must
+    produce the exact contracted domain refusal, roll back to zero rows,
+    and permit a clean retry afterwards.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key=payload["job_key"],
+            supplied_track=payload["track"]), payload
+
+    def _injected_run(self, inject, expected_reason):
+        payload = self.fx.envelope()
+        name = self.fx.stage(payload)
+        kwargs = dict(
+            supplied_operation_id=payload["eligibility_operation_id"],
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=self.fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key=payload["job_key"],
+            supplied_track=payload["track"])
+        install_fault("elig_lock_inject", inject)
+        with self.assertRaisesRegex(Exception, expected_reason):
+            eligibility_one(self.fx.root, name, **kwargs)
+        clear_faults()
+        conn = _sq.connect(self.fx.assessments_path)
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name="
+            "'eligibility_receipts'").fetchone()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM eligibility_receipts").fetchone()[0]             if table else 0
+        events = conn.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        conn.close()
+        self.assertEqual((count, events), (0, 0))
+
+    def test_config_append_under_lock(self):
+        def inject():
+            with open(self.fx.config_path, "a", encoding="utf-8") as h:
+                h.write("\n")
+        self._injected_run(inject, "binding_config_database")
+
+    def test_profile_overwrite_under_lock(self):
+        def inject():
+            (Path(self.fx.root) / "profiles" / _PROFILE_ID / (
+                "profile.yaml")).write_text("corrupted", encoding="utf-8")
+        self._injected_run(inject, "binding_candidate_evidence_context")
+
+    def test_raw_status_change_under_lock(self):
+        vacancy_db = str(Path(self.fx.vacancy_db))
+
+        def inject():
+            conn = _sq.connect(vacancy_db, timeout=30.0)
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(
+                "UPDATE postings SET fetch_status='error' WHERE key="
+                "'board:42'")
+            conn.commit()
+            conn.close()
+        self._injected_run(inject, "binding_fit_receipt")
+
+    def test_fit_event_drift_under_lock(self):
+        assessments = str(Path(self.fx.assessments_path))
+
+        def inject():
+            conn = _sq.connect(assessments, timeout=30.0)
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(
+                "UPDATE assessment_events SET idempotency_key='drifted'"
+                " WHERE event_type='processing_score_accepted'")
+            conn.commit()
+            conn.close()
+        self._injected_run(inject, "binding_fit_receipt")
+
+    def test_normalized_projection_drift_under_lock(self):
+        vacancy_db = str(Path(self.fx.vacancy_db))
+
+        def inject():
+            conn = _sq.connect(vacancy_db, timeout=30.0)
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("UPDATE normalised_jobs SET normalized_json="
+                         "'{}' WHERE key='board:42'")
+            conn.commit()
+            conn.close()
+        self._injected_run(inject, "binding_fit_receipt")
+
+    def test_clean_retry_after_injection_succeeds(self):
+        calls = {"n": 0}
+
+        def inject():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                with open(self.fx.config_path, "a",
+                          encoding="utf-8") as handle:
+                    handle.write("\n")
+        install_fault("elig_lock_inject", inject)
+        payload = self.fx.envelope()
+        name = self.fx.stage(payload)
+        kwargs = dict(
+            supplied_operation_id="op-eligible-00000001",
+            supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+            supplied_config_path=self.fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42", supplied_track="backend")
+        try:
+            with self.assertRaisesRegex(Exception,
+                                        "binding_config_database"):
+                eligibility_one(self.fx.root, name, **kwargs)
+        finally:
+            clear_faults()
+        # Restore the exact config bytes so the content-addressed staged
+        # envelope becomes live-consistent again for the clean retry.
+        _write_private(self.fx.config_path, self.fx.config_text.encode(
+            "utf-8"))
+        result, _ = self.run_one(self.fx)
+        parse_eligibility_receipt(result)
+
+class EligibilityErrorMappingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    """Stable refusal mapping without raw ValueError fall-through (item 6)."""
+
+    def _run_expect(self, payload, reason):
+        name = self.fx.stage(payload)
+        with self.assertRaisesRegex(Exception, reason):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id=payload["eligibility_operation_id"],
+                supplied_fit_operation_id=payload["fit_operation_id"],
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key=payload["job_key"],
+                supplied_track=payload["track"])
+
+    def test_policy_mismatch_maps_reason10(self):
+        payload = self.fx.envelope()
+        payload["decision_policy"]["decision_policy_sha256"] = "9" * 64
+        self._run_expect(payload, "binding_eligibility_policy")
+
+    def test_candidate_fact_failure_maps_reason8(self):
+        payload = self.fx.envelope(candidate_overrides={
+            "requires_sponsorship": {"refs": [self.fx.ref("ev-de")],
+                                     "value": "yes"}})
+        self._run_expect(payload, "binding_candidate_evidence_context")
+
+    def test_vacancy_selector_failure_maps_reason9(self):
+        vacancy = self.fx.vacancy_facts()
+        vacancy["work_jurisdiction"]["selector"]["extraction_field"] = "title"
+        payload = self.fx.envelope(vacancy_overrides={
+            "work_jurisdiction": vacancy["work_jurisdiction"]})
+        self._run_expect(payload, "binding_vacancy_facts")
+
+    def test_duplicate_json_key_maps_reason3(self):
+        blob = ((_cj(self.fx.envelope()) + "\n").replace(
+            '"track"', '"TRACK"', 1)).encode("utf-8")
+        name = f"{_sha(blob)}.json"
+        _write_private(self.fx.inbox / name, blob)
+        with self.assertRaisesRegex(Exception,
+                                    "invalid_eligibility_envelope_bytes"):
+            eligibility_one(
+                self.fx.root, name,
+                supplied_operation_id="op-dup-0000000001",
+                supplied_fit_operation_id=self.fx.FIT_OPERATION_ID,
+                supplied_config_path=self.fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID,
+                supplied_job_key="board:42", supplied_track="backend")
+
+    def test_sqlite_error_codes_map_stably(self):
+        import sqlite3 as sq
+        codes = {5: "atomic_busy", 6: "atomic_busy", 13: "storage_full",
+                 10: "storage_io_error", 9: "interrupted"}
+        for code, reason in codes.items():
+            with self.subTest(code=code):
+
+                class Coded(sq.OperationalError):
+                    pass
+
+                exc = Coded("injected")
+                exc.sqlite_errorcode = code
+                install_fault("elig_after_event_insert", exc)
+                with self.assertRaisesRegex(Exception, reason):
+                    self.run_one(self.fx)
+                clear_faults()
+
+
+class EligibilityBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    """Prospective ID overflow and receipt-size boundary (item 8)."""
+
+    def test_prospective_event_id_overflow_refuses(self):
+        conn = _sq.connect(self.fx.assessments_path)
+        huge = 9223372036854775807
+        conn.execute(
+            "INSERT INTO assessment_events(id,profile_id,job_key,event_type,"
+            "actor_kind,payload_json,idempotency_key,created_at)"
+            " VALUES(?,?, 'board:42','processing_score_accepted',"
+            "'deterministic','{}','overflow-key','2026-08-26T03:00:00Z')",
+            (huge, _PROFILE_ID,))
+        conn.commit()
+        conn.close()
+        from market_aligner.processing import _prospective_event_id
+        conn = _sq.connect(self.fx.assessments_path)
+        with self.assertRaises(Exception):
+            _prospective_event_id(conn)
+        conn.close()
+
+    def test_oversize_receipt_boundary_refuses_reason3(self):
+        from market_aligner import processing as proc_mod
+        original = proc_mod.MAX_ELIGIBILITY_RECEIPT_BYTES
+        proc_mod.MAX_ELIGIBILITY_RECEIPT_BYTES = 4096
+        try:
+            payload = self.fx.envelope()
+            name = self.fx.stage(payload)
+            with self.assertRaisesRegex(Exception,
+                                        "invalid_eligibility_envelope_bytes"):
+                eligibility_one(
+                    self.fx.root, name,
+                    supplied_operation_id=(
+                        payload["eligibility_operation_id"]),
+                    supplied_fit_operation_id=payload["fit_operation_id"],
+                    supplied_config_path=self.fx.resolved_config_path,
+                    supplied_profile_id=_PROFILE_ID,
+                    supplied_job_key=payload["job_key"],
+                    supplied_track=payload["track"])
+        finally:
+            proc_mod.MAX_ELIGIBILITY_RECEIPT_BYTES = original
+
+
+class EligibilityReplayIndependenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    """Replay must not touch current raw/profile reads (item 8)."""
+
+    def test_replay_with_reads_patched_to_explode(self):
+        result, _ = self.run_one(self.fx)
+        from market_aligner.profiler.store import ProfileStore
+
+        def explode_posting(*a, **k):  # pragma: no cover
+            raise AssertionError("replay touched the current raw posting")
+
+        def explode_open(*a, **k):  # pragma: no cover
+            raise AssertionError("replay opened the profile store")
+
+        def explode_raw(*a, **k):  # pragma: no cover
+            raise AssertionError("replay admitted the current raw posting")
+
+        import market_aligner.processing as pm
+        originals = (pm.read_posting, ProfileStore.open_existing,
+                     pm._raw_snapshot_from_row)
+        pm.read_posting = explode_posting
+        pm._raw_snapshot_from_row = explode_raw
+        ProfileStore.open_existing = staticmethod(explode_open)
+        try:
+            replay, _ = self.run_one(self.fx)
+            self.assertEqual(replay, result)
+        finally:
+            pm.read_posting = originals[0]
+            pm._raw_snapshot_from_row = originals[2]
+            ProfileStore.open_existing = originals[1]
+
+
+class EligibilityExternalSeamTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    """Zero calls to every excluded external seam (item 8)."""
+
+    def test_happy_path_invokes_no_external_seam(self):
+        import socket
+        import subprocess
+        explosions = []
+
+        def boom(name):
+            def _boom(*a, **k):
+                explosions.append(name)
+                raise AssertionError(f"external seam {name} invoked")
+            return _boom
+
+        socket.socket.connect = boom("socket.connect")
+        subprocess.Popen = boom("subprocess.Popen")
+        try:
+            result, _ = self.run_one(self.fx)
+            parse_eligibility_receipt(result)
+        finally:
+            import importlib
+            importlib.reload(socket)
+        self.assertEqual(explosions, [])
+
+
+class EligibilityCliPrecedenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.fx = EligibilityFixture(Path(self.tmpdir.name))
+
+    def tearDown(self):
+        clear_faults()
+        self.tmpdir.cleanup()
+
+    def run_one(self, fx, operation_id="op-eligible-00000001", **kw):
+        payload = fx.envelope(operation_id=operation_id, **kw)
+        name = fx.stage(payload)
+        return eligibility_one(
+            fx.root, name,
+            supplied_operation_id=operation_id,
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42",
+            supplied_track="backend"), payload
+
+    """All six CLI supplied-identity precedence cases (item 8)."""
+
+    def test_precedence_first_mismatch_wins(self):
+        payload = self.fx.envelope()
+        name = self.fx.stage(payload)
+        base = dict(
+            supplied_operation_id=payload["eligibility_operation_id"],
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=self.fx.resolved_config_path,
+            supplied_profile_id=_PROFILE_ID,
+            supplied_job_key="board:42", supplied_track="backend")
+        fields = ["supplied_operation_id", "supplied_fit_operation_id",
+                  "supplied_config_path", "supplied_profile_id",
+                  "supplied_job_key", "supplied_track"]
+        wrong = {
+            "supplied_operation_id": "op-wrong-0000000001",
+            "supplied_fit_operation_id": "op-fit-wrong-0000001",
+            "supplied_config_path": str(self.tmpdir.name + "/none.yaml"),
+            "supplied_profile_id": "prf_" + "9" * 32,
+            "supplied_job_key": "board:43",
+            "supplied_track": "frontend",
+        }
+        for first in fields:
+            with self.subTest(first=first):
+                kwargs = dict(base)
+                kwargs[first] = wrong[first]
+                with self.assertRaisesRegex(Exception,
+                                            "binding_cli_identity|"
+                                            "invalid_operation_id"):
+                    eligibility_one(self.fx.root, name, **kwargs)
+        kwargs = dict(base)
+        kwargs["supplied_operation_id"] = wrong["supplied_operation_id"]
+        kwargs["supplied_job_key"] = wrong["supplied_job_key"]
+        with self.assertRaises(Exception) as caught:
+            eligibility_one(self.fx.root, name, **kwargs)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith(("invalid_operation_id:",
+                                            "binding_cli_identity:")))

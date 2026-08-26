@@ -82,3 +82,29 @@ class MarketAlignerService:
             supplied_job_key=supplied_job_key,
             supplied_track=supplied_track,
         )
+    @staticmethod
+    def eligibility_one(
+        data_home: Path,
+        envelope_name: str,
+        *,
+        supplied_operation_id: str,
+        supplied_fit_operation_id: str,
+        supplied_config_path: str,
+        supplied_profile_id: str,
+        supplied_job_key: str,
+        supplied_track: str,
+    ) -> bytes:
+        """Run ELIGIBILITY-001 without constructing the mutating service."""
+
+        from market_aligner.processing import eligibility_one
+
+        return eligibility_one(
+            data_home,
+            envelope_name,
+            supplied_operation_id=supplied_operation_id,
+            supplied_fit_operation_id=supplied_fit_operation_id,
+            supplied_config_path=supplied_config_path,
+            supplied_profile_id=supplied_profile_id,
+            supplied_job_key=supplied_job_key,
+            supplied_track=supplied_track,
+        )

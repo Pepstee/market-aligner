@@ -93,6 +93,8 @@ from market_aligner.research.store import (
     require_rfc3339_timestamp,
 )
 from market_aligner.state.migrations import (
+    ELIGIBILITY_ELIGIBILITY_RECEIPTS,
+    ELIGIBILITY_RECEIPTS_DDL,
     FIT001_PROCESSING_RECEIPTS,
     FIT001_RECEIPTS_DDL,
     LEDGER_DDL,
@@ -7546,3 +7548,2453 @@ def process_one(
             supplied_job_key=supplied_job_key,
             supplied_track=supplied_track,
         )
+
+
+# ==========================================================================
+# ELIGIBILITY-001: evidence-bound eligibility decision admission.
+#
+# Authority: docs/eligibility/
+# ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md
+# (accepted, SHA-256 cea1b0f8b024d1322cf5a9eff52cfb2938cf68608b30ae7da38ef35e
+# d529d349).  One public deterministic provider-free path: eligibility_one().
+# Every frozen constant below is embedded verbatim from the accepted contract.
+# ==========================================================================
+
+ELIGIBILITY_ENVELOPE_SCHEMA_VERSION = "market-aligner.eligibility-envelope.v1"
+ELIGIBILITY_BINDING_SCHEMA_VERSION = "market-aligner.eligibility-binding.v1"
+ELIGIBILITY_EVENT_SCHEMA_VERSION = "market-aligner.eligibility-decided-event.v1"
+ELIGIBILITY_RECEIPT_SCHEMA_VERSION = "market-aligner.eligibility-receipt.v1"
+EVENT_TYPE_ELIGIBILITY_DECIDED = "eligibility_decided"
+
+MAX_ELIGIBILITY_ENVELOPE_BYTES = 1_048_576
+MAX_ELIGIBILITY_RECEIPT_BYTES = 8_388_608
+MAX_ELIGIBILITY_JSON_NODES = 10_000
+MAX_ELIGIBILITY_JSON_DEPTH = 32
+
+ISO_JURISDICTION_SET_SHA256 = (
+    "bad3b0ab6d1073f237d176df4d3ec9297269c1c13c73f714c0736a87912b1523")
+CONTRACT_TYPE_ENUM_SHA256 = (
+    "8deddcbc79b7fbe7bd577e5a13c39d4a2ee20419fa33e023cb31eccf46f33ff2")
+ELIGIBILITY_DECISION_POLICY_SHA256 = (
+    "12dbb06cc16277aed00007f46eaf132fa54fb89cf211c53c7283e48c06bcb581")
+ELIGIBILITY_DECISION_POLICY_BODY = json.dumps(
+    {
+        "application_authority": False,
+        "decision_tokens": ["pass", "review", "reject"],
+        "iso_jurisdiction_set_sha256": ISO_JURISDICTION_SET_SHA256,
+        "release_authority": False,
+        "research_authority": False,
+        "schema_version":
+            "market-aligner.eligibility001-fixed-decision-policy.v1",
+        "submission_authority": False,
+    },
+    ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+assert len(ELIGIBILITY_DECISION_POLICY_BODY.encode("utf-8")) == 329
+assert hashlib.sha256(
+    ELIGIBILITY_DECISION_POLICY_BODY.encode("utf-8")).hexdigest() == \
+    ELIGIBILITY_DECISION_POLICY_SHA256
+
+_ISO_MEMBER_CODES = (
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ "
+    "BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ "
+    "CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ "
+    "DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR "
+    "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY "
+    "HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP "
+    "KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY "
+    "MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ "
+    "NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS "
+    "PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR "
+    "SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ "
+    "UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW").split()
+_ISO_JURISDICTIONS = frozenset(_ISO_MEMBER_CODES)
+assert len(_ISO_JURISDICTIONS) == 249
+assert hashlib.sha256(json.dumps(
+    sorted(_ISO_JURISDICTIONS), separators=(",", ":")).encode()).hexdigest() \
+    == ISO_JURISDICTION_SET_SHA256
+
+_CONTRACT_TYPES = frozenset((
+    "apprenticeship", "contract", "freelance", "full_time", "internship",
+    "part_time", "permanent", "temporary"))
+assert hashlib.sha256(json.dumps(
+    sorted(_CONTRACT_TYPES), separators=(",", ":")).encode()).hexdigest() == \
+    CONTRACT_TYPE_ENUM_SHA256
+
+MAX_CANDIDATE_REF_BYTES = 2359
+MAX_TOTAL_CANDIDATE_REFS = 256
+MAX_AUTHORISED_JURISDICTIONS = 249
+MAX_EXCLUDED_CONTRACT_TYPES = 8
+
+ELIGIBILITY_REASON_OPERATION_ID = "invalid_operation_id"
+ELIGIBILITY_REASON_ENVELOPE_PATH = "unsafe_eligibility_envelope_path"
+ELIGIBILITY_REASON_ENVELOPE_BYTES = "invalid_eligibility_envelope_bytes"
+ELIGIBILITY_REASON_CLI_IDENTITY = "binding_cli_identity"
+ELIGIBILITY_REASON_CONFIG_DATABASE = "binding_config_database"
+ELIGIBILITY_REASON_EXISTING_RECEIPT = "binding_eligibility_receipt"
+ELIGIBILITY_REASON_FIT_RECEIPT = "binding_fit_receipt"
+ELIGIBILITY_REASON_CANDIDATE_EVIDENCE = "binding_candidate_evidence_context"
+ELIGIBILITY_REASON_VACANCY_FACTS = "binding_vacancy_facts"
+ELIGIBILITY_REASON_POLICY = "binding_eligibility_policy"
+ELIGIBILITY_REASON_DECISION_RECONSTRUCTION = "binding_decision_reconstruction"
+ELIGIBILITY_REASON_TARGET_CONFLICT = "eligibility_target_conflict"
+
+_ELIGIBILITY_ENVELOPE_TOP_LEVEL_KEYS = {
+    "schema_version", "eligibility_operation_id", "fit_operation_id",
+    "job_key", "profile_id", "profile_version", "track",
+    "fit_receipt_self_hash", "fit_receipt_file_sha256", "decision_policy",
+    "config", "databases", "candidate_facts", "vacancy_facts"}
+_CANDIDATE_REF_KEYS = {"evidence_id", "kind", "status", "claim_sha256",
+                       "source_ref_sha256", "content_sha256"}
+_CANDIDATE_FACTS_KEYS = {"authorised_jurisdictions", "current_residence",
+                         "requires_sponsorship", "maximum_years_required",
+                         "excluded_contract_types"}
+_SELECTOR_KEYS = {"extraction_field", "item_index", "selected_type",
+                  "selected_value", "selected_value_sha256"}
+_VACANCY_FACTS_KEYS = {"work_jurisdiction", "required_residence",
+                       "sponsorship_available", "minimum_years_required",
+                       "contract_type"}
+_ELIGIBILITY_BINDING_KEYS = {
+    "schema_version", "operation_id", "fit_operation_id", "job_key",
+    "profile_id", "profile_version", "track", "envelope_file_sha256",
+    "envelope_semantic_sha256", "fit_receipt_self_hash",
+    "fit_receipt_file_sha256", "decision_policy_sha256", "config",
+    "databases", "candidate_facts", "vacancy_facts"}
+_ELIGIBILITY_DECISION_INPUT_KEYS = {
+    "authorised_jurisdictions", "contract_type", "current_residence",
+    "excluded_contract_types", "maximum_years_required",
+    "minimum_years_experience", "requires_sponsorship", "required_residence",
+    "sponsorship_available", "work_jurisdiction"}
+_ELIGIBILITY_EVENT_PAYLOAD_KEYS = {
+    "schema_version", "operation_id", "fit_operation_id", "profile_id",
+    "job_key", "track", "binding_sha256", "envelope_file_sha256",
+    "fit_receipt_self_hash", "fit_receipt_file_sha256",
+    "fit_assessment_event_id", "fit_event_payload_sha256",
+    "fit_normalized_json_sha256", "candidate_facts_sha256",
+    "vacancy_facts_sha256", "decision_policy_sha256",
+    "decision_input_sha256", "iso_jurisdiction_set_sha256", "decision",
+    "reasons", "unknowns"}
+assert len(_ELIGIBILITY_EVENT_PAYLOAD_KEYS) == 21
+_ELIGIBILITY_EVENT_NODE_KEYS = {"id", "event_type", "actor_kind",
+                                "payload_sha256", "idempotency_key",
+                                "created_at"}
+_ELIGIBILITY_RECEIPT_TOP_LEVEL_KEYS = {
+    "schema_version", "operation_id", "fit_operation_id", "job_key",
+    "profile_id", "profile_version", "track", "binding_sha256",
+    "envelope_file_sha256", "envelope_semantic_sha256", "config", "databases",
+    "fit_receipt", "fit_receipt_self_hash", "fit_receipt_file_sha256",
+    "fit_binding_sha256", "fit_assessment_event_id",
+    "fit_event_payload_sha256", "fit_raw_snapshot_sha256",
+    "fit_profile_context_sha256", "fit_extraction_output_sha256",
+    "fit_alignment_output_sha256", "fit_normalized_json_sha256",
+    "fit_assessment_payload_hash", "candidate_facts", "vacancy_facts",
+    "candidate_facts_sha256", "vacancy_facts_sha256",
+    "decision_policy_sha256", "decision_input_sha256",
+    "iso_jurisdiction_set_sha256", "decision_input", "decision", "reasons",
+    "unknowns", "eligibility_event", "created_at", "time_authenticated",
+    "imported_model_policy_authenticated", "imported_time_authenticated",
+    "research_authority", "application_authority", "release_authority",
+    "submission_authority", "eligibility_authority", "self_hash"}
+assert len(_ELIGIBILITY_RECEIPT_TOP_LEVEL_KEYS) == 46
+_ELIGIBILITY_FALSE_FLAGS = (
+    "time_authenticated", "imported_model_policy_authenticated",
+    "imported_time_authenticated", "research_authority",
+    "application_authority", "release_authority", "submission_authority")
+_FIT_SCALAR_PROJECTIONS = (
+    ("fit_binding_sha256", ("binding_sha256",)),
+    ("fit_event_payload_sha256", ("assessment_event", "payload_sha256")),
+    ("fit_raw_snapshot_sha256", ("raw", "raw_snapshot_sha256")),
+    ("fit_profile_context_sha256", ("profile", "profile_context_sha256")),
+    ("fit_extraction_output_sha256", ("extraction", "receipt", "output_sha256")),
+    ("fit_alignment_output_sha256", ("alignment", "receipt", "output_sha256")),
+    ("fit_normalized_json_sha256",
+     ("normalised_projection", "normalized_json_sha256")),
+    ("fit_assessment_payload_hash",
+     ("assessment_projection", "score_payload_hash")))
+
+
+def _is_blank_character(character: str) -> bool:
+    if character in " \t\n\v\f\r":
+        return True
+    import unicodedata
+    return unicodedata.category(character) == "Zs"
+
+
+def _is_nonblank(text: str) -> bool:
+    return any(not _is_blank_character(ch) for ch in text)
+
+
+def _require_iso_member(value: Any, label: str) -> str:
+    if not isinstance(value, str) or value not in _ISO_JURISDICTIONS:
+        raise ValueError(f"{label} must be an exact uppercase ISO-3166-1 "
+                         "alpha-2 member")
+    return value
+
+
+def _require_enum_member(value: Any, label: str) -> str:
+    if not isinstance(value, str) or value not in _CONTRACT_TYPES:
+        raise ValueError(f"{label} must be an exact lowercase contract-type "
+                         "enum member")
+    return value
+
+
+def _validate_candidate_ref(node: Any, seen_ids: set[str],
+                            label: str) -> dict[str, Any]:
+    ref = exact_keys(node, _CANDIDATE_REF_KEYS, label)
+    evidence_id = plain_string(ref["evidence_id"], f"{label}.evidence_id",
+                               1, 256)
+    if evidence_id in seen_ids:
+        raise ValueError(f"{label}.evidence_id duplicates an earlier id in "
+                         "its refs array")
+    seen_ids.add(evidence_id)
+    plain_string(ref["kind"], f"{label}.kind", 1, 256)
+    status = plain_string(ref["status"], f"{label}.status", 1, 32)
+    if status not in ("verified", "explicit", "inference",
+                      "unverified_current"):
+        raise ValueError(f"{label}.status is not a committed evidence status")
+    sha256_value(ref["claim_sha256"], f"{label}.claim_sha256")
+    sha256_value(ref["source_ref_sha256"], f"{label}.source_ref_sha256")
+    if not isinstance(ref["content_sha256"], str):
+        raise ValueError(f"{label}.content_sha256 is required (never null)")
+    sha256_value(ref["content_sha256"], f"{label}.content_sha256")
+    canonical = canonical_json(ref).encode("utf-8")
+    if len(canonical) > MAX_CANDIDATE_REF_BYTES:
+        raise ValueError(f"{label} serializes to {len(canonical)} bytes; "
+                         f"maximum is {MAX_CANDIDATE_REF_BYTES}")
+    return ref
+
+
+def _refs_array(node: dict[str, Any], label: str) -> list[Any]:
+    refs = node.get("refs")
+    if not isinstance(refs, list) or not refs:
+        raise ValueError(f"{label}.refs must be a nonempty array of exact "
+                         "CandidateEvidenceRef objects")
+    return refs
+
+
+def _refs_gate(refs: list[Any]) -> bool:
+    return all(ref["status"] in ("verified", "explicit") for ref in refs)
+
+
+class _CandidateRefBudget:
+    """Global ref-count budget; evidence_id uniqueness stays PER ARRAY."""
+
+    def __init__(self) -> None:
+        self._count = 0
+
+    def take(self, raw_refs: list[Any], label: str) -> list[dict[str, Any]]:
+        seen_in_array: set[str] = set()
+        parsed: list[dict[str, Any]] = []
+        for i, ref in enumerate(raw_refs):
+            parsed.append(_validate_candidate_ref(
+                ref, seen_in_array, f"{label}[{i}]"))
+        self._count += len(parsed)
+        if self._count > MAX_TOTAL_CANDIDATE_REFS:
+            raise ValueError("candidate_facts exceed the total ref budget")
+        return parsed
+
+
+@dataclasses.dataclass(frozen=True)
+class CandidateFactsAdmission:
+    staged_canonical: bytes
+    effective: dict[str, Any]
+    status_downgraded: bool
+
+
+def admit_candidate_facts(payload: Any) -> CandidateFactsAdmission:
+    """Validate staged candidate facts and derive the effective decision view.
+
+    Scalar facts use the whole-fact status rule; array facts are
+    ALL-OR-NOTHING across their outer refs AND every member ref.  A downgrade
+    yields UNKNOWN (JSON null downstream), never an empty array, and adds
+    exactly one ``candidate_evidence_status_unverified`` token after dedup.
+    """
+    node = exact_keys(payload, _CANDIDATE_FACTS_KEYS, "candidate_facts")
+    budget = _CandidateRefBudget()
+    effective: dict[str, Any] = {}
+    downgraded = False
+
+    def admit_wrapper(wrapper, label, value_check):
+        nonlocal downgraded
+        if wrapper is None:
+            return None
+        if not isinstance(wrapper, dict) or set(wrapper) != {"refs", "value"}:
+            raise ValueError(f"candidate_facts.{label} must be null or an "
+                             "exact refs/value object")
+        outer = budget.take(_refs_array(wrapper, label),
+                            f"candidate_facts.{label}.refs")
+        value_check(wrapper["value"], f"candidate_facts.{label}.value")
+        ok = _refs_gate(outer)
+        return ok
+
+    auth = node["authorised_jurisdictions"]
+    if auth is None:
+        effective["authorised_jurisdictions"] = None
+    else:
+        if not isinstance(auth, dict) or set(auth) != {"refs", "value"}:
+            raise ValueError("candidate_facts.authorised_jurisdictions must "
+                             "be null or an exact refs/value object")
+        outer = budget.take(_refs_array(auth, "authorised_jurisdictions"),
+                            "authorised_jurisdictions.refs")
+        members = auth["value"]
+        if not isinstance(members, list):
+            raise ValueError("authorised_jurisdictions.value must be an array")
+        if len(members) > MAX_AUTHORISED_JURISDICTIONS:
+            raise ValueError("authorised_jurisdictions exceeds its maximum")
+        seen_values: set[str] = set()
+        members_ok = True
+        for i, entry in enumerate(members):
+            if not isinstance(entry, dict) or set(entry) != {"refs", "value"}:
+                raise ValueError("authorised_jurisdictions.value entries must "
+                                 "be exact refs/value objects")
+            mrefs = budget.take(
+                _refs_array(entry, f"authorised_jurisdictions.value[{i}]"),
+                f"authorised_jurisdictions.value[{i}].refs")
+            value = _require_iso_member(
+                entry["value"],
+                f"authorised_jurisdictions.value[{i}].value")
+            if value in seen_values:
+                raise ValueError("authorised_jurisdictions values must be "
+                                 "unique after exact comparison")
+            seen_values.add(value)
+            members_ok = members_ok and _refs_gate(mrefs)
+        outer_ok = _refs_gate(outer)
+        if outer_ok and members_ok:
+            effective["authorised_jurisdictions"] = sorted(seen_values)
+        else:
+            effective["authorised_jurisdictions"] = None
+            downgraded = True
+
+    residence = node["current_residence"]
+    if residence is None:
+        effective["current_residence"] = None
+    else:
+        if (not isinstance(residence, dict)
+                or set(residence) != {"refs", "value"}):
+            raise ValueError("candidate_facts.current_residence must be null "
+                             "or an exact refs/value object")
+        outer = budget.take(_refs_array(residence, "current_residence"),
+                            "current_residence.refs")
+        _require_iso_member(residence["value"],
+                            "candidate_facts.current_residence.value")
+        if _refs_gate(outer):
+            effective["current_residence"] = residence["value"]
+        else:
+            effective["current_residence"] = None
+            downgraded = True
+
+    sponsorship = node["requires_sponsorship"]
+    if sponsorship is None:
+        effective["requires_sponsorship"] = None
+    else:
+        if (not isinstance(sponsorship, dict)
+                or set(sponsorship) != {"refs", "value"}):
+            raise ValueError("candidate_facts.requires_sponsorship must be "
+                             "null or an exact refs/value object")
+        outer = budget.take(_refs_array(sponsorship, "requires_sponsorship"),
+                            "requires_sponsorship.refs")
+        if not isinstance(sponsorship["value"], bool):
+            raise ValueError("candidate_facts.requires_sponsorship.value must "
+                             "be a boolean")
+        if _refs_gate(outer):
+            effective["requires_sponsorship"] = sponsorship["value"]
+        else:
+            effective["requires_sponsorship"] = None
+            downgraded = True
+
+    years = node["maximum_years_required"]
+    if years is None:
+        effective["maximum_years_required"] = None
+    else:
+        if not isinstance(years, dict) or set(years) != {"refs", "value"}:
+            raise ValueError("candidate_facts.maximum_years_required must be "
+                             "null or an exact refs/value object")
+        outer = budget.take(_refs_array(years, "maximum_years_required"),
+                            "maximum_years_required.refs")
+        value = years["value"]
+        if (not _is_number(value) or not math.isfinite(float(value))
+                or float(value) < 0):
+            raise ValueError("candidate_facts.maximum_years_required.value "
+                             "must be a finite number >= 0")
+        if _refs_gate(outer):
+            effective["maximum_years_required"] = value
+        else:
+            effective["maximum_years_required"] = None
+            downgraded = True
+
+    exclusions = node["excluded_contract_types"]
+    if exclusions is None:
+        effective["excluded_contract_types"] = None
+    else:
+        if (not isinstance(exclusions, dict)
+                or set(exclusions) != {"refs", "value"}):
+            raise ValueError("candidate_facts.excluded_contract_types must be "
+                             "null or an exact refs/value object")
+        outer = budget.take(_refs_array(exclusions, "excluded_contract_types"),
+                            "excluded_contract_types.refs")
+        members = exclusions["value"]
+        if not isinstance(members, list):
+            raise ValueError("excluded_contract_types.value must be an array")
+        if len(members) > MAX_EXCLUDED_CONTRACT_TYPES:
+            raise ValueError("excluded_contract_types exceeds its maximum")
+        seen_values: set[str] = set()
+        members_ok = True
+        for i, entry in enumerate(members):
+            if not isinstance(entry, dict) or set(entry) != {"refs", "value"}:
+                raise ValueError("excluded_contract_types.value entries must "
+                                 "be exact refs/value objects")
+            mrefs = budget.take(
+                _refs_array(entry, f"excluded_contract_types.value[{i}]"),
+                f"excluded_contract_types.value[{i}].refs")
+            value = _require_enum_member(
+                entry["value"],
+                f"excluded_contract_types.value[{i}].value")
+            if value in seen_values:
+                raise ValueError("excluded_contract_types values must be "
+                                 "unique after exact comparison")
+            seen_values.add(value)
+            members_ok = members_ok and _refs_gate(mrefs)
+        outer_ok = _refs_gate(outer)
+        if outer_ok and members_ok:
+            effective["excluded_contract_types"] = sorted(seen_values)
+        else:
+            effective["excluded_contract_types"] = None
+            downgraded = True
+
+    return CandidateFactsAdmission(
+        staged_canonical=canonical_json(node).encode("utf-8"),
+        effective=effective,
+        status_downgraded=downgraded)
+
+
+_SELECTOR_COMBINATIONS = {
+    "work_jurisdiction":
+        {("work_authorisation", "scalar_string")},
+    "sponsorship_available":
+        {("work_authorisation", "string_list")},
+    "required_residence": {("location", "scalar_string")},
+    "contract_type": {("contract_type", "scalar_string")},
+    "minimum_years_required": {("description", "scalar_string"),
+                               ("required_qualifications", "scalar_string")},
+}
+_ALLOWED_EXTRACTION_FIELDS = frozenset(
+    field for combos in _SELECTOR_COMBINATIONS.values()
+    for field, _ in combos)
+_ELEMENT_LIST_FIELDS = frozenset(("work_authorisation",
+                                  "required_qualifications"))
+
+
+def admit_vacancy_facts(payload: Any,
+                        extraction: dict[str, Any]) -> dict[str, Any]:
+    """Validate staged vacancy facts against the committed extraction."""
+    node = exact_keys(payload, _VACANCY_FACTS_KEYS, "vacancy_facts")
+
+    def check_iso(v, lbl):
+        _require_iso_member(v, lbl)
+
+    def check_bool(v, lbl):
+        if not isinstance(v, bool):
+            raise ValueError(lbl + " must be a boolean")
+
+    def check_enum(v, lbl):
+        _require_enum_member(v, lbl)
+
+    def check_years(v, lbl):
+        if not _is_number(v) or not math.isfinite(float(v)) or float(v) < 0:
+            raise ValueError(lbl + " must be a finite number >= 0")
+
+    validators = {"work_jurisdiction": check_iso,
+                  "required_residence": check_iso,
+                  "sponsorship_available": check_bool,
+                  "minimum_years_required": check_years,
+                  "contract_type": check_enum}
+    effective: dict[str, Any] = {}
+    for fact in sorted(_VACANCY_FACTS_KEYS):
+        entry = node[fact]
+        if entry is None:
+            effective[fact] = None
+            continue
+        if not isinstance(entry, dict) or set(entry) != {"selector", "value"}:
+            raise ValueError(f"vacancy_facts.{fact} must be null or an exact "
+                             "selector/value object")
+        sel = exact_keys(entry["selector"],
+                         _SELECTOR_KEYS, f"vacancy_facts.{fact}.selector")
+        field = plain_string(sel["extraction_field"],
+                             f"vacancy_facts.{fact}.selector.extraction_field",
+                             1, 64)
+        if field not in _ALLOWED_EXTRACTION_FIELDS:
+            raise ValueError(
+                f"vacancy_facts.{fact}: extraction_field is prohibited")
+        allowed = _SELECTOR_COMBINATIONS[fact]
+        stype = plain_string(sel["selected_type"],
+                             f"vacancy_facts.{fact}.selector.selected_type",
+                             1, 16)
+        if stype not in ("scalar_string", "string_list"):
+            raise ValueError("selected_type must be a closed token")
+        if (field, stype) not in allowed:
+            raise ValueError(
+                f"vacancy_facts.{fact}: field/type combination is not "
+                "permitted for this fact")
+        idx = sel["item_index"]
+        if stype == "string_list":
+            if idx is not None:
+                raise ValueError("whole-list selection requires null "
+                                 "item_index")
+            raw = sel["selected_value"]
+            target = extraction[field]
+            if not isinstance(target, (list, tuple)):
+                target = list(target)
+            if not isinstance(raw, list):
+                raise ValueError("selected_value must mirror the list")
+            if len(raw) != len(target) or raw != list(target):
+                raise ValueError("selected_value does not mirror the "
+                                 "committed list byte-for-byte")
+            if len(raw) == 0 or any(not _is_nonblank(item) for item in raw):
+                raise ValueError("a non-null sponsorship fact requires a "
+                                 "nonempty list of nonblank elements")
+        elif field in _ELEMENT_LIST_FIELDS:
+            if not _is_int(idx):
+                raise ValueError("element selection requires an integer "
+                                 "item_index")
+            target_list = extraction[field]
+            if not 0 <= idx < len(target_list):
+                raise ValueError("item_index out of range")
+            raw = sel["selected_value"]
+            if not isinstance(raw, str) or raw != target_list[idx]:
+                raise ValueError("selected_value does not mirror the "
+                                 "committed element byte-for-byte")
+            if not _is_nonblank(raw):
+                raise ValueError("the selected element must contain at least "
+                                 "one nonblank code point")
+        else:
+            if idx is not None:
+                raise ValueError("scalar selection requires null item_index")
+            raw = sel["selected_value"]
+            if not isinstance(raw, str) or raw != extraction[field]:
+                raise ValueError("selected_value does not mirror the "
+                                 "committed scalar byte-for-byte")
+            if not _is_nonblank(raw):
+                raise ValueError("the selected string must contain at least "
+                                 "one nonblank code point")
+        digest = sha256_hex(canonical_json(raw).encode("utf-8"))
+        given = sha256_value(sel["selected_value_sha256"],
+                             f"vacancy_facts.{fact}.selector."
+                             "selected_value_sha256")
+        if digest != given:
+            raise ValueError("selected_value_sha256 does not bind the exact "
+                             "selected value")
+        validators[fact](entry["value"], f"vacancy_facts.{fact}.value")
+        effective[fact] = entry["value"]
+    return effective
+
+
+@dataclasses.dataclass(frozen=True)
+class EligibilityEnvelopeFacts:
+    """Immutable accepted facts from one validated eligibility envelope."""
+
+    envelope_file_sha256: str
+    envelope_semantic_sha256: str
+    envelope_semantic_bytes: bytes
+    operation_id: str
+    fit_operation_id: str
+    job_key: str
+    profile_id: str
+    profile_version: str
+    track: str
+    fit_receipt_self_hash: str
+    fit_receipt_file_sha256: str
+    decision_policy_sha256: str
+    config_source_path: str
+    config_source_file_sha256: str
+    config_closure_files: tuple[tuple[str, str], ...]
+    config_closure_sha256: str
+    config_semantic_sha256: str
+    assessments: DatabaseFacts
+    vacancy: DatabaseFacts
+    candidate_facts_staged: tuple
+    vacancy_facts_staged: tuple
+    candidate_facts_canonical: bytes
+    vacancy_facts_canonical: bytes
+
+
+def compose_eligibility_envelope_facts(
+    payload: Any, *, envelope_file_sha256: str,
+    expected_assessments_path: str | None,
+    expected_vacancy_path: str | None,
+) -> EligibilityEnvelopeFacts:
+    """Validate the closed eligibility schema; return immutable facts."""
+    if not isinstance(payload, dict):
+        raise ValueError("eligibility envelope must be a JSON object")
+    exact_keys(payload, _ELIGIBILITY_ENVELOPE_TOP_LEVEL_KEYS,
+               "eligibility envelope")
+    if payload["schema_version"] != ELIGIBILITY_ENVELOPE_SCHEMA_VERSION:
+        raise ValueError(f"schema_version must be "
+                         f"{ELIGIBILITY_ENVELOPE_SCHEMA_VERSION!r}")
+    operation_id = operation_id_value(payload["eligibility_operation_id"])
+    fit_operation_id = operation_id_value(payload["fit_operation_id"])
+    job_key = job_key_value(payload["job_key"])
+    profile_id = _canonical_profile_id(payload["profile_id"],
+                                       "envelope.profile_id")
+    profile_version = plain_string(payload["profile_version"],
+                                   "envelope.profile_version", 1, 128)
+    track = plain_string(payload["track"], "envelope.track", 1, 128)
+    fit_self = sha256_value(payload["fit_receipt_self_hash"],
+                            "envelope.fit_receipt_self_hash")
+    fit_file = sha256_value(payload["fit_receipt_file_sha256"],
+                            "envelope.fit_receipt_file_sha256")
+    policy_node = exact_keys(payload["decision_policy"],
+                             {"decision_policy_sha256"}, "decision_policy")
+    policy_sha = sha256_value(policy_node["decision_policy_sha256"],
+                              "decision_policy.decision_policy_sha256")
+    if policy_sha != ELIGIBILITY_DECISION_POLICY_SHA256:
+        raise ProcessingRefused(ELIGIBILITY_REASON_POLICY,
+                                "decision_policy differs from the fixed "
+                                "contracted policy body")
+    bounded_json_nodes(payload, "eligibility envelope",
+                       max_nodes=MAX_ELIGIBILITY_JSON_NODES,
+                       max_depth=MAX_ELIGIBILITY_JSON_DEPTH)
+    config_binding = validate_config_binding(payload["config"])
+    assessments_node, vacancy_node = validate_database_bindings(
+        payload["databases"], expected_assessments_path,
+        expected_vacancy_path)
+    try:
+        semantic_bytes = canonical_json(payload).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("envelope contains unencodable Unicode") from exc
+    sha256_value(envelope_file_sha256, "envelope.envelope_file_sha256")
+    if hashlib.sha256(semantic_bytes + b"\n").hexdigest() != \
+            envelope_file_sha256:
+        raise ValueError("envelope_file_sha256 must equal SHA-256 of the "
+                         "exact canonical envelope bytes plus one LF")
+    facts = EligibilityEnvelopeFacts(
+        envelope_file_sha256=envelope_file_sha256,
+        envelope_semantic_sha256=sha256_hex(semantic_bytes),
+        envelope_semantic_bytes=semantic_bytes,
+        operation_id=operation_id,
+        fit_operation_id=fit_operation_id,
+        job_key=job_key,
+        profile_id=profile_id,
+        profile_version=profile_version,
+        track=track,
+        fit_receipt_self_hash=fit_self,
+        fit_receipt_file_sha256=fit_file,
+        decision_policy_sha256=policy_sha,
+        config_source_path=config_binding["source_path"],
+        config_source_file_sha256=config_binding["source_file_sha256"],
+        config_closure_files=tuple(sorted(
+            config_binding["closure_files"].items())),
+        config_closure_sha256=config_binding["closure_sha256"],
+        config_semantic_sha256=config_binding["semantic_sha256"],
+        assessments=DatabaseFacts(
+            path=assessments_node["path"], dev=int(assessments_node["dev"]),
+            ino=int(assessments_node["ino"]), uid=int(assessments_node["uid"]),
+            mode=int(assessments_node["mode"]),
+            nlink=int(assessments_node["nlink"])),
+        vacancy=DatabaseFacts(
+            path=vacancy_node["path"], dev=int(vacancy_node["dev"]),
+            ino=int(vacancy_node["ino"]), uid=int(vacancy_node["uid"]),
+            mode=int(vacancy_node["mode"]), nlink=int(vacancy_node["nlink"])),
+        candidate_facts_staged=_freeze_structure(payload["candidate_facts"]),
+        vacancy_facts_staged=_freeze_structure(payload["vacancy_facts"]),
+        candidate_facts_canonical=canonical_json(
+            payload["candidate_facts"]).encode("utf-8"),
+        vacancy_facts_canonical=canonical_json(
+            payload["vacancy_facts"]).encode("utf-8"),
+    )
+    _assert_fully_immutable(facts, "eligibility_facts")
+    return facts
+
+
+def validate_eligibility_envelope_name(envelope_name: str) -> str:
+    """Eligibility lexical gate: identical grammar to the FIT envelope name,
+    but every lexical refusal maps to the ELIGIBILITY path reason (contract
+    section 13 row 2), never to the FIT processing-path token."""
+    try:
+        return validate_envelope_name(envelope_name)
+    except ProcessingRefused as exc:
+        if exc.reason == REASON_ENVELOPE_PATH:
+            raise ProcessingRefused(ELIGIBILITY_REASON_ENVELOPE_PATH,
+                                    exc.detail) from exc
+        raise
+
+
+def load_eligibility_envelope_authority(
+    data_home: Path, envelope_name: str
+) -> tuple[_DescriptorSet, dict[str, Any], str]:
+    """Retain root/state/eligibility-inbox plus the exact leaf; parse."""
+    validate_eligibility_envelope_name(envelope_name)
+    descriptors = _DescriptorSet()
+    try:
+        try:
+            root_fd_chain = open_existing_private_data_root(str(data_home))
+        except (OSError, ValueError) as exc:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_CONFIG_DATABASE,
+                f"data-home authority refused: {exc}") from exc
+        root = _CanonicalRoot.__new__(_CanonicalRoot)
+        root._chain = root_fd_chain
+        levels: list[_RetainedDirectory] = []
+        try:
+            root.revalidate()
+            state_level = _RetainedDirectory(root, "state",
+                                             require_private=True)
+            levels.append(state_level)
+            inbox_level = _RetainedDirectory(state_level,
+                                             "eligibility-inbox",
+                                             require_private=True)
+            levels.append(inbox_level)
+            descriptors.attach_root(root)
+            descriptors.directories.extend(levels)
+            descriptors.state_level = state_level
+            descriptors.inbox_level = inbox_level
+        except BaseException:
+            for level in reversed(levels):
+                level.close()
+            root.close()
+            raise
+        try:
+            info = os.stat(envelope_name, dir_fd=inbox_level.fd,
+                           follow_symlinks=False)
+            _require_private_leaf(info, "eligibility envelope")
+        except (OSError, ValueError) as exc:
+            raise ProcessingRefused(ELIGIBILITY_REASON_ENVELOPE_PATH,
+                                    str(exc)) from exc
+        if info.st_size > MAX_ELIGIBILITY_ENVELOPE_BYTES:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_ENVELOPE_BYTES,
+                f"eligibility envelope exceeds "
+                f"{MAX_ELIGIBILITY_ENVELOPE_BYTES} bytes")
+        try:
+            leaf = descriptors.push_leaf(_RetainedLeaf(
+                inbox_level, envelope_name,
+                maximum=MAX_ELIGIBILITY_ENVELOPE_BYTES, prestat=info))
+        except _RetainedLeafContentError as exc:
+            raise ProcessingRefused(ELIGIBILITY_REASON_ENVELOPE_BYTES,
+                                    str(exc)) from exc
+        except (OSError, ValueError) as exc:
+            raise ProcessingRefused(ELIGIBILITY_REASON_ENVELOPE_PATH,
+                                    str(exc)) from exc
+        try:
+            payload = strict_json_loads(leaf.data)
+            exact_keys(payload, _ELIGIBILITY_ENVELOPE_TOP_LEVEL_KEYS,
+                       "eligibility envelope")
+        except ValueError as exc:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_ENVELOPE_BYTES,
+                f"eligibility envelope refused: {exc}") from exc
+        canonical = canonical_json(payload).encode("utf-8")
+        if leaf.data != canonical + b"\n":
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_ENVELOPE_BYTES,
+                "envelope bytes are not canonical JSON followed by exactly "
+                "one LF")
+        file_sha = sha256_hex(leaf.data)
+        if envelope_name != f"{file_sha}.json":
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_ENVELOPE_BYTES,
+                "filename does not bind the exact envelope bytes")
+        if payload.get("schema_version") != \
+                ELIGIBILITY_ENVELOPE_SCHEMA_VERSION:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_ENVELOPE_BYTES,
+                f"schema_version must be "
+                f"{ELIGIBILITY_ENVELOPE_SCHEMA_VERSION!r}")
+        return descriptors, payload, file_sha
+    except BaseException:
+        descriptors.close()
+        raise
+
+
+
+
+def build_eligibility_binding(
+    facts: EligibilityEnvelopeFacts, payload: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    binding = {
+        "schema_version": ELIGIBILITY_BINDING_SCHEMA_VERSION,
+        "operation_id": facts.operation_id,
+        "fit_operation_id": facts.fit_operation_id,
+        "job_key": facts.job_key,
+        "profile_id": facts.profile_id,
+        "profile_version": facts.profile_version,
+        "track": facts.track,
+        "envelope_file_sha256": facts.envelope_file_sha256,
+        "envelope_semantic_sha256": facts.envelope_semantic_sha256,
+        "fit_receipt_self_hash": facts.fit_receipt_self_hash,
+        "fit_receipt_file_sha256": facts.fit_receipt_file_sha256,
+        "decision_policy_sha256": facts.decision_policy_sha256,
+        "config": copy.deepcopy(payload["config"]),
+        "databases": copy.deepcopy(payload["databases"]),
+        "candidate_facts": copy.deepcopy(payload["candidate_facts"]),
+        "vacancy_facts": copy.deepcopy(payload["vacancy_facts"]),
+    }
+    exact_keys(binding, _ELIGIBILITY_BINDING_KEYS, "eligibility binding")
+    return binding, sha256_hex(canonical_json(binding).encode("utf-8"))
+
+
+def rebuild_eligibility_event_payload(
+        receipt: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "schema_version": ELIGIBILITY_EVENT_SCHEMA_VERSION,
+        "operation_id": receipt["operation_id"],
+        "fit_operation_id": receipt["fit_operation_id"],
+        "profile_id": receipt["profile_id"],
+        "job_key": receipt["job_key"],
+        "track": receipt["track"],
+        "binding_sha256": receipt["binding_sha256"],
+        "envelope_file_sha256": receipt["envelope_file_sha256"],
+        "fit_receipt_self_hash": receipt["fit_receipt_self_hash"],
+        "fit_receipt_file_sha256": receipt["fit_receipt_file_sha256"],
+        "fit_assessment_event_id": receipt["fit_assessment_event_id"],
+        "fit_event_payload_sha256": receipt["fit_event_payload_sha256"],
+        "fit_normalized_json_sha256": receipt["fit_normalized_json_sha256"],
+        "candidate_facts_sha256": receipt["candidate_facts_sha256"],
+        "vacancy_facts_sha256": receipt["vacancy_facts_sha256"],
+        "decision_policy_sha256": receipt["decision_policy_sha256"],
+        "decision_input_sha256": receipt["decision_input_sha256"],
+        "iso_jurisdiction_set_sha256": receipt["iso_jurisdiction_set_sha256"],
+        "decision": receipt["decision"],
+        "reasons": receipt["reasons"],
+        "unknowns": receipt["unknowns"],
+    }
+    exact_keys(payload, _ELIGIBILITY_EVENT_PAYLOAD_KEYS,
+               "eligibility event payload")
+    return payload
+
+
+def parse_eligibility_receipt(raw_bytes: bytes) -> dict[str, Any]:
+    """Strict closed parser proving canonical identity and every binding."""
+    if not isinstance(raw_bytes, bytes) or len(raw_bytes) < 3:
+        raise ValueError("receipt bytes must be at least 3 bytes")
+    if len(raw_bytes) > MAX_ELIGIBILITY_RECEIPT_BYTES:
+        raise ValueError(f"receipt bytes exceed "
+                         f"{MAX_ELIGIBILITY_RECEIPT_BYTES}")
+    receipt = strict_json_loads(raw_bytes)
+    exact_keys(receipt, _ELIGIBILITY_RECEIPT_TOP_LEVEL_KEYS,
+               "eligibility receipt")
+    if raw_bytes != canonical_json(receipt).encode("utf-8") + b"\n":
+        raise ValueError("receipt bytes are not canonical JSON plus one LF")
+    if receipt["schema_version"] != ELIGIBILITY_RECEIPT_SCHEMA_VERSION:
+        raise ValueError(
+            f"schema_version must be {ELIGIBILITY_RECEIPT_SCHEMA_VERSION!r}")
+    for flag in _ELIGIBILITY_FALSE_FLAGS:
+        if receipt[flag] is not False:
+            raise ValueError(f"authority flag {flag} must be exactly false")
+    if receipt["eligibility_authority"] is not (receipt["decision"] == "pass"):
+        raise ValueError("eligibility_authority must equal "
+                         "(decision == 'pass')")
+    operation_id_value(receipt["operation_id"])
+    operation_id_value(receipt["fit_operation_id"])
+    job_key_value(receipt["job_key"])
+    _canonical_profile_id(receipt["profile_id"], "receipt.profile_id")
+    plain_string(receipt["profile_version"], "receipt.profile_version", 1, 128)
+    plain_string(receipt["track"], "receipt.track", 1, 128)
+    if receipt["decision"] not in ("pass", "review", "reject"):
+        raise ValueError("decision must be a closed decision token")
+    for field in ("binding_sha256", "envelope_file_sha256",
+                  "envelope_semantic_sha256", "fit_receipt_self_hash",
+                  "fit_receipt_file_sha256", "fit_binding_sha256",
+                  "fit_event_payload_sha256", "fit_raw_snapshot_sha256",
+                  "fit_profile_context_sha256",
+                  "fit_extraction_output_sha256",
+                  "fit_alignment_output_sha256", "fit_normalized_json_sha256",
+                  "fit_assessment_payload_hash", "candidate_facts_sha256",
+                  "vacancy_facts_sha256", "decision_policy_sha256",
+                  "decision_input_sha256", "iso_jurisdiction_set_sha256"):
+        sha256_value(receipt[field], f"receipt.{field}")
+    if not isinstance(receipt["reasons"], list) or not isinstance(
+            receipt["unknowns"], list):
+        raise ValueError("reasons/unknowns must be arrays")
+    fit_sealed = canonical_json(receipt["fit_receipt"]).encode("utf-8") + b"\n"
+    fit_parsed = parse_processing_receipt(fit_sealed)
+    if fit_parsed["self_hash"] != receipt["fit_receipt_self_hash"]:
+        raise ValueError("embedded FIT self_hash disagrees")
+    if fit_parsed["binding_sha256"] != receipt["fit_binding_sha256"]:
+        raise ValueError("embedded FIT binding disagrees")
+    event = fit_parsed["assessment_event"]
+    if event["id"] != receipt["fit_assessment_event_id"]:
+        raise ValueError("embedded FIT event id disagrees")
+    if event["payload_sha256"] != receipt["fit_event_payload_sha256"]:
+        raise ValueError("embedded FIT event payload disagrees")
+    if (fit_parsed["normalised_projection"]["normalized_json_sha256"]
+            != receipt["fit_normalized_json_sha256"]):
+        raise ValueError("embedded FIT normalized hash disagrees")
+    for column, path in _FIT_SCALAR_PROJECTIONS:
+        node: Any = fit_parsed
+        for part in path:
+            node = node[part]
+        if node != receipt[column]:
+            raise ValueError(f"receipt.{column} disagrees with the embedded "
+                             "FIT receipt")
+    for identity in ("profile_id", "profile_version", "job_key", "track"):
+        if receipt[identity] != fit_parsed[identity]:
+            raise ValueError(f"receipt.{identity} differs from the embedded "
+                             "FIT receipt")
+    if receipt["config"] != fit_parsed["config"]:
+        raise ValueError("receipt.config differs from the embedded FIT graph")
+    if receipt["databases"] != fit_parsed["databases"]:
+        raise ValueError("receipt.databases differs from the embedded FIT "
+                         "graph")
+    event_node = exact_keys(receipt["eligibility_event"],
+                            _ELIGIBILITY_EVENT_NODE_KEYS,
+                            "receipt.eligibility_event")
+    if event_node["event_type"] != EVENT_TYPE_ELIGIBILITY_DECIDED:
+        raise ValueError("eligibility_event.event_type must be exactly "
+                         "eligibility_decided")
+    if event_node["actor_kind"] != "deterministic":
+        raise ValueError("eligibility_event.actor_kind must be deterministic")
+    if not _is_int(event_node["id"]) or event_node["id"] <= 0:
+        raise ValueError("eligibility_event.id must be a positive integer")
+    rfc3339_value(event_node["created_at"], "eligibility_event.created_at")
+    rfc3339_value(receipt["created_at"], "receipt.created_at")
+    if event_node["created_at"] != receipt["created_at"]:
+        raise ValueError("eligibility_event.created_at must equal the single "
+                         "operation timestamp")
+    rebuilt = rebuild_eligibility_event_payload(receipt)
+    payload_sha = sha256_hex(canonical_json(rebuilt).encode("utf-8"))
+    if payload_sha != event_node["payload_sha256"]:
+        raise ValueError("eligibility_event.payload_sha256 does not bind the "
+                         "rebuilt payload")
+    job_key_sha = hashlib.sha256(receipt["job_key"].encode("utf-8")).hexdigest()
+    idem = ("eligibility-decided:" + receipt["profile_id"] + ":"
+            + job_key_sha + ":" + payload_sha)
+    if event_node["idempotency_key"] != idem:
+        raise ValueError("eligibility_event.idempotency_key does not follow "
+                         "the contracted formula")
+    claimed = receipt["self_hash"]
+    sha256_value(claimed, "receipt.self_hash")
+    without_self = {k: v for k, v in receipt.items() if k != "self_hash"}
+    if sha256_hex(canonical_json(without_self).encode("utf-8")) != claimed:
+        raise ValueError("receipt self_hash does not bind the complete receipt")
+    return receipt
+
+
+# ==========================================================================
+# ELIGIBILITY-001 part 2: store inspection, S1-S5 binding, replay,
+# transaction, recovery, and the public coordinator.
+# ==========================================================================
+
+_ELIGIBILITY_RECEIPT_ROW_COLUMNS = (
+    "operation_id", "fit_operation_id", "profile_id", "job_key", "track",
+    "binding_sha256", "envelope_file_sha256", "envelope_semantic_sha256",
+    "fit_receipt_self_hash", "fit_receipt_file_sha256", "fit_binding_sha256",
+    "fit_event_id", "fit_event_payload_sha256", "fit_raw_snapshot_sha256",
+    "fit_profile_context_sha256", "fit_extraction_output_sha256",
+    "fit_alignment_output_sha256", "fit_normalized_json_sha256",
+    "fit_assessment_payload_hash", "candidate_facts_sha256",
+    "vacancy_facts_sha256", "decision_policy_sha256", "decision_input_sha256",
+    "iso_jurisdiction_set_sha256", "decision", "reasons_json",
+    "unknowns_json", "event_id", "event_payload_sha256",
+    "receipt_self_hash", "receipt_file_sha256", "receipt_bytes",
+    "eligibility_authority", "research_authority", "application_authority",
+    "release_authority", "submission_authority", "created_at")
+assert len(_ELIGIBILITY_RECEIPT_ROW_COLUMNS) == 38
+_ELIGIBILITY_SENTINEL_TIMESTAMP = "1970-01-01T00:00:00.000000Z"
+_ELIG_IDX = {name: i for i, name in enumerate(_ELIGIBILITY_RECEIPT_ROW_COLUMNS)}
+_ELIG_VOLATILE_IDX = frozenset((
+    _ELIG_IDX["created_at"], _ELIG_IDX["event_id"],
+    _ELIG_IDX["receipt_self_hash"], _ELIG_IDX["receipt_file_sha256"],
+    _ELIG_IDX["receipt_bytes"]))
+
+
+def _inspect_eligibility_store(
+    connection: sqlite3.Connection, fit_operation_id: str,
+    operation_id: str,
+) -> ReplayClassification:
+    """Read-only store-state machine (accepted contract 14.5 S1-S3)."""
+
+    def provisional(detail: str) -> ReplayClassification:
+        return ReplayClassification(
+            DISPOSITION_PROVISIONAL_ATOMIC_INCOMPATIBILITY, None, detail)
+
+    rows = connection.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='table' AND name IN "
+        "('market_aligner_schema_migrations','processing_receipts',"
+        "'assessment_events','assessments','eligibility_receipts')").fetchall()
+    present = {name: _normalized_sql(sql) for name, sql in rows}
+    for required in ("market_aligner_schema_migrations", "processing_receipts",
+                     "assessment_events", "assessments"):
+        if required not in present:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_FIT_RECEIPT,
+                f"required table {required} is absent; no bootstrap path")
+    canonical_ledger = " ".join(
+        LEDGER_DDL.replace("CREATE TABLE IF NOT EXISTS ",
+                           "CREATE TABLE ").split())
+    if present["market_aligner_schema_migrations"] != canonical_ledger:
+        return provisional("migration ledger is not the canonical ledger")
+    ledger_rows = connection.execute(
+        "SELECT version, name, checksum FROM market_aligner_schema_migrations"
+        " ORDER BY version").fetchall()
+    v1 = (_FIT_VERSION, _FIT_NAME, _FIT_CHECKSUM)
+    v2 = (_ELIG_VERSION, _ELIG_NAME, _ELIG_CHECKSUM)
+    versions = tuple(tuple(row) for row in ledger_rows)
+    if versions == (v1,):
+        with_v2 = False
+    elif versions == (v1, v2):
+        with_v2 = True
+    else:
+        return provisional("migration ledger rows are not exactly [v1] or "
+                           "[v1, v2]")
+    if present["processing_receipts"] != _normalized_sql(FIT001_RECEIPTS_DDL):
+        return provisional("processing_receipts DDL is not canonical")
+    if not with_v2:
+        if "eligibility_receipts" in present:
+            return provisional("eligibility_receipts exists without its "
+                               "ledger row")
+        return _fit_row_present_or_refuse(connection, fit_operation_id,
+                                          "compatible store without "
+                                          "eligibility receipts")
+    if present["eligibility_receipts"] != \
+            _normalized_sql(ELIGIBILITY_RECEIPTS_DDL):
+        return provisional("eligibility_receipts DDL is not canonical")
+    actual_uniques: set[tuple[str, ...]] = set()
+    for row in connection.execute(
+            "PRAGMA index_list(eligibility_receipts)").fetchall():
+        unique, origin, partial = row[2], row[3], row[4]
+        if not unique or partial or origin not in ("pk", "u", "c"):
+            continue
+        columns = tuple(info[2] for info in connection.execute(
+            f"PRAGMA index_info({row[1]!r})").fetchall())
+        actual_uniques.add(columns)
+    expected_uniques = {("operation_id",), ("fit_operation_id",),
+                        ("binding_sha256",), ("receipt_file_sha256",),
+                        ("profile_id", "job_key")}
+    if actual_uniques != expected_uniques:
+        return provisional("eligibility_receipts unique facts are not exact")
+    foreign_keys = connection.execute(
+        "PRAGMA foreign_key_list(eligibility_receipts)").fetchall()
+    expected_fks = [
+        (0, 0, "assessment_events", "event_id", "id", "NO ACTION", "RESTRICT",
+         "NONE"),
+        (1, 0, "assessment_events", "fit_event_id", "id", "NO ACTION",
+         "RESTRICT", "NONE"),
+        (2, 0, "processing_receipts", "fit_operation_id", "operation_id",
+         "NO ACTION", "RESTRICT", "NONE")]
+    if list(map(tuple, foreign_keys)) != expected_fks:
+        return provisional("eligibility_receipts foreign-key facts are not "
+                           "exact")
+    conflict = connection.execute(
+        "SELECT operation_id FROM eligibility_receipts WHERE "
+        "fit_operation_id=? AND operation_id<>?",
+        (fit_operation_id, operation_id)).fetchone()
+    if conflict is not None:
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                "another operation already targets this FIT "
+                                "receipt")
+    return _fit_row_present_or_refuse(connection, fit_operation_id,
+                                      "compatible store")
+
+
+_FIT_VERSION = 1
+_FIT_NAME = "fit001_processing_receipts_v1"
+_FIT_CHECKSUM = FIT001_PROCESSING_RECEIPTS.checksum
+_ELIG_VERSION = ELIGIBILITY_ELIGIBILITY_RECEIPTS.version
+_ELIG_NAME = ELIGIBILITY_ELIGIBILITY_RECEIPTS.name
+_ELIG_CHECKSUM = ELIGIBILITY_ELIGIBILITY_RECEIPTS.checksum
+
+
+def _fit_row_present_or_refuse(connection: sqlite3.Connection,
+                               fit_operation_id: str, ok_detail: str
+                               ) -> ReplayClassification:
+    row = connection.execute(
+        "SELECT operation_id FROM processing_receipts WHERE operation_id=?",
+        (fit_operation_id,)).fetchone()
+    if row is None:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            "no processing receipt for the referenced fit_operation_id")
+    return ReplayClassification(DISPOSITION_DEFINITIVE_ABSENCE, None,
+                                ok_detail)
+
+
+def bind_fit_authority(
+    connection: sqlite3.Connection, facts: EligibilityEnvelopeFacts,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """S4/S5: parse and FULLY self-validate the referenced FIT receipt.
+
+    _self_validating_receipt recomputes the embedded envelope's semantic
+    hash and staged binding from the sealed bytes; the proven FIT
+    EnvelopeFacts remain local proof.  Current-raw admission lives in
+    _validate_current_raw_against_fit so exact historical replay and
+    recovery stay independent of mutable current raw.
+    """
+    table = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name="
+        "'processing_receipts'").fetchone()
+    if table is None:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "processing_receipts is absent; no bootstrap "
+                                "path exists")
+    scalar_columns = (
+        "operation_id", "profile_id", "job_key", "track",
+        "binding_sha256", "envelope_file_sha256", "envelope_semantic_sha256",
+        "normalized_sha256", "assessment_payload_hash", "receipt_self_hash",
+        "receipt_file_sha256", "created_at", "receipt_bytes")
+    row = connection.execute(
+        f"SELECT {','.join(scalar_columns)} FROM processing_receipts"
+        " WHERE operation_id=?", (facts.fit_operation_id,)).fetchone()
+    if row is None:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "referenced FIT receipt row is absent")
+    stored = dict(zip(scalar_columns, row))
+    (stored_op, stored_profile, stored_job, stored_track, stored_self,
+     stored_file, stored_bytes) = (stored["operation_id"],
+                                   stored["profile_id"],
+                                   stored["job_key"], stored["track"],
+                                   stored["receipt_self_hash"],
+                                   stored["receipt_file_sha256"],
+                                   stored["receipt_bytes"])
+    for value, label in ((stored_op, "operation_id"),
+                         (stored_profile, "profile_id"),
+                         (stored_job, "job_key"), (stored_track, "track"),
+                         (stored_self, "receipt_self_hash"),
+                         (stored_file, "receipt_file_sha256")):
+        if not isinstance(value, str):
+            raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                    f"stored FIT column {label} is not TEXT")
+    if not isinstance(stored_bytes, bytes):
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "stored FIT receipt is not a BLOB")
+    try:
+        parsed, fit_envelope_facts = _self_validating_receipt(stored_bytes)
+    except ValueError as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                f"stored FIT receipt fails full "
+                                f"self-validation: {exc}") from exc
+    if parsed["envelope_semantic_sha256"] != fit_envelope_facts.envelope_semantic_sha256:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "proven FIT envelope semantic hash drifted")
+    embedded_sealed = canonical_json(parsed).encode("utf-8") + b"\n"
+    if embedded_sealed != stored_bytes:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "embedded FIT receipt does not re-seal "
+                                "byte-exactly to its stored BLOB")
+    scalar_expectations = (
+        ("operation_id", "operation_id"),
+        ("profile_id", "profile_id"),
+        ("job_key", "job_key"),
+        ("track", "track"),
+        ("binding_sha256", "binding_sha256"),
+        ("envelope_file_sha256", "envelope_file_sha256"),
+        ("envelope_semantic_sha256", "envelope_semantic_sha256"),
+        ("normalized_sha256",
+         ("normalised_projection", "normalized_json_sha256")),
+        ("assessment_payload_hash",
+         ("assessment_projection", "score_payload_hash")),
+    )
+    for column, source in scalar_expectations:
+        expected = (parsed[source] if isinstance(source, str)
+                    else parsed[source[0]][source[1]])
+        if stored[column] != expected:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_FIT_RECEIPT,
+                f"stored FIT column {column} differs from the sealed "
+                "receipt")
+    if stored["created_at"] != parsed["created_at"]:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "stored FIT created_at differs from the "
+                                "sealed receipt")
+    if parsed["self_hash"] != stored_self:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "stored FIT self hash disagrees with its row")
+    if parsed["self_hash"] != facts.fit_receipt_self_hash:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "staged fit_receipt_self_hash differs from "
+                                "the stored FIT receipt")
+    file_hash = sha256_hex(stored_bytes)
+    if file_hash != stored_file:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "stored FIT file hash disagrees with its row")
+    if file_hash != facts.fit_receipt_file_sha256:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "staged fit_receipt_file_sha256 differs from "
+                                "the stored FIT receipt")
+    event_node = parsed["assessment_event"]
+    event_row = connection.execute(
+        "SELECT id, event_type, actor_kind, payload_json, idempotency_key,"
+        " created_at, profile_id, job_key FROM assessment_events WHERE id=?",
+        (event_node["id"],),
+    ).fetchone()
+    if event_row is None:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "the FIT assessment event row is absent")
+    expected_event_identity = (
+        event_node["id"],
+        event_node["event_type"],
+        event_node["actor_kind"],
+        event_node["idempotency_key"],
+        event_node["created_at"],
+        parsed["profile_id"],
+        parsed["job_key"],
+    )
+    observed_event_identity = (
+        event_row[0],
+        event_row[1],
+        event_row[2],
+        event_row[4],
+        event_row[5],
+        event_row[6],
+        event_row[7],
+    )
+    if observed_event_identity != expected_event_identity:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            "the FIT event identity differs from the sealed receipt",
+        )
+    if sha256_hex(event_row[3].encode("utf-8")) != event_node["payload_sha256"]:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            "the FIT event payload bytes differ from its sealed hash",
+        )
+    projection = parsed["normalised_projection"]
+    normalized = read_normalized_job(connection, key=parsed["job_key"])
+    if (
+        normalized is None
+        or sha256_hex(normalized[0].encode("utf-8"))
+        != projection["normalized_json_sha256"]
+        or normalized[1] != projection["normalized_at"]
+    ):
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "the normalized projection behind the FIT "
+                                "receipt drifted or is absent")
+    assessment_projection = parsed["assessment_projection"]
+    score_row = connection.execute(
+        "SELECT profile_id, job_key, score_payload_hash, state, created_at, "
+        "updated_at FROM "
+        "assessments WHERE profile_id=? AND job_key=?",
+        (parsed["profile_id"], parsed["job_key"])).fetchone()
+    if score_row is None:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "the assessment row behind the FIT receipt is "
+                                "absent")
+    expected_score_row = (parsed["profile_id"], parsed["job_key"],
+                          assessment_projection["score_payload_hash"],
+                          "scored",
+                          assessment_projection["created_at"],
+                          assessment_projection["updated_at"])
+    if tuple(score_row) != expected_score_row:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                "the assessment row disagrees with the FIT "
+                                "projection")
+
+    for column, staged in (("operation_id", facts.fit_operation_id),
+                           ("profile_id", facts.profile_id),
+                           ("job_key", facts.job_key),
+                           ("track", facts.track)):
+        if parsed[column] != staged:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_FIT_RECEIPT,
+                f"anti-relabelling: staged {column} differs from the FIT "
+                "receipt")
+    if parsed["profile_version"] != facts.profile_version:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            "anti-relabelling: staged profile_version differs from the FIT "
+            "receipt")
+    if payload["config"] != parsed["config"]:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            "anti-relabelling: staged config node differs from the FIT "
+            "receipt config node")
+    if payload["databases"] != parsed["databases"]:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            "anti-relabelling: staged databases node differs from the FIT "
+            "receipt databases node")
+    return parsed
+def _validate_current_raw_against_fit(
+    connection: sqlite3.Connection, fit_parsed: dict[str, Any],
+) -> None:
+    """Admit the CURRENT vacancy posting against the proven FIT receipt.
+
+    Reads the current posting row twice via the exact POSTING_READ_COLUMNS
+    projection, runs _raw_snapshot_from_row on BOTH rows with the FIT
+    EnvelopeFacts reconstructed from the sealed receipt, and requires the
+    two immutable raw-snapshot proofs to be immediately equal.  Any shape,
+    fetch-status, legacy-source-hash, or snapshot-hash divergence maps to
+    stable reason 7 (contract 14.5 S4 / 14.8 step 4).  Exact historical
+    replay and recovery never call this helper.
+    """
+    try:
+        fit_envelope_facts = reconstruct_receipt_envelope_facts(fit_parsed)
+        projection = ",".join(POSTING_READ_COLUMNS)
+        first = connection.execute(
+            f"SELECT {projection} FROM vacancy.postings WHERE key=?",
+            (fit_envelope_facts.job_key,)).fetchone()
+        if first is None:
+            raise ValueError("current posting row is absent")
+        admitted = _raw_snapshot_from_row(first, fit_envelope_facts)
+        second = connection.execute(
+            f"SELECT {projection} FROM vacancy.postings WHERE key=?",
+            (fit_envelope_facts.job_key,)).fetchone()
+        if second is None:
+            raise ValueError("current posting row vanished on reread")
+        confirmed = _raw_snapshot_from_row(second, fit_envelope_facts)
+    except ProcessingRefused:
+        raise
+    except ValueError as exc:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            f"current raw posting refused against the sealed FIT "
+            f"receipt: {exc}") from exc
+    if _raw_snapshot_proof(admitted) != _raw_snapshot_proof(confirmed):
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_FIT_RECEIPT,
+            "current raw posting drifted between read and immediate "
+            "reread")
+
+
+
+def _eligibility_table_exists(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND "
+        "name='eligibility_receipts'").fetchone()
+    return row is not None
+
+
+
+def _sha_of_canonical(value: Any) -> str:
+    return sha256_hex(canonical_json(value).encode("utf-8"))
+
+
+def _cj_list(values: list[str]) -> str:
+    return canonical_json(values)
+
+
+def _classify_own_receipt(
+    connection: sqlite3.Connection, facts: EligibilityEnvelopeFacts,
+    binding_sha256: str,
+) -> ReplayClassification | None:
+    """Own-receipt classification; None means definitive absence."""
+    exists = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND "
+        "name='eligibility_receipts'").fetchone()
+    if exists is None:
+        return None
+    columns = ",".join(_ELIGIBILITY_RECEIPT_ROW_COLUMNS)
+    row = connection.execute(
+        f"SELECT {columns} FROM eligibility_receipts WHERE operation_id=?",
+        (facts.operation_id,)).fetchone()
+    if row is None:
+        return None
+    if type(row) is not tuple or len(row) != 38:
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                "stored row shape is not the closed 38-column"
+                                " contract")
+    stored = dict(zip(_ELIGIBILITY_RECEIPT_ROW_COLUMNS, row))
+    stored_bytes = stored["receipt_bytes"]
+    integer_columns = ("event_id", "fit_event_id",
+                       "fit_assessment_event_id", "eligibility_authority",
+                       "research_authority", "application_authority",
+                       "release_authority", "submission_authority")
+    for column in _ELIGIBILITY_RECEIPT_ROW_COLUMNS:
+        value = stored[column]
+        if column == "receipt_bytes":
+            continue
+        if column in integer_columns:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ProcessingRefused(
+                    ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                    f"stored column {column} must be an INTEGER without bool")
+        elif not isinstance(value, str):
+            raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                    f"stored column {column} must be TEXT")
+    if not isinstance(stored_bytes, bytes):
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                "stored receipt is not a BLOB")
+    try:
+        parsed = parse_eligibility_receipt(stored_bytes)
+    except ValueError as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                f"stored receipt fails validation: {exc}")
+    derived = {
+        "operation_id": parsed["operation_id"],
+        "fit_operation_id": parsed["fit_operation_id"],
+        "profile_id": parsed["profile_id"],
+        "job_key": parsed["job_key"],
+        "track": parsed["track"],
+        "binding_sha256": parsed["binding_sha256"],
+        "envelope_file_sha256": parsed["envelope_file_sha256"],
+        "envelope_semantic_sha256": parsed["envelope_semantic_sha256"],
+        "fit_receipt_self_hash": parsed["fit_receipt_self_hash"],
+        "fit_receipt_file_sha256": parsed["fit_receipt_file_sha256"],
+        "receipt_file_sha256": sha256_hex(stored_bytes),
+        "fit_binding_sha256": parsed["fit_binding_sha256"],
+        "fit_event_id": parsed["fit_assessment_event_id"],
+        "fit_event_payload_sha256":
+            parsed["fit_event_payload_sha256"],
+        "fit_raw_snapshot_sha256": parsed["fit_raw_snapshot_sha256"],
+        "fit_profile_context_sha256":
+            parsed["fit_profile_context_sha256"],
+        "fit_extraction_output_sha256":
+            parsed["fit_extraction_output_sha256"],
+        "fit_alignment_output_sha256":
+            parsed["fit_alignment_output_sha256"],
+        "fit_normalized_json_sha256":
+            parsed["fit_normalized_json_sha256"],
+        "fit_assessment_payload_hash":
+            parsed["fit_assessment_payload_hash"],
+        "candidate_facts_sha256": _sha_of_canonical(
+            parsed["candidate_facts"]),
+        "vacancy_facts_sha256": _sha_of_canonical(
+            parsed["vacancy_facts"]),
+        "decision_policy_sha256": parsed["decision_policy_sha256"],
+        "decision_input_sha256": parsed["decision_input_sha256"],
+        "iso_jurisdiction_set_sha256":
+            parsed["iso_jurisdiction_set_sha256"],
+        "decision": parsed["decision"],
+        "reasons_json": _cj_list(parsed["reasons"]),
+        "unknowns_json": _cj_list(parsed["unknowns"]),
+        "event_id": parsed["eligibility_event"]["id"],
+        "event_payload_sha256":
+            parsed["eligibility_event"]["payload_sha256"],
+        "receipt_self_hash": parsed["self_hash"],
+        "created_at": parsed["created_at"],
+        "eligibility_authority": 1 if parsed["decision"] == "pass" else 0,
+        "research_authority": 0, "application_authority": 0,
+        "release_authority": 0, "submission_authority": 0,
+    }
+    mismatches = [column for column, want in derived.items()
+                  if stored[column] != want]
+    if mismatches:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_EXISTING_RECEIPT,
+            "stored eligibility columns differ from the sealed receipt: "
+            + ",".join(sorted(mismatches)))
+    if parsed["binding_sha256"] != binding_sha256:
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                "stored receipt carries a different staged "
+                                "binding")
+    node = parsed["eligibility_event"]
+    event_row = connection.execute(
+        "SELECT id, event_type, actor_kind, payload_json, idempotency_key,"
+        " created_at, profile_id, job_key FROM assessment_events WHERE id=?",
+        (node["id"],)).fetchone()
+    if event_row is None:
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                "the bound eligibility_decided event row is "
+                                "absent")
+    rebuilt = rebuild_eligibility_event_payload(parsed)
+    payload_json = canonical_json(rebuilt)
+    payload_sha = sha256_hex(payload_json.encode("utf-8"))
+    if payload_sha != node["payload_sha256"]:
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                "the sealed event node does not bind the "
+                                "rebuilt payload")
+    expected_event = (node["id"], EVENT_TYPE_ELIGIBILITY_DECIDED,
+                      "deterministic", payload_json,
+                      node["idempotency_key"], parsed["created_at"],
+                      parsed["profile_id"], parsed["job_key"])
+    if tuple(event_row) != expected_event:
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                "the bound eligibility_decided event row "
+                                "drifted")
+    return ReplayClassification(DISPOSITION_EXACT_REPLAY, stored_bytes,
+                                "sealed replay")
+
+
+def reconstruct_decision_view(facts: EligibilityEnvelopeFacts,
+                              fit_parsed: dict[str, Any]
+                              ) -> dict[str, Any]:
+    """Validate both staged fact families and rebuild the decision view."""
+    from market_aligner.assessment.eligibility import (
+        EligibilityInput, EligibilityPolicy, assess_eligibility)
+    staged_candidate = strict_json_loads(
+        facts.candidate_facts_canonical.decode("utf-8"))
+    try:
+        admission = admit_candidate_facts(staged_candidate)
+    except ValueError as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                                f"candidate facts refused: {exc}") from exc
+    extraction = strict_json_loads(json.dumps(
+        fit_parsed["extraction"]["output"], ensure_ascii=False,
+        sort_keys=True, separators=(",", ":")))
+    try:
+        validate_extraction_output(extraction)
+        staged_vacancy = strict_json_loads(
+            facts.vacancy_facts_canonical.decode("utf-8"))
+        vacancy_effective = admit_vacancy_facts(staged_vacancy, extraction)
+    except ValueError as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_VACANCY_FACTS,
+                                f"vacancy facts refused: {exc}") from exc
+    eff = admission.effective
+    policy = EligibilityPolicy(
+        authorised_jurisdictions=(None if eff["authorised_jurisdictions"]
+                                  is None else
+                                  frozenset(eff["authorised_jurisdictions"])),
+        current_residence=eff["current_residence"],
+        requires_sponsorship=eff["requires_sponsorship"],
+        maximum_years_required=eff["maximum_years_required"],
+        excluded_contract_types=(None if eff["excluded_contract_types"]
+                                 is None else
+                                 frozenset(eff["excluded_contract_types"])))
+    dec_input = EligibilityInput(
+        work_jurisdiction=vacancy_effective["work_jurisdiction"],
+        required_residence=vacancy_effective["required_residence"],
+        sponsorship_available=vacancy_effective["sponsorship_available"],
+        minimum_years_experience=vacancy_effective["minimum_years_required"],
+        contract_type=vacancy_effective["contract_type"])
+    outcome = assess_eligibility(dec_input, policy)
+    reasons = sorted(set(outcome.reasons))
+    unknowns = sorted(set(outcome.unknowns))
+    if admission.status_downgraded:
+        unknowns.append("candidate_evidence_status_unverified")
+        unknowns = sorted(set(unknowns))
+    final_decision = ("reject" if reasons
+                      else ("review" if unknowns else "pass"))
+    decision_input = {
+        "authorised_jurisdictions": eff["authorised_jurisdictions"],
+        "contract_type": dec_input.contract_type,
+        "current_residence": eff["current_residence"],
+        "excluded_contract_types": eff["excluded_contract_types"],
+        "maximum_years_required": eff["maximum_years_required"],
+        "minimum_years_experience": dec_input.minimum_years_experience,
+        "requires_sponsorship": eff["requires_sponsorship"],
+        "required_residence": dec_input.required_residence,
+        "sponsorship_available": dec_input.sponsorship_available,
+        "work_jurisdiction": dec_input.work_jurisdiction,
+    }
+    exact_keys(decision_input, _ELIGIBILITY_DECISION_INPUT_KEYS,
+               "decision_input")
+    return {
+        "decision_input": decision_input,
+        "decision_input_sha256": sha256_hex(
+            canonical_json(decision_input).encode("utf-8")),
+        "decision": final_decision,
+        "reasons": reasons,
+        "unknowns": unknowns,
+    }
+
+
+@dataclasses.dataclass(frozen=True)
+class EligibilityProspectivePlan:
+    sealed_bytes: bytes
+    receipt_file_sha256: str
+    receipt_self_hash: str
+    binding_sha256: str
+    event_payload_json: str
+    event_payload_sha256: str
+    idempotency_key: str
+    accepted_at: str
+    event_id: int
+    facts: EligibilityEnvelopeFacts
+    receipt_row_values: tuple
+
+
+def build_eligibility_prospective_plan(
+    *, facts: EligibilityEnvelopeFacts, payload: dict[str, Any],
+    binding_sha256: str, decision_view: dict[str, Any], accepted_at: str,
+    prospective_event_id: int, fit_parsed: dict[str, Any],
+) -> EligibilityProspectivePlan:
+    rfc3339_value(accepted_at, "accepted_at")
+    if (not _is_int(prospective_event_id) or prospective_event_id <= 0
+            or prospective_event_id > MAX_EVENT_ID):
+        raise ProcessingRefused(REASON_ATOMIC_MODE,
+                                "prospective event id out of range")
+    candidate_sha = sha256_hex(facts.candidate_facts_canonical)
+    vacancy_sha = sha256_hex(facts.vacancy_facts_canonical)
+    event_payload = {
+        "schema_version": ELIGIBILITY_EVENT_SCHEMA_VERSION,
+        "operation_id": facts.operation_id,
+        "fit_operation_id": facts.fit_operation_id,
+        "profile_id": facts.profile_id,
+        "job_key": facts.job_key,
+        "track": facts.track,
+        "binding_sha256": binding_sha256,
+        "envelope_file_sha256": facts.envelope_file_sha256,
+        "fit_receipt_self_hash": facts.fit_receipt_self_hash,
+        "fit_receipt_file_sha256": facts.fit_receipt_file_sha256,
+        "fit_assessment_event_id": fit_parsed["assessment_event"]["id"],
+        "fit_event_payload_sha256":
+            fit_parsed["assessment_event"]["payload_sha256"],
+        "fit_normalized_json_sha256":
+            fit_parsed["normalised_projection"]["normalized_json_sha256"],
+        "candidate_facts_sha256": candidate_sha,
+        "vacancy_facts_sha256": vacancy_sha,
+        "decision_policy_sha256": facts.decision_policy_sha256,
+        "decision_input_sha256": decision_view["decision_input_sha256"],
+        "iso_jurisdiction_set_sha256": ISO_JURISDICTION_SET_SHA256,
+        "decision": decision_view["decision"],
+        "reasons": decision_view["reasons"],
+        "unknowns": decision_view["unknowns"],
+    }
+    exact_keys(event_payload, _ELIGIBILITY_EVENT_PAYLOAD_KEYS,
+               "prospective event payload")
+    event_payload_json = canonical_json(event_payload)
+    event_payload_sha256 = sha256_hex(event_payload_json.encode("utf-8"))
+    job_key_sha = hashlib.sha256(facts.job_key.encode("utf-8")).hexdigest()
+    idempotency_key = ("eligibility-decided:" + facts.profile_id + ":"
+                       + job_key_sha + ":" + event_payload_sha256)
+    if len(idempotency_key.encode("utf-8")) != 186 or not idempotency_key.isascii():
+        raise ProcessingRefused(REASON_PROJECTION_CONFLICT,
+                                "idempotency key width/formula drifted")
+    eligibility_event = {
+        "id": prospective_event_id,
+        "event_type": EVENT_TYPE_ELIGIBILITY_DECIDED,
+        "actor_kind": "deterministic",
+        "payload_sha256": event_payload_sha256,
+        "idempotency_key": idempotency_key,
+        "created_at": accepted_at,
+    }
+    receipt: dict[str, Any] = {
+        "schema_version": ELIGIBILITY_RECEIPT_SCHEMA_VERSION,
+        "operation_id": facts.operation_id,
+        "fit_operation_id": facts.fit_operation_id,
+        "job_key": facts.job_key,
+        "profile_id": facts.profile_id,
+        "profile_version": facts.profile_version,
+        "track": facts.track,
+        "binding_sha256": binding_sha256,
+        "envelope_file_sha256": facts.envelope_file_sha256,
+        "envelope_semantic_sha256": facts.envelope_semantic_sha256,
+        "config": payload["config"],
+        "databases": payload["databases"],
+        "fit_receipt": fit_parsed,
+        "fit_receipt_self_hash": facts.fit_receipt_self_hash,
+        "fit_receipt_file_sha256": facts.fit_receipt_file_sha256,
+        "fit_binding_sha256": fit_parsed["binding_sha256"],
+        "fit_assessment_event_id": fit_parsed["assessment_event"]["id"],
+        "fit_event_payload_sha256":
+            fit_parsed["assessment_event"]["payload_sha256"],
+        "fit_raw_snapshot_sha256": fit_parsed["raw"]["raw_snapshot_sha256"],
+        "fit_profile_context_sha256":
+            fit_parsed["profile"]["profile_context_sha256"],
+        "fit_extraction_output_sha256":
+            fit_parsed["extraction"]["receipt"]["output_sha256"],
+        "fit_alignment_output_sha256":
+            fit_parsed["alignment"]["receipt"]["output_sha256"],
+        "fit_normalized_json_sha256":
+            fit_parsed["normalised_projection"]["normalized_json_sha256"],
+        "fit_assessment_payload_hash":
+            fit_parsed["assessment_projection"]["score_payload_hash"],
+        "candidate_facts": payload["candidate_facts"],
+        "vacancy_facts": payload["vacancy_facts"],
+        "candidate_facts_sha256": candidate_sha,
+        "vacancy_facts_sha256": vacancy_sha,
+        "decision_policy_sha256": facts.decision_policy_sha256,
+        "decision_input_sha256": decision_view["decision_input_sha256"],
+        "iso_jurisdiction_set_sha256": ISO_JURISDICTION_SET_SHA256,
+        "decision_input": decision_view["decision_input"],
+        "decision": decision_view["decision"],
+        "reasons": decision_view["reasons"],
+        "unknowns": decision_view["unknowns"],
+        "eligibility_event": eligibility_event,
+        "created_at": accepted_at,
+        "time_authenticated": False,
+        "imported_model_policy_authenticated": False,
+        "imported_time_authenticated": False,
+        "research_authority": False,
+        "application_authority": False,
+        "release_authority": False,
+        "submission_authority": False,
+        "eligibility_authority": decision_view["decision"] == "pass",
+    }
+    receipt["self_hash"] = sha256_hex(
+        canonical_json(receipt).encode("utf-8"))
+    sealed_bytes = canonical_json(receipt).encode("utf-8") + b"\n"
+    if len(sealed_bytes) > MAX_ELIGIBILITY_RECEIPT_BYTES:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_ENVELOPE_BYTES,
+            f"sealed receipt is {len(sealed_bytes)} bytes; maximum is "
+            f"{MAX_ELIGIBILITY_RECEIPT_BYTES}")
+    validated = parse_eligibility_receipt(sealed_bytes)
+    row_values: list[Any] = []
+    for column in _ELIGIBILITY_RECEIPT_ROW_COLUMNS:
+        if column == "receipt_bytes":
+            row_values.append(sealed_bytes)
+        elif column == "eligibility_authority":
+            row_values.append(1 if validated["eligibility_authority"] else 0)
+        elif column in _ELIGIBILITY_FALSE_FLAGS:
+            row_values.append(0)
+        elif column == "reasons_json":
+            row_values.append(canonical_json(validated["reasons"]))
+        elif column == "unknowns_json":
+            row_values.append(canonical_json(validated["unknowns"]))
+        elif column == "fit_event_id":
+            row_values.append(validated["fit_assessment_event_id"])
+        elif column == "event_id":
+            row_values.append(validated["eligibility_event"]["id"])
+        elif column == "event_payload_sha256":
+            row_values.append(validated["eligibility_event"][
+                "payload_sha256"])
+        elif column == "receipt_self_hash":
+            row_values.append(validated["self_hash"])
+        elif column == "receipt_file_sha256":
+            row_values.append(sha256_hex(sealed_bytes))
+        else:
+            row_values.append(validated[column])
+    return EligibilityProspectivePlan(
+        sealed_bytes=sealed_bytes,
+        receipt_file_sha256=sha256_hex(sealed_bytes),
+        receipt_self_hash=receipt["self_hash"],
+        binding_sha256=binding_sha256,
+        event_payload_json=event_payload_json,
+        event_payload_sha256=event_payload_sha256,
+        idempotency_key=idempotency_key,
+        accepted_at=accepted_at,
+        event_id=prospective_event_id,
+        facts=facts,
+        receipt_row_values=tuple(row_values))
+
+
+def apply_eligibility_transaction_plan(
+    connection: sqlite3.Connection, plan: EligibilityProspectivePlan,
+) -> bytes:
+    """Apply one exact eligibility plan inside the caller's transaction."""
+    if getattr(connection, "in_transaction", False) is not True:
+        raise ProcessingRefused(REASON_ATOMIC_MODE,
+                                "requires an active caller-owned transaction")
+    try:
+        apply_on(connection, (FIT001_PROCESSING_RECEIPTS,
+                              ELIGIBILITY_ELIGIBILITY_RECEIPTS), "main")
+    except MigrationCompatibilityError as exc:
+        raise ProcessingRefused(REASON_ATOMIC_MODE,
+                                f"migration incompatible: {exc}") from exc
+    _maybe_fault("elig_after_migration_apply")
+
+    events_before = classify_processing_score_event(
+        connection, profile_id=plan.facts.profile_id,
+        job_key=plan.facts.job_key,
+        event_type=EVENT_TYPE_ELIGIBILITY_DECIDED)
+    if events_before.action != "insert_required":
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                "an eligibility_decided event already exists "
+                                "for this profile/job")
+    try:
+        event_outcome = cas_processing_event(
+            connection, profile_id=plan.facts.profile_id,
+            job_key=plan.facts.job_key,
+            event_type=EVENT_TYPE_ELIGIBILITY_DECIDED,
+            actor_kind="deterministic",
+            payload_json=plan.event_payload_json,
+            idempotency_key=plan.idempotency_key,
+            created_at=plan.accepted_at, event_id=plan.event_id)
+    except ProjectionConflict as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                f"event insert conflict: {exc}") from exc
+    projection = event_outcome.projection
+    if (event_outcome.action != "insert" or projection is None
+            or projection.event_id != plan.event_id
+            or projection.payload_json != plan.event_payload_json
+            or projection.idempotency_key != plan.idempotency_key
+            or projection.created_at != plan.accepted_at):
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                "event insert differs from its exact plan")
+    _maybe_fault("elig_after_event_insert")
+
+    columns = ",".join(_ELIGIBILITY_RECEIPT_ROW_COLUMNS)
+    placeholders = ",".join("?" for _ in _ELIGIBILITY_RECEIPT_ROW_COLUMNS)
+    try:
+        cursor = connection.execute(
+            f"INSERT INTO main.eligibility_receipts({columns}) "
+            f"VALUES({placeholders})", plan.receipt_row_values)
+    except sqlite3.IntegrityError as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                f"receipt integrity conflict: {exc}") from exc
+    if cursor.rowcount != 1:
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                "receipt insert affected multiple rows")
+    _maybe_fault("elig_after_receipt_insert")
+    stored = connection.execute(
+        f"SELECT {columns} FROM main.eligibility_receipts WHERE "
+        f"operation_id=?", (plan.facts.operation_id,)).fetchall()
+    if (type(stored) is not list or len(stored) != 1
+            or type(stored[0]) is not tuple
+            or stored[0] != plan.receipt_row_values):
+        raise ProcessingRefused(REASON_PROJECTION_CONFLICT,
+                                "receipt reread differs from inserted row")
+    try:
+        reparsed = parse_eligibility_receipt(stored[0][_ELIG_IDX[
+            "receipt_bytes"]])
+    except ValueError as exc:
+        raise ProcessingRefused(REASON_PROJECTION_CONFLICT,
+                                f"stored receipt reread invalid: {exc}") from \
+            exc
+    if reparsed["self_hash"] != plan.receipt_self_hash or \
+            sha256_hex(plan.sealed_bytes) != plan.receipt_file_sha256:
+        raise ProcessingRefused(REASON_PROJECTION_CONFLICT,
+                                "stored receipt hashes drifted")
+    _maybe_fault("elig_pre_commit")
+    return plan.sealed_bytes
+
+
+def recover_eligibility_durable_truth(
+    data_home: Path, envelope_name: str, plan: EligibilityProspectivePlan,
+) -> RecoveredTransactionClassification:
+    """Fresh reopen through SQLite recovery, then durable-truth classify."""
+    lease: _AdmissionLease | None = None
+    primary: ProcessingRefused | None = None
+    classification: RecoveredTransactionClassification | None = None
+    try:
+        descriptors, reload_payload, reload_sha = \
+            load_eligibility_envelope_authority(data_home, envelope_name)
+        lease = _AdmissionLease(descriptors)
+        try:
+            facts = compose_eligibility_envelope_facts(
+                reload_payload, envelope_file_sha256=reload_sha,
+                expected_assessments_path=None, expected_vacancy_path=None)
+            if facts != plan.facts:
+                raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                        "recovery envelope facts differ from "
+                                        "the attempted transaction")
+            admission = admit_config_and_databases(data_home, facts,
+                                                   descriptors)
+            lease.bind(admission, facts, plan.binding_sha256)
+            lease.revalidate_chain()
+            lease.open_view(allow_database_size_change=True)
+            conn = lease.connection
+            assert conn is not None and lease.assessments is not None \
+                and lease.vacancy is not None
+            conn.execute("PRAGMA query_only=OFF")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=30000")
+            for alias in ("main", "vacancy"):
+                mode = conn.execute(f"PRAGMA {alias}.journal_mode").fetchall()
+                if mode != [("delete",)]:
+                    raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                            f"{alias} journal mode is not "
+                                            "delete")
+                conn.execute(f"PRAGMA {alias}.synchronous=FULL")
+                sync = conn.execute(f"PRAGMA {alias}.synchronous").fetchall()
+                if sync != [(2,)]:
+                    raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                            f"{alias} synchronous is not FULL")
+            _verify_transaction_connection(
+                conn, descriptors, lease.assessments, lease.vacancy,
+                allow_database_size_change=True)
+            conn.execute("BEGIN IMMEDIATE")
+
+            def verify_once() -> RecoveredTransactionClassification:
+                listed = conn.execute("PRAGMA database_list").fetchall()
+                if len(listed) != 2:
+                    raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                            "recovery aliases are not exactly "
+                                            "two")
+                for alias in ("main", "vacancy"):
+                    quick = conn.execute(f"PRAGMA {alias}.quick_check"
+                                         ).fetchall()
+                    if quick != [("ok",)]:
+                        raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                                f"{alias} quick_check failed")
+                    fkrows = conn.execute(
+                        f"PRAGMA {alias}.foreign_key_check").fetchall()
+                    if fkrows != []:
+                        raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                                f"{alias} foreign_key_check "
+                                                "found violations")
+                return classify_eligibility_durable_graph(conn, plan)
+
+            first = verify_once()
+            lease.assessments.accept_recovered_size()
+            lease.vacancy.accept_recovered_size()
+            _require_clean_recovery_epoch(_stabilize_filesystem_epoch(
+                descriptors, lease.assessments, lease.vacancy))
+            second = verify_once()
+            if second != first:
+                raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                        "durable classification changed "
+                                        "inside one snapshot")
+            classification = second
+            conn.rollback()
+        except BaseException:
+            raise
+    except (KeyboardInterrupt, _Interrupted) as exc:
+        primary = ProcessingRefused(REASON_INTERRUPTED,
+                                    "recovery was interrupted")
+        primary.__cause__ = exc
+    except sqlite3.Error as exc:
+        primary = map_sqlite_read_error(exc)
+        primary.__cause__ = exc
+    except ProcessingRefused as exc:
+        primary = exc
+    finally:
+        if lease is not None:
+            if (lease.connection is not None
+                    and lease.connection.in_transaction):
+                with contextlib.suppress(sqlite3.Error):
+                    lease.connection.rollback()
+            lease.close()
+    if primary is not None:
+        raise primary
+    assert classification is not None
+    return classification
+
+
+def classify_eligibility_durable_graph(
+    connection: sqlite3.Connection, plan: EligibilityProspectivePlan,
+) -> RecoveredTransactionClassification:
+    def incoherent(detail: str) -> RecoveredTransactionClassification:
+        return RecoveredTransactionClassification(RECOVERY_DURABLE_INCOHERENT,
+                                                  None, detail)
+
+    if not _eligibility_table_exists(connection):
+        event_probe = connection.execute(
+            "SELECT COUNT(*) FROM assessment_events WHERE event_type=?",
+            (EVENT_TYPE_ELIGIBILITY_DECIDED,)).fetchone()[0]
+        if event_probe:
+            return incoherent("eligibility event exists without its receipt")
+        return RecoveredTransactionClassification(
+            RECOVERY_DURABLE_EMPTY, None,
+            "eligibility store absent; nothing persisted")
+    ledger_rows = connection.execute(
+        "SELECT version FROM market_aligner_schema_migrations ORDER BY "
+        "version").fetchall()
+    versions = tuple(row[0] for row in ledger_rows)
+    if versions not in ((1,), (1, 2)):
+        return incoherent("migration ledger is not [v1] or [v1, v2]")
+    event_rows = connection.execute(
+        "SELECT id, event_type, actor_kind, payload_json, idempotency_key,"
+        " created_at FROM assessment_events WHERE profile_id=? AND job_key=?"
+        " AND event_type=?", (plan.facts.profile_id, plan.facts.job_key,
+                              EVENT_TYPE_ELIGIBILITY_DECIDED)).fetchall()
+    receipt_rows = connection.execute(
+        "SELECT receipt_bytes FROM eligibility_receipts WHERE operation_id=?",
+        (plan.facts.operation_id,)).fetchall()
+    if not event_rows and not receipt_rows:
+        if versions == (1,) or versions == (1, 2):
+            return RecoveredTransactionClassification(
+                RECOVERY_DURABLE_EMPTY, None,
+                "v1 intact and no own eligibility projection exists")
+        return incoherent("migration ledger is neither [v1] nor [v1, v2] "
+                          "with an empty own graph")
+    if len(event_rows) > 1 or len(receipt_rows) > 1:
+        return incoherent("multiple eligibility projections exist")
+    if versions != (1, 2):
+        return incoherent("a complete eligibility graph requires ledger "
+                          "exactly [v1, v2]")
+    if len(event_rows) != 1 or len(receipt_rows) != 1:
+        return incoherent("partial eligibility projection graph exists")
+    stored_row = connection.execute(
+        "SELECT " + ",".join(_ELIGIBILITY_RECEIPT_ROW_COLUMNS) +
+        " FROM eligibility_receipts WHERE operation_id=?",
+        (plan.facts.operation_id,)).fetchone()
+    if type(stored_row) is not tuple or len(stored_row) != 38:
+        return incoherent("stored receipt row is not the closed 38-column "
+                          "shape")
+    if tuple(stored_row) != plan.receipt_row_values:
+        return incoherent("stored 38-column row differs from the exact "
+                          "prospective plan")
+    event = event_rows[0]
+    stored_bytes = receipt_rows[0][0]
+    if not isinstance(stored_bytes, bytes):
+        return incoherent("stored receipt is not a BLOB")
+    try:
+        parsed = parse_eligibility_receipt(stored_bytes)
+    except ValueError as exc:
+        return incoherent(f"stored receipt fails validation: {exc}")
+    node = parsed["eligibility_event"]
+    if (event[0] != node["id"] or event[1] != EVENT_TYPE_ELIGIBILITY_DECIDED
+            or event[2] != "deterministic" or event[3] != plan.event_payload_json
+            or event[4] != plan.idempotency_key or event[5] != node["created_at"]):
+        return incoherent("stored event does not match the embedded "
+                          "eligibility_event node")
+    if stored_bytes != plan.sealed_bytes:
+        return incoherent("stored receipt bytes differ from the prospective "
+                          "plan")
+    fit_row = connection.execute(
+        "SELECT receipt_bytes FROM processing_receipts WHERE operation_id=?",
+        (plan.facts.fit_operation_id,)).fetchone()
+    embedded_fit_sealed = canonical_json(parsed["fit_receipt"]).encode(
+        "utf-8") + b"\n"
+    if fit_row is None or fit_row[0] != embedded_fit_sealed:
+        return incoherent("embedded FIT receipt does not match its stored row")
+    # Full immutable-graph revalidation through the sole owners, using a
+    # payload reconstructed EXACTLY from the sealed eligibility receipt.
+    reconstructed_payload = {
+        "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
+        "eligibility_operation_id": parsed["operation_id"],
+        "fit_operation_id": parsed["fit_operation_id"],
+        "job_key": parsed["job_key"],
+        "profile_id": parsed["profile_id"],
+        "profile_version": parsed["profile_version"],
+        "track": parsed["track"],
+        "fit_receipt_self_hash": parsed["fit_receipt_self_hash"],
+        "fit_receipt_file_sha256": parsed["fit_receipt_file_sha256"],
+        "decision_policy": {"decision_policy_sha256":
+                            parsed["decision_policy_sha256"]},
+        "config": parsed["config"],
+        "databases": parsed["databases"],
+        "candidate_facts": parsed["candidate_facts"],
+        "vacancy_facts": parsed["vacancy_facts"],
+    }
+    try:
+        store_state = _inspect_eligibility_store(
+            connection, parsed["fit_operation_id"], parsed["operation_id"])
+        if store_state.disposition != DISPOSITION_DEFINITIVE_ABSENCE:
+            return incoherent("locked store classification is not definitive "
+                              "absence for the committed operation: "
+                              + store_state.detail)
+        bind_fit_authority(connection,
+                           compose_eligibility_envelope_facts(
+                               reconstructed_payload,
+                               envelope_file_sha256=sha256_hex(
+                                   canonical_json(reconstructed_payload)
+                                   .encode("utf-8") + b"\n"),
+                               expected_assessments_path=None,
+                               expected_vacancy_path=None),
+                           reconstructed_payload)
+    except ProcessingRefused as exc:
+        return incoherent(f"FIT immutable graph failed recovery "
+                          f"revalidation ({exc.reason}): {exc.detail}")
+    return RecoveredTransactionClassification(RECOVERY_DURABLE_COMPLETE,
+                                              stored_bytes,
+                                              "exact complete graph")
+
+
+def _validate_supplied_eligibility_identity(
+    *, supplied_operation_id: str, supplied_fit_operation_id: str,
+    supplied_config_path: str, supplied_profile_id: str,
+    supplied_job_key: str, supplied_track: str,
+) -> None:
+    """Lexical validation only; equality is compared at reason 4."""
+    try:
+        operation_id_value(supplied_operation_id)
+    except ValueError as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_OPERATION_ID,
+                                str(exc)) from exc
+    try:
+        operation_id_value(supplied_fit_operation_id)
+        path_value(supplied_config_path, "supplied configuration path")
+        _canonical_profile_id(supplied_profile_id, "supplied profile id")
+        job_key_value(supplied_job_key)
+        plain_string(supplied_track, "supplied track", 1, 128)
+    except ValueError as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_CLI_IDENTITY,
+                                f"malformed supplied identity: {exc}") from exc
+
+
+def eligibility_one(
+    data_home: Path,
+    envelope_name: str,
+    *,
+    supplied_operation_id: str,
+    supplied_fit_operation_id: str,
+    supplied_config_path: str,
+    supplied_profile_id: str,
+    supplied_job_key: str,
+    supplied_track: str,
+) -> bytes:
+    """Run one serialized provider-free eligibility operation."""
+    _validate_supplied_eligibility_identity(
+        supplied_operation_id=supplied_operation_id,
+        supplied_fit_operation_id=supplied_fit_operation_id,
+        supplied_config_path=supplied_config_path,
+        supplied_profile_id=supplied_profile_id,
+        supplied_job_key=supplied_job_key,
+        supplied_track=supplied_track)
+    with _process_one_serialization_scope(data_home):
+        return _eligibility_one_under_scope(
+            data_home, envelope_name,
+            supplied_operation_id=supplied_operation_id,
+            supplied_fit_operation_id=supplied_fit_operation_id,
+            supplied_config_path=supplied_config_path,
+            supplied_profile_id=supplied_profile_id,
+            supplied_job_key=supplied_job_key,
+            supplied_track=supplied_track)
+
+
+def _eligibility_one_under_scope(
+    data_home: Path, envelope_name: str, *, supplied_operation_id: str,
+    supplied_fit_operation_id: str, supplied_config_path: str,
+    supplied_profile_id: str, supplied_job_key: str, supplied_track: str,
+) -> bytes:
+    descriptors: _DescriptorSet | None = None
+    lease: _AdmissionLease | None = None
+    result: bytes | None = None
+    caught: BaseException | None = None
+    plan_holder: list[tuple[EligibilityProspectivePlan, dict[str, Any]]] = []
+    try:
+        validate_eligibility_envelope_name(envelope_name)
+        descriptors, payload, file_sha = load_eligibility_envelope_authority(
+            data_home, envelope_name)
+        try:
+            facts = compose_eligibility_envelope_facts(
+                payload, envelope_file_sha256=file_sha,
+                expected_assessments_path=None, expected_vacancy_path=None)
+        except ProcessingRefused:
+            raise
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProcessingRefused(ELIGIBILITY_REASON_ENVELOPE_BYTES,
+                                    f"eligibility envelope refused: "
+                                    f"{exc}") from exc
+        for supplied, expected, label in (
+                (supplied_operation_id, facts.operation_id,
+                 "operation id"),
+                (supplied_fit_operation_id, facts.fit_operation_id,
+                 "fit operation id"),
+                (supplied_config_path, facts.config_source_path,
+                 "configuration path"),
+                (supplied_profile_id, facts.profile_id, "profile id"),
+                (supplied_job_key, facts.job_key, "job key"),
+                (supplied_track, facts.track, "track")):
+            if supplied != expected:
+                raise ProcessingRefused(
+                    ELIGIBILITY_REASON_CLI_IDENTITY,
+                    f"supplied {label} does not equal the staged binding")
+        canonical_assessments = str(Path(data_home) / "state"
+                                    / "assessments.sqlite3")
+        if facts.assessments.path != canonical_assessments:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_CONFIG_DATABASE,
+                "staged assessments path is not the canonical "
+                "state/assessments.sqlite3")
+        merged, collector_plan = _verify_live_config_binding(data_home, facts)
+        if str(collector_plan["database"]) != facts.vacancy.path:
+            raise ProcessingRefused(
+                ELIGIBILITY_REASON_CONFIG_DATABASE,
+                "planned collector database differs from the staged vacancy "
+                "path")
+        admission = admit_config_and_databases(data_home, facts, descriptors)
+        lease = _AdmissionLease(descriptors)
+        lease.bind(admission, facts, "")
+        lease.revalidate_chain()
+        journal_present = False
+        for database in (lease.assessments, lease.vacancy):
+            journal_name = database.name + "-journal"
+            try:
+                journal_info = os.stat(journal_name,
+                                       dir_fd=database.parent.fd,
+                                       follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ProcessingRefused(REASON_ATOMIC_MODE,
+                                        f"cannot classify pre-open "
+                                        f"{journal_name}: {exc}") from exc
+            _require_private_leaf(journal_info, journal_name)
+            journal_present = True
+        lease.open_view(allow_database_size_change=True)
+        conn = lease.connection
+        assert conn is not None
+        _verify_transaction_connection(conn, descriptors, lease.assessments,
+                                       lease.vacancy,
+                                       allow_database_size_change=True)
+        if journal_present:
+            conn.execute("PRAGMA query_only=OFF")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=30000")
+            for alias in ("main", "vacancy"):
+                if conn.execute(f"PRAGMA {alias}.journal_mode=DELETE"
+                                ).fetchall() != [("delete",)]:
+                    raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                            "startup recovery did not enter "
+                                            "DELETE mode")
+                conn.execute(f"PRAGMA {alias}.synchronous=FULL")
+            conn.execute("BEGIN IMMEDIATE")
+            for alias in ("main", "vacancy"):
+                if conn.execute(f"PRAGMA {alias}.quick_check"
+                                ).fetchall() != [("ok",)]:
+                    raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                            "startup quick_check failed")
+                if conn.execute(f"PRAGMA {alias}.foreign_key_check"
+                                ).fetchall() != []:
+                    raise ProcessingRefused(REASON_RECOVERY_INCOHERENT,
+                                            "startup FK violations found")
+            conn.rollback()
+            conn.execute("PRAGMA query_only=ON")
+        lease.assessments.accept_recovered_size()
+        lease.vacancy.accept_recovered_size()
+
+        # S1-S3 sole historical classifier on the public path (before replay
+        # and before any new admission); hard refusals leave zero writes.
+        store_state = _inspect_eligibility_store(
+            conn, facts.fit_operation_id, facts.operation_id)
+        if store_state.disposition ==                 DISPOSITION_PROVISIONAL_ATOMIC_INCOMPATIBILITY:
+            provisional_detail = store_state.detail
+        else:
+            provisional_detail = None
+        lease.provisional_detail = provisional_detail
+
+        fit_parsed = bind_fit_authority(conn, facts, payload)
+
+        _binding_object, binding_sha = build_eligibility_binding(facts,
+                                                                 payload)
+        own_classification = _classify_own_receipt(conn, facts, binding_sha)
+        if own_classification is not None:
+            assert own_classification.stored_receipt_bytes is not None
+            result = own_classification.stored_receipt_bytes
+        else:
+            # S4 on the NEW-operation path: full current-raw admission
+            # bound to the sealed FIT receipt (exact historical replay and
+            # recovery never reach this line).
+            _validate_current_raw_against_fit(conn, fit_parsed)
+            profile_store = ProfileStore.open_existing(Path(data_home))
+            snapshot = profile_store.coherent_snapshot(
+                facts.profile_id, require_committed_generation=True)
+            staged_profile_binding = dict(fit_parsed["profile"])
+            for key in ("profile_file_sha256", "evidence_file_sha256",
+                        "profile_sha256", "evidence_ledger_sha256",
+                        "profile_context_sha256"):
+                if staged_profile_binding.get(key) != snapshot.hashes.get(key):
+                    raise ProcessingRefused(
+                        ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                        f"committed generation hash {key} differs from the "
+                        "embedded FIT receipt profile binding")
+            if (snapshot.manifest is None
+                    or snapshot.manifest.get("state") != "committed"):
+                raise ProcessingRefused(
+                    ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                    "a committed generation manifest is required")
+            if facts.profile_version != snapshot.profile.version:
+                raise ProcessingRefused(
+                    ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                    "staged profile_version differs from the committed "
+                    "generation")
+            if facts.track not in snapshot.profile.tracks:
+                raise ProcessingRefused(
+                    ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                    f"selected track {facts.track!r} does not exist in the "
+                    "committed profile")
+
+            def walk_refs(node):  # noqa: ANN202
+                if isinstance(node, dict):
+                    if "refs" in node and isinstance(node["refs"], list):
+                        for ref in node["refs"]:
+                            evidence_id = ref.get("evidence_id")
+                            item = snapshot.evidence.get(evidence_id)
+                            if item is None:
+                                raise ProcessingRefused(
+                                    ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                                    f"cited evidence id {evidence_id!r} is "
+                                    "not in the committed ledger")
+                            if ref.get("kind") != item.kind or ref.get(
+                                    "status") != item.status:
+                                raise ProcessingRefused(
+                                    ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                                    f"cited ref {evidence_id!r} kind/status "
+                                    "differs from the committed ledger")
+                            claim_sha = sha256_hex(item.claim.encode("utf-8"))
+                            source_sha = sha256_hex(
+                                item.source_ref.encode("utf-8"))
+                            if (ref.get("claim_sha256") != claim_sha
+                                    or ref.get("source_ref_sha256")
+                                    != source_sha):
+                                raise ProcessingRefused(
+                                    ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                                    f"cited ref {evidence_id!r} hashes differ "
+                                    "from the committed ledger")
+                            if item.content_sha256 is None or ref.get(
+                                    "content_sha256") != item.content_sha256:
+                                raise ProcessingRefused(
+                                    ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                                    f"cited ref {evidence_id!r} "
+                                    "content_sha256 must be non-null and "
+                                    "equal the committed item")
+                    for value in node.values():
+                        walk_refs(value)
+                elif isinstance(node, list):
+                    for entry in node:
+                        walk_refs(entry)
+
+            walk_refs(payload["candidate_facts"])
+
+            decision_view = reconstruct_decision_view(facts, fit_parsed)
+            preflight_plan = build_eligibility_prospective_plan(
+                facts=facts, payload=payload, binding_sha256=binding_sha,
+                decision_view=decision_view,
+                accepted_at=_ELIGIBILITY_SENTINEL_TIMESTAMP,
+                prospective_event_id=_prospective_event_id(conn),
+                fit_parsed=fit_parsed)
+            del preflight_plan
+            if lease.provisional_detail is not None:
+                raise ProcessingRefused(REASON_ATOMIC_MODE,
+                                        lease.provisional_detail)
+            result = _commit_eligibility_one(
+                data_home, lease, facts, payload, fit_parsed, decision_view,
+                binding_sha, plan_holder, snapshot)
+    except BaseException as exc:
+        caught = exc
+    finally:
+        if lease is not None:
+            lease.close()
+        elif descriptors is not None:
+            descriptors.close()
+    if caught is None:
+        assert result is not None
+        return result
+    if isinstance(caught, SystemExit):
+        raise caught
+    if not plan_holder:
+        if isinstance(caught, ProcessingRefused):
+            raise caught
+        if isinstance(caught, (KeyboardInterrupt, _Interrupted)):
+            raise ProcessingRefused(REASON_INTERRUPTED,
+                                    "eligibility admission was interrupted") \
+                from caught
+        if isinstance(caught, sqlite3.Error):
+            raise map_sqlite_read_error(caught) from caught
+        raise ProcessingRefused(
+            REASON_ATOMIC_MODE,
+            f"eligibility failed before any prospective write plan: "
+            f"{caught}") from caught
+    plan, payload_for_recovery = plan_holder[0]
+    recovered = recover_eligibility_durable_truth(data_home, envelope_name,
+                                                  plan)
+    del payload_for_recovery
+    if recovered.disposition == RECOVERY_DURABLE_COMPLETE:
+        assert recovered.stored_receipt_bytes is not None
+        return recovered.stored_receipt_bytes
+    if recovered.disposition == RECOVERY_DURABLE_EMPTY:
+        if isinstance(caught, ProcessingRefused):
+            raise caught
+        if isinstance(caught, (KeyboardInterrupt, _Interrupted)):
+            raise ProcessingRefused(
+                REASON_INTERRUPTED,
+                "eligibility transaction was interrupted") from caught
+        if isinstance(caught, sqlite3.Error):
+            raise map_sqlite_read_error(caught) from caught
+        raise ProcessingRefused(
+            REASON_ATOMIC_MODE,
+            "eligibility transaction failed before durable commit: "
+            f"{caught}") from caught
+    raise ProcessingRefused(REASON_RECOVERY_INCOHERENT, recovered.detail)
+
+
+def _reverify_locked_eligibility_authority(
+    data_home: Path, facts: EligibilityEnvelopeFacts,
+    payload: dict[str, Any], snapshot: Any,
+    connection: sqlite3.Connection, lease: "_AdmissionLease", *,
+    label: str, expect_fit: dict[str, Any] | None = None,
+    cited_walk: Any = None,
+) -> dict[str, Any]:
+    """Repeat every contracted mutable-authority check under the lock."""
+
+    assert lease.connection is not None and lease.assessments is not None         and lease.vacancy is not None
+    merged, collector_plan = _verify_live_config_binding(data_home, facts)
+    if str(collector_plan["database"]) != facts.vacancy.path:
+        raise ProcessingRefused(
+            ELIGIBILITY_REASON_CONFIG_DATABASE,
+            f"{label}: planned collector database differs from the staged "
+            "vacancy path")
+    try:
+        snapshot.revalidate()
+    except ProcessingRefused:
+        raise
+    except (ValueError, OSError) as exc:
+        raise ProcessingRefused(ELIGIBILITY_REASON_CANDIDATE_EVIDENCE,
+                                f"{label}: committed generation drifted: "
+                                f"{exc}") from exc
+    if cited_walk is not None:
+        cited_walk(payload["candidate_facts"])
+    refetched = bind_fit_authority(connection, facts, payload)
+    _validate_current_raw_against_fit(connection, refetched)
+    if expect_fit is not None and refetched != expect_fit:
+        raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
+                                f"{label}: the bound FIT graph changed")
+    return refetched
+
+
+def _commit_eligibility_one(
+    data_home: Path, lease: _AdmissionLease, facts: EligibilityEnvelopeFacts,
+    payload: dict[str, Any], fit_parsed: dict[str, Any],
+    decision_view: dict[str, Any], binding_sha: str,
+    plan_holder: list[tuple[EligibilityProspectivePlan, dict[str, Any]]],
+    snapshot: Any,
+) -> bytes:
+    assert lease.connection is not None and lease.assessments is not None \
+        and lease.vacancy is not None
+    connection = lease.connection
+
+    def revalidate_authority(*, allow_db_change: bool) -> None:
+        _verify_transaction_connection(
+            connection, lease.descriptors, lease.assessments, lease.vacancy,
+            allow_database_size_change=allow_db_change)
+
+    revalidate_authority(allow_db_change=False)
+    conflict = connection.execute(
+        "SELECT operation_id FROM eligibility_receipts WHERE "
+        "fit_operation_id=? AND operation_id<>?",
+        (facts.fit_operation_id, facts.operation_id)).fetchone()         if _eligibility_table_exists(connection) else None
+    if conflict is not None:
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                "another operation already targets this FIT "
+                                "receipt")
+    own = _classify_own_receipt(connection, facts, binding_sha)
+    if own is not None:
+        assert own.stored_receipt_bytes is not None
+        return own.stored_receipt_bytes
+    events_before = classify_processing_score_event(
+        connection, profile_id=facts.profile_id, job_key=facts.job_key,
+        event_type=EVENT_TYPE_ELIGIBILITY_DECIDED)
+    if events_before.action != "insert_required":
+        raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                "an eligibility_decided event already exists "
+                                "for this profile/job")
+    connection.execute("PRAGMA query_only=OFF")
+    setup_transaction_sqlite(connection)
+    revalidate_authority(allow_db_change=True)
+    # Contract 14.8 step 4: full config/database/raw/profile/FIT recheck
+    # after SQLite setup and BEFORE BEGIN (not descriptor-only).
+    _reverify_locked_eligibility_authority(
+        data_home, facts, payload, snapshot, connection,
+        lease, label="pre_begin", expect_fit=fit_parsed)
+    _maybe_fault("elig_lock_inject")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        locked_store = _inspect_eligibility_store(
+            connection, facts.fit_operation_id, facts.operation_id)
+        if locked_store.disposition ==                 DISPOSITION_PROVISIONAL_ATOMIC_INCOMPATIBILITY:
+            raise ProcessingRefused(REASON_ATOMIC_MODE,
+                                    locked_store.detail)
+        conflict_again = connection.execute(
+            "SELECT operation_id FROM eligibility_receipts WHERE "
+            "fit_operation_id=? AND operation_id<>?",
+            (facts.fit_operation_id, facts.operation_id)).fetchone()             if _eligibility_table_exists(connection) else None
+        if conflict_again is not None:
+            raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                    "another operation won this FIT target "
+                                    "under lock")
+        events_under_lock = classify_processing_score_event(
+            connection, profile_id=facts.profile_id, job_key=facts.job_key,
+            event_type=EVENT_TYPE_ELIGIBILITY_DECIDED)
+        if events_under_lock.action != "insert_required":
+            raise ProcessingRefused(ELIGIBILITY_REASON_TARGET_CONFLICT,
+                                    "an eligibility_decided event already "
+                                    "exists for this profile/job")
+        own_again = _classify_own_receipt(connection, facts, binding_sha)
+        if own_again is not None:
+            connection.rollback()
+            assert own_again.stored_receipt_bytes is not None
+            return own_again.stored_receipt_bytes
+        revalidate_authority(allow_db_change=True)
+        refetched = _reverify_locked_eligibility_authority(
+            data_home, facts, payload, snapshot, connection,
+            lease, label="under_lock")
+        accepted_at = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        transaction_plan = build_eligibility_prospective_plan(
+            facts=facts, payload=payload, binding_sha256=binding_sha,
+            decision_view=decision_view, accepted_at=accepted_at,
+            prospective_event_id=_prospective_event_id(connection),
+            fit_parsed=refetched)
+        sealed_plan = build_eligibility_prospective_plan(
+            facts=facts, payload=payload, binding_sha256=binding_sha,
+            decision_view=decision_view,
+            accepted_at=_ELIGIBILITY_SENTINEL_TIMESTAMP,
+            prospective_event_id=transaction_plan.event_id,
+            fit_parsed=refetched)
+        for column, idx in _ELIG_IDX.items():
+            if idx in _ELIG_VOLATILE_IDX:
+                continue
+            if sealed_plan.receipt_row_values[idx] != \
+                    transaction_plan.receipt_row_values[idx]:
+                raise ProcessingRefused(
+                    ELIGIBILITY_REASON_DECISION_RECONSTRUCTION,
+                    f"transaction plan column {column} changed between "
+                    "preflight and transaction")
+        plan_holder.append((transaction_plan, payload))
+        outcome = apply_eligibility_transaction_plan(connection,
+                                                     transaction_plan)
+        _maybe_fault("elig_pre_commit_inject")
+        _reverify_locked_eligibility_authority(
+            data_home, facts, payload, snapshot, connection,
+            lease, label="pre_commit", expect_fit=refetched)
+        revalidate_authority(allow_db_change=True)
+        connection.commit()
+        return outcome
+    except BaseException:
+        if connection.in_transaction:
+            with contextlib.suppress(sqlite3.Error):
+                connection.rollback()
+        raise
