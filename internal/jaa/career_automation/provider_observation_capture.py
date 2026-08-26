@@ -196,6 +196,7 @@ class ProviderObservationCaptureReceipt:
     source_url: str
     form_inventory_sha256: str | None = None
     form_inventory: bytes | None = None
+    acceptance_receipt_sha256: str | None = None
 
 
 class ProviderObservationCaptureFailure(RuntimeError):
@@ -245,6 +246,7 @@ def _failure_observation(
     code: str,
     status: int | None,
     final_url: str | None = None,
+    acceptance_receipt_sha256: str | None = None,
 ) -> bytes:
     return _bytes(
         {
@@ -258,6 +260,7 @@ def _failure_observation(
                 "final_url": final_url,
             },
             "failure": {"code": code},
+            "operator_acceptance_receipt_sha256": acceptance_receipt_sha256,
             "interaction": {
                 "fields_filled": 0,
                 "files_uploaded": 0,
@@ -281,6 +284,7 @@ def _persist_failure(
     network: list[dict[str, object]],
     screenshot: bytes | None,
     screenshot_safety: bytes | None = None,
+    operator_acceptance: Mapping[str, object] | None = None,
 ) -> ProviderObservationCaptureFailure:
     receipt = _persist_capture(
         archive_root=archive_root,
@@ -293,6 +297,11 @@ def _persist_failure(
             code=code,
             status=status,
             final_url=final_url,
+            acceptance_receipt_sha256=(
+                str(operator_acceptance["receipt_sha256"])
+                if operator_acceptance is not None
+                else None
+            ),
         ),
         primary_response=primary_response or b"[unavailable]\n",
         visible_content=visible_content or b"[unavailable]\n",
@@ -304,6 +313,7 @@ def _persist_failure(
         ),
         screenshot=screenshot,
         screenshot_safety=screenshot_safety,
+        operator_acceptance=operator_acceptance,
     )
     _terminalize_capture_failure(
         receipt,
@@ -409,14 +419,28 @@ def _persist_capture(
     screenshot: bytes | None,
     screenshot_safety: bytes | None = None,
     form_inventory: bytes | None = None,
+    operator_acceptance: Mapping[str, object] | None = None,
 ) -> ProviderObservationCaptureReceipt:
     """Persist an owned capture as create-only content-addressed objects."""
     root = Path(archive_root).resolve(strict=True)
     repository = Path(repository_root).resolve(strict=True)
-    head = exact_clean_head(repository)
-    source, source_sha256 = collector_source_identity(repository)
+    source_identity = exact_committed_source_identity(repository)
+    head = source_identity.head
+    source, source_sha256 = collector_source_identity(
+        repository, commit=source_identity.head
+    )
     if source != Path(__file__).read_bytes():
         raise ValueError("running provider observer differs from exact HEAD")
+    if operator_acceptance is not None and any(
+        operator_acceptance.get(key) != value
+        for key, value in {
+            "source_url": source_url,
+            "repository_commit": head,
+            "repository_tree": source_identity.tree,
+            "collector_source_sha256": source_sha256,
+        }.items()
+    ):
+        raise ValueError("provider observation acceptance differs at publication")
     parsed = urlsplit(source_url)
     if parsed.scheme != "https" or parsed.hostname not in _GREENHOUSE_HOSTS:
         raise ValueError("provider observer only accepts canonical Greenhouse HTTPS")
@@ -462,6 +486,13 @@ def _persist_capture(
         },
         "artifacts": artifacts,
     }
+    if operator_acceptance is not None:
+        receipt_sha256 = operator_acceptance.get("receipt_sha256")
+        if not isinstance(receipt_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", receipt_sha256
+        ):
+            raise ValueError("provider observation acceptance receipt identity is invalid")
+        manifest["operator_acceptance"] = dict(operator_acceptance)
     value = _bytes(manifest)
     digest = _archive_object(root, value)
     manifest_path = root / "provider-observation-captures" / f"{digest}.json"
@@ -475,6 +506,11 @@ def _persist_capture(
         source_url=source_url,
         form_inventory_sha256=artifacts.get("form_inventory"),
         form_inventory=form_inventory,
+        acceptance_receipt_sha256=(
+            str(operator_acceptance["receipt_sha256"])
+            if operator_acceptance is not None
+            else None
+        ),
     )
 
 
@@ -494,10 +530,14 @@ def _extract_loader_value(html: str, key: str) -> str:
     raise ValueError(f"Greenhouse loader did not expose {key}")
 
 
-def _capture_preflight(source_url: str, repository_root: str | Path) -> None:
+def _capture_preflight(
+    source_url: str, repository_root: str | Path
+) -> tuple[str, str, str]:
     repository = Path(repository_root).resolve(strict=True)
-    head = exact_clean_head(repository)
-    source, _source_sha256 = collector_source_identity(repository, commit=head)
+    identity = exact_committed_source_identity(repository)
+    source, source_sha256 = collector_source_identity(
+        repository, commit=identity.head
+    )
     if source != Path(__file__).read_bytes():
         raise ValueError("running provider observer differs from exact HEAD")
     parsed = urlsplit(source_url)
@@ -509,6 +549,7 @@ def _capture_preflight(source_url: str, repository_root: str | Path) -> None:
         or parsed.fragment
     ):
         raise ValueError("provider observer source URL is not canonical Greenhouse HTTPS")
+    return identity.head, identity.tree, source_sha256
 
 
 def _mask_page_for_screenshot(page: object) -> bytes:
@@ -554,10 +595,40 @@ def capture_greenhouse_observation(
     source_url: str,
     archive_root: str | Path,
     repository_root: str | Path,
+    job_key: str,
+    acceptance_envelope_path: str | Path,
+    operator_public_key_path: str | Path,
     timeout_ms: int = 30_000,
 ) -> ProviderObservationCaptureReceipt:
     """Navigate read-only and capture provider-owned success semantics."""
-    _capture_preflight(source_url, repository_root)
+    repository_commit, repository_tree, collector_source_sha256 = _capture_preflight(
+        source_url, repository_root
+    )
+    match = re.search(r"(?:^|/)jobs/(\d+)(?:/|$)", urlsplit(source_url).path)
+    assert match is not None
+    from .provider_observation_authority import (
+        verify_and_consume_provider_observation_acceptance,
+    )
+
+    acceptance_receipt, acceptance_created = (
+        verify_and_consume_provider_observation_acceptance(
+            envelope_path=acceptance_envelope_path,
+            public_key_path=operator_public_key_path,
+            archive_root=archive_root,
+            job_key=job_key,
+            source_url=source_url,
+            source_job_id=match.group(1),
+            timeout_ms=timeout_ms,
+            repository_commit=repository_commit,
+            repository_tree=repository_tree,
+            collector_source_sha256=collector_source_sha256,
+        )
+    )
+    if not acceptance_created:
+        raise ValueError(
+            "provider observation acceptance was already consumed; protected navigation will not retry"
+        )
+    operator_acceptance = acceptance_receipt.document()
     # Import lazily so verification users do not require the browser extra.
     from playwright.sync_api import sync_playwright
 
@@ -638,6 +709,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            operator_acceptance=operator_acceptance,
         ) from exc
     if response_status is None or not 200 <= response_status < 300:
         raise _persist_failure(
@@ -653,6 +725,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            operator_acceptance=operator_acceptance,
         )
     if final_url.rstrip("/") != source_url.rstrip("/"):
         raise _persist_failure(
@@ -668,6 +741,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            operator_acceptance=operator_acceptance,
         )
     # The current Greenhouse renderer removes its loader script after hydration.
     # Resolve provider-owned submit semantics from the exact redacted document
@@ -700,6 +774,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            operator_acceptance=operator_acceptance,
         ) from exc
     observation = _bytes(
         {
@@ -713,6 +788,9 @@ def capture_greenhouse_observation(
                 "submitPath": submit_path,
             },
             "form_inventory_sha256": _sha256(form_inventory),
+            "operator_acceptance_receipt_sha256": (
+                acceptance_receipt.receipt_sha256
+            ),
             "interaction": {
                 "fields_filled": 0,
                 "files_uploaded": 0,
@@ -737,6 +815,7 @@ def capture_greenhouse_observation(
         screenshot=screenshot,
         screenshot_safety=screenshot_safety,
         form_inventory=form_inventory,
+        operator_acceptance=operator_acceptance,
     )
 
 
@@ -745,11 +824,17 @@ def main() -> int:
     parser.add_argument("source_url")
     parser.add_argument("--archive-root", required=True)
     parser.add_argument("--repository-root", default=".")
+    parser.add_argument("--job-key", required=True)
+    parser.add_argument("--acceptance-envelope", required=True)
+    parser.add_argument("--operator-public-key", required=True)
     args = parser.parse_args()
     receipt = capture_greenhouse_observation(
         source_url=args.source_url,
         archive_root=args.archive_root,
         repository_root=args.repository_root,
+        job_key=args.job_key,
+        acceptance_envelope_path=args.acceptance_envelope,
+        operator_public_key_path=args.operator_public_key,
     )
     print(
         canonical_json(

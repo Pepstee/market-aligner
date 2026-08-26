@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import career_automation.provider_observation_capture as capture_module
+import career_automation.provider_observation_authority as authority_module
 from career_automation.provider_observation_capture import (
     COLLECTOR_IDENTITY,
     _extract_loader_value,
@@ -204,6 +205,42 @@ def test_capture_receipt_is_create_only_and_content_addressed(tmp_path: Path) ->
     assert repeated.manifest_sha256 == receipt.manifest_sha256
 
 
+def test_invalid_acceptance_refuses_before_playwright_import_or_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import builtins
+
+    imported: list[str] = []
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "playwright.sync_api":
+            imported.append(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        capture_module,
+        "_capture_preflight",
+        lambda *_args: ("a" * 40, "b" * 40, "c" * 64),
+    )
+    monkeypatch.setattr(
+        authority_module,
+        "verify_and_consume_provider_observation_acceptance",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("signature is invalid")),
+    )
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    with pytest.raises(ValueError, match="signature is invalid"):
+        capture_greenhouse_observation(
+            source_url=APPLICATION_URL,
+            archive_root=tmp_path,
+            repository_root=ROOT,
+            job_key="job_" + "1" * 64,
+            acceptance_envelope_path=tmp_path / "forged.json",
+            operator_public_key_path=tmp_path / "operator-public.pem",
+        )
+    assert imported == []
+
+
 @pytest.mark.parametrize(
     ("failure_stage", "expected_code"),
     (
@@ -301,9 +338,26 @@ def test_every_browser_stage_failure_is_terminally_archived(
         def __exit__(self, *_args):
             return None
 
-    monkeypatch.setattr(capture_module, "_capture_preflight", lambda *_args: None)
-    monkeypatch.setattr(capture_module, "exact_clean_head", lambda _root: "a" * 40)
     current_source = Path(capture_module.__file__).read_bytes()
+    current_source_sha256 = hashlib.sha256(current_source).hexdigest()
+    monkeypatch.setattr(
+        capture_module,
+        "_capture_preflight",
+        lambda *_args: ("a" * 40, "b" * 40, current_source_sha256),
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "exact_committed_source_identity",
+        lambda _root: capture_module.CommittedSourceIdentity(
+            ROOT,
+            ROOT,
+            "",
+            "a" * 40,
+            "b" * 40,
+            "sha256:" + "c" * 64,
+        ),
+    )
+    monkeypatch.setattr(capture_module, "exact_clean_head", lambda _root: "a" * 40)
     monkeypatch.setattr(
         capture_module,
         "collector_source_identity",
@@ -312,12 +366,33 @@ def test_every_browser_stage_failure_is_terminally_archived(
             hashlib.sha256(current_source).hexdigest(),
         ),
     )
+    class AcceptanceReceipt:
+        receipt_sha256 = "d" * 64
+
+        def document(self):
+            return {
+                "schema_version": "market-aligner.provider-observation-acceptance-receipt.v1",
+                "receipt_sha256": self.receipt_sha256,
+                "source_url": APPLICATION_URL,
+                "repository_commit": "a" * 40,
+                "repository_tree": "b" * 40,
+                "collector_source_sha256": current_source_sha256,
+            }
+
+    monkeypatch.setattr(
+        authority_module,
+        "verify_and_consume_provider_observation_acceptance",
+        lambda **_kwargs: (AcceptanceReceipt(), True),
+    )
     monkeypatch.setattr(playwright_api, "sync_playwright", lambda: Context())
     with pytest.raises(capture_module.ProviderObservationCaptureFailure) as caught:
         capture_greenhouse_observation(
             source_url=APPLICATION_URL,
             archive_root=tmp_path,
             repository_root=ROOT,
+            job_key="job_" + "1" * 64,
+            acceptance_envelope_path=tmp_path / "accepted.json",
+            operator_public_key_path=tmp_path / "operator-public.pem",
         )
     manifest = json.loads(caught.value.receipt.manifest_path.read_bytes())
     observation_sha256 = manifest["artifacts"]["observation"]

@@ -1697,11 +1697,20 @@ def test_greenhouse_identity_retargets_one_market_handoff_and_materialization(
 def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
     tmp_path, capsys, monkeypatch
 ) -> None:
+    import base64
+    import hashlib
+    import os
+    from datetime import datetime, timedelta, timezone
+
     pytest.importorskip("playwright.sync_api")
+    import career_automation.provider_observation_authority as observation_authority
     import career_automation.workable_live_adapter as workable_module
     import playwright.sync_api as playwright_api
+    from career_automation.evidence_matching import canonical_json
     from career_automation.provider_observation_capture import (
         capture_greenhouse_observation,
+        collector_source_identity,
+        exact_committed_source_identity,
     )
     from career_automation.workable_live_adapter import (
         SyntheticWorkableFixtureAdapter,
@@ -1787,10 +1796,81 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
     monkeypatch.setattr(playwright_api, "sync_playwright", RoutedContext)
     observation_root = tmp_path / "provider-observation"
     observation_root.mkdir(mode=0o700)
+    os.chmod(observation_root, 0o700)
+    replay_domain = (
+        observation_authority.prepare_provider_observation_consumption_root(
+            observation_root
+        )
+    )
+    operator_root = tmp_path / "operator-authority"
+    operator_root.mkdir(mode=0o700)
+    os.chmod(operator_root, 0o700)
+    acceptance_root = operator_root / "acceptances"
+    acceptance_root.mkdir(mode=0o700)
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    public_der = public_key.public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    public_der_sha256 = hashlib.sha256(public_der).hexdigest()
+    key_id = "market-observation-local-fixture"
+    monkeypatch.setattr(
+        observation_authority, "MARKET_OBSERVATION_KEY_ID", key_id
+    )
+    monkeypatch.setattr(
+        observation_authority,
+        "MARKET_OBSERVATION_PUBLIC_DER_SHA256",
+        public_der_sha256,
+    )
+    public_key_path = operator_root / "operator-observation-public.pem"
+    public_key_path.write_bytes(
+        public_key.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    os.chmod(public_key_path, 0o644)
+    identity = exact_committed_source_identity(JAA_ROOT)
+    _collector_source, collector_sha256 = collector_source_identity(JAA_ROOT)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    payload = observation_authority.build_provider_observation_acceptance_payload(
+        acceptance_id="local-greenhouse-observation",
+        nonce=hashlib.sha256((job_key + source_url).encode()).hexdigest(),
+        not_before=(now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=(now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        job_key=job_key,
+        source_url=source_url,
+        source_job_id="1234567",
+        timeout_ms=30_000,
+        repository_commit=identity.head,
+        repository_tree=identity.tree,
+        collector_source_sha256=collector_sha256,
+        consumption_root_sha256=replay_domain,
+        key_id=key_id,
+        public_der_sha256=public_der_sha256,
+    )
+    signature = private_key.sign(canonical_json(payload).encode("utf-8"))
+    unsigned = payload | {
+        "signature_b64": base64.b64encode(signature).decode("ascii")
+    }
+    envelope = unsigned | {
+        "envelope_sha256": hashlib.sha256(
+            canonical_json(unsigned).encode("utf-8")
+        ).hexdigest()
+    }
+    acceptance_path = acceptance_root / "local-greenhouse-observation.json"
+    acceptance_path.write_bytes((canonical_json(envelope) + "\n").encode("utf-8"))
+    os.chmod(acceptance_path, 0o600)
     observation = capture_greenhouse_observation(
         source_url=source_url,
         archive_root=observation_root,
         repository_root=JAA_ROOT,
+        job_key=job_key,
+        acceptance_envelope_path=acceptance_path,
+        operator_public_key_path=public_key_path,
     )
     inventory = json.loads(observation.form_inventory)
     observed_names = tuple(
@@ -1798,6 +1878,7 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
     )
     assert observed_names == ("full_name", "email", "resume")
     assert inventory["url"] == source_url
+    assert observation.acceptance_receipt_sha256 is not None
 
     market_jaa_root = tmp_path / "market-jaa"
     market_jaa_root.mkdir(mode=0o700)
