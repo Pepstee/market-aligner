@@ -16,6 +16,7 @@ from market_aligner.applications.jaa import (
     ATSForensicRecorder,
     ApplicationSource,
     AtsFieldOption,
+    AtsFixturePreSubmitAuthority,
     AtsFormInventory,
     AtsObservationAuthority,
     AtsObservedField,
@@ -23,6 +24,8 @@ from market_aligner.applications.jaa import (
     SanityReviewReceipt,
     canonical_json,
     capture_or_recover,
+    compile_fixture_pre_submit_plan,
+    execute_fixture_pre_submit_or_recover,
     list_canary_learning_events,
     load_forensic_receipt,
     observe_ats_form_or_recover,
@@ -91,6 +94,28 @@ def observation_authority(
         "submission_authority": False,
     }
     return AtsObservationAuthority(
+        **fields,
+        authority_sha256=sha256(canonical_json(fields).encode()),
+    )
+
+
+def pre_submit_authority(observation, values: dict[str, bytes]) -> AtsFixturePreSubmitAuthority:
+    assert observation.inventory is not None
+    plan = compile_fixture_pre_submit_plan(observation, values)
+    fields = {
+        "schema_version": "market-aligner.ats-fixture-pre-submit-authority.v1",
+        "job_key": observation.job_key,
+        "application_url": observation.final_application_url,
+        "observation_manifest_sha256": observation.receipt.manifest_sha256,
+        "inventory_sha256": observation.inventory.content_sha256,
+        "plan_sha256": sha256(canonical_json({"schema_version": "market-aligner.ats-pre-submit-plan.v1", "fields": [field.document() for field in plan]}).encode()),
+        "local_fixture_only": True,
+        "synthetic_values_only": True,
+        "identity_authority": False,
+        "vault_authority": False,
+        "submission_authority": False,
+    }
+    return AtsFixturePreSubmitAuthority(
         **fields,
         authority_sha256=sha256(canonical_json(fields).encode()),
     )
@@ -426,6 +451,38 @@ def test_real_playwright_malicious_fixture_is_terminally_blocked_without_interac
     manifest = (tmp_path / "forensics" / "manifests" / "attempt-observe-malicious.json").read_text()
     assert secret not in manifest
     assert "changed" not in manifest
+
+
+def test_real_playwright_fixture_pre_submit_maps_fills_uploads_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    application = source()
+    html = """<form><input id='name' required><textarea id='note'></textarea><select id='team'><option value='eng'>Engineering</option></select><input name='work' type='radio' value='remote'><input name='work' type='radio' value='office'><input name='consent' type='checkbox' value='yes'><input id='cv' type='file' required><button type='submit'>Submit</button></form>"""
+    observation = observe_ats_form_or_recover(
+        root=tmp_path / "forensics", attempt_id="attempt-pre-submit-observe",
+        application_id="application-pre-submit-observe", source=application,
+        sanity=sanity(application), ats_name="fixture", authority=observation_authority(application),
+        captured_at="2026-08-27T12:00:00Z", fixture_html=html,
+    )
+    values = {"name": b"Synthetic User", "note": b"fixture note", "team": b"eng", "work": b"remote", "consent": b"yes", "cv": b"synthetic fixture document"}
+    kwargs = {
+        "root": tmp_path / "forensics", "attempt_id": "attempt-pre-submit-0001",
+        "application_id": "application-pre-submit-0001", "observation": observation,
+        "authority": pre_submit_authority(observation, values), "values": values,
+        "fixture_html": html,
+    }
+    with pytest.raises(RuntimeError, match="pre-publication fixture crash"):
+        execute_fixture_pre_submit_or_recover(**kwargs, injected_crash_after_action=1)
+    assert not (tmp_path / "forensics" / "manifests" / "attempt-pre-submit-0001.json").exists()
+    receipt = execute_fixture_pre_submit_or_recover(**kwargs)
+    assert (receipt.outcome, receipt.failure_class) == ("prepared", None)
+    manifest = (tmp_path / "forensics" / "manifests" / "attempt-pre-submit-0001.json").read_text()
+    assert "Synthetic User" not in manifest
+    assert "synthetic fixture document" not in manifest
+    import playwright.sync_api
+    monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("pre-submit replay launched browser")))
+    assert execute_fixture_pre_submit_or_recover(**kwargs) == receipt
 
 
 @pytest.mark.parametrize(

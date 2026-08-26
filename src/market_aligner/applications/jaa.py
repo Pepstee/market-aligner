@@ -30,6 +30,7 @@ _ATS_PROVIDERS = frozenset({"ashby", "fixture", "greenhouse", "personio", "recru
 _ATS_CAPTURE_TIME = re.compile(r"^(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\dZ$", re.ASCII)
 _OBSERVATION_SCHEMA = "market-aligner.read-only-ats-observation.v1"
 _OBSERVATION_CHECKPOINT = "read_only_ats_observation"
+_PRE_SUBMIT_CHECKPOINT = "fixture_pre_submit"
 
 
 def canonical_json(value: object) -> str:
@@ -402,6 +403,28 @@ def _observation_payload(value: object) -> tuple[AtsFormInventory | None, str | 
     return inventory, None
 
 
+def _pre_submit_payload(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {"schema_version", "observation_manifest_sha256", "inventory_sha256", "authority_sha256", "plan_sha256", "before_snapshot_sha256", "after_snapshot_sha256", "actions", "interaction_counts", "terminal_disposition", "diagnostic_only", "raw_payloads_persisted", "identity_authority", "vault_authority", "submission_authority"}:
+        raise ValueError("ATS pre-submit evidence schema differs")
+    if value["schema_version"] != "market-aligner.ats-pre-submit-evidence.v1" or value["terminal_disposition"] not in {"prepared_no_submit", "blocked"} or value["interaction_counts"] != {"click": 0, "network": 0, "submit": 0} or value["diagnostic_only"] is not True or value["raw_payloads_persisted"] is not False or any(value[name] is not False for name in ("identity_authority", "vault_authority", "submission_authority")) or not isinstance(value["actions"], list):
+        raise ValueError("ATS pre-submit evidence boundary differs")
+    for name in ("observation_manifest_sha256", "inventory_sha256", "authority_sha256", "plan_sha256", "before_snapshot_sha256", "after_snapshot_sha256"):
+        _digest(value[name], name)
+    for action in value["actions"]:
+        if not isinstance(action, dict) or set(action) != {"field_id", "action", "value_sha256", "readback_sha256", "upload_name", "upload_mime", "upload_content_sha256"}:
+            raise ValueError("ATS pre-submit action evidence differs")
+        _ats_text(action["field_id"], "ATS pre-submit field ID", maximum=512)
+        if action["action"] not in _PRE_SUBMIT_ACTIONS:
+            raise ValueError("ATS pre-submit action differs")
+        for name in ("value_sha256", "readback_sha256", "upload_content_sha256"):
+            _digest(action[name], name)
+        if action["action"] == "upload":
+            _ats_text(action["upload_name"], "ATS upload name", maximum=256)
+            _ats_text(action["upload_mime"], "ATS upload MIME", maximum=128)
+        elif action["upload_name"] is not None or action["upload_mime"] is not None:
+            raise ValueError("ATS non-upload action carries upload evidence")
+
+
 def _canonical(raw: bytes) -> dict[str, object]:
     def pairs(rows: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -621,8 +644,8 @@ class ATSForensicRecorder:
         self.binding_sha256 = _digest(binding_sha256, "binding SHA-256")
         self.events: list[dict[str, object]] = []
 
-    def checkpoint(self, name: str, *, observation: Mapping[str, object] | None = None) -> None:
-        if name not in {"prepared", "blocked", _OBSERVATION_CHECKPOINT}:
+    def checkpoint(self, name: str, *, observation: Mapping[str, object] | None = None, pre_submit: Mapping[str, object] | None = None) -> None:
+        if name not in {"prepared", "blocked", _OBSERVATION_CHECKPOINT, _PRE_SUBMIT_CHECKPOINT}:
             raise ValueError("unsupported forensic checkpoint")
         event = {"sequence": len(self.events) + 1, "checkpoint": name}
         if name == _OBSERVATION_CHECKPOINT:
@@ -630,7 +653,12 @@ class ATSForensicRecorder:
                 raise ValueError("read-only ATS observation checkpoint requires evidence")
             _observation_payload(dict(observation))
             event["observation"] = json.loads(canonical_json(dict(observation)))
-        elif observation is not None:
+        elif name == _PRE_SUBMIT_CHECKPOINT:
+            if pre_submit is None:
+                raise ValueError("pre-submit checkpoint requires evidence")
+            _pre_submit_payload(dict(pre_submit))
+            event["pre_submit"] = json.loads(canonical_json(dict(pre_submit)))
+        elif observation is not None or pre_submit is not None:
             raise ValueError("ordinary forensic checkpoints cannot carry observation evidence")
         self.events.append(event | {"event_sha256": sha256(canonical_json(event).encode())})
 
@@ -656,7 +684,9 @@ def _forensic_observation(events: object) -> dict[str, object] | None:
         expected = {"sequence", "checkpoint", "event_sha256"}
         if checkpoint == _OBSERVATION_CHECKPOINT:
             expected.add("observation")
-        if checkpoint not in {"prepared", "blocked", _OBSERVATION_CHECKPOINT} or set(event) != expected:
+        if checkpoint == _PRE_SUBMIT_CHECKPOINT:
+            expected.add("pre_submit")
+        if checkpoint not in {"prepared", "blocked", _OBSERVATION_CHECKPOINT, _PRE_SUBMIT_CHECKPOINT} or set(event) != expected:
             raise ValueError("forensic event schema differs")
         without_hash = {key: value for key, value in event.items() if key != "event_sha256"}
         if event["event_sha256"] != sha256(canonical_json(without_hash).encode()):
@@ -666,6 +696,8 @@ def _forensic_observation(events: object) -> dict[str, object] | None:
                 raise ValueError("forensic observation evidence differs")
             _observation_payload(event["observation"])
             observation = event["observation"]
+        if checkpoint == _PRE_SUBMIT_CHECKPOINT:
+            _pre_submit_payload(event["pre_submit"])
     return observation
 
 
@@ -813,6 +845,8 @@ class AtsReadOnlyObservation:
     inventory: AtsFormInventory | None
     requested_application_url: str
     final_application_url: str
+    job_key: str
+    observation_authority_sha256: str
     network_evidence_sha256: str
     network_event_count: int
 
@@ -821,6 +855,8 @@ class AtsReadOnlyObservation:
             raise TypeError("read-only ATS observation requires an exact forensic receipt")
         _observation_url(self.requested_application_url)
         _observation_url(self.final_application_url)
+        _job_key(self.job_key)
+        _digest(self.observation_authority_sha256, "ATS observation authority SHA-256")
         _digest(self.network_evidence_sha256, "ATS observation network evidence SHA-256")
         if isinstance(self.network_event_count, bool) or not isinstance(self.network_event_count, int) or self.network_event_count < 0:
             raise ValueError("ATS observation network event count differs")
@@ -914,6 +950,8 @@ def _observation_from_receipt(
         inventory=inventory,
         requested_application_url=str(payload["requested_application_url"]),
         final_application_url=str(payload["final_application_url"]),
+        job_key=str(payload["job_key"]),
+        observation_authority_sha256=str(payload["authority_sha256"]),
         network_evidence_sha256=str(payload["network_evidence_sha256"]),
         network_event_count=int(payload["network_event_count"]),
     )
@@ -1130,3 +1168,239 @@ def observe_ats_form_or_recover(
             raise
         receipt = load_forensic_receipt(root, attempt_id=attempt_id, application_id=application_id, binding_sha256=binding)
     return _observation_from_receipt(root, receipt)
+
+
+_PRE_SUBMIT_ACTIONS = frozenset({"fill", "select", "check", "upload"})
+
+
+@dataclass(frozen=True)
+class AtsPreSubmitField:
+    """A value-hash-bound local-fixture action; raw input stays in memory only."""
+
+    field_id: str
+    action: str
+    value_sha256: str
+
+    def __post_init__(self) -> None:
+        _ats_text(self.field_id, "ATS pre-submit field ID", maximum=512)
+        if self.action not in _PRE_SUBMIT_ACTIONS:
+            raise ValueError("ATS pre-submit action is unsupported")
+        _digest(self.value_sha256, "ATS pre-submit value SHA-256")
+
+    def document(self) -> dict[str, str]:
+        return {"field_id": self.field_id, "action": self.action, "value_sha256": self.value_sha256}
+
+
+def _pre_submit_plan_sha256(fields: tuple[AtsPreSubmitField, ...]) -> str:
+    return sha256(canonical_json({"schema_version": "market-aligner.ats-pre-submit-plan.v1", "fields": [field.document() for field in fields]}).encode())
+
+
+@dataclass(frozen=True)
+class AtsFixturePreSubmitAuthority:
+    """Local synthetic pre-submit capability, explicitly excluding identity and submit."""
+
+    job_key: str
+    application_url: str
+    observation_manifest_sha256: str
+    inventory_sha256: str
+    plan_sha256: str
+    authority_sha256: str
+    local_fixture_only: bool = True
+    synthetic_values_only: bool = True
+    identity_authority: bool = False
+    vault_authority: bool = False
+    submission_authority: bool = False
+    schema_version: str = "market-aligner.ats-fixture-pre-submit-authority.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "market-aligner.ats-fixture-pre-submit-authority.v1":
+            raise ValueError("ATS pre-submit authority schema differs")
+        _job_key(self.job_key)
+        if _observation_url(self.application_url) != self.application_url or urlsplit(self.application_url).hostname != "localhost":
+            raise ValueError("ATS pre-submit authority must bind localhost exactly")
+        for name in ("observation_manifest_sha256", "inventory_sha256", "plan_sha256", "authority_sha256"):
+            _digest(getattr(self, name), name)
+        if (self.local_fixture_only, self.synthetic_values_only, self.identity_authority, self.vault_authority, self.submission_authority) != (True, True, False, False, False):
+            raise ValueError("ATS pre-submit authority exceeds local faceless scope")
+        if self.authority_sha256 != sha256(canonical_json(self.document(include_hash=False)).encode()):
+            raise ValueError("ATS pre-submit authority identity differs")
+
+    def document(self, *, include_hash: bool = True) -> dict[str, object]:
+        value = {
+            "schema_version": self.schema_version, "job_key": self.job_key,
+            "application_url": self.application_url,
+            "observation_manifest_sha256": self.observation_manifest_sha256,
+            "inventory_sha256": self.inventory_sha256, "plan_sha256": self.plan_sha256,
+            "local_fixture_only": self.local_fixture_only, "synthetic_values_only": self.synthetic_values_only,
+            "identity_authority": self.identity_authority, "vault_authority": self.vault_authority,
+            "submission_authority": self.submission_authority,
+        }
+        if include_hash:
+            value["authority_sha256"] = self.authority_sha256
+        return value
+
+
+def compile_fixture_pre_submit_plan(
+    observation: AtsReadOnlyObservation,
+    values: Mapping[str, bytes],
+) -> tuple[AtsPreSubmitField, ...]:
+    """Compile only typed synthetic fixture actions from a sanitized inventory."""
+    if type(observation) is not AtsReadOnlyObservation or observation.inventory is None:
+        raise ValueError("ATS pre-submit requires a prepared read-only observation")
+    if observation.receipt.outcome != "prepared":
+        raise ValueError("blocked ATS observations cannot be prepared")
+    fields: list[AtsPreSubmitField] = []
+    actionable = {"text": "fill", "email": "fill", "tel": "fill", "url": "fill", "textarea": "fill", "number": "fill", "select": "select", "radio": "check", "checkbox": "check", "file": "upload"}
+    inventory = {field.field_id: field for field in observation.inventory.fields}
+    if set(values) - set(inventory):
+        raise ValueError("ATS pre-submit values include an unknown field")
+    for field_id, field in inventory.items():
+        value = values.get(field_id)
+        if field.automation_role != "applicant":
+            if value is not None:
+                raise ValueError("ATS pre-submit cannot target a non-applicant field")
+            continue
+        action = actionable.get(field.control_kind)
+        if value is None:
+            if field.required:
+                raise ValueError("ATS pre-submit lacks a required fixture value")
+            continue
+        if action is None or not isinstance(value, bytes) or not value or len(value) > 65_536:
+            raise ValueError("ATS pre-submit fixture value is unsupported")
+        fields.append(AtsPreSubmitField(field_id, action, sha256(value)))
+    return tuple(sorted(fields, key=lambda field: field.field_id))
+
+
+def execute_fixture_pre_submit_or_recover(
+    *,
+    root: str | Path,
+    attempt_id: str,
+    application_id: str,
+    observation: AtsReadOnlyObservation,
+    authority: AtsFixturePreSubmitAuthority,
+    values: Mapping[str, bytes],
+    fixture_html: str,
+    injected_crash_after_action: int | None = None,
+) -> ATSForensicReceipt:
+    """Run synthetic local fill/upload preparation and stop before every click/submit boundary."""
+    if type(authority) is not AtsFixturePreSubmitAuthority or type(observation) is not AtsReadOnlyObservation:
+        raise TypeError("ATS pre-submit requires exact typed inputs")
+    plan = compile_fixture_pre_submit_plan(observation, values)
+    plan_sha256 = _pre_submit_plan_sha256(plan)
+    inventory = observation.inventory
+    assert inventory is not None
+    if authority.job_key != observation.job_key or authority.application_url != observation.final_application_url or authority.observation_manifest_sha256 != observation.receipt.manifest_sha256 or authority.inventory_sha256 != inventory.content_sha256 or authority.plan_sha256 != plan_sha256:
+        raise ValueError("ATS pre-submit authority binding differs")
+    if not isinstance(fixture_html, str) or not fixture_html or "\x00" in fixture_html:
+        raise ValueError("ATS pre-submit fixture is malformed")
+    binding = sha256(canonical_json({"observation_receipt": observation.receipt.receipt_sha256, "authority": authority.authority_sha256, "plan": plan_sha256}).encode())
+    try:
+        return load_forensic_receipt(root, attempt_id=attempt_id, application_id=application_id, binding_sha256=binding)
+    except KeyError:
+        pass
+    recorder = ATSForensicRecorder(root, attempt_id=attempt_id, application_id=application_id, binding_sha256=binding)
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        recorder.checkpoint("blocked")
+        return recorder.finalize(outcome="blocked", failure_class="observation_indeterminate")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, channel="chrome")
+        context = browser.new_context()
+        context.add_init_script("""(() => {
+          const attempts = []; window.__marketAlignerPreSubmit = {attempts};
+          const block = (name) => { attempts.push(name); throw new Error(`market-aligner-pre-submit:${name}`); };
+          HTMLFormElement.prototype.submit = () => block('submit');
+          HTMLFormElement.prototype.requestSubmit = () => block('submit');
+          HTMLElement.prototype.click = () => block('click');
+          window.fetch = () => block('network');
+        })()""")
+        try:
+            page = context.new_page()
+            page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=fixture_html))
+            page.goto(authority.application_url, wait_until="domcontentloaded", timeout=2_000)
+            before_snapshot_sha256 = sha256(page.content().encode())
+            if before_snapshot_sha256 != inventory.page_snapshot_sha256:
+                raise ValueError("ATS pre-submit page snapshot differs from observation")
+            controls = page.locator("form input, form textarea, form select")
+            rows = controls.evaluate_all("""(elements) => elements.map((element, index) => {
+              const tag = element.tagName.toLowerCase(); const inputType = (element.getAttribute('type') || 'text').toLowerCase();
+              const controlKind = tag === 'textarea' ? 'textarea' : (tag === 'select' ? 'select' : inputType);
+              const fieldId = element.id || element.getAttribute('name') || '';
+              const label = Array.from(element.labels || []).map((label) => (label.textContent || '').trim()).find(Boolean) || element.getAttribute('aria-label') || fieldId || `field-${index}`;
+              const options = tag === 'select' ? Array.from(element.options || []).map((option) => ({value: option.value || option.textContent || '', label: (option.textContent || '').trim() || option.value || ''})) : ((controlKind === 'radio' || controlKind === 'checkbox') ? [{value: element.getAttribute('value') || fieldId, label}] : []);
+              return {field_id: fieldId, control_kind: controlKind, label, required: Boolean(element.required) || element.getAttribute('aria-required') === 'true', visible: Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length), disabled: Boolean(element.disabled), read_only: Boolean(element.readOnly), multiple: Boolean(element.multiple), options, value: element.getAttribute('value') || ''};
+            })""")
+            if not isinstance(rows, list):
+                raise ValueError("ATS pre-submit controls are malformed")
+            shape_rows = [{key: value for key, value in row.items() if key != "value"} for row in rows]
+            if [field.document() for field in _observed_fields(shape_rows)] != [field.document() for field in inventory.fields]:
+                raise ValueError("ATS pre-submit page shape differs from observation")
+            for action_index, field in enumerate(plan, start=1):
+                candidates = [index for index, row in enumerate(rows) if row["field_id"] == field.field_id]
+                if not candidates:
+                    raise ValueError("ATS pre-submit form shape differs")
+                value = values[field.field_id]
+                if sha256(value) != field.value_sha256:
+                    raise ValueError("ATS pre-submit value identity differs")
+                if field.action == "check":
+                    decoded = value.decode("utf-8")
+                    candidates = [index for index in candidates if rows[index]["value"] == decoded]
+                if len(candidates) != 1:
+                    raise ValueError("ATS pre-submit selector is ambiguous")
+                target = controls.nth(candidates[0])
+                if field.action == "upload":
+                    target.set_input_files({"name": "fixture.txt", "mimeType": "text/plain", "buffer": value})
+                elif field.action == "select":
+                    target.select_option(value.decode("utf-8"))
+                elif field.action == "check":
+                    target.check()
+                else:
+                    target.fill(value.decode("utf-8"))
+                if injected_crash_after_action == action_index:
+                    raise RuntimeError("injected pre-publication fixture crash")
+            attempts = page.evaluate("() => window.__marketAlignerPreSubmit.attempts.slice()")
+            after_snapshot_sha256 = sha256(page.content().encode())
+            readbacks = controls.evaluate_all("""(rows) => rows.map((row) => ({field_id: row.id || row.getAttribute('name') || '', value: row.value || '', checked: Boolean(row.checked), files: Array.from(row.files || []).map((file) => ({name: file.name, size: file.size, type: file.type}))}))""")
+            evidence_actions = []
+            for field in plan:
+                value = values[field.field_id]
+                matches = [row for row in readbacks if row["field_id"] == field.field_id]
+                if field.action == "check":
+                    matches = [row for row in matches if row["value"] == value.decode("utf-8")]
+                if len(matches) != 1:
+                    raise ValueError("ATS pre-submit readback selector is ambiguous")
+                row = matches[0]
+                if field.action == "upload":
+                    metadata = {"name": "fixture.txt", "size": len(value), "type": "text/plain"}
+                    if row["files"] != [metadata]:
+                        raise ValueError("ATS pre-submit upload readback differs")
+                    readback_sha256 = sha256(canonical_json(metadata).encode())
+                elif field.action == "check":
+                    if row["checked"] is not True:
+                        raise ValueError("ATS pre-submit checked readback differs")
+                    readback_sha256 = sha256(canonical_json({"checked": True, "value": row["value"]}).encode())
+                else:
+                    if row["value"].encode() != value:
+                        raise ValueError("ATS pre-submit value readback differs")
+                    readback_sha256 = sha256(row["value"].encode())
+                evidence_actions.append({"field_id": field.field_id, "action": field.action, "value_sha256": field.value_sha256, "readback_sha256": readback_sha256, "upload_name": "fixture.txt" if field.action == "upload" else None, "upload_mime": "text/plain" if field.action == "upload" else None, "upload_content_sha256": field.value_sha256 if field.action == "upload" else sha256(b"")})
+            payload = {
+                "schema_version": "market-aligner.ats-pre-submit-evidence.v1",
+                "observation_manifest_sha256": observation.receipt.manifest_sha256,
+                "inventory_sha256": inventory.content_sha256, "authority_sha256": authority.authority_sha256,
+                "plan_sha256": plan_sha256, "before_snapshot_sha256": before_snapshot_sha256,
+                "after_snapshot_sha256": after_snapshot_sha256, "actions": evidence_actions,
+                "interaction_counts": {"click": 0, "network": 0, "submit": 0},
+                "terminal_disposition": "blocked" if attempts else "prepared_no_submit",
+                "diagnostic_only": True, "raw_payloads_persisted": False,
+                "identity_authority": False, "vault_authority": False, "submission_authority": False,
+            }
+            if attempts:
+                recorder.checkpoint(_PRE_SUBMIT_CHECKPOINT, pre_submit=payload)
+                return recorder.finalize(outcome="blocked", failure_class="read_only_interaction_attempted")
+            recorder.checkpoint(_PRE_SUBMIT_CHECKPOINT, pre_submit=payload)
+            return recorder.finalize(outcome="prepared")
+        finally:
+            context.close()
+            browser.close()
