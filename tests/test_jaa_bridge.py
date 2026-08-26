@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import builtins
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from market_aligner.applications.jaa import (
     ApplicationSource,
     AtsFieldOption,
     AtsFormInventory,
+    AtsObservationAuthority,
     AtsObservedField,
     FixtureCaptureBackend,
     SanityReviewReceipt,
@@ -23,6 +25,7 @@ from market_aligner.applications.jaa import (
     capture_or_recover,
     list_canary_learning_events,
     load_forensic_receipt,
+    observe_ats_form_or_recover,
     record_canary_learning_event,
     sha256,
     verify_canary_learning_event,
@@ -62,6 +65,34 @@ def sanity(value: ApplicationSource) -> SanityReviewReceipt:
         receipt_sha256=hashlib.sha256(
             json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
+    )
+
+
+def observation_authority(
+    value: ApplicationSource,
+    *,
+    url: str = "https://localhost/fixture-ats",
+    state: str = "accepted",
+    local_fixture_only: bool = True,
+) -> AtsObservationAuthority:
+    fields = {
+        "schema_version": "market-aligner.ats-observation-authority.v1",
+        "job_key": value.job_key,
+        "application_url": url,
+        "timeout_ms": 2_000,
+        "max_network_events": 8,
+        "max_snapshot_bytes": 65_536,
+        "authority_state": state,
+        "local_fixture_only": local_fixture_only,
+        "diagnostic_only": True,
+        "raw_payloads_persisted": False,
+        "identity_authority": False,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    return AtsObservationAuthority(
+        **fields,
+        authority_sha256=sha256(canonical_json(fields).encode()),
     )
 
 
@@ -270,6 +301,153 @@ def test_ats_inventory_shape_refuses_duplicate_fields_and_unsafe_screenshot_iden
             captured_at="2026-08-27T12:00:00Z", page_snapshot_sha256="a" * 64,
             screenshot_sha256s=("b" * 64, "b" * 64), fields=(field,),
         )
+
+
+def test_real_playwright_local_fixture_observation_is_sanitized_and_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    application = source()
+    secret = "secret@example.test"
+    html = f"""<!doctype html><form id='application'>
+      <label for='name'>Full name</label><input id='name' required value='{secret}'>
+      <label for='team'>Team</label><select id='team' multiple><option value='eng'>Engineering</option><option value='ops'>Operations</option></select>
+      <input id='trap' name='trap' type='hidden' value='private-token'>
+      <input id='managed' name='managed' readonly value='provider-managed'>
+      <script>
+        for (const event of ['click', 'input', 'change', 'submit']) document.addEventListener(event, () => fetch('/interaction-' + event));
+      </script>
+    </form>"""
+    kwargs = {
+        "root": tmp_path / "forensics",
+        "attempt_id": "attempt-observe-0001",
+        "application_id": "application-observe-0001",
+        "source": application,
+        "sanity": sanity(application),
+        "ats_name": "fixture",
+        "authority": observation_authority(application),
+        "captured_at": "2026-08-27T12:00:00Z",
+        "fixture_html": html,
+    }
+    observed = observe_ats_form_or_recover(**kwargs)
+    assert observed.receipt.outcome == "prepared"
+    assert observed.inventory is not None
+    assert {field.field_id: field for field in observed.inventory.fields}["team"].multiple is True
+    assert {field.field_id: field for field in observed.inventory.fields}["trap"].automation_role == "honeypot"
+    assert {field.field_id: field for field in observed.inventory.fields}["managed"].automation_role == "provider_managed"
+    assert observed.network_event_count == 1
+    manifest = (tmp_path / "forensics" / "manifests" / "attempt-observe-0001.json").read_text()
+    assert secret not in manifest
+    assert "private-token" not in manifest
+    assert "current_value" not in manifest
+    import playwright.sync_api
+    monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("replay launched browser")))
+    assert observe_ats_form_or_recover(**kwargs) == observed
+
+
+def test_unaccepted_public_observation_refuses_before_playwright_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = source()
+    authority = observation_authority(
+        application,
+        url="https://jobs.example.test/role",
+        state="pending",
+        local_fixture_only=False,
+    )
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.startswith("playwright"):
+            raise AssertionError("unaccepted authority imported Playwright")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    with pytest.raises(PermissionError, match="external verified operator capability"):
+        observe_ats_form_or_recover(
+            root=tmp_path / "forensics", attempt_id="attempt-observe-0002",
+            application_id="application-observe-0002", source=application,
+            sanity=sanity(application), ats_name="fixture", authority=authority,
+            captured_at="2026-08-27T12:00:00Z", fixture_html="<form><input id='x'></form>",
+        )
+
+
+def test_forged_accepted_public_observation_refuses_before_playwright_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = source()
+    authority = observation_authority(
+        application,
+        url="https://jobs.example.test/role",
+        state="accepted",
+        local_fixture_only=False,
+    )
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.startswith("playwright"):
+            raise AssertionError("forged public acceptance imported Playwright")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    with pytest.raises(PermissionError, match="external verified operator capability"):
+        observe_ats_form_or_recover(
+            root=tmp_path / "forensics", attempt_id="attempt-observe-0003",
+            application_id="application-observe-0003", source=application,
+            sanity=sanity(application), ats_name="fixture", authority=authority,
+            captured_at="2026-08-27T12:00:00Z", fixture_html="<form><input id='x'></form>",
+        )
+
+
+def test_real_playwright_malicious_fixture_is_terminally_blocked_without_interaction(
+    tmp_path: Path
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    application = source()
+    secret = "private@example.test"
+    html = f"""<!doctype html><form><input id='name' value='{secret}'><script>
+      const input = document.querySelector('#name');
+      for (const action of [
+        () => input.value = 'changed', () => input.click(), () => document.forms[0].submit(),
+        () => fetch('/escaped')
+      ]) {{ try {{ action(); }} catch (_error) {{}} }}
+    </script></form>"""
+    observed = observe_ats_form_or_recover(
+        root=tmp_path / "forensics", attempt_id="attempt-observe-malicious",
+        application_id="application-observe-malicious", source=application,
+        sanity=sanity(application), ats_name="fixture", authority=observation_authority(application),
+        captured_at="2026-08-27T12:00:00Z", fixture_html=html,
+    )
+    assert (observed.receipt.outcome, observed.receipt.failure_class) == (
+        "blocked", "read_only_interaction_attempted"
+    )
+    assert observed.inventory is None
+    assert observed.network_event_count == 1
+    manifest = (tmp_path / "forensics" / "manifests" / "attempt-observe-malicious.json").read_text()
+    assert secret not in manifest
+    assert "changed" not in manifest
+
+
+@pytest.mark.parametrize(
+    ("html", "failure"),
+    (
+        ("<form><input id='password' type='password'></form>", "identity_required"),
+        ("<form><input id='name'><iframe title='captcha challenge'></iframe></form>", "human_verification"),
+    ),
+)
+def test_real_playwright_local_fixture_terminal_blocks(
+    tmp_path: Path, html: str, failure: str
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    application = source()
+    observed = observe_ats_form_or_recover(
+        root=tmp_path / "forensics", attempt_id=f"attempt-observe-{failure}",
+        application_id=f"application-observe-{failure}", source=application,
+        sanity=sanity(application), ats_name="fixture", authority=observation_authority(application),
+        captured_at="2026-08-27T12:00:00Z", fixture_html=html,
+    )
+    assert (observed.receipt.outcome, observed.receipt.failure_class) == ("blocked", failure)
+    assert observed.inventory is None
 
 
 def test_real_market_eligibility_receipt_flows_through_service_and_cli(
