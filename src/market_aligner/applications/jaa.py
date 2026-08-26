@@ -8,6 +8,7 @@ import re
 import stat
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +19,10 @@ _IDS = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _JOB_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$", re.ASCII)
 _DIGEST = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _FAILURES = frozenset({"identity_required", "unsupported_ats", "human_verification", "provider_timeout"})
+_RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$", re.ASCII)
+_LEARNING_STAGES = frozenset({"ats_preflight", "capture", "improvement"})
+_LEARNING_ISSUES = frozenset({"prepared", "blocked", "identity_required", "unsupported_ats", "human_verification", "provider_timeout"})
+_LEARNING_SUMMARIES = frozenset({"observation_captured", "outcome_blocked", "improvement_required"})
 
 
 def canonical_json(value: object) -> str:
@@ -96,6 +101,20 @@ def _manifests(root: Path, *, create: bool) -> Path:
         info = os.lstat(path)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise ValueError("forensic manifests are unsafe")
+    return path
+
+
+def _learning_events(root: Path, *, create: bool) -> Path:
+    path = root / "learning-events"
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if not create:
+            raise KeyError("forensic learning events are missing") from None
+        path.mkdir(mode=0o700)
+        info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("forensic learning events are unsafe")
     return path
 
 
@@ -200,6 +219,49 @@ class ATSForensicReceipt:
         return {"schema_version": SCHEMA_VERSION, "attempt_id": self.attempt_id, "application_id": self.application_id, "manifest_path": f"manifests/{self.attempt_id}.json", "manifest_sha256": self.manifest_sha256, "receipt_sha256": self.receipt_sha256, "outcome": self.outcome, "failure_class": self.failure_class, "event_count": self.event_count, "root_identity": list(self.root_identity), "diagnostic_only": True, "raw_payloads_persisted": False, "identity_authority": False, "release_authority": False, "submission_authority": False}
 
 
+@dataclass(frozen=True)
+class ATSForensicLearningEvent:
+    event_sha256: str
+    recorded_at: str
+    cycle_id: str
+    stage: str
+    issue_code: str
+    summary: str
+    attempt_id: str
+    application_id: str
+    manifest_sha256: str
+    receipt_sha256: str
+    outcome: str
+    failure_class: str | None
+    event_count: int
+
+    def __post_init__(self) -> None:
+        _digest(self.event_sha256, "learning event SHA-256")
+        if not isinstance(self.recorded_at, str) or not _RFC3339_UTC.fullmatch(self.recorded_at):
+            raise ValueError("learning event time must be canonical RFC3339 UTC")
+        try:
+            datetime.fromisoformat(f"{self.recorded_at[:-1]}+00:00")
+        except ValueError as exc:
+            raise ValueError("learning event time must be canonical RFC3339 UTC") from exc
+        _id(self.cycle_id, "learning cycle ID")
+        if self.stage not in _LEARNING_STAGES or self.issue_code not in _LEARNING_ISSUES or self.summary not in _LEARNING_SUMMARIES:
+            raise ValueError("learning event uses an unsupported closed value")
+        _id(self.attempt_id, "attempt ID")
+        _id(self.application_id, "application ID")
+        _digest(self.manifest_sha256, "manifest SHA-256")
+        _digest(self.receipt_sha256, "receipt SHA-256")
+        if self.outcome not in {"prepared", "blocked"} or (self.outcome == "prepared") != (self.failure_class is None) or self.failure_class not in _FAILURES | {None} or self.event_count < 1:
+            raise ValueError("learning event forensic outcome is invalid")
+        if self.event_sha256 != sha256(canonical_json(self.document(include_hash=False)).encode()):
+            raise ValueError("learning event identity differs")
+
+    def document(self, *, include_hash: bool = True) -> dict[str, object]:
+        value = {"schema_version": SCHEMA_VERSION, "recorded_at": self.recorded_at, "cycle_id": self.cycle_id, "stage": self.stage, "issue_code": self.issue_code, "summary": self.summary, "attempt_id": self.attempt_id, "application_id": self.application_id, "manifest_sha256": self.manifest_sha256, "receipt_sha256": self.receipt_sha256, "outcome": self.outcome, "failure_class": self.failure_class, "event_count": self.event_count, "diagnostic_only": True, "raw_payloads_persisted": False, "identity_authority": False, "release_authority": False, "submission_authority": False}
+        if include_hash:
+            value["event_sha256"] = self.event_sha256
+        return value
+
+
 class ATSForensicRecorder:
     def __init__(self, root: str | Path, *, attempt_id: str, application_id: str, binding_sha256: str) -> None:
         self.root, self.root_identity = _root(root, create=True)
@@ -238,6 +300,66 @@ def load_forensic_receipt(root: str | Path, *, attempt_id: str, application_id: 
     provisional = ATSForensicReceipt(attempt_id, application_id, sha256(data), "0" * 64, manifest["outcome"], manifest["failure_class"], len(manifest["events"]), identity)
     receipt_doc = provisional.document() | {"receipt_sha256": None}
     return ATSForensicReceipt(attempt_id, application_id, provisional.manifest_sha256, sha256(canonical_json(receipt_doc).encode()), provisional.outcome, provisional.failure_class, provisional.event_count, identity)
+
+
+def _verify_learning_receipt(root: str | Path, receipt: ATSForensicReceipt) -> None:
+    if not isinstance(receipt, ATSForensicReceipt):
+        raise TypeError("learning events require ATSForensicReceipt")
+    path, identity = _root(root, create=False)
+    data = _read(_manifests(path, create=False) / f"{receipt.attempt_id}.json")
+    manifest = _canonical(data)
+    expected = {"schema_version", "attempt_id", "application_id", "binding_sha256", "root_identity", "outcome", "failure_class", "events", "diagnostic_only", "raw_payloads_persisted", "identity_authority", "release_authority", "submission_authority"}
+    if set(manifest) != expected or manifest["schema_version"] != SCHEMA_VERSION or manifest["attempt_id"] != receipt.attempt_id or manifest["application_id"] != receipt.application_id or manifest["root_identity"] != list(identity) or manifest["outcome"] != receipt.outcome or manifest["failure_class"] != receipt.failure_class or manifest["diagnostic_only"] is not True or manifest["raw_payloads_persisted"] is not False or any(manifest[name] is not False for name in ("identity_authority", "release_authority", "submission_authority")) or not isinstance(manifest["events"], list) or len(manifest["events"]) != receipt.event_count or sha256(data) != receipt.manifest_sha256:
+        raise ValueError("learning event forensic receipt binding differs")
+    receipt_document = receipt.document() | {"receipt_sha256": None}
+    if receipt.receipt_sha256 != sha256(canonical_json(receipt_document).encode()):
+        raise ValueError("learning event forensic receipt identity differs")
+
+
+def _learning_event_name(event_sha256: str) -> str:
+    return f"{_digest(event_sha256, 'learning event SHA-256')}.json"
+
+
+def _learning_event_from_document(value: object) -> ATSForensicLearningEvent:
+    keys = {"schema_version", "recorded_at", "cycle_id", "stage", "issue_code", "summary", "attempt_id", "application_id", "manifest_sha256", "receipt_sha256", "outcome", "failure_class", "event_count", "diagnostic_only", "raw_payloads_persisted", "identity_authority", "release_authority", "submission_authority", "event_sha256"}
+    if not isinstance(value, dict) or set(value) != keys or value["schema_version"] != SCHEMA_VERSION or value["diagnostic_only"] is not True or value["raw_payloads_persisted"] is not False or any(value[name] is not False for name in ("identity_authority", "release_authority", "submission_authority")):
+        raise ValueError("learning event schema differs")
+    event = ATSForensicLearningEvent(**{key: value[key] for key in keys if key not in {"schema_version", "diagnostic_only", "raw_payloads_persisted", "identity_authority", "release_authority", "submission_authority"}})
+    return event
+
+
+def record_canary_learning_event(root: str | Path, receipt: ATSForensicReceipt, *, recorded_at: str, cycle_id: str, stage: str, issue_code: str, summary: str) -> ATSForensicLearningEvent:
+    """Create-or-verify one closed, receipt-bound, no-submit learning event."""
+    _verify_learning_receipt(root, receipt)
+    fields = {"recorded_at": recorded_at, "cycle_id": cycle_id, "stage": stage, "issue_code": issue_code, "summary": summary, "attempt_id": receipt.attempt_id, "application_id": receipt.application_id, "manifest_sha256": receipt.manifest_sha256, "receipt_sha256": receipt.receipt_sha256, "outcome": receipt.outcome, "failure_class": receipt.failure_class, "event_count": receipt.event_count}
+    event = ATSForensicLearningEvent(**fields, event_sha256=sha256(canonical_json({"schema_version": SCHEMA_VERSION, **fields, "diagnostic_only": True, "raw_payloads_persisted": False, "identity_authority": False, "release_authority": False, "submission_authority": False}).encode()))
+    root_path, _identity = _root(root, create=False)
+    _write_once(_learning_events(root_path, create=True), _learning_event_name(event.event_sha256), (canonical_json(event.document()) + "\n").encode())
+    return verify_canary_learning_event(root, event.event_sha256)
+
+
+def verify_canary_learning_event(root: str | Path, event_sha256: str) -> ATSForensicLearningEvent:
+    root_path, _identity = _root(root, create=False)
+    event = _learning_event_from_document(_canonical(_read(_learning_events(root_path, create=False) / _learning_event_name(event_sha256))))
+    if event.event_sha256 != event_sha256:
+        raise ValueError("learning event path differs from identity")
+    receipt = ATSForensicReceipt(event.attempt_id, event.application_id, event.manifest_sha256, event.receipt_sha256, event.outcome, event.failure_class, event.event_count, _identity)
+    _verify_learning_receipt(root, receipt)
+    return event
+
+
+def list_canary_learning_events(root: str | Path) -> tuple[ATSForensicLearningEvent, ...]:
+    root_path, _identity = _root(root, create=False)
+    try:
+        directory = _learning_events(root_path, create=False)
+    except KeyError:
+        return ()
+    events: list[ATSForensicLearningEvent] = []
+    for path in directory.iterdir():
+        if not _DIGEST.fullmatch(path.stem) or path.suffix != ".json":
+            raise ValueError("learning event inventory is unsafe")
+        events.append(verify_canary_learning_event(root, path.stem))
+    return tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_sha256)))
 
 
 @dataclass(frozen=True)

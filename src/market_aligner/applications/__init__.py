@@ -1,4 +1,4 @@
 """Market application contracts and faceless internal JAA diagnostics."""
 from .contracts import ApplicationEvent, ApplicationHandoff, JAAClient
-from .jaa import ApplicationSource, ATSForensicReceipt, ATSForensicRecorder, CaptureBackend, FixtureCaptureBackend, SanityReviewReceipt, capture_or_recover, load_forensic_receipt, prepare_from_market
-__all__ = ["ApplicationEvent", "ApplicationHandoff", "JAAClient", "ApplicationSource", "ATSForensicReceipt", "ATSForensicRecorder", "CaptureBackend", "FixtureCaptureBackend", "SanityReviewReceipt", "capture_or_recover", "load_forensic_receipt", "prepare_from_market"]
+from .jaa import ApplicationSource, ATSForensicLearningEvent, ATSForensicReceipt, ATSForensicRecorder, CaptureBackend, FixtureCaptureBackend, SanityReviewReceipt, capture_or_recover, list_canary_learning_events, load_forensic_receipt, prepare_from_market, record_canary_learning_event, verify_canary_learning_event
+__all__ = ["ApplicationEvent", "ApplicationHandoff", "JAAClient", "ApplicationSource", "ATSForensicLearningEvent", "ATSForensicReceipt", "ATSForensicRecorder", "CaptureBackend", "FixtureCaptureBackend", "SanityReviewReceipt", "capture_or_recover", "list_canary_learning_events", "load_forensic_receipt", "prepare_from_market", "record_canary_learning_event", "verify_canary_learning_event"]

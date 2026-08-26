@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,13 @@ from market_aligner.applications.jaa import (
     ApplicationSource,
     FixtureCaptureBackend,
     SanityReviewReceipt,
+    canonical_json,
     capture_or_recover,
+    list_canary_learning_events,
     load_forensic_receipt,
+    record_canary_learning_event,
+    sha256,
+    verify_canary_learning_event,
 )
 from market_aligner.cli import main as cli_main
 from market_aligner.processing import eligibility_one
@@ -140,6 +146,57 @@ def test_forensics_persists_no_raw_secret(tmp_path: Path) -> None:
     )
     evidence = tmp_path / "forensics" / "manifests" / f"{receipt.attempt_id}.json"
     assert "secret@example.test" not in evidence.read_text()
+
+
+def test_learning_event_is_receipt_bound_idempotent_and_secret_free(tmp_path: Path) -> None:
+    application = source()
+    root = tmp_path / "forensics"
+    receipt = capture_or_recover(root=root, attempt_id="attempt-learning-0001", application_id="application-learning-0001", source=application, sanity=sanity(application), ats_name="fixture")
+    fields = {"recorded_at": "2026-08-27T12:00:00Z", "cycle_id": "cycle-learning-0001", "stage": "ats_preflight", "issue_code": "prepared", "summary": "observation_captured"}
+    event = record_canary_learning_event(root, receipt, **fields)
+    assert record_canary_learning_event(root, receipt, **fields) == event
+    assert verify_canary_learning_event(root, event.event_sha256) == event
+    assert list_canary_learning_events(root) == (event,)
+    secret = "token=private-access-token"
+    with pytest.raises(ValueError):
+        record_canary_learning_event(root, receipt, **(fields | {"summary": secret}))
+    assert all(secret.encode() not in path.read_bytes() for path in root.rglob("*") if path.is_file())
+
+
+def test_learning_event_rejects_noncanonical_time_and_reconstructs_chronology(tmp_path: Path) -> None:
+    application = source()
+    root = tmp_path / "forensics"
+    receipt = capture_or_recover(root=root, attempt_id="attempt-learning-0002", application_id="application-learning-0002", source=application, sanity=sanity(application), ats_name="fixture")
+    fields = {"cycle_id": "cycle-learning-0002", "stage": "ats_preflight", "issue_code": "prepared", "summary": "observation_captured"}
+    for value in ("2026-08-27T12:00:00+00:00", "2026-08-27T12:00:00", "2026-08-27T12:00:00.1234567Z"):
+        with pytest.raises(ValueError):
+            record_canary_learning_event(root, receipt, recorded_at=value, **fields)
+    events = [record_canary_learning_event(root, receipt, recorded_at=f"2026-08-27T12:00:00.{index:06d}Z", **(fields | {"cycle_id": f"cycle-learning-{index:04d}"})) for index in range(8, 0, -1)]
+    expected = tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_sha256)))
+    assert tuple(events) != expected
+    assert list_canary_learning_events(root) == expected
+
+
+def test_learning_event_refuses_every_contradictory_forensic_authority_before_publication(tmp_path: Path) -> None:
+    application = source()
+    root = tmp_path / "forensics"
+    receipt = capture_or_recover(root=root, attempt_id="attempt-learning-0003", application_id="application-learning-0003", source=application, sanity=sanity(application), ats_name="fixture")
+    manifest = root / "manifests" / f"{receipt.attempt_id}.json"
+    original = manifest.read_bytes()
+    document = json.loads(original)
+    fields = {"recorded_at": "2026-08-27T12:00:00Z", "cycle_id": "cycle-learning-0003", "stage": "ats_preflight", "issue_code": "prepared", "summary": "observation_captured"}
+    for name, contradictory in (("diagnostic_only", False), ("raw_payloads_persisted", True), ("identity_authority", True), ("release_authority", True), ("submission_authority", True)):
+        changed = document | {name: contradictory}
+        changed_bytes = (canonical_json(changed) + "\n").encode()
+        forged = replace(receipt, manifest_sha256=sha256(changed_bytes), receipt_sha256="0" * 64)
+        forged = replace(forged, receipt_sha256=sha256(canonical_json(forged.document() | {"receipt_sha256": None}).encode()))
+        manifest.write_bytes(changed_bytes)
+        with pytest.raises(ValueError, match="forensic receipt binding differs"):
+            record_canary_learning_event(root, forged, **fields)
+        assert not (root / "learning-events").exists()
+        assert manifest.read_bytes() == changed_bytes
+        manifest.write_bytes(original)
+    assert manifest.read_bytes() == original
 
 
 def test_installed_import_has_no_protected_dependencies() -> None:
