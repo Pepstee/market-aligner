@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from market_aligner.processing import parse_eligibility_receipt
 
@@ -23,6 +24,10 @@ _RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$
 _LEARNING_STAGES = frozenset({"ats_preflight", "capture", "improvement"})
 _LEARNING_ISSUES = frozenset({"prepared", "blocked", "identity_required", "unsupported_ats", "human_verification", "provider_timeout"})
 _LEARNING_SUMMARIES = frozenset({"observation_captured", "outcome_blocked", "improvement_required"})
+_ATS_CONTROL_KINDS = frozenset({"text", "email", "tel", "url", "textarea", "number", "select", "radio", "checkbox", "file", "hidden"})
+_ATS_AUTOMATION_ROLES = frozenset({"applicant", "honeypot", "provider_managed"})
+_ATS_PROVIDERS = frozenset({"ashby", "fixture", "greenhouse", "personio", "recruitee", "workable"})
+_ATS_CAPTURE_TIME = re.compile(r"^(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\dZ$", re.ASCII)
 
 
 def canonical_json(value: object) -> str:
@@ -49,6 +54,161 @@ def _job_key(value: object) -> str:
     if not isinstance(value, str) or not _JOB_KEY.fullmatch(value):
         raise ValueError("job key must use the canonical Market key grammar")
     return value
+
+
+def _ats_text(value: object, label: str, *, maximum: int = 4096) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.strip() != value
+        or len(value.encode("utf-8")) > maximum
+        or "\x00" in value
+        or "\r" in value
+    ):
+        raise ValueError(f"{label} must be bounded normalized text")
+    return value
+
+
+def _ats_time(value: object) -> str:
+    if not isinstance(value, str) or not _ATS_CAPTURE_TIME.fullmatch(value):
+        raise ValueError("ATS inventory capture time must be second-precision RFC3339 UTC")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError("ATS inventory capture time must be valid") from exc
+    return value
+
+
+@dataclass(frozen=True)
+class AtsFieldOption:
+    """A public choice descriptor; it carries no candidate answer."""
+
+    value: str
+    label: str
+
+    def __post_init__(self) -> None:
+        _ats_text(self.value, "ATS option value", maximum=2048)
+        _ats_text(self.label, "ATS option label", maximum=2048)
+
+    def document(self) -> dict[str, str]:
+        return {"value": self.value, "label": self.label}
+
+
+@dataclass(frozen=True)
+class AtsObservedField:
+    """Sanitized, value-free form shape observed at a public ATS route."""
+
+    field_id: str
+    control_kind: str
+    label: str
+    required: bool
+    visible: bool
+    automation_role: str = "applicant"
+    disabled: bool = False
+    read_only: bool = False
+    multiple: bool = False
+    options: tuple[AtsFieldOption, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "options", tuple(self.options))
+        _ats_text(self.field_id, "ATS field ID", maximum=512)
+        if self.control_kind not in _ATS_CONTROL_KINDS:
+            raise ValueError("ATS control kind is unsupported")
+        if self.automation_role not in _ATS_AUTOMATION_ROLES:
+            raise ValueError("ATS automation role is unsupported")
+        _ats_text(self.label, "ATS field label")
+        for name in ("required", "visible", "disabled", "read_only", "multiple"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"ATS field {name} must be bool")
+        if not all(type(option) is AtsFieldOption for option in self.options):
+            raise TypeError("ATS options must use exact typed descriptors")
+        values = [option.value for option in self.options]
+        if len(values) != len(set(values)):
+            raise ValueError("ATS option values must be unique")
+        if self.options and self.control_kind not in {"select", "radio", "checkbox"}:
+            raise ValueError("only choice controls may carry options")
+        if self.multiple and self.control_kind not in {"file", "select", "checkbox"}:
+            raise ValueError("ATS control cannot accept multiple values")
+        if self.control_kind == "hidden":
+            if self.visible or self.automation_role == "applicant":
+                raise ValueError("hidden ATS controls require a non-applicant role")
+        elif self.automation_role != "applicant" and self.visible:
+            raise ValueError("non-applicant ATS controls cannot be visible")
+        elif self.automation_role == "applicant" and (
+            not self.visible or self.disabled or self.read_only
+        ):
+            raise ValueError("non-actionable ATS controls require a non-applicant role")
+
+    def document(self) -> dict[str, object]:
+        return {
+            "field_id": self.field_id,
+            "control_kind": self.control_kind,
+            "label": self.label,
+            "required": self.required,
+            "visible": self.visible,
+            "automation_role": self.automation_role,
+            "disabled": self.disabled,
+            "read_only": self.read_only,
+            "multiple": self.multiple,
+            "options": [option.document() for option in self.options],
+        }
+
+
+@dataclass(frozen=True)
+class AtsFormInventory:
+    """Content-addressed, no-action form shape for a future protected adapter."""
+
+    provider: str
+    application_url: str
+    captured_at: str
+    page_snapshot_sha256: str
+    screenshot_sha256s: tuple[str, ...]
+    fields: tuple[AtsObservedField, ...]
+    schema_version: str = "market-aligner.ats-form-inventory.v1"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "screenshot_sha256s", tuple(self.screenshot_sha256s))
+        object.__setattr__(self, "fields", tuple(self.fields))
+        if self.schema_version != "market-aligner.ats-form-inventory.v1":
+            raise ValueError("unsupported ATS inventory schema")
+        if not isinstance(self.provider, str) or self.provider not in _ATS_PROVIDERS:
+            raise ValueError("ATS provider is unsupported")
+        parsed = urlsplit(_ats_text(self.application_url, "ATS application URL"))
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("ATS application URL must be a fragment-free HTTPS route")
+        _ats_time(self.captured_at)
+        _digest(self.page_snapshot_sha256, "ATS page snapshot SHA-256")
+        if len(set(self.screenshot_sha256s)) != len(self.screenshot_sha256s):
+            raise ValueError("ATS screenshot hashes must be unique")
+        for digest in self.screenshot_sha256s:
+            _digest(digest, "ATS screenshot SHA-256")
+        if not self.fields or len(self.fields) > 512:
+            raise ValueError("ATS inventory field count is outside policy")
+        if not all(type(field) is AtsObservedField for field in self.fields):
+            raise TypeError("ATS inventory requires exact typed fields")
+        field_ids = [field.field_id for field in self.fields]
+        if len(field_ids) != len(set(field_ids)):
+            raise ValueError("ATS inventory field IDs must be unique")
+
+    def document(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "provider": self.provider,
+            "application_url": self.application_url,
+            "captured_at": self.captured_at,
+            "page_snapshot_sha256": self.page_snapshot_sha256,
+            "screenshot_sha256s": list(self.screenshot_sha256s),
+            "fields": [field.document() for field in self.fields],
+            "diagnostic_only": True,
+            "raw_payloads_persisted": False,
+            "identity_authority": False,
+            "release_authority": False,
+            "submission_authority": False,
+        }
+
+    @property
+    def content_sha256(self) -> str:
+        return sha256(canonical_json(self.document()).encode())
 
 
 def _canonical(raw: bytes) -> dict[str, object]:

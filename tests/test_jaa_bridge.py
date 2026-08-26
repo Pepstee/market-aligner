@@ -14,6 +14,9 @@ import pytest
 from market_aligner.applications.jaa import (
     ATSForensicRecorder,
     ApplicationSource,
+    AtsFieldOption,
+    AtsFormInventory,
+    AtsObservedField,
     FixtureCaptureBackend,
     SanityReviewReceipt,
     canonical_json,
@@ -218,6 +221,55 @@ print('PASS')
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_ats_form_inventory_is_sanitized_content_addressed_and_default_off() -> None:
+    inventory = AtsFormInventory(
+        provider="greenhouse",
+        application_url="https://job-boards.greenhouse.io/example/jobs/1234567",
+        captured_at="2026-08-27T12:00:00Z",
+        page_snapshot_sha256="a" * 64,
+        screenshot_sha256s=("b" * 64,),
+        fields=(
+            AtsObservedField("full_name", "text", "Full name", True, True),
+            AtsObservedField(
+                "work_mode", "select", "Work mode", False, True,
+                options=(AtsFieldOption("remote", "Remote"),),
+            ),
+            AtsObservedField(
+                "trap", "hidden", "Hidden verification", False, False,
+                automation_role="honeypot",
+            ),
+        ),
+    )
+    document = inventory.document()
+    assert document["diagnostic_only"] is True
+    assert document["raw_payloads_persisted"] is False
+    assert all(document[name] is False for name in ("identity_authority", "release_authority", "submission_authority"))
+    assert "current_value" not in canonical_json(document)
+    assert inventory.content_sha256 == sha256(canonical_json(document).encode())
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        AtsObservedField("full_name", "text", "Full name", True, True),
+        AtsObservedField("trap", "hidden", "Hidden verification", False, False, automation_role="honeypot"),
+    ),
+)
+def test_ats_inventory_shape_refuses_duplicate_fields_and_unsafe_screenshot_identity(field: AtsObservedField) -> None:
+    with pytest.raises(ValueError, match="field IDs"):
+        AtsFormInventory(
+            provider="fixture", application_url="https://jobs.example.test/application",
+            captured_at="2026-08-27T12:00:00Z", page_snapshot_sha256="a" * 64,
+            screenshot_sha256s=(), fields=(field, field),
+        )
+    with pytest.raises(ValueError, match="screenshot hashes"):
+        AtsFormInventory(
+            provider="fixture", application_url="https://jobs.example.test/application",
+            captured_at="2026-08-27T12:00:00Z", page_snapshot_sha256="a" * 64,
+            screenshot_sha256s=("b" * 64, "b" * 64), fields=(field,),
+        )
 
 
 def test_real_market_eligibility_receipt_flows_through_service_and_cli(
