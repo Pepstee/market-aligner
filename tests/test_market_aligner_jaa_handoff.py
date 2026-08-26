@@ -812,3 +812,688 @@ def test_persisted_gated_assessment_emits_exact_handoff_and_enters_jaa(
     assert admission.application_id == MARKET_APPLICATION_ID
     assert admission.job_key == MARKET_JOB_KEY
     assert admission.admission_kind == ADMISSION_KIND_V1
+
+
+def _synthetic_candidate_materialization_authority(
+    expected: dict[str, object],
+) -> tuple[tuple[tuple[str, str, str], ...], dict[str, object], bytes]:
+    from career_automation.evidence_matching import canonical_json, content_hash
+
+    statements = (
+        (
+            "E-001",
+            "credential",
+            "Completed a synthetic computing degree covering dependable software design, testing, and delivery practices.",
+        ),
+        (
+            "E-002",
+            "project_evidence",
+            "Built a synthetic dissertation system that evaluated privacy preserving detection methods through repeatable experiments.",
+        ),
+        (
+            "E-011",
+            "project_evidence",
+            "Built a synthetic job workflow with collectors, validation, persistent state, retries, and deterministic recovery.",
+        ),
+        (
+            "E-012",
+            "project_evidence",
+            "Designed synthetic multi-stage automation with explicit requirements, bounded decisions, and measurable acceptance checks.",
+        ),
+        (
+            "E-013",
+            "project_evidence",
+            "Delivered synthetic Python services with stable interfaces, repeatable tests, and clear operational ownership.",
+        ),
+        (
+            "E-014",
+            "project_evidence",
+            "Directed a synthetic media workflow from product requirements through a tested local working demonstration.",
+        ),
+        (
+            "E-015",
+            "project_evidence",
+            "Verified a synthetic audio pipeline with automated checks and a timeline-correct local output artifact.",
+        ),
+        (
+            "E-016",
+            "project_evidence",
+            "Built a synthetic learning service with question generation, spaced review, persistence, and progress analysis.",
+        ),
+        (
+            "E-017",
+            "project_evidence",
+            "Implemented a synthetic anomaly detection package with documented interfaces and reproducible local evaluation.",
+        ),
+    )
+    projection_body = {
+        "approved_evidence": [
+            {
+                "id": evidence_id,
+                "statement_sha256": hashlib.sha256(statement.encode()).hexdigest(),
+            }
+            for evidence_id, _kind, statement in statements
+        ],
+        "policy_sha256": hashlib.sha256(b"synthetic-projection-policy").hexdigest(),
+        "schema_version": "jaa.synthetic-candidate-projection.v1",
+    }
+    candidate_projection = {
+        **projection_body,
+        "projection_sha256": content_hash(projection_body),
+    }
+    vacancy = expected["vacancy"]
+    requirement_text = "Deliver reliable services through tested software."
+    decision_receipt = {
+        "candidate_projection_sha256": candidate_projection["projection_sha256"],
+        "company_name": vacancy["company_name"],
+        "decision": "eligible",
+        "evidence_matrix": [
+            {
+                "classification": "essential",
+                "evidence_ids": ["E-011"],
+                "requirement_id": "delivery",
+                "requirement_text": requirement_text,
+                "requirement_text_sha256": hashlib.sha256(
+                    requirement_text.encode()
+                ).hexdigest(),
+                "status": "matched",
+            }
+        ],
+        "job_key": expected["job_key"],
+        "observed_at": "2026-08-10T10:05:00Z",
+        "role_title": vacancy["role_title"],
+        "source_url": vacancy["provenance"]["canonical_url"],
+        "vacancy_description_sha256": hashlib.sha256(
+            b"synthetic vacancy description"
+        ).hexdigest(),
+        "vacancy_sha256": vacancy["vacancy_snapshot_sha256"],
+    }
+    authority = {
+        "candidate_projection": candidate_projection,
+        "decisions": [
+            {
+                "receipt": decision_receipt,
+                "receipt_sha256": hashlib.sha256(
+                    (canonical_json(decision_receipt) + "\n").encode()
+                ).hexdigest(),
+            }
+        ],
+        "schema_version": "jaa.production-candidate-authority.v2",
+    }
+    return statements, decision_receipt, (canonical_json(authority) + "\n").encode()
+
+
+def _canonical_market_jaa_materialization(
+    tmp_path, capsys, monkeypatch, *, upload_kind="cv"
+):
+    import career_automation.candidate_application_factory as candidate_factory_module
+    from career_automation.application_compiler import CandidateContact
+    from career_automation.candidate_application_factory import (
+        CandidateApplicationPackage,
+        build_candidate_application_deployment_binding,
+        materialize_candidate_application_source,
+    )
+    from career_automation.candidate_contact_authority import CandidateContactAuthority
+    from career_automation.evidence_matching import canonical_json
+    from career_automation.rendering import render_pdf_artifacts
+    from career_automation.workable_live_adapter import WorkableUpload
+
+    document = json.loads(
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    expected = json.loads(
+        base64.b64decode(document["handoff"]["canonical_base64"], validate=True)
+    )["payload"]
+    assessment = expected["assessment"]
+    statements, decision_receipt, candidate_authority_bytes = (
+        _synthetic_candidate_materialization_authority(expected)
+    )
+    candidate_authority = json.loads(candidate_authority_bytes)
+    candidate_projection = candidate_authority["candidate_projection"]
+    candidate_authority_sha256 = hashlib.sha256(candidate_authority_bytes).hexdigest()
+
+    entries = document["reference_bundle"]["value"]["entries"]
+    candidate_intent_entry = next(
+        row
+        for row in entries
+        if row["metadata"]["reference_key"] == "candidate_intent"
+    )
+    candidate_intent = json.loads(
+        base64.b64decode(candidate_intent_entry["object_base64"], validate=True)
+    )
+    candidate_intent["authority_source_sha256"] = candidate_authority_sha256
+    candidate_intent_bytes = canonical_json_bytes(candidate_intent)
+    candidate_intent_sha256 = hashlib.sha256(candidate_intent_bytes).hexdigest()
+    candidate_intent_entry["object_base64"] = base64.b64encode(
+        candidate_intent_bytes
+    ).decode()
+    candidate_intent_entry["metadata"]["object_sha256"] = candidate_intent_sha256
+    authority_entry = next(
+        row
+        for row in entries
+        if row["metadata"]["reference_key"] == "candidate_intent.authority_source"
+    )
+    authority_entry["object_base64"] = base64.b64encode(
+        candidate_authority_bytes
+    ).decode()
+    authority_entry["metadata"]["object_sha256"] = candidate_authority_sha256
+
+    data_home = tmp_path / "market-data"
+    ProfileStore(data_home).save(
+        CandidateProfile(
+            profile_id=expected["profile_id"],
+            version=expected["profile_version"],
+            tracks={
+                "synthetic_track": TrackProfile(
+                    interest=8,
+                    demonstrated_skill=8,
+                    confidence=0.95,
+                    market_readiness=8,
+                    rationale="Synthetic cross-product contract fixture.",
+                )
+            },
+        ),
+        [],
+    )
+    service = MarketAlignerService(data_home)
+    service.assessments.upsert_score(
+        ScoreResult(
+            profile_id=expected["profile_id"],
+            job_key=expected["job_key"],
+            track="synthetic_track",
+            fit=assessment["fit"],
+            opportunity=assessment["opportunity"],
+            final=assessment["final"] * 100.0,
+            fit_status=FitStatus.UNCALIBRATED,
+            parameters_hash=assessment["scoring_parameters_sha256"],
+            fit_subscores=assessment["fit_components"],
+            opportunity_subscores=assessment["opportunity_components"],
+        ),
+        url=expected["vacancy"]["provenance"]["canonical_url"],
+        title=expected["vacancy"]["role_title"],
+        company=expected["vacancy"]["company_name"],
+        extraction_confidence=assessment["extraction_confidence"],
+    )
+    service.assessments.apply_opportunity_gate(
+        profile_id=expected["profile_id"],
+        job_key=expected["job_key"],
+        passed=True,
+        reason="legacy_manual_gate_is_insufficient",
+        policy_hash=expected["selection"]["selection_policy_sha256"],
+        priority=1,
+    )
+    selection_entry = next(
+        row
+        for row in entries
+        if row["metadata"]["reference_key"] == "selection.policy"
+    )
+    selection_policy = json.loads(
+        base64.b64decode(selection_entry["object_base64"], validate=True)
+    )
+    promotion_binding = {
+        "evidence_authority_sha256": "1" * 64,
+        "processing_config_sha256": "2" * 64,
+        "processing_receipt_sha256": "3" * 64,
+        "processing_result_sha256": "4" * 64,
+        "source_content_sha256": "5" * 64,
+        "track": "synthetic_track",
+    }
+    promotion_body = {
+        "binding": promotion_binding,
+        "binding_sha256": hashlib.sha256(
+            canonical_json_bytes(promotion_binding)
+        ).hexdigest(),
+        "decision": "pass",
+        "evidence_authority_sha256": "1" * 64,
+        "job_key": expected["job_key"],
+        "policy": selection_policy,
+        "policy_sha256": expected["selection"]["selection_policy_sha256"],
+        "processing_receipt_bytes_sha256": "6" * 64,
+        "profile_id": expected["profile_id"],
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        "score_payload_hash": service.assessments.assessment(
+            expected["profile_id"], expected["job_key"]
+        )["score_payload_hash"],
+    }
+    promotion_sha256 = hashlib.sha256(
+        canonical_json_bytes(promotion_body)
+    ).hexdigest()
+    service.assessments.promote_processing_gate(
+        profile_id=expected["profile_id"],
+        job_key=expected["job_key"],
+        score={
+            "fit": assessment["fit"],
+            "opportunity": assessment["opportunity"],
+            "final": assessment["final"] * 100.0,
+            "fit_status": assessment["fit_status"],
+        },
+        policy_hash=expected["selection"]["selection_policy_sha256"],
+        processing_receipt_sha256="3" * 64,
+        processing_result_sha256="4" * 64,
+        source_content_sha256="5" * 64,
+        authority_sha256="1" * 64,
+        processing_config_sha256="2" * 64,
+        track="synthetic_track",
+        receipt_bytes=canonical_json_bytes(
+            {**promotion_body, "receipt_sha256": promotion_sha256}
+        ),
+        receipt_sha256=promotion_sha256,
+    )
+    manifest = {
+        "assessment_receipt_sha256": assessment["assessment_receipt_sha256"],
+        "candidate_intent_sha256": candidate_intent_sha256,
+        "created_at": expected["created_at"],
+        "eligibility": expected["eligibility"],
+        "employer_dossier_sha256": expected["employer_dossier_sha256"],
+        "evidence_ledger_sha256": expected["evidence_ledger_sha256"],
+        "producer_commit_sha": expected["producer"]["commit_sha"],
+        "selection": expected["selection"],
+        "vacancy": expected["vacancy"],
+    }
+    manifest_path = tmp_path / "bridge-handoff-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    handoff_path = tmp_path / "bridge-handoff.json"
+    assert market_aligner_main(
+        [
+            "handoff",
+            "--profile-id",
+            expected["profile_id"],
+            "--job-key",
+            expected["job_key"],
+            "--manifest",
+            str(manifest_path),
+            "--output",
+            str(handoff_path),
+            "--data-home",
+            str(data_home),
+        ]
+    ) == 0
+    handoff_receipt = json.loads(capsys.readouterr().out)
+    context = canonical_json_bytes(
+        {
+            "environment": "synthetic",
+            "handoff_root_sha256": handoff_receipt["root_sha256"],
+            "issued_at": "2026-08-10T10:04:00Z",
+            "producer_commit_sha": expected["producer"]["commit_sha"],
+            "producer_product": "market-aligner",
+            "source_record_sha256": hashlib.sha256(
+                canonical_json_bytes(document)
+            ).hexdigest(),
+            "trust_mode": "authenticated_attestation",
+            "trust_proof_sha256": hashlib.sha256(
+                b"jaa-synthetic-materialization-context-proof-v1"
+            ).hexdigest(),
+            "trust_root_id": "synthetic-market-root",
+        }
+    )
+    time_nonces = iter(range(32))
+    witness = configured_hmac_current_time_witness(
+        authentication_key=b"market-vector-time-key-32-bytes!",
+        environment="synthetic",
+        trust_root_id="synthetic-market-time-root",
+        witness_identity_sha256=hashlib.sha256(
+            b"synthetic-market-time-witness"
+        ).hexdigest(),
+        clock=lambda: ADMISSION_TIME,
+        nonce_source=lambda: f"market-jaa-bridge-{next(time_nonces)}".encode(),
+    )
+    admission_store = HandoffAdmissionStore(
+        tmp_path / "bridge-admission.sqlite3",
+        context_authenticator=_MarketVectorContextAuthenticator(),
+        resolver=_MarketVectorResolver(document),
+        current_time_witness=witness,
+    )
+    admission = admission_store.admit_authenticated(handoff_path.read_bytes(), context)
+    built = {}
+
+    def package_builder(verified):
+        assert verified.candidate_authority_sha256 == candidate_authority_sha256
+        assert verified.candidate_authority_bytes == candidate_authority_bytes
+        contact = CandidateContact(
+            full_name="Alex Example",
+            email="alex@example.test",
+            phone=None,
+            city="London",
+            record_id="synthetic-contact",
+            record_version=1,
+            provenance_sha256=hashlib.sha256(
+                b"synthetic-contact-authority"
+            ).hexdigest(),
+        )
+        contact_bytes = b'{"fixture":"synthetic-signed-contact"}\n'
+        contact_path = tmp_path / "synthetic-contact.json"
+        contact_path.write_bytes(contact_bytes)
+        contact_path.chmod(0o600)
+        contact_authority = CandidateContactAuthority(
+            contact=contact,
+            issued_at="2026-08-10T10:05:00+00:00",
+            authority_sha256=contact.provenance_sha256,
+            envelope_sha256=hashlib.sha256(contact_bytes).hexdigest(),
+            registry_sha256=hashlib.sha256(
+                b"synthetic-contact-registry"
+            ).hexdigest(),
+            signer_public_key_sha256=hashlib.sha256(
+                b"synthetic-contact-test-key"
+            ).hexdigest(),
+            source_path=contact_path,
+        )
+        evidence_document = {
+            "schema_version": "jaa.synthetic-approved-evidence.v1",
+            "statements": [
+                {
+                    "id": evidence_id,
+                    "kind": kind,
+                    "proof_class": kind,
+                    "statement": statement,
+                }
+                for evidence_id, kind, statement in statements
+            ],
+        }
+        evidence_bytes = (canonical_json(evidence_document) + "\n").encode()
+        evidence_path = tmp_path / "synthetic-approved-evidence.json"
+        evidence_path.write_bytes(evidence_bytes)
+        evidence_path.chmod(0o600)
+        monkeypatch.setitem(
+            candidate_factory_module.APPROVED_CANDIDATE_SOURCE_HASHES,
+            "approved_evidence",
+            hashlib.sha256(evidence_bytes).hexdigest(),
+        )
+        monkeypatch.setattr(
+            candidate_factory_module,
+            "OUTWARD_PROFILE_REWRITES",
+            {
+                evidence_id: statement
+                for evidence_id, _kind, statement in statements
+            },
+        )
+        monkeypatch.setattr(
+            candidate_factory_module, "OUTWARD_LETTER_REWRITES", {}
+        )
+        candidate_authority_path = tmp_path / "synthetic-candidate-authority.json"
+        candidate_authority_path.write_bytes(candidate_authority_bytes)
+        candidate_authority_path.chmod(0o600)
+        deployment_binding = build_candidate_application_deployment_binding(
+            application_id=verified.application_id,
+            environment=verified.environment,
+            handoff_root_sha256=verified.handoff_root_sha256,
+            admission_receipt_sha256=verified.admission_receipt_sha256,
+            current_boundary_receipt_sha256=verified.current_boundary_receipt_sha256,
+            candidate_authority_file_sha256=candidate_authority_sha256,
+        )
+        materialization = materialize_candidate_application_source(
+            candidate_authority_path=candidate_authority_path,
+            deployment_binding=deployment_binding,
+            contact_authority=contact_authority,
+            decision_receipt=decision_receipt,
+            candidate_projection=candidate_projection,
+            job_key=verified.job_key,
+            vacancy_sha256=verified.vacancy_snapshot_sha256,
+            source_url=verified.canonical_url,
+            role_title=verified.role_title,
+            company_name=verified.company_name,
+            contact=contact,
+            approved_evidence_path=evidence_path,
+            candidate_authority_bytes=candidate_authority_bytes,
+            contact_authority_bytes=contact_bytes,
+        )
+        artifacts = render_pdf_artifacts(materialization.source)
+        candidate_package = CandidateApplicationPackage(
+            materialization.source,
+            artifacts,
+            materialization.vacancy_requirements,
+        )
+        cv_path = tmp_path / "synthetic-cv.pdf"
+        cv_path.write_bytes(artifacts.cv_pdf.pdf_bytes)
+        cv_path.chmod(0o600)
+        cover_path = tmp_path / "synthetic-cover-letter.pdf"
+        cover_path.write_bytes(artifacts.cover_letter_pdf.pdf_bytes)
+        cover_path.chmod(0o600)
+        selected_path, selected_sha256 = (
+            (cv_path, artifacts.cv_pdf.pdf_sha256)
+            if upload_kind == "cv"
+            else (cover_path, artifacts.cover_letter_pdf.pdf_sha256)
+        )
+        uploads = {"resume": WorkableUpload(selected_path, selected_sha256)}
+        built.update(
+            {
+                "artifacts": artifacts,
+                "candidate_package": candidate_package,
+                "cover_path": cover_path,
+                "cv_path": cv_path,
+                "materialization": materialization,
+                "verified": verified,
+            }
+        )
+        return materialization, candidate_package, uploads
+
+    return {
+        "admission": admission,
+        "admission_store": admission_store,
+        "built": built,
+        "job_key": expected["job_key"],
+        "package_builder": package_builder,
+    }
+
+
+def test_admitted_market_materialization_binds_workable_diagnostic_package(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    from career_automation.workable_live_adapter import (
+        SyntheticWorkableFixtureAdapter,
+        WorkableBoundaryError,
+        WorkableField,
+        WorkableLiveAdapter,
+        WorkableOneUseCircuit,
+        WorkablePolicy,
+    )
+
+    fixture = _canonical_market_jaa_materialization(tmp_path, capsys, monkeypatch)
+    policy = WorkablePolicy(
+        tenant="synthetic",
+        vacancy_id="MARKETJAA1",
+        job_key=fixture["job_key"],
+        fields=(
+            WorkableField("full_name", "text", True, "Full name"),
+            WorkableField("email", "email", True, "Email"),
+            WorkableField("resume", "file", True, "Resume"),
+        ),
+    )
+    circuit = WorkableOneUseCircuit(tmp_path / "workable-no-submit.sqlite3")
+    adapter = SyntheticWorkableFixtureAdapter(circuit, JAA_ROOT)
+    arguments = {
+        "admission_store": fixture["admission_store"],
+        "application_id": fixture["admission"].application_id,
+        "package_builder": fixture["package_builder"],
+        "policy": policy,
+    }
+    with pytest.raises(WorkableBoundaryError, match="synthetic Workable fixture"):
+        WorkableLiveAdapter(circuit, JAA_ROOT)._admitted_diagnostic_application(
+            **arguments
+        )
+    application = adapter._admitted_diagnostic_application(**arguments)
+    built = fixture["built"]
+    materialization = built["materialization"]
+    artifacts = built["artifacts"]
+    document = application.package_document()
+    assert document["application_id"] == fixture["admission"].application_id
+    assert document["handoff_root_sha256"] == fixture["admission"].handoff_root_sha256
+    assert document["materialization_receipt_sha256"] == (
+        materialization.receipt.receipt_sha256
+    )
+    assert document["artifact_set_sha256"] == artifacts.artifact_set_sha256
+    assert document["upload_roles"] == {"resume": "cv"}
+    assert document["diagnostic_only"] is True
+    assert document["release_authority"] is False
+    assert document["submission_authority"] is False
+
+    consent_root = tmp_path / "unowned-consent"
+    consent_root.mkdir()
+    consent_fixture = _canonical_market_jaa_materialization(
+        consent_root, capsys, monkeypatch
+    )
+    consent_policy = WorkablePolicy(
+        tenant="synthetic",
+        vacancy_id="MARKETJAA1",
+        job_key=consent_fixture["job_key"],
+        fields=(
+            WorkableField("full_name", "text", True, "Full name"),
+            WorkableField("email", "email", True, "Email"),
+            WorkableField("terms", "checkbox", True, "Terms"),
+            WorkableField("resume", "file", True, "Resume"),
+        ),
+    )
+    consent_circuit = WorkableOneUseCircuit(consent_root / "workable.sqlite3")
+    with pytest.raises(WorkableBoundaryError):
+        SyntheticWorkableFixtureAdapter(
+            consent_circuit, JAA_ROOT
+        )._admitted_diagnostic_application(
+            admission_store=consent_fixture["admission_store"],
+            application_id=consent_fixture["admission"].application_id,
+            package_builder=consent_fixture["package_builder"],
+            policy=consent_policy,
+        )
+
+    cover_root = tmp_path / "cover-role-swap"
+    cover_root.mkdir()
+    cover_fixture = _canonical_market_jaa_materialization(
+        cover_root, capsys, monkeypatch, upload_kind="cover_letter"
+    )
+    cover_policy = WorkablePolicy(
+        tenant="synthetic",
+        vacancy_id="MARKETJAA1",
+        job_key=cover_fixture["job_key"],
+        fields=policy.fields,
+    )
+    with pytest.raises(WorkableBoundaryError, match="uploads differ"):
+        SyntheticWorkableFixtureAdapter(
+            WorkableOneUseCircuit(cover_root / "workable.sqlite3"), JAA_ROOT
+        )._admitted_diagnostic_application(
+            admission_store=cover_fixture["admission_store"],
+            application_id=cover_fixture["admission"].application_id,
+            package_builder=cover_fixture["package_builder"],
+            policy=cover_policy,
+        )
+
+    phone_root = tmp_path / "canonical-none-phone"
+    phone_root.mkdir()
+    phone_fixture = _canonical_market_jaa_materialization(
+        phone_root, capsys, monkeypatch
+    )
+    phone_policy = WorkablePolicy(
+        tenant="synthetic",
+        vacancy_id="MARKETJAA1",
+        job_key=phone_fixture["job_key"],
+        fields=(
+            WorkableField("full_name", "text", True, "Full name"),
+            WorkableField("email", "email", True, "Email"),
+            WorkableField("phone", "tel", False, "Phone"),
+            WorkableField("resume", "file", True, "Resume"),
+        ),
+    )
+    with pytest.raises(WorkableBoundaryError):
+        SyntheticWorkableFixtureAdapter(
+            WorkableOneUseCircuit(phone_root / "workable.sqlite3"), JAA_ROOT
+        )._admitted_diagnostic_application(
+            admission_store=phone_fixture["admission_store"],
+            application_id=phone_fixture["admission"].application_id,
+            package_builder=phone_fixture["package_builder"],
+            policy=phone_policy,
+        )
+    assert circuit.journal() == ()
+    assert consent_circuit.journal() == ()
+
+
+def test_admitted_market_package_real_chrome_readback_never_submits(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    import career_automation.workable_live_adapter as workable_module
+    from career_automation.workable_live_adapter import (
+        SyntheticWorkableFixtureAdapter,
+        WorkableBoundaryError,
+        WorkableField,
+        WorkableOneUseCircuit,
+        WorkablePolicy,
+    )
+    from playwright.sync_api import sync_playwright
+
+    try:
+        expected_source_identity = workable_module._source_identity(JAA_ROOT)
+    except (ValueError, WorkableBoundaryError):
+        pytest.skip("real Chrome proof requires the committed clean candidate tree")
+    fixture = _canonical_market_jaa_materialization(tmp_path, capsys, monkeypatch)
+    policy = WorkablePolicy(
+        tenant="synthetic",
+        vacancy_id="MARKETJAA1",
+        job_key=fixture["job_key"],
+        fields=(
+            WorkableField("full_name", "text", True, "Full name"),
+            WorkableField("email", "email", True, "Email"),
+            WorkableField("resume", "file", True, "Resume"),
+        ),
+    )
+    circuit = WorkableOneUseCircuit(tmp_path / "workable-chrome-no-submit.sqlite3")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        page = browser.new_page()
+        fixture_html = """<!doctype html><html><body>
+          <form>
+            <label for="full-name">Full name</label>
+            <input id="full-name" name="full_name" type="text" required>
+            <label for="email">Email</label>
+            <input id="email" name="email" type="email" required>
+            <label for="resume">Resume</label>
+            <input id="resume" name="resume" type="file" required>
+            <button type="submit">Submit application</button>
+          </form>
+          <script>
+            window.submitClicks = 0;
+            document.querySelector('form').addEventListener('submit', event => {
+              event.preventDefault(); window.submitClicks += 1;
+            });
+          </script>
+        </body></html>"""
+
+        def fulfill_fixture(route) -> None:
+            route.fulfill(status=200, content_type="text/html", body=fixture_html)
+
+        page.route("**/*", fulfill_fixture)
+        page.goto(
+            "http://127.0.0.1/fixture/workable/synthetic/j/"
+            "MARKETJAA1/apply/",
+            wait_until="domcontentloaded",
+        )
+        page.evaluate("window.__JAA_WORKABLE_FIXTURE__ = true")
+        application, review = SyntheticWorkableFixtureAdapter(
+            circuit, JAA_ROOT
+        ).prepare_admitted_diagnostic_review(
+            page,
+            admission_store=fixture["admission_store"],
+            application_id=fixture["admission"].application_id,
+            package_builder=fixture["package_builder"],
+            policy=policy,
+        )
+        built = fixture["built"]
+        answers = {
+            "full_name": built["materialization"].source.contact.full_name,
+            "email": built["materialization"].source.contact.email,
+        }
+        assert page.locator('[name="full_name"]').input_value() == answers["full_name"]
+        assert page.locator('[name="email"]').input_value() == answers["email"]
+        assert page.locator('[name="resume"]').evaluate(
+            "el => ({name: el.files[0].name, size: el.files[0].size})"
+        ) == {
+            "name": built["cv_path"].name,
+            "size": built["cv_path"].stat().st_size,
+        }
+        assert page.evaluate("window.submitClicks") == 0
+        browser.close()
+    assert application.package_document()["application_id"] == (
+        fixture["admission"].application_id
+    )
+    assert (review.source_head, review.source_sha256s) == expected_source_identity
+    assert review.consequential_click_authority is False
+    assert circuit.journal() == ()

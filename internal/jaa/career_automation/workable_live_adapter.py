@@ -16,14 +16,17 @@ import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import parse_qsl, urlsplit
 
-from playwright.sync_api import Page
+if TYPE_CHECKING:
+    from playwright.sync_api import Page
 
-from .ashby_live_adapter import JAA08ReleaseAuthority
-from .browser_executor import certified_final_submit_click
-from .candidate_release_authority import CandidateReleaseExecutionAuthority
+    from .ashby_live_adapter import JAA08ReleaseAuthority
+    from .candidate_release_authority import CandidateReleaseExecutionAuthority
+else:
+    Page = Any
+
 from .candidate_release_gate import WorkableReleaseBinding, WorkableUploadBinding
 from .provider_observation_capture import exact_clean_head
 
@@ -853,6 +856,237 @@ class WorkableLiveAdapter:
             sources,
         )
 
+    def _admitted_diagnostic_application(
+        self,
+        *,
+        admission_store: object,
+        application_id: str,
+        package_builder: object,
+        policy: WorkablePolicy,
+    ) -> WorkableApplication:
+        """Build one exact synthetic package from a freshly resolved admission."""
+
+        from .application_compiler import verify_application_source
+        from .candidate_application_factory import (
+            CandidateApplicationMaterialization,
+            CandidateApplicationMaterializationReceipt,
+            CandidateApplicationPackage,
+        )
+        from .handoff_admission import HandoffAdmissionStore, VerifiedApplicationInput
+        from .rendering import verify_application_artifacts
+
+        if type(policy) is not WorkablePolicy:
+            raise TypeError("diagnostic review requires an exact Workable policy")
+        if type(self) is not SyntheticWorkableFixtureAdapter or policy.tenant != "synthetic":
+            raise WorkableBoundaryError(
+                "diagnostic review requires the synthetic Workable fixture boundary"
+            )
+        if type(admission_store) is not HandoffAdmissionStore:
+            raise TypeError("diagnostic review requires the canonical admission store")
+        if not callable(package_builder):
+            raise TypeError("diagnostic review requires a candidate package builder")
+        verified_input = admission_store.for_boundary(application_id, "strategy")
+        if type(verified_input) is not VerifiedApplicationInput:
+            raise TypeError("diagnostic review requires verified admitted input")
+        built = package_builder(verified_input)
+        if type(built) is not tuple or len(built) != 3:
+            raise TypeError("diagnostic package builder returned a malformed bundle")
+        materialization, candidate_package, uploads = built
+        if type(materialization) is not CandidateApplicationMaterialization:
+            raise TypeError("diagnostic review requires canonical materialization")
+        if type(materialization.receipt) is not CandidateApplicationMaterializationReceipt:
+            raise TypeError("diagnostic review requires canonical materialization receipt")
+        if type(candidate_package) is not CandidateApplicationPackage:
+            raise TypeError("diagnostic review requires a typed candidate package")
+        if (
+            verified_input.environment != "synthetic"
+            or verified_input.authority_scope != "synthetic"
+            or verified_input.current_boundary != "strategy"
+            or verified_input.application_id != application_id
+        ):
+            raise WorkableBoundaryError(
+                "diagnostic review requires the synthetic Workable fixture boundary"
+            )
+
+        receipt = materialization.receipt
+        receipt.__post_init__()
+        binding = receipt.deployment_binding
+        source = candidate_package.source
+        artifacts = candidate_package.artifacts
+        verify_application_source(source)
+        verify_application_artifacts(artifacts)
+        if (
+            binding.application_id != verified_input.application_id
+            or binding.environment != verified_input.environment
+            or binding.handoff_root_sha256 != verified_input.handoff_root_sha256
+            or binding.admission_receipt_sha256
+            != verified_input.admission_receipt_sha256
+            or binding.current_boundary_receipt_sha256
+            != verified_input.current_boundary_receipt_sha256
+            or binding.candidate_authority_file_sha256
+            != verified_input.candidate_authority_sha256
+            or materialization.source != source
+            or materialization.editable != artifacts.editable
+            or materialization.vacancy_requirements
+            != candidate_package.vacancy_requirements
+            or receipt.application_source_id != source.source_id
+            or receipt.application_source_sha256 != source.content_sha256
+            or receipt.job_key != verified_input.job_key
+            or receipt.role_title != verified_input.role_title
+            or receipt.company_name != verified_input.company_name
+            or receipt.source_url != verified_input.canonical_url
+            or receipt.vacancy_sha256 != source.vacancy_sha256
+            or receipt.vacancy_snapshot_sha256
+            != verified_input.vacancy_snapshot_sha256
+            or source.job_key != verified_input.job_key
+            or policy.job_key != verified_input.job_key
+            or source.role_title != verified_input.role_title
+            or source.company_name != verified_input.company_name
+            or source.vacancy_sha256 != receipt.vacancy_sha256
+            or artifacts.source_id != source.source_id
+            or not candidate_package.vacancy_requirements
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in candidate_package.vacancy_requirements
+            )
+        ):
+            raise WorkableBoundaryError(
+                "candidate package differs from the admitted Market opportunity"
+            )
+
+        expected_role_hashes = {
+            "cv": artifacts.cv_pdf.pdf_sha256,
+            "cover_letter": artifacts.cover_letter_pdf.pdf_sha256,
+        }
+        file_fields = {
+            row.name: row for row in policy.fields if row.field_type == "file"
+        }
+        derived_upload_roles: dict[str, str] = {}
+        for name, row in file_fields.items():
+            field_identity = (name.casefold(), row.label.strip().casefold())
+            if field_identity in {
+                ("resume", "resume"),
+                ("resume", "cv"),
+                ("cv", "cv"),
+            }:
+                derived_upload_roles[name] = "cv"
+            elif field_identity in {
+                ("cover_letter", "cover letter"),
+                ("cover-letter", "cover letter"),
+            }:
+                derived_upload_roles[name] = "cover_letter"
+            else:
+                raise WorkableBoundaryError(
+                    "diagnostic upload field has no exact document-role mapping"
+                )
+        if (
+            not uploads
+            or any(type(value) is not WorkableUpload for value in uploads.values())
+            or set(uploads) != set(file_fields)
+            or len(set(derived_upload_roles.values())) != len(derived_upload_roles)
+            or any(
+                uploads[field_name].sha256 != expected_role_hashes[role]
+                for field_name, role in derived_upload_roles.items()
+            )
+        ):
+            raise WorkableBoundaryError(
+                "diagnostic uploads differ from the candidate package artifacts"
+            )
+
+        contact_projection = {
+            "full_name": source.contact.full_name,
+            "email": source.contact.email,
+            "phone": source.contact.phone,
+            "city": source.contact.city,
+        }
+        non_file_fields = {
+            row.name: row for row in policy.fields if row.field_type != "file"
+        }
+        if any(
+            name not in contact_projection
+            or not isinstance(contact_projection[name], str)
+            or row.field_type in {"checkbox", "file"}
+            for name, row in non_file_fields.items()
+        ):
+            raise WorkableBoundaryError(
+                "diagnostic answers differ from the materialized contact projection"
+            )
+        answers = {name: contact_projection[name] for name in non_file_fields}
+
+        provisional = WorkableApplication(b"{}\n", answers, uploads)
+        requirements_sha256 = _content_hash(list(candidate_package.vacancy_requirements))
+        candidate_package_sha256 = _content_hash(
+            {
+                "application_source_sha256": source.content_sha256,
+                "artifact_set_sha256": artifacts.artifact_set_sha256,
+                "materialization_receipt_sha256": receipt.receipt_sha256,
+                "vacancy_requirements_sha256": requirements_sha256,
+            }
+        )
+        document = {
+            "admission_receipt_sha256": verified_input.admission_receipt_sha256,
+            "application_id": verified_input.application_id,
+            "application_source_sha256": source.content_sha256,
+            "application_url": policy.application_url,
+            "artifact_set_sha256": artifacts.artifact_set_sha256,
+            "candidate_package_sha256": candidate_package_sha256,
+            "cover_letter_sha256": artifacts.cover_letter_pdf.pdf_sha256,
+            "current_boundary_receipt_sha256": (
+                verified_input.current_boundary_receipt_sha256
+            ),
+            "cv_sha256": artifacts.cv_pdf.pdf_sha256,
+            "diagnostic_only": True,
+            "environment": verified_input.environment,
+            "fixture_only": True,
+            "form_answers_sha256": provisional.answers_sha256,
+            "handoff_root_sha256": verified_input.handoff_root_sha256,
+            "job_key": verified_input.job_key,
+            "materialization_receipt_sha256": receipt.receipt_sha256,
+            "policy_sha256": policy.policy_sha256,
+            "release_authority": False,
+            "schema_version": "jaa.workable-admitted-diagnostic-package.v1",
+            "submission_authority": False,
+            "upload_roles": dict(sorted(derived_upload_roles.items())),
+            "vacancy_requirements_sha256": requirements_sha256,
+            "vacancy_sha256": receipt.vacancy_sha256,
+            "vacancy_snapshot_sha256": verified_input.vacancy_snapshot_sha256,
+        }
+        application = WorkableApplication(
+            (_canonical_json(document) + "\n").encode("utf-8"),
+            answers,
+            uploads,
+        )
+        return application
+
+    def prepare_admitted_diagnostic_review(
+        self,
+        page: Page,
+        *,
+        admission_store: object,
+        application_id: str,
+        package_builder: object,
+        policy: WorkablePolicy,
+    ) -> tuple[WorkableApplication, WorkablePreflightReview]:
+        """Fill and read back one admitted synthetic package without submit authority."""
+
+        application = self._admitted_diagnostic_application(
+            admission_store=admission_store,
+            application_id=application_id,
+            package_builder=package_builder,
+            policy=policy,
+        )
+        self._assert_route(page, policy)
+        if page.evaluate("() => window.__JAA_WORKABLE_FIXTURE__ === true") is not True:
+            raise WorkableBoundaryError(
+                "diagnostic review requires the synthetic Workable fixture sentinel"
+            )
+        review = self.prepare_review(
+            page,
+            policy=policy,
+            application=application,
+        )
+        return application, review
+
     @staticmethod
     def _assert_package(
         policy: WorkablePolicy,
@@ -955,6 +1189,8 @@ class WorkableLiveAdapter:
         authority: CandidateReleaseExecutionAuthority,
     ) -> WorkableSuccessReceipt:
         """Production entrypoint; legacy release authorities are never admitted."""
+        from .candidate_release_authority import CandidateReleaseExecutionAuthority
+
         if type(authority) is not CandidateReleaseExecutionAuthority:
             raise TypeError(
                 "production Workable submit requires candidate release authority"
@@ -977,6 +1213,9 @@ class WorkableLiveAdapter:
         authority: CandidateReleaseExecutionAuthority,
     ) -> WorkableSuccessReceipt:
         """Consume one release token and dispatch at most one final click."""
+        from .browser_executor import certified_final_submit_click
+        from .candidate_release_authority import CandidateReleaseExecutionAuthority
+
         if (
             type(review) is not WorkablePreflightReview
             or type(authority) is not CandidateReleaseExecutionAuthority
@@ -1192,6 +1431,8 @@ class SyntheticWorkableFixtureAdapter(WorkableLiveAdapter):
         review: WorkablePreflightReview,
         authority: JAA08ReleaseAuthority,
     ) -> WorkableSuccessReceipt:
+        from .ashby_live_adapter import JAA08ReleaseAuthority
+
         if (
             type(authority) is not JAA08ReleaseAuthority
             or policy.tenant != "synthetic"
