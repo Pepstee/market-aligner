@@ -13,7 +13,14 @@ from market_aligner.assessment.eligibility import (
     EligibilityPolicy,
     assess_eligibility,
 )
-from market_aligner.assessment.opportunity import apply_gate
+from market_aligner.assessment.opportunity import (
+    PreProfileOpportunityConfidence,
+    PreProfileOpportunityInput,
+    PreProfileOpportunityPolicy,
+    apply_gate,
+    decide_pre_profile_opportunity,
+    pre_profile_opportunity_score,
+)
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, score
 from market_aligner.assessment.viability import assess_viability
 from market_aligner.domain.contracts import Vacancy
@@ -113,6 +120,63 @@ class AssessmentTests(unittest.TestCase):
         self.assertGreater(result.final, 70)
         self.assertFalse(readiness(29, 9).ready)
         self.assertTrue(readiness(30, 10).ready)
+
+    def test_pre_profile_opportunity_gate_is_candidate_independent_and_exact(self) -> None:
+        value = PreProfileOpportunityInput.from_mapping(
+            {
+                "market_demand_bp": 8_000,
+                "role_quality_bp": 7_000,
+                "accessibility_bp": 9_000,
+            }
+        )
+        confidence = PreProfileOpportunityConfidence(8_000, 8_000, 8_000, 8_000)
+        decision = decide_pre_profile_opportunity(value, confidence)
+        self.assertEqual(
+            (decision.decision, decision.reason, decision.score_bp),
+            ("pass", "viable", 7_850),
+        )
+        self.assertEqual(
+            1,
+            pre_profile_opportunity_score(
+                PreProfileOpportunityInput(1, 0, 0),
+                PreProfileOpportunityPolicy(weights=(50, 50, 0)),
+            ),
+        )
+        policy = PreProfileOpportunityPolicy()
+        self.assertEqual(policy, PreProfileOpportunityPolicy.from_document(policy.document()))
+        for forbidden_field in ("fit", "candidate_fit", "interest", "candidate_interest"):
+            poisoned = {
+                "market_demand_bp": 8_000,
+                "role_quality_bp": 7_000,
+                "accessibility_bp": 9_000,
+                forbidden_field: 1,
+            }
+            with self.subTest(forbidden_field=forbidden_field):
+                with self.assertRaises(ValueError):
+                    PreProfileOpportunityInput.from_mapping(poisoned)
+        with self.assertRaises(ValueError):
+            PreProfileOpportunityInput.from_mapping(
+                {
+                    "market_demand_bp": 8_000,
+                    "role_quality_bp": 7_000,
+                    "accessibility_bp": True,
+                }
+            )
+        for poisoned in (
+            {"market_demand_bp": 8_000, "role_quality_bp": 7_000},
+            {"market_demand_bp": 8_000, "role_quality_bp": 7_000, "accessibility_bp": 9_000, "extra": 1},
+        ):
+            with self.assertRaises(ValueError):
+                PreProfileOpportunityInput.from_mapping(poisoned)
+        self.assertEqual(
+            "abstain",
+            decide_pre_profile_opportunity(
+                value,
+                PreProfileOpportunityConfidence(7_499, 8_000, 8_000, 8_000),
+            ).decision,
+        )
+        rejected = decide_pre_profile_opportunity(value, confidence, viability_reason="expired")
+        self.assertEqual((rejected.decision, rejected.reason, rejected.score_bp), ("reject", "expired", None))
 
     def test_llm_alignment_cannot_cite_invented_evidence(self) -> None:
         alignment = EvidenceAlignment(
