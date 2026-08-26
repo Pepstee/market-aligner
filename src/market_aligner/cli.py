@@ -119,6 +119,20 @@ def _assess_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _applications_command(args: argparse.Namespace) -> int:
+    result = MarketAlignerService.prepare_internal_jaa(
+        eligibility_receipt=args.eligibility_receipt.read_bytes(),
+        evidence_reference_sha256=args.evidence_reference_sha256,
+        contact_reference_sha256=args.contact_reference_sha256,
+        forensic_root=args.forensic_root,
+        attempt_id=args.attempt_id,
+        application_id=args.application_id,
+        ats_name=args.ats_name,
+    )
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def _write_exact_bytes(sink, payload: bytes) -> None:
     """Write one exact receipt to a binary or ordinary CLI stdout seam."""
 
@@ -683,6 +697,18 @@ def build_parser() -> argparse.ArgumentParser:
              "eligibility-one.",
     )
     eligibility_parser.set_defaults(handler=_eligibility_one_command)
+
+    applications = commands.add_parser(
+        "applications", help="Run the faceless internal JAA diagnostic corridor."
+    )
+    applications.add_argument("--eligibility-receipt", type=Path, required=True)
+    applications.add_argument("--evidence-reference-sha256", required=True)
+    applications.add_argument("--contact-reference-sha256", required=True)
+    applications.add_argument("--forensic-root", type=Path, required=True)
+    applications.add_argument("--attempt-id", required=True)
+    applications.add_argument("--application-id", required=True)
+    applications.add_argument("--ats-name", default="fixture")
+    applications.set_defaults(handler=_applications_command)
     return parser
 
 

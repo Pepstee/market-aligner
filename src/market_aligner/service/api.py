@@ -53,6 +53,35 @@ class MarketAlignerService:
         return apply_gate(self.assessments, profile_id, job_key)
 
     @staticmethod
+    def prepare_internal_jaa(
+        *, eligibility_receipt: bytes, evidence_reference_sha256: str,
+        contact_reference_sha256: str, forensic_root: Path, attempt_id: str,
+        application_id: str, ats_name: str = "fixture", backend=None,
+    ) -> dict[str, object]:
+        """Run only the faceless, zero-interaction Market-to-JAA corridor."""
+        from market_aligner.applications.jaa import capture_or_recover, prepare_from_market
+        source, sanity = prepare_from_market(
+            eligibility_receipt=eligibility_receipt,
+            evidence_reference_sha256=evidence_reference_sha256,
+            contact_reference_sha256=contact_reference_sha256,
+        )
+        forensic = capture_or_recover(
+            root=forensic_root, attempt_id=attempt_id,
+            application_id=application_id, source=source, sanity=sanity,
+            ats_name=ats_name, backend=backend,
+        )
+        return {
+            "schema_version": "market-aligner.internal-jaa-result.v1",
+            "status": forensic.outcome,
+            "source": source.document(),
+            "sanity_receipt_sha256": sanity.receipt_sha256,
+            "forensic_receipt": forensic.document(),
+            "identity_authority": False,
+            "release_authority": False,
+            "submission_authority": False,
+        }
+
+    @staticmethod
     def process_one(
         data_home: Path,
         envelope_name: str,

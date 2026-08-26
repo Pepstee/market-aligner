@@ -1,47 +1,80 @@
 {
-  "schema": "market-aligner.source-manifests.v1",
-  "captured_at": "2026-07-31",
-  "sources": [
-    {
-      "id": "legacy-market-aligner",
-      "path": "/Users/admin/Documents/giga-user/market-aligner",
-      "git_status": "untracked-in-parent",
-      "selected_files": 70,
-      "selected_bytes": 450335,
-      "manifest_sha256": "46e6b8d1774bb8b6a705fd12befdd63eab8585a60d1f82d108423e9ba60b4b14"
-    },
-    {
-      "id": "redundant-person-fork",
-      "path": "/Users/admin/Documents/giga-user/market-aligner-artiom",
-      "git_status": "untracked-in-parent",
-      "selected_files": 65,
-      "selected_bytes": 405108,
-      "manifest_sha256": "7ae2c49c82f1e7760df9b27f9f209249680475d950c866785d136df5538c2033"
-    },
-    {
-      "id": "korea-project-selected-code",
-      "path": "/Users/admin/Claude/Projects/Korea Job Scraper",
-      "git_status": "not-a-git-repository",
-      "selected_files": 153,
-      "selected_bytes": 1004769,
-      "manifest_sha256": "084bbea31a2d3bb3ddeaba950cc3d591514eb2ad8188258ccb8c93cab372216a"
-    },
-    {
-      "id": "local-application-plans",
-      "path": "/Users/admin/Documents/giga-user/job-application-automation",
-      "git_status": "tracked-in-parent-with-local-state",
-      "last_relevant_parent_commit": "ab4b6111b0f15d04a1f219f805dd8cb18e788d12"
-    },
-    {
-      "id": "protected-application-upstream",
-      "path": "gutua:protected-active-worktree",
-      "git_status": "pending-sealed-final-handoff",
-      "import_allowed": false
-    }
-  ],
   "audit_report": {
     "path": "/Users/admin/Documents/market-aligner-audit/READ_ONLY_RECONCILIATION_2026-07-31.md",
     "sha256": "856c590aeac543053efc50e29f558df40bcc5b3513635c974f56afbd6e338830"
-  }
+  },
+  "captured_at": "2026-07-31",
+  "schema": "market-aligner.source-manifests.v1",
+  "sources": [
+    {
+      "git_status": "untracked-in-parent",
+      "id": "legacy-market-aligner",
+      "manifest_sha256": "46e6b8d1774bb8b6a705fd12befdd63eab8585a60d1f82d108423e9ba60b4b14",
+      "path": "/Users/admin/Documents/giga-user/market-aligner",
+      "selected_bytes": 450335,
+      "selected_files": 70
+    },
+    {
+      "git_status": "untracked-in-parent",
+      "id": "redundant-person-fork",
+      "manifest_sha256": "7ae2c49c82f1e7760df9b27f9f209249680475d950c866785d136df5538c2033",
+      "path": "/Users/admin/Documents/giga-user/market-aligner-artiom",
+      "selected_bytes": 405108,
+      "selected_files": 65
+    },
+    {
+      "git_status": "not-a-git-repository",
+      "id": "korea-project-selected-code",
+      "manifest_sha256": "084bbea31a2d3bb3ddeaba950cc3d591514eb2ad8188258ccb8c93cab372216a",
+      "path": "/Users/admin/Claude/Projects/Korea Job Scraper",
+      "selected_bytes": 1004769,
+      "selected_files": 153
+    },
+    {
+      "git_status": "tracked-in-parent-with-local-state",
+      "id": "local-application-plans",
+      "last_relevant_parent_commit": "ab4b6111b0f15d04a1f219f805dd8cb18e788d12",
+      "path": "/Users/admin/Documents/giga-user/job-application-automation"
+    },
+    {
+      "git_status": "pending-sealed-final-handoff",
+      "id": "protected-application-upstream",
+      "import_allowed": false,
+      "path": "gutua:protected-active-worktree"
+    },
+    {
+      "adopted_paths": {
+        "src/market_aligner/applications/jaa.py": {
+          "classification": "adapted",
+          "donor_paths": [
+            "career_automation/ats_forensics.py",
+            "career_automation/application_compiler.py",
+            "career_automation/application_artifacts.py",
+            "career_automation/application_sanity_review.py",
+            "market_aligner/applications/jaa.py"
+          ]
+        }
+      },
+      "deferred_paths": [
+        "career_automation/production_ats_executor.py",
+        "career_automation/candidate_contact_authority.py",
+        "career_automation/browser_executor.py",
+        "career_automation/browser_workflows.py",
+        "career_automation/provider_observation_capture.py",
+        "career_automation/release_gate.py",
+        "career_automation/production_queue.py",
+        "career_automation/database.py",
+        "career_automation/lifecycle.py",
+        "runtime_evidence/**",
+        "**/*.sqlite*",
+        "**/*.pdf",
+        "**/*credential*",
+        "**/*cv*"
+      ],
+      "git_commit": "a843a5c6ca0ca9f6994b1e86b6456a06e2e99570",
+      "id": "sealed-jaa-donor-a843",
+      "import_allowed": true,
+      "scope": "adapted faceless Market JAA: opaque package/sanity/forensic fixture only"
+    }
+  ]
 }
-
