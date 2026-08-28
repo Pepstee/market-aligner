@@ -1514,9 +1514,27 @@ def reconcile(receipt_path: str | Path, data_root: str | Path) -> dict[str, Any]
                         result["schema_objects"] != spec.schema_objects or
                         set(result["table_counts"]) != set(spec.table_counts)):
                     raise AdoptionError(f"{spec.name}: destination schema violates baseline contract")
-                identity = _file_identity(destination, f"destination:{spec.name}")
-                if identity != destination_record["identity"]:
-                    raise AdoptionError(f"{spec.name}: destination identity changed")
+                # Device and inode identify the capture-time directory entry, not
+                # the immutable snapshot content.  They legitimately change when
+                # an exact frozen runtime is relocated into the canonical Market
+                # Aligner checkout.  Keep them in the receipt as historical
+                # observations, but reconcile on the durable content, schema and
+                # size facts checked above.
+                recorded_identity = destination_record.get("identity")
+                if not isinstance(recorded_identity, dict):
+                    raise AdoptionError(f"{spec.name}: destination identity is malformed")
+                expected_identity_facts = {
+                    "label": f"destination:{spec.name}",
+                    "exists": True,
+                    "bytes": result["bytes"],
+                }
+                if any(
+                    recorded_identity.get(field) != value
+                    for field, value in expected_identity_facts.items()
+                ):
+                    raise AdoptionError(
+                        f"{spec.name}: destination identity content facts changed"
+                    )
             else:
                 recorded = record["destination"]
                 result = _verify_database(data_root / spec.destination_relative, spec)

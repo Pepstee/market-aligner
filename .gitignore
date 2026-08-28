@@ -19,6 +19,7 @@ graphify-out/
 
 # Runtime state is never product source.
 .market-aligner-data/
+state/runtime/
 profiles/
 outputs/
 caches/
