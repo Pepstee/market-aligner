@@ -5,7 +5,11 @@ from pathlib import Path
 
 from career_automation.application_archive import ApplicationArchive
 from career_automation.production_queue import ProductionCheckpointLedger
-from scripts.import_legacy_application_archive import import_directory
+from scripts.import_legacy_application_archive import (
+    audit_legacy_application_records,
+    classify_legacy_application_record,
+    import_directory,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -88,3 +92,52 @@ def test_legacy_non_submit_status_is_archived_as_blocked(tmp_path: Path) -> None
     assert result["verified"] is True
     assert result["outcome"] == "blocked"
     assert result["imported"] is True
+
+
+def test_legacy_gap_audit_reports_absence_without_copying_private_values(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "applications" / "legacy-gap"
+    private_value = "synthetic-private@example.test"
+    _write_record(
+        source,
+        {
+            "application_id": "legacy-gap",
+            "job_url": "https://example.test/jobs/gap",
+            "status": "blocked",
+            "answers": {"email": private_value},
+        },
+    )
+    row = classify_legacy_application_record(source / "application_record.json")
+    audit = audit_legacy_application_records(tmp_path / "applications")
+    assert row["categories"]["entered_values"] == "PRIVATE_PRESENT"
+    assert row["categories"]["job_source"] == "MISSING"
+    assert audit["record_count"] == 1
+    assert private_value not in json.dumps(audit, sort_keys=True)
+
+
+def test_legacy_gap_audit_recognizes_historical_schema_aliases(tmp_path: Path) -> None:
+    source = tmp_path / "applications" / "legacy-aliases"
+    _write_record(
+        source,
+        {
+            "application_id": "legacy-aliases",
+            "status": "blocked_human_verification",
+            "preserved_answers": {"email": "synthetic-private@example.test"},
+            "submitted_cv": {"path": "/private/synthetic-cv.pdf", "sha256": "a" * 64},
+            "evidence": {"pre_submit_screenshot": "/private/synthetic.png"},
+            "website_receipt": {"present": False},
+        },
+    )
+    row = classify_legacy_application_record(source / "application_record.json")
+    assert row["categories"] == {
+        "attempt_timeline": "MISSING",
+        "job_source": "MISSING",
+        "form_inventory": "MISSING",
+        "entered_values": "PRIVATE_PRESENT",
+        "documents": "PRIVATE_PRESENT",
+        "action_timeline": "MISSING",
+        "browser_evidence": "PRIVATE_PRESENT",
+        "terminal_confirmation": "PRESENT",
+        "manifest_recovery": "MISSING",
+    }

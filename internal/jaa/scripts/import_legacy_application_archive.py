@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,311 @@ from career_automation.application_archive import (
 )
 from career_automation.evidence_matching import canonical_json
 from career_automation.production_queue import ProductionCheckpointLedger
+
+
+LEGACY_EVIDENCE_CATEGORIES = (
+    "attempt_timeline",
+    "job_source",
+    "form_inventory",
+    "entered_values",
+    "documents",
+    "action_timeline",
+    "browser_evidence",
+    "terminal_confirmation",
+    "manifest_recovery",
+)
+
+
+def _walk_keys(value: object) -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            result.add(str(key).casefold())
+            result.update(_walk_keys(child))
+    elif isinstance(value, list):
+        for child in value:
+            result.update(_walk_keys(child))
+    return result
+
+
+def _path_value(value: Mapping[str, object], path: str) -> object | None:
+    current: object = value
+    for part in path.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _path_present(value: Mapping[str, object], path: str) -> bool:
+    return _path_value(value, path) not in (None, "", False, (), [], {})
+
+
+def _leaf_paths(value: object, prefix: str = "") -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            path = f"{prefix}.{key}".strip(".").casefold()
+            result.update(_leaf_paths(child, path))
+    elif isinstance(value, list):
+        if value:
+            result.add(prefix + "[]")
+        for child in value:
+            result.update(_leaf_paths(child, prefix + "[]"))
+    elif value not in (None, "", False):
+        result.add(prefix)
+    return result
+
+
+def classify_legacy_application_record(record_path: Path) -> dict[str, object]:
+    """Classify evidence presence without returning private record values."""
+    raw = record_path.read_bytes()
+    result: dict[str, object] = {
+        "record_sha256": hashlib.sha256(raw).hexdigest(),
+        "byte_length": len(raw),
+    }
+    try:
+        record = json.loads(raw)
+    except json.JSONDecodeError:
+        result["categories"] = {
+            name: "MALFORMED" for name in LEGACY_EVIDENCE_CATEGORIES
+        }
+        return result
+    if not isinstance(record, dict):
+        result["categories"] = {
+            name: "MALFORMED" for name in LEGACY_EVIDENCE_CATEGORIES
+        }
+        return result
+    keys = _walk_keys(record)
+    leaf_paths = _leaf_paths(record)
+
+    def has(*names: str) -> bool:
+        return all(name in keys for name in names)
+
+    def any_key(*names: str) -> bool:
+        return any(name in keys for name in names)
+
+    entered_value_paths = (
+        "answers",
+        "preserved_answers",
+        "submitted_answers",
+        "verified_answers",
+        "captured_answers",
+        "form.questions_and_answers",
+        "application_package.form_answers",
+    )
+    private_document_paths = (
+        "submitted_cv.path",
+        "submitted_cover_letter.path",
+        "application_package.cv_path",
+        "application_package.cover_letter_path",
+        "known_packet.cv_path",
+        "cv_path",
+        "documents.cv.path",
+        "prepared_cover_letter.path",
+        "prepared_materials.cv",
+        "prepared_materials.cover_letter",
+        "materials.resume",
+        "documents.cv.bytes",
+        "cover_letter",
+        "application_package.cover_letter",
+        "documents",
+    )
+    private_documents = any(
+        _path_present(record, path) for path in private_document_paths
+    )
+    document_hashes = any(
+        "sha256" in path
+        and any(token in path for token in ("cv", "resume", "cover", "document"))
+        for path in leaf_paths
+    )
+    private_browser_evidence = any(
+        "sha256" not in path
+        and (
+            "screenshot" in path
+            or path.startswith("evidence.network_evidence")
+            or path.startswith("authoritative_receipt.network_evidence")
+            or path == "evidence.console_log"
+        )
+        for path in leaf_paths
+    )
+    browser_hashes = any(
+        "sha256" in path
+        and any(
+            token in path
+            for token in ("screenshot", "network", "console", "dom", "receipt")
+        )
+        for path in leaf_paths
+    )
+    terminal_evidence_keys = {
+        "website_receipt",
+        "gmail_confirmation",
+        "authoritative_receipt",
+        "receipt_evidence",
+        "email_receipt",
+        "gmail_receipt",
+        "gmail_post_submission_confirmation",
+        "receipt",
+        "release",
+        "submission",
+    }
+    terminal_evidence = any(
+        key in record and record[key] not in (None, "", False, [], {})
+        for key in terminal_evidence_keys
+    ) or any(
+        record.get(key) is False
+        for key in ("website_receipt", "gmail_confirmation")
+    )
+    explicit_confirmation = any(
+        _path_value(record, path) is True
+        for path in (
+            "website_receipt.present",
+            "gmail_confirmation.present",
+            "email_receipt.present",
+            "gmail_receipt.present_at_certification_time",
+        )
+    ) or any(
+        _path_present(record, path)
+        for path in (
+            "website_receipt.confirmation_url",
+            "confirmation_url",
+            "success_receipt_sha256",
+            "receipt.website",
+            "submission.receipt",
+            "release.receipt_files",
+            "authoritative_receipt",
+            "receipt_evidence",
+        )
+    )
+    explicit_no_confirmation = any(
+        _path_value(record, path) is False
+        for path in (
+            "website_receipt.present",
+            "gmail_confirmation.present",
+            "email_receipt.present",
+            "gmail_receipt.present_at_certification_time",
+        )
+    )
+    status = record.get("status")
+    submitted_status = status in {"submitted", "submitted_by_operator"}
+    if submitted_status:
+        terminal_class = "PRESENT" if explicit_confirmation else "MALFORMED"
+    elif status == "closed":
+        terminal_class = "MISSING"
+    elif terminal_evidence and explicit_no_confirmation and status != "closed":
+        terminal_class = "PRESENT"
+    elif terminal_evidence:
+        terminal_class = "MALFORMED"
+    else:
+        terminal_class = "MISSING"
+
+    result["categories"] = {
+        "attempt_timeline": (
+            "PRESENT" if has("attempt_id", "events", "occurred_at") else "MISSING"
+        ),
+        "job_source": (
+            "PRESENT"
+            if has(
+                "job_key",
+                "source_url",
+                "ats",
+                "repository_commit",
+                "repository_tree",
+            )
+            else "MISSING"
+        ),
+        "form_inventory": (
+            "PRESENT"
+            if has("form_inventory", "field_id", "type", "required", "options")
+            else "HASH_ONLY"
+            if any_key("form_inventory_sha256", "success_dom_sha256")
+            else "MISSING"
+        ),
+        "entered_values": (
+            "PRESENT"
+            if has("entered_values", "provenance")
+            else "PRIVATE_PRESENT"
+            if any(_path_present(record, path) for path in entered_value_paths)
+            else "HASH_ONLY"
+            if any_key("answers_sha256", "value_sha256")
+            else "MISSING"
+        ),
+        "documents": (
+            "PRESENT"
+            if has(
+                "cv_sha256",
+                "cover_letter_sha256",
+                "cv_extracted_text",
+                "cover_letter_extracted_text",
+                "document_role",
+            )
+            else "PRIVATE_PRESENT"
+            if private_documents
+            else "HASH_ONLY"
+            if document_hashes
+            else "MISSING"
+        ),
+        "action_timeline": (
+            "PRESENT"
+            if has(
+                "fill",
+                "upload",
+                "click",
+                "navigation",
+                "request",
+                "response",
+                "occurred_at",
+            )
+            else "MISSING"
+        ),
+        "browser_evidence": (
+            "PRESENT"
+            if has("screenshot", "network", "console")
+            else "PRIVATE_PRESENT"
+            if private_browser_evidence
+            else "HASH_ONLY"
+            if browser_hashes
+            else "MISSING"
+        ),
+        "terminal_confirmation": terminal_class,
+        "manifest_recovery": (
+            "PRESENT"
+            if has("manifest_sha256", "human_view", "recovery")
+            else "MISSING"
+        ),
+    }
+    return result
+
+
+def audit_legacy_application_records(applications_root: Path) -> dict[str, object]:
+    rows = []
+    for path in sorted(applications_root.glob("*/application_record.json")):
+        row = classify_legacy_application_record(path)
+        row["record_path_sha256"] = hashlib.sha256(
+            path.relative_to(applications_root).as_posix().encode("utf-8")
+        ).hexdigest()
+        rows.append(row)
+    counts = {
+        category: {
+            value: sum(
+                row["categories"][category] == value for row in rows
+            )
+            for value in (
+                "PRESENT",
+                "HASH_ONLY",
+                "PRIVATE_PRESENT",
+                "MISSING",
+                "MALFORMED",
+            )
+        }
+        for category in LEGACY_EVIDENCE_CATEGORIES
+    }
+    return {
+        "schema_version": "jaa.legacy-application-evidence-gap-audit.v1",
+        "record_count": len(rows),
+        "counts": counts,
+        "records": rows,
+    }
 
 
 def _json_bytes(value: object) -> bytes:

@@ -606,6 +606,9 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             ),
         )
         page.goto(application_url)
+        recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": application_url}
+        )
         recorder.record_prefill(page)
         sink = GeneratedRevisionSink(recorder)
         prepared = session.prepare_release(item, recorder, page, sink)
@@ -627,6 +630,19 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             "jordan.smith@proton.me"
         )
         assert page.locator('input[name="consent"]').is_checked()
+        from career_automation.application_archive import load_complete_attempt_view
+
+        view = load_complete_attempt_view(
+            recorder.attempt.attempt_id,
+            root=recorder.attempt.archive.root,
+            repository_root=recorder.attempt.archive.repository_root,
+        )
+        event_kinds = {
+            row["payload"]["event_kind"] for row in view["evidence_events"]
+        }
+        assert {"navigation", "preflight", "field_filled", "field_selected", "file_uploaded", "screenshot"} <= event_kinds
+        assert view["gaps"]["action_timeline"] is False
+        assert "jordan.smith@proton.me" not in json.dumps(view, sort_keys=True)
         browser.close()
 
 
@@ -741,8 +757,38 @@ def test_graphcore_recurring_fields_use_only_stable_candidate_authority(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content(html)
+        vacancy_bytes = page.content().encode("utf-8")
+        vacancy = VacancyArchiveIdentity(
+            job_key="greenhouse:fixture:graphcore",
+            vacancy_sha256=hashlib.sha256(vacancy_bytes).hexdigest(),
+            role_title="Synthetic engineer",
+            company_name="Fixture company",
+            source_url="https://job-boards.greenhouse.io/fixture/jobs/1234567",
+        )
+        recorder = GreenhouseAttemptRecorder.create(
+            archive_root=tmp_path / "archive",
+            repository_root=Path.cwd(),
+            vacancy=vacancy,
+            complete_vacancy=vacancy_bytes,
+            structured_vacancy={"job_key": vacancy.job_key},
+            assessment={"eligible": True, "fixture_only": True},
+        )
+        recorder.add_revision(
+            role="document.cv.final_pdf",
+            value=b"%PDF-fixture",
+            media_type="application/pdf",
+            prior_sha256=None,
+            approved=True,
+        )
+        recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": vacancy.source_url}
+        )
+        recorder.record_prefill(page)
         _, _, authorities, consents, _ = session._fill_supported_form(
-            page, package, artifact_directory=artifact_directory
+            page,
+            package,
+            artifact_directory=artifact_directory,
+            recorder=recorder,
         )
         assert dict(authorities) == {
             "first_name": "contact.given_name",
@@ -759,6 +805,17 @@ def test_graphcore_recurring_fields_use_only_stable_candidate_authority(
         assert page.locator("#question_3").input_value() == "EU Settled Status"
         assert page.locator("#gender").input_value() == "I don't wish to answer"
         assert dict(consents) == {"gdpr_demographic_data_consent_given": True}
+        from career_automation.application_archive import load_complete_attempt_view
+
+        view = load_complete_attempt_view(
+            recorder.attempt.attempt_id,
+            root=recorder.attempt.archive.root,
+            repository_root=recorder.attempt.archive.repository_root,
+        )
+        kinds = {row["payload"]["event_kind"] for row in view["evidence_events"]}
+        assert {"navigation", "preflight", "field_filled", "field_selected", "file_uploaded", "click", "screenshot"} <= kinds
+        assert view["gaps"]["action_timeline"] is False
+        assert "Alex Example" not in json.dumps(view, sort_keys=True)
         browser.close()
 
 

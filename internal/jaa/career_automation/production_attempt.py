@@ -38,12 +38,17 @@ from .production_ats_executor import (
 )
 from .production_queue import ProductionCheckpointLedger
 from form_filling.service import approved_form_mapping_bytes
+from form_filling.ats_forensics import redact_text, sanitize_url
 from .provider_observation_authority import verify_provider_observation_authority
 from .rendering import ApplicationArtifacts
 
 
 def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode("utf-8")
+
+
+def _utc_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _approved_fact_authorities(source: ApplicationSource) -> list[dict[str, object]]:
@@ -102,6 +107,7 @@ class GreenhouseAttemptRecorder:
 
     def __init__(self, attempt: AttemptArchive) -> None:
         self.attempt = attempt
+        self._attached_pages: set[int] = set()
 
     @classmethod
     def create(
@@ -180,6 +186,190 @@ class GreenhouseAttemptRecorder:
             metadata=metadata,
         )
 
+    def _record_evidence(
+        self,
+        event_kind: str,
+        *,
+        result: str,
+        members: Mapping[str, str] | None = None,
+        details: Mapping[str, object] | None = None,
+        private_value: bytes | None = None,
+        private_media_type: str = "application/octet-stream",
+    ) -> str:
+        return self.attempt.record_evidence_event(
+            event_id=self.attempt.next_evidence_event_id(event_kind),
+            event_kind=event_kind,
+            occurred_at=_utc_z(),
+            result=result,
+            member_sha256s=members,
+            details=details,
+            private_value=private_value,
+            private_media_type=private_media_type,
+        )
+
+    @staticmethod
+    def _url_sha256(value: str) -> str:
+        return hashlib.sha256(sanitize_url(value).encode("utf-8")).hexdigest()
+
+    def attach_page_evidence(self, page: Page) -> None:
+        """Attach append-only sanitized browser evidence to this attempt once."""
+        page_identity = id(page)
+        if page_identity in self._attached_pages:
+            return
+        self._attached_pages.add(page_identity)
+
+        def on_request(request) -> None:
+            self._record_evidence(
+                "request",
+                result="observed",
+                details={
+                    "method": str(request.method).upper(),
+                    "resource_type": str(request.resource_type),
+                    "url_sha256": self._url_sha256(str(request.url)),
+                },
+            )
+
+        def on_response(response) -> None:
+            self._record_evidence(
+                "response",
+                result="observed",
+                details={
+                    "method": str(response.request.method).upper(),
+                    "status": int(response.status),
+                    "url_sha256": self._url_sha256(str(response.url)),
+                },
+            )
+
+        def on_request_failed(request) -> None:
+            self._record_evidence(
+                "request_failed",
+                result="failed",
+                details={
+                    "method": str(request.method).upper(),
+                    "resource_type": str(request.resource_type),
+                    "url_sha256": self._url_sha256(str(request.url)),
+                    "error_code": "request_failed",
+                },
+            )
+
+        def on_console(message) -> None:
+            if str(message.type).casefold() not in {"error", "warning"}:
+                return
+            self._record_evidence(
+                "console_error",
+                result="observed",
+                details={"provenance": "browser.console"},
+                private_value=redact_text(str(message.text)).encode("utf-8"),
+                private_media_type="text/plain",
+            )
+
+        page.on("request", on_request)
+        page.on("response", on_response)
+        page.on("requestfailed", on_request_failed)
+        page.on("console", on_console)
+        page.on(
+            "pageerror",
+            lambda error: self._record_evidence(
+                "console_error",
+                result="failed",
+                details={"provenance": "browser.pageerror"},
+                private_value=redact_text(str(error)).encode("utf-8"),
+                private_media_type="text/plain",
+            ),
+        )
+
+    def record_navigation(self, evidence: Mapping[str, object] | None) -> str:
+        row = dict(evidence or {})
+        details: dict[str, object] = {
+            "method": str(row.get("method", "GET")).upper(),
+            "url_sha256": self._url_sha256(
+                str(row.get("url") or self.attempt.vacancy.source_url)
+            ),
+        }
+        if isinstance(row.get("status"), int):
+            details["status"] = int(row["status"])
+        return self._record_evidence(
+            "navigation", result="completed", details=details
+        )
+
+    def record_field_action(
+        self,
+        *,
+        event_kind: str,
+        field_id: str,
+        field_type: str,
+        required: bool,
+        options: Sequence[str],
+        provenance: str,
+        readback: bytes | None,
+        result: str = "completed",
+        document_role: str | None = None,
+        source_path: Path | None = None,
+        content_sha256: str | None = None,
+        file_name: str | None = None,
+        file_size: int | None = None,
+        mime_type: str | None = None,
+        checked: bool | None = None,
+        selected: bool | None = None,
+    ) -> str:
+        details: dict[str, object] = {
+            "field_id": field_id,
+            "field_type": field_type,
+            "required": required,
+            "options": list(options),
+            "provenance": provenance,
+        }
+        members: dict[str, str] = {}
+        if readback is not None:
+            details.update(
+                {
+                    "value_sha256": hashlib.sha256(readback).hexdigest(),
+                    "value_byte_length": len(readback),
+                    "readback_sha256": hashlib.sha256(readback).hexdigest(),
+                    "readback_byte_length": len(readback),
+                }
+            )
+        if document_role is not None:
+            details["document_role"] = document_role
+            archive_role = f"document.{document_role}.final_pdf"
+            rows = [
+                row
+                for row in self.attempt._objects(self.attempt._events())
+                if row.role == archive_role
+            ]
+            if len(rows) != 1:
+                raise ValueError("uploaded document lacks one archived source object")
+            if content_sha256 is None or rows[0].sha256 != content_sha256:
+                raise ValueError("uploaded document differs from archived source bytes")
+            members[archive_role] = rows[0].sha256
+            details["content_sha256"] = content_sha256
+        if source_path is not None:
+            details["source_path_sha256"] = hashlib.sha256(
+                str(source_path).encode("utf-8")
+            ).hexdigest()
+        if file_name is not None:
+            details["file_name_sha256"] = hashlib.sha256(
+                file_name.encode("utf-8")
+            ).hexdigest()
+        if file_size is not None:
+            details["file_size"] = file_size
+        if mime_type is not None:
+            details["mime_type"] = mime_type
+        if checked is not None:
+            details["checked"] = checked
+        if selected is not None:
+            details["selected"] = selected
+        return self._record_evidence(
+            event_kind,
+            result=result,
+            members=members,
+            details=details,
+            private_value=readback,
+            private_media_type=(
+                "application/json" if event_kind == "file_uploaded" else "text/plain"
+            ),
+        )
+
     def add_revision(
         self,
         *,
@@ -212,13 +402,60 @@ class GreenhouseAttemptRecorder:
             "application/json",
             metadata={"provider": "greenhouse", "phase": "before_fill"},
         )
-        self._add(
+        questions = self._add(
             "form.questions",
             inventory,
             "application/json",
             metadata={"includes_select_options": True, "values_are_prefill": True},
         )
+        screenshot = self._add(
+            "browser.prefill_screenshot",
+            page.screenshot(full_page=True),
+            "image/png",
+            disposition="observed",
+            metadata={"provider": "greenhouse", "phase": "before_fill"},
+        )
+        self._record_evidence(
+            "preflight",
+            result="completed",
+            members={
+                prefill.role: prefill.sha256,
+                questions.role: questions.sha256,
+                screenshot.role: screenshot.sha256,
+            },
+            details={
+                "provenance": "greenhouse.form_inventory",
+                "interaction_counts": {
+                    "fields_filled": 0,
+                    "files_uploaded": 0,
+                    "submit_clicks": 0,
+                },
+            },
+        )
         return prefill
+
+    def record_postfill(self, page: Page) -> tuple[ArchivedObject, ArchivedObject]:
+        state = self._add(
+            "browser.post_fill_state",
+            canonical_non_secret_form_state(page),
+            "application/json",
+            disposition="observed",
+            metadata={"provider": "greenhouse", "phase": "after_fill"},
+        )
+        screenshot = self._add(
+            "browser.post_fill_screenshot",
+            page.screenshot(full_page=True),
+            "image/png",
+            disposition="observed",
+            metadata={"provider": "greenhouse", "phase": "after_fill"},
+        )
+        self._record_evidence(
+            "screenshot",
+            result="completed",
+            members={state.role: state.sha256, screenshot.role: screenshot.sha256},
+            details={"provenance": "greenhouse.post_fill"},
+        )
+        return state, screenshot
 
     def finalize_preintent_failure(
         self,
@@ -589,6 +826,19 @@ class GreenhouseAttemptRecorder:
         for role, value, media_type, metadata in payloads:
             row = self._add(role, value, media_type, metadata=metadata)
             selected[role] = row.sha256
+        self._record_evidence(
+            "release",
+            result="completed",
+            members=selected,
+            details={
+                "provenance": "greenhouse.release",
+                "interaction_counts": {
+                    "fields_filled": len(tuple(field_authority_names)),
+                    "files_uploaded": len(tuple(attached_roles)),
+                    "submit_clicks": 0,
+                },
+            },
+        )
         return self.attempt.finalize_release(
             selected=selected,
             finalized_at=release_time.isoformat(),

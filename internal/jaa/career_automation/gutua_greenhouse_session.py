@@ -47,7 +47,7 @@ from .external_document_assurance import (
 )
 from .gmail_confirmation import ACCESS_TOKEN_ENV, GmailAPIConfirmationChecker
 from .live_vacancy_discovery import verify_vacancy_body_equivalence
-from .production_attempt import ProductionIdentity
+from .production_attempt import GreenhouseAttemptRecorder, ProductionIdentity
 from .production_ats_executor import ProductionATSBoundaryError
 from .production_ats_executor import collect_greenhouse_form_inventory
 from .production_ats_executor import is_greenhouse_auxiliary_field
@@ -621,6 +621,7 @@ class GutuaGreenhouseSession:
         package: CandidateApplicationPackage,
         *,
         artifact_directory: Path,
+        recorder: GreenhouseAttemptRecorder | None = None,
     ) -> tuple[
         tuple[str, ...],
         tuple[tuple[str, str], ...],
@@ -692,6 +693,43 @@ class GutuaGreenhouseSession:
                 filename = "cv.pdf" if role == "cv" else "cover-letter.pdf"
                 path = artifact_directory / filename
                 locator.set_input_files(str(path))
+                browser_file = locator.evaluate(
+                    """element => {
+                        const file = element.files && element.files[0];
+                        return file ? {name: file.name, size: file.size, type: file.type} : null;
+                    }"""
+                )
+                if (
+                    not isinstance(browser_file, Mapping)
+                    or browser_file.get("name") != path.name
+                    or browser_file.get("size") != path.stat().st_size
+                ):
+                    raise ProductionATSBoundaryError(
+                        "browser upload readback differs from the selected document"
+                    )
+                if recorder is not None:
+                    content_sha256 = _file_sha256(path)
+                    recorder.record_field_action(
+                        event_kind="file_uploaded",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=(),
+                        provenance=f"document.{role}.final_pdf",
+                        readback=_json_bytes(
+                            {
+                                "browser_file": dict(browser_file),
+                                "source_path": str(path),
+                                "source_sha256": content_sha256,
+                            }
+                        ),
+                        document_role=role,
+                        source_path=path,
+                        content_sha256=content_sha256,
+                        file_name=str(browser_file["name"]),
+                        file_size=int(browser_file["size"]),
+                        mime_type=str(browser_file.get("type") or "application/pdf"),
+                    )
                 uploads[role] = (identity, path)
                 continue
             if field_type == "radio":
@@ -709,6 +747,33 @@ class GutuaGreenhouseSession:
                     )
                 expected = bool(required and consent)
                 locator.check() if expected else locator.uncheck()
+                if locator.is_checked() is not expected:
+                    raise ProductionATSBoundaryError(
+                        "checkbox readback differs from the approved consent"
+                    )
+                if recorder is not None:
+                    recorder.record_field_action(
+                        event_kind="click",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=("false", "true"),
+                        provenance="consent.required" if expected else "blank.optional",
+                        readback=None,
+                        checked=expected,
+                        selected=expected,
+                    )
+                    recorder.record_field_action(
+                        event_kind="field_selected",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=("false", "true"),
+                        provenance="consent.required" if expected else "blank.optional",
+                        readback=(b"true" if expected else b"false"),
+                        checked=expected,
+                        selected=expected,
+                    )
                 consents.append((identity, expected))
                 continue
             authority = self._field_authority(field)
@@ -726,8 +791,10 @@ class GutuaGreenhouseSession:
                 authority = "blank.optional"
             value = approved[authority]
             tag = str(field.get("tag", "")).casefold()
+            clicked = False
             if tag == "select":
                 locator.select_option(label=value)
+                readback = locator.locator("option:checked").inner_text()
             elif identity in select_inventories and value:
                 option_values = {
                     str(row.get("text"))
@@ -745,9 +812,54 @@ class GutuaGreenhouseSession:
                     identity=identity,
                     value=value,
                 )
+                clicked = True
+                readback = locator.input_value()
             else:
                 locator.fill(value)
+                readback = locator.input_value()
+            if readback != value:
+                raise ProductionATSBoundaryError(
+                    "field readback differs from the approved answer"
+                )
+            if recorder is not None:
+                option_rows = select_inventories.get(identity, {}).get("options", [])
+                option_labels = tuple(
+                    str(row.get("text"))
+                    for row in option_rows
+                    if isinstance(row, Mapping) and row.get("text") is not None
+                )
+                if clicked:
+                    recorder.record_field_action(
+                        event_kind="click",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=option_labels,
+                        provenance=authority,
+                        readback=None,
+                        selected=True,
+                    )
+                recorder.record_field_action(
+                    event_kind=(
+                        "field_selected"
+                        if tag == "select" or identity in select_inventories
+                        else "field_filled"
+                    ),
+                    field_id=identity,
+                    field_type=field_type,
+                    required=required,
+                    options=option_labels,
+                    provenance=authority,
+                    readback=readback.encode("utf-8"),
+                    selected=(
+                        True
+                        if tag == "select" or identity in select_inventories
+                        else None
+                    ),
+                )
             field_authorities.append((identity, authority))
+        if recorder is not None:
+            recorder.record_postfill(page)
         if "cv" not in uploads:
             raise ProductionATSBoundaryError("Greenhouse form lacks one CV upload")
         attached_roles = tuple(
@@ -910,7 +1022,10 @@ class GutuaGreenhouseSession:
             consent_states,
             upload_paths,
         ) = self._fill_supported_form(
-            page, package, artifact_directory=artifact_directory
+            page,
+            package,
+            artifact_directory=artifact_directory,
+            recorder=recorder,
         )
         head = exact_clean_head(self.repository_root)
         return PreparedGreenhouseRelease(

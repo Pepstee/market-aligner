@@ -643,7 +643,6 @@ class GreenhouseProductionRunner:
                 item.vacancy.vacancy.vacancy_sha256,
             )
         ]
-        navigation = open_vacancy(item, page)
         recorder = (
             GreenhouseAttemptRecorder.resume(
                 archive_root=self.archive.root,
@@ -660,6 +659,18 @@ class GreenhouseProductionRunner:
                 assessment={**candidate.assessment, "queue_rank": item.queue_rank},
             )
         )
+        recorder.attach_page_evidence(page)
+        try:
+            navigation = open_vacancy(item, page)
+            recorder.record_navigation(navigation)
+        except Exception as exc:
+            recorder.finalize_preintent_failure(
+                page,
+                reason_code="navigation_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise
         boundary_signals = self.executor.boundary_signals(page)
         if boundary_signals:
             observed_network = list(candidate.network_evidence)

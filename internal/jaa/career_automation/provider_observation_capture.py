@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -169,15 +171,29 @@ def collector_source_identity(
 
 
 def _write_create_only(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError("provider observation archive path must not be a symlink")
     try:
-        with path.open("xb") as handle:
-            handle.write(value)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
     except FileExistsError:
         if path.read_bytes() != value:
             raise ValueError("content-addressed provider observation object differs")
+        return
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
 
 
 def _archive_object(root: Path, value: bytes) -> str:
@@ -284,6 +300,7 @@ def _persist_failure(
     network: list[dict[str, object]],
     screenshot: bytes | None,
     screenshot_safety: bytes | None = None,
+    form_inventory: bytes | None = None,
     operator_acceptance: Mapping[str, object] | None = None,
 ) -> ProviderObservationCaptureFailure:
     receipt = _persist_capture(
@@ -313,6 +330,10 @@ def _persist_failure(
         ),
         screenshot=screenshot,
         screenshot_safety=screenshot_safety,
+        form_inventory=form_inventory,
+        form_inventory_unavailable_reason=(
+            None if form_inventory is not None else code
+        ),
         operator_acceptance=operator_acceptance,
     )
     _terminalize_capture_failure(
@@ -419,6 +440,7 @@ def _persist_capture(
     screenshot: bytes | None,
     screenshot_safety: bytes | None = None,
     form_inventory: bytes | None = None,
+    form_inventory_unavailable_reason: str | None = None,
     operator_acceptance: Mapping[str, object] | None = None,
 ) -> ProviderObservationCaptureReceipt:
     """Persist an owned capture as create-only content-addressed objects."""
@@ -475,6 +497,8 @@ def _persist_capture(
         "collector_source_path": COLLECTOR_SOURCE_PATH,
         "collector_source_sha256": source_sha256,
         "repository_commit": head,
+        "repository_tree": source_identity.tree,
+        "source_content_revision": source_identity.content_revision,
         "provider": "greenhouse",
         "source_url": source_url,
         "vacancy_id": match.group(1),
@@ -485,6 +509,17 @@ def _persist_capture(
             "submit_clicks": 0,
         },
         "artifacts": artifacts,
+        "form_inventory": {
+            "availability": (
+                "captured" if form_inventory is not None else "unavailable"
+            ),
+            "reason": (
+                None
+                if form_inventory is not None
+                else form_inventory_unavailable_reason
+            ),
+            "sha256": artifacts.get("form_inventory"),
+        },
     }
     if operator_acceptance is not None:
         receipt_sha256 = operator_acceptance.get("receipt_sha256")
@@ -528,6 +563,134 @@ def _extract_loader_value(html: str, key: str) -> str:
             except json.JSONDecodeError:
                 return raw.replace("\\/", "/")
     raise ValueError(f"Greenhouse loader did not expose {key}")
+
+
+def load_provider_observation_capture(
+    *, archive_root: str | Path, manifest_sha256: str
+) -> dict[str, object]:
+    """Resolve one capture in place and return sanitized metadata only."""
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256):
+        raise ValueError("provider capture manifest hash is invalid")
+    root = Path(archive_root).resolve(strict=True)
+    manifest_path = (
+        root / "provider-observation-captures" / f"{manifest_sha256}.json"
+    )
+    if manifest_path.is_symlink():
+        raise ValueError("provider capture manifest path is unsafe")
+    raw = manifest_path.read_bytes()
+    if _sha256(raw) != manifest_sha256:
+        raise ValueError("provider capture manifest hash differs")
+    manifest = json.loads(raw)
+    if not isinstance(manifest, dict) or raw != _bytes(manifest):
+        raise ValueError("provider capture manifest is not canonical")
+    if manifest.get("schema_version") != "jaa.provider-observation-capture.v1":
+        raise ValueError("provider capture manifest schema is unsupported")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError("provider capture artifacts are malformed")
+    rows: dict[str, dict[str, object]] = {}
+    resolved: dict[str, bytes] = {}
+    for role, digest in sorted(artifacts.items()):
+        if (
+            not isinstance(role, str)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise ValueError("provider capture artifact identity is malformed")
+        path = root / "objects" / digest[:2] / digest
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("provider capture artifact path is unsafe")
+        value = path.read_bytes()
+        if _sha256(value) != digest:
+            raise ValueError("provider capture artifact hash differs")
+        resolved[role] = value
+        rows[role] = {"sha256": digest, "byte_length": len(value)}
+    observation = json.loads(resolved["observation"])
+    failure = observation.get("failure") if isinstance(observation, dict) else None
+    inventory = manifest.get("form_inventory")
+    if not isinstance(inventory, dict):
+        inventory = {
+            "availability": (
+                "captured" if "form_inventory" in artifacts else "unavailable"
+            ),
+            "reason": (
+                failure.get("code")
+                if isinstance(failure, dict)
+                else "not_preserved"
+            ),
+            "sha256": artifacts.get("form_inventory"),
+        }
+    form_summary: dict[str, object] = dict(inventory)
+    if "form_inventory" in resolved:
+        form_document = json.loads(resolved["form_inventory"])
+        state = (
+            form_document.get("form_state", {})
+            if isinstance(form_document, dict)
+            else {}
+        )
+        fields = state.get("fields", []) if isinstance(state, dict) else []
+        form_summary["field_count"] = len(fields) if isinstance(fields, list) else 0
+    acceptance = manifest.get("operator_acceptance")
+    tree = manifest.get("repository_tree")
+    if tree is None and isinstance(acceptance, dict):
+        tree = acceptance.get("repository_tree")
+    return {
+        "schema_version": "jaa.provider-observation-view.v1",
+        "manifest_sha256": manifest_sha256,
+        "provider": manifest.get("provider"),
+        "source_url": manifest.get("source_url"),
+        "observed_at": manifest.get("observed_at"),
+        "repository_commit": manifest.get("repository_commit"),
+        "repository_tree": tree,
+        "source_content_revision": manifest.get("source_content_revision"),
+        "interaction": manifest.get("interaction"),
+        "outcome": (
+            failure.get("code") if isinstance(failure, dict) else "observed"
+        ),
+        "form_inventory": form_summary,
+        "operator_acceptance": (
+            dict(acceptance) if isinstance(acceptance, dict) else None
+        ),
+        "artifacts": rows,
+    }
+
+
+def render_provider_observation_capture(
+    *, archive_root: str | Path, manifest_sha256: str
+) -> str:
+    view = load_provider_observation_capture(
+        archive_root=archive_root, manifest_sha256=manifest_sha256
+    )
+    inventory = view["form_inventory"]
+    lines = [
+        f"Provider observation: {view['manifest_sha256']}",
+        f"Target: {view['source_url']}",
+        f"Outcome: {view['outcome']}",
+        f"Observed: {view['observed_at']}",
+        f"Form inventory: {inventory['availability']}",
+    ]
+    if inventory.get("reason"):
+        lines.append(f"Form inventory reason: {inventory['reason']}")
+    if "field_count" in inventory:
+        lines.append(f"Observed fields: {inventory['field_count']}")
+    acceptance = view["operator_acceptance"]
+    if isinstance(acceptance, dict):
+        lines.extend(
+            [
+                f"Acceptance: {acceptance.get('acceptance_id')}",
+                f"Acceptance receipt: {acceptance.get('receipt_sha256')}",
+                f"Acceptance envelope: {acceptance.get('envelope_sha256')}",
+                f"Acceptance key: {acceptance.get('key_id')}",
+                f"Acceptance consumed: {acceptance.get('consumed_at')}",
+            ]
+        )
+    lines.append("Artifacts:")
+    for role, row in sorted(view["artifacts"].items()):
+        lines.append(
+            f"- {role} {row['sha256']} ({row['byte_length']} bytes)"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _capture_preflight(
@@ -709,6 +872,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            form_inventory=form_inventory,
             operator_acceptance=operator_acceptance,
         ) from exc
     if response_status is None or not 200 <= response_status < 300:
@@ -725,6 +889,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            form_inventory=form_inventory,
             operator_acceptance=operator_acceptance,
         )
     if final_url.rstrip("/") != source_url.rstrip("/"):
@@ -741,6 +906,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            form_inventory=form_inventory,
             operator_acceptance=operator_acceptance,
         )
     # The current Greenhouse renderer removes its loader script after hydration.
@@ -774,6 +940,7 @@ def capture_greenhouse_observation(
             network=network,
             screenshot=screenshot,
             screenshot_safety=screenshot_safety,
+            form_inventory=form_inventory,
             operator_acceptance=operator_acceptance,
         ) from exc
     observation = _bytes(
@@ -862,4 +1029,6 @@ __all__ = [
     "collector_source_identity",
     "exact_clean_head",
     "exact_committed_source_identity",
+    "load_provider_observation_capture",
+    "render_provider_observation_capture",
 ]

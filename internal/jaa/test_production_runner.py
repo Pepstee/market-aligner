@@ -153,6 +153,12 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
     class FakeRecorder:
         attempt = FakeAttempt()
 
+        def attach_page_evidence(self, _page):
+            calls.append("attach_evidence")
+
+        def record_navigation(self, _navigation):
+            calls.append("record_navigation")
+
         def record_prefill(self, _page):
             calls.append("record_prefill")
 
@@ -240,8 +246,10 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
     )
     assert result is receipt
     assert calls == [
-        "open_vacancy",
         "create_attempt",
+        "attach_evidence",
+        "open_vacancy",
+        "record_navigation",
         "record_prefill",
         "prepare_release",
         "validate_generation",
@@ -370,6 +378,16 @@ def test_runner_archives_returned_revisions_before_inventory_rejection(
 
     monkeypatch.setattr(
         GreenhouseAttemptRecorder, "record_prefill", lambda self, _page: None
+    )
+    monkeypatch.setattr(
+        GreenhouseAttemptRecorder,
+        "attach_page_evidence",
+        lambda self, _page: None,
+    )
+    monkeypatch.setattr(
+        GreenhouseAttemptRecorder,
+        "record_navigation",
+        lambda self, _navigation: None,
     )
     monkeypatch.setattr(
         GreenhouseAttemptRecorder,
@@ -614,6 +632,12 @@ def test_runner_terminalizes_after_sink_archives_generator_crash(
     class FakeRecorder:
         attempt = FakeAttempt()
 
+        def attach_page_evidence(self, _page):
+            return None
+
+        def record_navigation(self, _navigation):
+            return None
+
         def record_prefill(self, _page):
             return None
 
@@ -673,6 +697,12 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
 
     class FakeRecorder:
         attempt = FakeAttempt()
+
+        def attach_page_evidence(self, _page):
+            return None
+
+        def record_navigation(self, _navigation):
+            return None
 
         def finalize_provider_boundary(self, _page, **kwargs):
             calls.append("terminal_boundary")

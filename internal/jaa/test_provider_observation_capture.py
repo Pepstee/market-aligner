@@ -15,6 +15,8 @@ from career_automation.provider_observation_capture import (
     _redact_sensitive_response,
     _mask_page_for_screenshot,
     capture_greenhouse_observation,
+    load_provider_observation_capture,
+    render_provider_observation_capture,
 )
 
 
@@ -405,3 +407,102 @@ def test_every_browser_stage_failure_is_terminally_archived(
         / "provider-observation-captures"
         / f"{caught.value.receipt.manifest_sha256}.terminal.json"
     ).is_file()
+
+
+def test_route_failure_retains_inventory_and_view_is_hash_only(
+    tmp_path: Path,
+) -> None:
+    inventory = _json_bytes(
+        {
+            "schema_version": "jaa.greenhouse-form-inventory.v1",
+            "form_state": {
+                "schema_version": "jaa.greenhouse-form-state.v1",
+                "provider": "greenhouse",
+                "title": "Expired role",
+                "url": APPLICATION_URL,
+                "fields": [
+                    {
+                        "id": "name",
+                        "type": "text",
+                        "required": True,
+                        "options": [],
+                    }
+                ],
+            },
+            "select_inventories": [],
+            "title": "Expired role",
+            "url": APPLICATION_URL,
+        }
+    )
+    identity = capture_module.exact_committed_source_identity(ROOT)
+    _, collector_sha256 = capture_module.collector_source_identity(
+        ROOT, commit=identity.head
+    )
+    operator_acceptance = {
+        "acceptance_id": "fixture-observation-acceptance",
+        "collector_source_sha256": collector_sha256,
+        "consumed_at": "2026-08-06T11:59:59Z",
+        "envelope_sha256": "a" * 64,
+        "key_id": "fixture-observation-key",
+        "receipt_sha256": "b" * 64,
+        "repository_commit": identity.head,
+        "repository_tree": identity.tree,
+        "source_url": APPLICATION_URL,
+    }
+    failure = _persist_failure(
+        archive_root=tmp_path,
+        repository_root=ROOT,
+        source_url=APPLICATION_URL,
+        observed_at="2026-08-06T12:00:00+00:00",
+        code="provider_route_changed",
+        status=200,
+        final_url="https://job-boards.greenhouse.io/example",
+        primary_response=b"expired",
+        visible_content=b"job no longer open",
+        network=[],
+        screenshot=None,
+        form_inventory=inventory,
+        operator_acceptance=operator_acceptance,
+    )
+    view = load_provider_observation_capture(
+        archive_root=tmp_path,
+        manifest_sha256=failure.receipt.manifest_sha256,
+    )
+    rendered = render_provider_observation_capture(
+        archive_root=tmp_path,
+        manifest_sha256=failure.receipt.manifest_sha256,
+    )
+    assert view["outcome"] == "provider_route_changed"
+    assert view["form_inventory"]["availability"] == "captured"
+    assert view["form_inventory"]["field_count"] == 1
+    assert view["operator_acceptance"] == operator_acceptance
+    assert "Acceptance receipt: " + "b" * 64 in rendered
+    assert "job no longer open" not in rendered
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_failure_capture_view_states_inventory_unavailable(tmp_path: Path) -> None:
+    failure = _persist_failure(
+        archive_root=tmp_path,
+        repository_root=ROOT,
+        source_url=APPLICATION_URL,
+        observed_at="2026-08-06T12:00:00+00:00",
+        code="provider_route_changed",
+        status=200,
+        final_url="https://job-boards.greenhouse.io/example",
+        primary_response=b"expired",
+        visible_content=b"job no longer open",
+        network=[],
+        screenshot=None,
+    )
+    view = load_provider_observation_capture(
+        archive_root=tmp_path,
+        manifest_sha256=failure.receipt.manifest_sha256,
+    )
+    assert view["form_inventory"] == {
+        "availability": "unavailable",
+        "reason": "provider_route_changed",
+        "sha256": None,
+    }

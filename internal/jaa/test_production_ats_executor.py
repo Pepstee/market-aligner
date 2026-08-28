@@ -593,6 +593,12 @@ def test_certified_greenhouse_executor_records_success_and_terminal_archive(
     )
     assert "browser.post_submit_visible_text" in terminal["selected"]
     assert "browser.redirect_http_evidence" in terminal["selected"]
+    evidence_kinds = {
+        event["payload"]["event_kind"]
+        for event in recorder.attempt._events()
+        if event["event_type"] == "evidence_recorded"
+    }
+    assert {"click", "request", "response", "terminal"} <= evidence_kinds
     assert "submission.reconciliation" in terminal["selected"]
     assert "submission.receipt" in terminal["selected"]
     checkpoints = sorted(

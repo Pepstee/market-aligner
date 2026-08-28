@@ -1310,6 +1310,23 @@ class CertifiedGreenhouseSubmitExecutor:
         if receipt_object is not None:
             terminal_selection["submission.receipt"] = receipt_object.sha256
         terminal_selection["submission.reconciliation"] = reconciliation.sha256
+        attempt.record_evidence_event(
+            event_id=attempt.next_evidence_event_id("terminal"),
+            event_kind="terminal",
+            occurred_at=datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            ),
+            result=("completed" if outcome == "submitted_success" else "indeterminate"),
+            member_sha256s=terminal_selection,
+            details={
+                "provenance": "greenhouse.terminal_reconciliation",
+                "interaction_counts": {
+                    "fields_filled": len(authority.field_authority_names),
+                    "files_uploaded": len(authority.attached_roles),
+                    "submit_clicks": 1,
+                },
+            },
+        )
         attempt.finalize_terminal(
             outcome=outcome,
             selected=terminal_selection,
@@ -1472,8 +1489,40 @@ class CertifiedGreenhouseSubmitExecutor:
                     ),
                 }
             )
+            attempt.record_evidence_event(
+                event_id=attempt.next_evidence_event_id("response"),
+                event_kind="response",
+                occurred_at=datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                ),
+                result="observed",
+                details={
+                    "method": str(request.method).upper(),
+                    "status": int(response.status),
+                    "url_sha256": _sha256(
+                        _normal_url(response.url).encode("utf-8")
+                    ),
+                },
+            )
 
         page.on("response", record_response)
+
+        def record_request(request) -> None:
+            attempt.record_evidence_event(
+                event_id=attempt.next_evidence_event_id("request"),
+                event_kind="request",
+                occurred_at=datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                ),
+                result="observed",
+                details={
+                    "method": str(request.method).upper(),
+                    "resource_type": str(request.resource_type),
+                    "url_sha256": _sha256(_normal_url(request.url).encode("utf-8")),
+                },
+            )
+
+        page.on("request", record_request)
         try:
             certified_final_submit_click(
                 locator,
@@ -1485,6 +1534,25 @@ class CertifiedGreenhouseSubmitExecutor:
                     authority,
                     verified_at=datetime.now(timezone.utc),
                 ),
+            )
+            attempt.record_evidence_event(
+                event_id=attempt.next_evidence_event_id("click"),
+                event_kind="click",
+                occurred_at=datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                ),
+                result="completed",
+                member_sha256s={
+                    "submission.click_intent": self._click_intent_sha256(attempt)
+                },
+                details={
+                    "provenance": "greenhouse.certified_final_submit_click",
+                    "interaction_counts": {
+                        "fields_filled": len(authority.field_authority_names),
+                        "files_uploaded": len(authority.attached_roles),
+                        "submit_clicks": 1,
+                    },
+                },
             )
         except FinalClickRevalidationError as exc:
             description = str(exc.__cause__ or exc)
