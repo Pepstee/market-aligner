@@ -64,11 +64,6 @@ _IMMUTABLE_LEGACY_COLLECTORS = frozenset(
             "8b0868399733a33716c3f37818f58dab8cb204bf",
             "2d8859b69fcba66d2c0767fc8fe24a58f5b3c5ed01a3752280d8c6d00056220f",
         ),
-        (
-            "jaa.repository-playwright-route-fixture.v1",
-            "cf4543f5906918c7e25143c18c344ddd6c6b602e",
-            "c87b0941bcd8df37d328724bead6a01c231cd85d7068a588491ed62cf843a463",
-        ),
     }
 )
 
