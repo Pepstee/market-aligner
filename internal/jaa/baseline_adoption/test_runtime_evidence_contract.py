@@ -17,6 +17,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 EVIDENCE = ROOT / "runtime_evidence" / "JAA-00-online-snapshot.yaml"
 
 
@@ -196,11 +197,18 @@ def _public(
 
 def _clean_repository(destination: Path) -> Path:
     result = subprocess.run(
-        ["git", "clone", "-q", "--no-local", str(ROOT), str(destination)],
+        [
+            "git",
+            "clone",
+            "-q",
+            "--no-local",
+            str(REPOSITORY_ROOT),
+            str(destination),
+        ],
         text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
-    return destination
+    return destination / "internal" / "jaa"
 
 
 def _runtime_files(root: Path) -> set[Path]:

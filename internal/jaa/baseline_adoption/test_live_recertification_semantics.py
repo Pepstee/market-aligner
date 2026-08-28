@@ -15,7 +15,6 @@ import stat
 import subprocess
 import sys
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 LIVE_ROOT = Path("/Users/admin/Claude/Projects/Korea Job Scraper")
 LIVE_RELATIVE = {
     "raw_jobs": "scraper/data_overnight/jobs.sqlite3",
@@ -113,7 +113,13 @@ def _run(source_root: Path, evidence: Path, contract: list[dict[str, object]] | 
     repository = evidence.parent / "certification-repository"
     if not repository.exists():
         cloned = subprocess.run(
-            ("git", "clone", "--no-local", str(ROOT), str(repository)),
+            (
+                "git",
+                "clone",
+                "--no-local",
+                str(REPOSITORY_ROOT),
+                str(repository),
+            ),
             text=True, capture_output=True, check=False,
         )
         assert cloned.returncode == 0, cloned.stderr
@@ -130,7 +136,11 @@ raise SystemExit(cli.main(sys.argv[2:]))
     return subprocess.run(
         [*command, "recertify-sources", "--source-root", str(source_root),
          "--evidence-directory", str(evidence)],
-        cwd=repository, text=True, capture_output=True, check=False, env=os.environ.copy(),
+        cwd=repository / "internal" / "jaa",
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ.copy(),
     )
 
 
