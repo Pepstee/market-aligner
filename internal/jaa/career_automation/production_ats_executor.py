@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import (
@@ -626,9 +626,11 @@ class CertifiedGreenhouseSubmitExecutor:
         *,
         repository_root: str | Path,
         gmail_confirmation_checker: GmailConfirmationChecker | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository_root = Path(repository_root).resolve(strict=True)
         self.gmail_confirmation_checker = gmail_confirmation_checker
+        self.now = now or (lambda: datetime.now(timezone.utc))
 
     @staticmethod
     def _submit_locator(page: Page, plan: GreenhouseSubmissionPlan) -> Locator:
@@ -1052,7 +1054,7 @@ class CertifiedGreenhouseSubmitExecutor:
         network_evidence: tuple[Mapping[str, object], ...] = (),
     ) -> tuple[str, bytes, bytes, bytes]:
         """Check provider state and Gmail once without replaying the click."""
-        checked_at = max(datetime.now(timezone.utc), authority.consumed_at)
+        checked_at = max(self.now(), authority.consumed_at)
         visible_text = page.locator("body").inner_text().encode("utf-8")
         screenshot = page.screenshot(full_page=True)
         provider_success = self._provider_success(page, authority.success_evidence)
@@ -1521,7 +1523,7 @@ class CertifiedGreenhouseSubmitExecutor:
         attempt.record_evidence_event(
             event_id=attempt.next_evidence_event_id("terminal"),
             event_kind="terminal",
-            occurred_at=datetime.now(timezone.utc).strftime(
+            occurred_at=self.now().strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             ),
             result=("completed" if outcome == "submitted_success" else "indeterminate"),
@@ -1591,7 +1593,7 @@ class CertifiedGreenhouseSubmitExecutor:
                 reconciliation_visible_text,
             ) = self._reconcile_after_intent(page, authority)
             if reconciled_outcome == "submitted_success":
-                submitted_at = datetime.now(timezone.utc).isoformat()
+                submitted_at = self.now().isoformat()
                 _screenshot, _result, receipt = self._record_terminal(
                     page,
                     authority,
@@ -1610,7 +1612,7 @@ class CertifiedGreenhouseSubmitExecutor:
                 authority,
                 state="indeterminate",
                 outcome="indeterminate",
-                submitted_at=datetime.now(timezone.utc).isoformat(),
+                submitted_at=self.now().isoformat(),
                 reconciliation_evidence=reconciliation,
                 reconciliation_screenshot=reconciliation_screenshot,
                 reconciliation_visible_text=reconciliation_visible_text,
@@ -1700,7 +1702,7 @@ class CertifiedGreenhouseSubmitExecutor:
             attempt.record_evidence_event(
                 event_id=attempt.next_evidence_event_id("response"),
                 event_kind="response",
-                occurred_at=datetime.now(timezone.utc).strftime(
+                occurred_at=self.now().strftime(
                     "%Y-%m-%dT%H:%M:%S.%fZ"
                 ),
                 result="observed",
@@ -1719,7 +1721,7 @@ class CertifiedGreenhouseSubmitExecutor:
             attempt.record_evidence_event(
                 event_id=attempt.next_evidence_event_id("request"),
                 event_kind="request",
-                occurred_at=datetime.now(timezone.utc).strftime(
+                occurred_at=self.now().strftime(
                     "%Y-%m-%dT%H:%M:%S.%fZ"
                 ),
                 result="observed",
@@ -1735,18 +1737,18 @@ class CertifiedGreenhouseSubmitExecutor:
             certified_final_submit_click(
                 locator,
                 authority,
-                verified_at=datetime.now(timezone.utc),
+                verified_at=self.now(),
                 immediate_revalidation=lambda: self._authoritative_revalidation(
                     page,
                     plan,
                     authority,
-                    verified_at=datetime.now(timezone.utc),
+                    verified_at=self.now(),
                 ),
             )
             attempt.record_evidence_event(
                 event_id=attempt.next_evidence_event_id("click"),
                 event_kind="click",
-                occurred_at=datetime.now(timezone.utc).strftime(
+                occurred_at=self.now().strftime(
                     "%Y-%m-%dT%H:%M:%S.%fZ"
                 ),
                 result="completed",

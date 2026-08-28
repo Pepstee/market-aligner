@@ -580,6 +580,7 @@ def test_certified_greenhouse_executor_records_success_and_terminal_archive(
         receipt = CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
             gmail_confirmation_checker=_NoMatchGmailChecker(),
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert receipt.provider == "greenhouse"
@@ -626,6 +627,7 @@ def test_cv_only_greenhouse_form_preserves_unattached_cover_assurance(
         receipt = CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
             gmail_confirmation_checker=_NoMatchGmailChecker(),
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert receipt.provider == "greenhouse"
@@ -653,6 +655,7 @@ def test_provider_success_can_defer_connector_gmail_verification(
         authority, plan, recorder = _prepared_authority(tmp_path, page)
         receipt = CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert receipt.confirmation_email_checked is False
@@ -1030,7 +1033,10 @@ def test_immediate_revalidation_runs_inside_primitive_after_intent(
         _install_routes(page)
         page.goto(APPLICATION_URL)
         authority, plan, recorder = _prepared_authority(tmp_path, page)
-        executor = CertifiedGreenhouseSubmitExecutor(repository_root=ROOT)
+        executor = CertifiedGreenhouseSubmitExecutor(
+            repository_root=ROOT,
+            now=lambda: authority.consumed_at,
+        )
         original = executor._authoritative_revalidation
         calls = 0
 
@@ -1102,6 +1108,7 @@ def test_exact_receipt_sanity_archive_and_upload_gates_run_twice(
         CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
             gmail_confirmation_checker=_NoMatchGmailChecker(),
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert pdf_calls == 4
@@ -1143,6 +1150,7 @@ def test_url_only_confirmation_is_indeterminate_and_archived(
             CertifiedGreenhouseSubmitExecutor(
                 repository_root=ROOT,
                 gmail_confirmation_checker=gmail,
+                now=lambda: authority.consumed_at,
             ).execute(page, authority=authority, plan=plan)
         browser.close()
     terminal = json.loads(
