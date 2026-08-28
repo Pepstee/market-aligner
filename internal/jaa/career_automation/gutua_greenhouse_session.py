@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
@@ -16,12 +17,19 @@ from playwright.sync_api import sync_playwright
 
 from .application_archive import VacancyArchiveIdentity
 from .application_artifacts import publish_application_artifacts
+from .application_quality import (
+    ApplicationQualityInput,
+    build_deterministic_preflight_quality_review,
+    run_pinned_editorial_skill_reviews,
+)
+from .application_quality_contracts import QualityReviewDisposition
 from .application_sanity_review import (
     ApplicationSanityReviewError,
     package_from_application,
     review_application_package,
 )
 from .browser_executor import GreenhouseSuccessEvidence
+from .ats_application_authority import build_ats_application_authority
 from cv_generation.service import CandidateApplicationPackage
 from .candidate_contact_authority import load_candidate_contact_authority
 from .candidate_release_gate import (
@@ -49,7 +57,9 @@ from .gmail_confirmation import ACCESS_TOKEN_ENV, GmailAPIConfirmationChecker
 from .live_vacancy_discovery import verify_vacancy_body_equivalence
 from .production_attempt import GreenhouseAttemptRecorder, ProductionIdentity
 from .production_ats_executor import ProductionATSBoundaryError
+from .production_ats_executor import compile_greenhouse_ats_plans
 from .production_ats_executor import collect_greenhouse_form_inventory
+from .production_ats_executor import greenhouse_ats_inventory_from_capture
 from .production_ats_executor import is_greenhouse_auxiliary_field
 from form_filling.service import approved_authority_values
 from .production_queue import LiveVacancy, QueueItem
@@ -622,6 +632,7 @@ class GutuaGreenhouseSession:
         *,
         artifact_directory: Path,
         recorder: GreenhouseAttemptRecorder | None = None,
+        inventory_bytes: bytes | None = None,
     ) -> tuple[
         tuple[str, ...],
         tuple[tuple[str, str], ...],
@@ -629,7 +640,11 @@ class GutuaGreenhouseSession:
         tuple[tuple[str, bool | str], ...],
         dict[str, Path],
     ]:
-        inventory = json.loads(collect_greenhouse_form_inventory(page))
+        inventory = json.loads(
+            inventory_bytes
+            if inventory_bytes is not None
+            else collect_greenhouse_form_inventory(page)
+        )
         fields = inventory["form_state"]["fields"]
         if not isinstance(fields, list):
             raise ProductionATSBoundaryError("Greenhouse form inventory is malformed")
@@ -1015,6 +1030,18 @@ class GutuaGreenhouseSession:
         )
         # Employer-visible page mutation is admitted only after every local,
         # provider, semantic, and one-use release authority has passed.
+        observed_capture = collect_greenhouse_form_inventory(page)
+        observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        observed_inventory = greenhouse_ats_inventory_from_capture(
+            observed_capture,
+            captured_at=observed_at,
+            page_snapshot_sha256=hashlib.sha256(
+                page.content().encode("utf-8")
+            ).hexdigest(),
+            screenshot_sha256=hashlib.sha256(
+                page.screenshot(full_page=True)
+            ).hexdigest(),
+        )
         (
             attached_roles,
             upload_field_names,
@@ -1026,7 +1053,68 @@ class GutuaGreenhouseSession:
             package,
             artifact_directory=artifact_directory,
             recorder=recorder,
+            inventory_bytes=observed_capture,
         )
+        reviewed_capture = collect_greenhouse_form_inventory(page)
+        reviewed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        uploaded_sha256_by_field = {
+            field_name: (
+                package.artifacts.cv_pdf.pdf_sha256
+                if role == "cv"
+                else package.artifacts.cover_letter_pdf.pdf_sha256
+            )
+            for role, field_name in upload_field_names
+        }
+        reviewed_inventory = greenhouse_ats_inventory_from_capture(
+            reviewed_capture,
+            captured_at=reviewed_at,
+            page_snapshot_sha256=hashlib.sha256(
+                page.content().encode("utf-8")
+            ).hexdigest(),
+            screenshot_sha256=hashlib.sha256(
+                page.screenshot(full_page=True)
+            ).hexdigest(),
+            uploaded_sha256_by_field=uploaded_sha256_by_field,
+        )
+        plans = compile_greenhouse_ats_plans(
+            observed_inventory,
+            field_authority_names=dict(field_authority_names),
+            consent_states=dict(consent_states),
+            upload_roles_by_field={
+                field_name: role for role, field_name in upload_field_names
+            },
+        )
+        candidate_authority_sha256 = _file_sha256(self.eligibility_path)
+        ats_authority = build_ats_application_authority(
+            reviewed_at=max(reviewed_at, reviewed_inventory.captured_at),
+            candidate_authority_sha256=candidate_authority_sha256,
+            source=package.source,
+            artifacts=package.artifacts,
+            publication_receipt=publication,
+            inventory=observed_inventory,
+            reviewed_inventory=reviewed_inventory,
+            plans=plans,
+        )
+        quality_input = ApplicationQualityInput(
+            reviewed_at=max(reviewed_at, reviewed_inventory.captured_at),
+            candidate_authority_sha256=candidate_authority_sha256,
+            source=package.source,
+            artifacts=package.artifacts,
+            publication_receipt=publication,
+            field_answers_bytes=ats_authority.answer_bytes,
+            form_inventory_bytes=ats_authority.inventory_bytes,
+            ats_application_authority=ats_authority,
+        )
+        quality_input = run_pinned_editorial_skill_reviews(
+            quality_input,
+            client=client,
+        )
+        quality_review = build_deterministic_preflight_quality_review(quality_input)
+        if quality_review.disposition is not QualityReviewDisposition.ACCEPTED:
+            raise ProductionATSBoundaryError(
+                "deterministic application quality review refused release: "
+                + ", ".join(issue.code for issue in quality_review.issues)
+            )
         head = exact_clean_head(self.repository_root)
         return PreparedGreenhouseRelease(
             source=package.source,
@@ -1035,6 +1123,9 @@ class GutuaGreenhouseSession:
             questions=None,
             document_assurance_receipts=document_receipts,
             sanity_review_receipt=sanity_receipt,
+            ats_application_authority=ats_authority,
+            quality_input=quality_input,
+            quality_review=quality_review,
             production_identity=ProductionIdentity(
                 code_revision=head,
                 policy_identity=POLICY_SHA256,

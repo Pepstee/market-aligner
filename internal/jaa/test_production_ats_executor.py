@@ -33,7 +33,9 @@ from career_automation.production_ats_executor import (
     ProductionATSBoundaryError,
     ProductionSubmissionIndeterminate,
     canonical_non_secret_form_state,
+    compile_greenhouse_ats_plans,
     collect_greenhouse_form_inventory,
+    greenhouse_ats_inventory_from_capture,
     is_greenhouse_auxiliary_field,
 )
 from career_automation.production_attempt import (
@@ -1196,6 +1198,124 @@ def test_react_combobox_selection_and_enumerable_options_are_captured() -> None:
     assert privacy["selected_text"] == ["Yes"]
     options = inventory["select_inventories"][0]["options"]
     assert [row["text"] for row in options] == ["Select", "Yes", "No"]
+
+
+def test_greenhouse_capture_compiles_closed_exact_ats_inventory_and_plans() -> None:
+    capture = {
+        "schema_version": "jaa.greenhouse-form-inventory.v1",
+        "form_state": {
+            "schema_version": "jaa.greenhouse-form-state.v1",
+            "url": APPLICATION_URL,
+            "title": "Fixture",
+            "provider": "greenhouse",
+            "fields": [
+                {
+                    "id": "csrf",
+                    "name": "csrf",
+                    "tag": "input",
+                    "type": "hidden",
+                    "labels": [],
+                    "required": False,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": False,
+                    "value_present": True,
+                },
+                {
+                    "id": "first_name",
+                    "name": "first_name",
+                    "tag": "input",
+                    "type": "text",
+                    "labels": ["First name"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "value": "",
+                    "selected_text": [],
+                },
+                {
+                    "id": "work_right",
+                    "name": "work_right",
+                    "tag": "select",
+                    "type": "",
+                    "labels": ["Legal right to work in the UK"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "value": "",
+                    "selected_text": [],
+                },
+                {
+                    "id": "resume",
+                    "name": "resume",
+                    "tag": "input",
+                    "type": "file",
+                    "labels": ["CV"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "files": [],
+                },
+                {
+                    "id": "consent",
+                    "name": "consent",
+                    "tag": "input",
+                    "type": "checkbox",
+                    "labels": ["Privacy consent"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "checked": False,
+                    "value": "on",
+                },
+            ],
+        },
+        "select_inventories": [
+            {
+                "field_identity": "work_right",
+                "option_source": "native_select",
+                "options": [
+                    {"value": "", "text": "Select", "disabled": False},
+                    {"value": "yes", "text": "Yes", "disabled": False},
+                    {"value": "no", "text": "No", "disabled": False},
+                ],
+            }
+        ],
+    }
+    inventory = greenhouse_ats_inventory_from_capture(
+        (json.dumps(capture, sort_keys=True) + "\n").encode(),
+        captured_at="2026-08-28T08:00:00Z",
+        page_snapshot_sha256="a" * 64,
+        screenshot_sha256="b" * 64,
+    )
+    plans = compile_greenhouse_ats_plans(
+        inventory,
+        field_authority_names={
+            "first_name": "contact.given_name",
+            "work_right": "candidate.uk_work_right",
+        },
+        consent_states={"consent": True},
+        upload_roles_by_field={"resume": "cv"},
+    )
+    assert [row.field_id for row in inventory.fields] == [
+        "csrf",
+        "first_name",
+        "work_right",
+        "resume",
+        "consent",
+    ]
+    assert inventory.fields[0].automation_role == "provider_managed"
+    assert [(row.action, row.source_reference) for row in plans] == [
+        ("omit", "none"),
+        ("fill", "contact.given_name"),
+        ("fill", "candidate.uk_work_right"),
+        ("upload", "artifact.cv"),
+        ("fill", "consent.true"),
+    ]
 
 
 def test_greenhouse_authority_rejects_nonofficial_or_mismatched_routes(

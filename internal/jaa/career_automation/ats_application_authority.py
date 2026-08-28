@@ -59,9 +59,20 @@ _CORRECTION_REASONS = frozenset(
 )
 _CONTACT_REFERENCES = {
     "contact.full_name": "full_name",
+    "contact.given_name": "given_name",
+    "contact.family_name": "family_name",
     "contact.email": "email",
     "contact.phone": "phone",
     "contact.city": "city",
+}
+STANDARD_CANDIDATE_AUTHORITIES = {
+    "candidate.legal_name_complete": "Yes",
+    "candidate.uk_work_right": "Yes",
+    "candidate.uk_work_status": "EU Settled Status",
+    "candidate.discovery_source": "Greenhouse job board",
+    "candidate.gender_nondisclosure": "I don't wish to answer",
+    "candidate.ethnicity_nondisclosure": "I don't wish to answer",
+    "candidate.disability_nondisclosure": "I don't wish to answer",
 }
 _MAX_FIELDS = 512
 _MAX_CAPTURE_BYTES = 4_194_304
@@ -78,12 +89,18 @@ ATS_AUTHORITY_POLICY = {
     "providers": sorted(_PROVIDERS),
     "sources": [
         "contact.full_name",
+        "contact.given_name",
+        "contact.family_name",
         "contact.email",
         "contact.phone",
         "contact.city",
+        "answers.full",
+        "candidate.<approved_standard_fact>",
         "answer.<question_id>",
         "artifact.cv",
         "artifact.cover_letter",
+        "consent.true",
+        "consent.false",
     ],
     "hidden_controls": {
         "honeypot": "observe, require empty, omit",
@@ -596,18 +613,38 @@ def _verify_reviewed_values(
             raise ValueError("omitted ATS field contains an unapproved reviewed value")
 
 
-def _resolve_value(
+def resolve_ats_source_reference(
     reference: str,
     source: ApplicationSource,
     artifacts: ApplicationArtifacts,
 ) -> tuple[str | bool | int | None, str]:
+    """Resolve one canonical ATS source without granting execution authority."""
     if reference in _CONTACT_REFERENCES:
         name = _CONTACT_REFERENCES[reference]
-        value = getattr(source.contact, name)
+        if name in {"given_name", "family_name"}:
+            given, separator, family = source.contact.full_name.partition(" ")
+            if not separator or not given.strip() or not family.strip():
+                raise ValueError("approved full name cannot be split deterministically")
+            value = given.strip() if name == "given_name" else family.strip()
+        else:
+            value = getattr(source.contact, name)
         return value, content_hash(
             {
                 "source_reference": reference,
                 "contact": source.contact.document(),
+            }
+        )
+    if reference == "answers.full":
+        value = artifacts.editable.answers_text
+        return value, artifacts.editable.answers_sha256
+    if reference in STANDARD_CANDIDATE_AUTHORITIES:
+        value = STANDARD_CANDIDATE_AUTHORITIES[reference]
+        return value, content_hash(
+            {
+                "source_reference": reference,
+                "value": value,
+                "candidate_authority_required": True,
+                "policy_sha256": ATS_AUTHORITY_POLICY_SHA256,
             }
         )
     answers = _structured_answer_values(source)
@@ -620,6 +657,12 @@ def _resolve_value(
             artifacts.cover_letter_pdf.pdf_sha256,
             artifacts.cover_letter_pdf.pdf_sha256,
         )
+    if reference == "consent.true":
+        return True, ATS_AUTHORITY_POLICY_SHA256
+    if reference == "consent.false":
+        return False, ATS_AUTHORITY_POLICY_SHA256
+    if reference == "blank.optional":
+        return "", ATS_AUTHORITY_POLICY_SHA256
     if reference == "none":
         return None, ATS_AUTHORITY_POLICY_SHA256
     raise ValueError("ATS field cites an unsupported application authority")
@@ -644,7 +687,7 @@ def _build_entries(
         plan = plan_by_id[observed.field_id]
         if plan.observed_value != observed.current_value:
             raise ValueError("ATS plan does not bind the exact initially observed value")
-        value, source_sha256 = _resolve_value(
+        value, source_sha256 = resolve_ats_source_reference(
             plan.source_reference,
             source,
             artifacts,

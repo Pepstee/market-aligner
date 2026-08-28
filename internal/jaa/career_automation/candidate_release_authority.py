@@ -4,8 +4,23 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 
 from .application_sanity_review import SanityReviewPackage, package_from_application
+from .application_quality import (
+    ApplicationQualityInput,
+    build_deterministic_preflight_quality_review,
+)
+from .application_quality_contracts import (
+    ApplicationPreflightQualityReview,
+    QualityReviewDisposition,
+)
+from .ats_application_authority import (
+    AtsApplicationAuthority,
+    verify_ats_application_authority,
+)
+from .application_archive import selected_archive_hashes
+from .evidence_matching import canonical_json
 from .browser_executor import ReleaseExecutionAuthority
 from .candidate_release_gate import CandidateAuthorityReleaseGate, WorkableReleaseBinding
 
@@ -15,6 +30,9 @@ class CandidateReleaseExecutionAuthority(ReleaseExecutionAuthority):
     """Bind full candidate-decision requirements without changing the collector."""
 
     vacancy_requirements: tuple[str, ...]
+    ats_application_authority: AtsApplicationAuthority
+    quality_input: ApplicationQualityInput
+    quality_review: ApplicationPreflightQualityReview
     workable_release_binding: WorkableReleaseBinding | None = None
 
     def __post_init__(self) -> None:
@@ -24,7 +42,50 @@ class CandidateReleaseExecutionAuthority(ReleaseExecutionAuthority):
             raise ValueError(
                 "release vacancy requirements differ from candidate gate authority"
             )
+        if self.quality_input.ats_application_authority != self.ats_application_authority:
+            raise ValueError("quality input differs from exact ATS authority")
+        verify_ats_application_authority(
+            self.ats_application_authority,
+            candidate_authority_sha256=(
+                self.quality_input.candidate_authority_sha256
+            ),
+            source=self.source,
+            artifacts=self.artifacts,
+            publication_receipt=self.quality_input.publication_receipt,
+        )
+        if (
+            build_deterministic_preflight_quality_review(self.quality_input)
+            != self.quality_review
+            or self.quality_review.disposition
+            is not QualityReviewDisposition.ACCEPTED
+        ):
+            raise ValueError("candidate release lacks accepted deterministic quality")
         super().__post_init__()
+        selected = selected_archive_hashes(
+            self.archive_receipt,
+            root=self.archive_root,
+            repository_root=self.repository_root,
+        )
+        required = {
+            "assurance.ats_application_authority": hashlib.sha256(
+                (canonical_json(self.ats_application_authority.document()) + "\n").encode()
+            ).hexdigest(),
+            "assurance.ats_inventory": self.ats_application_authority.inventory_sha256,
+            "assurance.ats_answers": self.ats_application_authority.answer_sha256,
+            "assurance.application_quality": hashlib.sha256(
+                (canonical_json(self.quality_review.to_dict()) + "\n").encode()
+            ).hexdigest(),
+        }
+        required.update(
+            {
+                f"assurance.editorial.{row.skill_name.replace('-', '_')}": hashlib.sha256(
+                    (canonical_json(row.to_dict()) + "\n").encode()
+                ).hexdigest()
+                for row in self.quality_input.editorial_skill_reviews
+            }
+        )
+        if any(selected.get(role) != digest for role, digest in required.items()):
+            raise ValueError("candidate release archive lacks exact quality authority")
         if self.ats_provider == "workable":
             binding = self.workable_release_binding
             expected_roles = (
@@ -81,6 +142,19 @@ class CandidateReleaseExecutionAuthority(ReleaseExecutionAuthority):
             questions=self.questions,
             vacancy_requirements=self.vacancy_requirements,
         )
+
+    def verify_employer_facing_receipts(
+        self, *, verified_at: datetime | None = None
+    ) -> None:
+        """Recompute deterministic quality immediately before certified click."""
+        if (
+            build_deterministic_preflight_quality_review(self.quality_input)
+            != self.quality_review
+            or self.quality_review.disposition
+            is not QualityReviewDisposition.ACCEPTED
+        ):
+            raise ValueError("candidate release quality authority no longer verifies")
+        super().verify_employer_facing_receipts(verified_at=verified_at)
 
 
 __all__ = ["CandidateReleaseExecutionAuthority"]

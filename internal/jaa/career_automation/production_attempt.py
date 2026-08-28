@@ -26,6 +26,9 @@ from .application_compiler import (
     VacancyFactAuthority,
 )
 from .application_sanity_review import SanityReviewReceipt
+from .application_quality import ApplicationQualityInput
+from .application_quality_contracts import ApplicationPreflightQualityReview
+from .ats_application_authority import AtsApplicationAuthority
 from .browser_executor import (
     GreenhouseSuccessEvidence,
     validate_greenhouse_success_observation,
@@ -637,6 +640,9 @@ class GreenhouseAttemptRecorder:
             ExternalDocumentAssuranceReceipt,
         ],
         sanity_review_receipt: SanityReviewReceipt,
+        ats_application_authority: AtsApplicationAuthority | None = None,
+        quality_input: ApplicationQualityInput | None = None,
+        quality_review: ApplicationPreflightQualityReview | None = None,
         production_identity: ProductionIdentity,
         attached_roles: Sequence[str] = ("cv", "cover_letter"),
         upload_field_names: Sequence[tuple[str, str]] = (
@@ -668,6 +674,62 @@ class GreenhouseAttemptRecorder:
             raise ValueError("prefill snapshot must be archived before release")
         claims = _approved_fact_authorities(source)
         pypdf_version = importlib.metadata.version("pypdf")
+        quality_values = (
+            ats_application_authority,
+            quality_input,
+            quality_review,
+        )
+        if any(value is not None for value in quality_values) and not all(
+            value is not None for value in quality_values
+        ):
+            raise ValueError("release quality authority must be complete or absent")
+        quality_payloads: tuple[
+            tuple[str, bytes, str, Mapping[str, object]], ...
+        ] = ()
+        if (
+            ats_application_authority is not None
+            and quality_input is not None
+            and quality_review is not None
+        ):
+            quality_payloads = (
+                (
+                    "assurance.ats_application_authority",
+                    _json_bytes(ats_application_authority.document()),
+                    "application/json",
+                    {
+                        "authority_sha256": ats_application_authority.authority_sha256,
+                    },
+                ),
+                (
+                    "assurance.ats_inventory",
+                    ats_application_authority.inventory_bytes,
+                    "application/json",
+                    {},
+                ),
+                (
+                    "assurance.ats_answers",
+                    ats_application_authority.answer_bytes,
+                    "application/json",
+                    {},
+                ),
+                (
+                    "assurance.application_quality",
+                    _json_bytes(quality_review.to_dict()),
+                    "application/json",
+                    {
+                        "reviewer_receipt_sha256": quality_review.reviewer_receipt_sha256,
+                    },
+                ),
+                *(
+                    (
+                        f"assurance.editorial.{receipt.skill_name.replace('-', '_')}",
+                        _json_bytes(receipt.to_dict()),
+                        "application/json",
+                        {"receipt_sha256": receipt.receipt_sha256},
+                    )
+                    for receipt in quality_input.editorial_skill_reviews
+                ),
+            )
         payloads: tuple[
             tuple[str, bytes, str, Mapping[str, object]], ...
         ] = (
@@ -757,6 +819,7 @@ class GreenhouseAttemptRecorder:
                     "model": sanity_review_receipt.model_identity,
                 },
             ),
+            *quality_payloads,
             (
                 "browser.pre_submit_state",
                 canonical_non_secret_form_state(page),

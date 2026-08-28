@@ -21,6 +21,9 @@ from playwright.sync_api import Page
 from .application_archive import ApplicationArchive
 from .application_compiler import ApplicationSource, CandidateContact
 from .application_sanity_review import SanityReviewReceipt
+from .application_quality import ApplicationQualityInput
+from .application_quality_contracts import ApplicationPreflightQualityReview
+from .ats_application_authority import AtsApplicationAuthority
 from .browser_executor import (
     GreenhouseSuccessEvidence,
 )
@@ -484,6 +487,9 @@ class PreparedGreenhouseRelease:
         ExternalDocumentAssuranceReceipt,
     ]
     sanity_review_receipt: SanityReviewReceipt
+    ats_application_authority: AtsApplicationAuthority
+    quality_input: ApplicationQualityInput
+    quality_review: ApplicationPreflightQualityReview
     production_identity: ProductionIdentity
     generation_authority: SinkBoundGenerationAuthority
     attached_roles: tuple[str, ...]
@@ -714,6 +720,9 @@ class GreenhouseProductionRunner:
             artifacts=prepared.artifacts,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             production_identity=prepared.production_identity,
             attached_roles=prepared.attached_roles,
             upload_field_names=prepared.upload_field_names,
@@ -731,6 +740,9 @@ class GreenhouseProductionRunner:
             questions=prepared.questions,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             archive_receipt=archive_receipt,
             archive_root=self.archive.root,
             artifact_root=prepared.artifact_root,
