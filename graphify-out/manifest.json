@@ -4180,8 +4180,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/market_aligner_preparation.py": {
-    "mtime": 1787906899.737619,
-    "ast_hash": "24a4a27a3aec21423d8173f3dde373a3",
+    "mtime": 1787941904.6676207,
+    "ast_hash": "445d1272eb0de4291c93deb3a75f1155",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/migrations.py": {
@@ -4540,8 +4540,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/cv_generation/editorial_composition.py": {
-    "mtime": 1787906899.7477193,
-    "ast_hash": "0ec4f998377f644f6285891670005407",
+    "mtime": 1787941904.6682673,
+    "ast_hash": "95dd2b001fc29f3649e530acf1153cbf",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/cv_generation/service.py": {
@@ -5535,8 +5535,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_cover_letter_editorial_parity.py": {
-    "mtime": 1787906899.7724946,
-    "ast_hash": "0ac305b7aa43f55232702bab34be24ba",
+    "mtime": 1787941904.6688175,
+    "ast_hash": "dc6b75737a77bb26bab7731021a559f0",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_cv_adversarial_rebuild.py": {
@@ -7110,9 +7110,9 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/CURRENT_ARCHITECTURE.md": {
-    "mtime": 1787906899.6305094,
-    "ast_hash": "2b74aac8ec6e53e9eb0e31dbda7dd7a9",
-    "semantic_hash": ""
+    "mtime": 1787942916.9753861,
+    "ast_hash": "bf642c20132ae07d31b844ea9ac44085",
+    "semantic_hash": "bf642c20132ae07d31b844ea9ac44085"
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": {
     "mtime": 1785588628.7911446,
@@ -7398,5 +7398,10 @@
     "mtime": 1787906899.7548301,
     "ast_hash": "c664697eee96fe2bdf2366ac26d64b0a",
     "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/docs/migration/ledger.jsonl": {
+    "mtime": 1787944302.99298,
+    "ast_hash": "",
+    "semantic_hash": "1befacd98c374f22a75cd9fdf02d9d80"
   }
 }

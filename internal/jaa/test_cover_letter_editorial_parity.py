@@ -36,6 +36,7 @@ from cv_generation.editorial_composition import (
     build_cover_letter_editorial_request,
     cover_letter_humanizer_request_sha256,
     run_cover_letter_composition_runtime,
+    run_editorial_composition_runtime,
     validate_cover_letter_editorial_draft,
 )
 from llm.client import Backend, LLMClient, LLMResponse
@@ -249,6 +250,36 @@ class _Adapter:
 
     def open_fresh_session(self, *, invocation_id):
         return _Session(self, invocation_id)
+
+
+def test_cv_runtime_rejects_cover_request_before_provider_availability() -> None:
+    _, request, _, writer, final = _fixture()
+
+    class _ProbeAdapter(_Adapter):
+        availability_calls = 0
+
+        def available(self):
+            self.availability_calls += 1
+            return True
+
+    writer_adapter = _ProbeAdapter("cover_letter_writer", "writer", writer)
+    humanizer_adapter = _ProbeAdapter(
+        "cover_letter_humanizer", "humanizer", final
+    )
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+        document_kind="cover_letter",
+    )
+
+    with pytest.raises(EditorialCompositionError, match="exact CV request"):
+        run_editorial_composition_runtime(request, runtime=runtime)
+
+    assert writer_adapter.availability_calls == 0
+    assert humanizer_adapter.availability_calls == 0
+    assert not writer_adapter.calls
+    assert not humanizer_adapter.calls
 
 
 def test_cover_runtime_rejects_forged_receipt_before_provider_availability() -> None:

@@ -43,6 +43,7 @@ from cv_generation.editorial_composition import (
     EditorialCompositionRuntime,
     build_cover_letter_editorial_request,
     build_editorial_request,
+    run_cover_letter_composition_runtime,
     run_editorial_composition_runtime,
 )
 from .handoff_admission import (
@@ -555,7 +556,7 @@ def prepare_admitted_market_application_from_authorities(
             cover_humanized_draft,
             cover_writer_evidence,
             cover_humanizer_evidence,
-        ) = run_editorial_composition_runtime(
+        ) = run_cover_letter_composition_runtime(
             cover_letter_request,
             runtime=cover_letter_editorial_runtime,
             materialization_receipt=receipt,
