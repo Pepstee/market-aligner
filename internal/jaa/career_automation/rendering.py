@@ -120,6 +120,46 @@ def _join_section(
     return "\n".join(values)
 
 
+def _join_letter_paragraph(
+    source: ApplicationSource,
+    sentence_ids: tuple[str, ...],
+    style_slot_ids: tuple[str, ...],
+) -> str:
+    facts = {row.sentence_id: row.text for row in source.facts}
+    slots = {row.slot_id: row.text for row in source.style_slots}
+    return " ".join(
+        (
+            *(slots[slot_id] for slot_id in style_slot_ids),
+            *(facts[sentence_id] for sentence_id in sentence_ids),
+        )
+    )
+
+
+def _letter_paragraphs(source: ApplicationSource) -> tuple[str, ...]:
+    paragraphs = tuple(
+        _join_letter_paragraph(
+            source,
+            section.sentence_ids,
+            section.style_slot_ids,
+        )
+        for section in source.letter_sections
+    )
+    if not paragraphs or not paragraphs[0].casefold().startswith("dear "):
+        paragraphs = ("Dear Hiring Manager,", *paragraphs)
+    closing = paragraphs[-1]
+    if closing.casefold().startswith(("kind regards", "sincerely")):
+        if source.contact.full_name not in closing.splitlines():
+            signoff = (
+                "Kind regards,"
+                if closing.casefold().startswith("kind regards")
+                else "Sincerely,"
+            )
+            paragraphs = (*paragraphs[:-1], f"{signoff}\n{source.contact.full_name}")
+    else:
+        paragraphs = (*paragraphs, f"Kind regards,\n{source.contact.full_name}")
+    return paragraphs
+
+
 def render_editable_text(source: ApplicationSource) -> EditableArtifacts:
     """Render plain, single-column editable sources with stable ordering."""
     verify_application_source(source)
@@ -168,16 +208,7 @@ def render_editable_text(source: ApplicationSource) -> EditableArtifacts:
         "\n\n".join(
             (
                 letter_header,
-                *(
-                    _join_section(
-                        source,
-                        section.heading,
-                        section.sentence_ids,
-                        section.style_slot_ids,
-                        show_heading=False,
-                    )
-                    for section in source.letter_sections
-                ),
+                *_letter_paragraphs(source),
             )
         )
         + "\n"
