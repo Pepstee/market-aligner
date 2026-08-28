@@ -926,7 +926,13 @@ def _repository_revision(repository: Path) -> str:
                                   check=True, capture_output=True, text=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise AdoptionError("canonical repository revision is unavailable") from exc
-    if Path(top).resolve() != repository.resolve() or len(revision) != 40:
+    top_level = Path(top).resolve()
+    repository_root = repository.resolve()
+    admitted_roots = {
+        top_level,
+        top_level / "internal" / "jaa",
+    }
+    if repository_root not in admitted_roots or len(revision) != 40:
         raise AdoptionError("repository is not the canonical worktree root")
     return revision
 
@@ -1351,7 +1357,9 @@ def adopt(source_root: str | Path, data_root: str | Path, *, repository: str | P
         temporary = Path(temporary_name)
         try:
             with os.fdopen(fd, "wb") as stream:
-                stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.link(temporary, receipt_path)
         finally:
             temporary.unlink(missing_ok=True)
