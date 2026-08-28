@@ -23,6 +23,7 @@ from market_aligner.domain.contracts import (
     write_jsonl,
 )
 from market_aligner.config_loader import load_config
+from market_aligner.config import owner_private_umask
 from market_aligner.state.importers import iter_raw_cache_roots
 
 
@@ -1119,7 +1120,7 @@ class JobDatabase:
             else self.path.parent.parent.absolute()
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self.connect()) as conn, conn:
+        with owner_private_umask(), closing(self.connect()) as conn, conn:
             conn.executescript(SCHEMA)
             self._migrate_vacancy_refresh_schema(conn)
             self._validate_vacancy_refresh_rows(conn)
@@ -1398,7 +1399,8 @@ class JobDatabase:
         )
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30)
+        with owner_private_umask():
+            conn = sqlite3.connect(self.path, timeout=30)
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
 

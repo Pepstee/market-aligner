@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from market_aligner.assessment.scoring import ScoreResult
+from market_aligner.config import owner_private_umask
 from market_aligner.profiler.schema import validate_profile_id
 from market_aligner.state.vacancies import (
     JobDatabase,
@@ -232,7 +233,8 @@ class AssessmentStore:
             connection.executescript(_REFRESH_QUEUE_IMMUTABILITY_TRIGGER)
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
+        with owner_private_umask():
+            connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
@@ -240,28 +242,30 @@ class AssessmentStore:
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        with owner_private_umask():
+            connection = self.connect()
+            try:
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        with owner_private_umask():
+            connection = self.connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     def upsert_score(
         self,

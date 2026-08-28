@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 
 DATA_HOME_ENV = "MARKET_ALIGNER_DATA_HOME"
+_OWNER_PRIVATE_LOCK = threading.RLock()
+
+
+@contextmanager
+def owner_private_umask() -> Iterator[None]:
+    """Serialize cooperating creators while applying an owner-private umask."""
+
+    with _OWNER_PRIVATE_LOCK:
+        previous = os.umask(0o077)
+        try:
+            yield
+        finally:
+            os.umask(previous)
 
 
 def data_home(override: str | Path | None = None) -> Path:
@@ -51,15 +67,16 @@ class ProductPaths:
         )
 
     def ensure(self) -> "ProductPaths":
-        for path in (
-            self.root,
-            self.profiles,
-            self.state,
-            self.raw,
-            self.cache,
-            self.outputs,
-            self.credentials,
-        ):
-            path.mkdir(parents=True, exist_ok=True)
-            path.chmod(stat.S_IRWXU)
+        with owner_private_umask():
+            for path in (
+                self.root,
+                self.profiles,
+                self.state,
+                self.raw,
+                self.cache,
+                self.outputs,
+                self.credentials,
+            ):
+                path.mkdir(parents=True, exist_ok=True)
+                path.chmod(stat.S_IRWXU)
         return self
