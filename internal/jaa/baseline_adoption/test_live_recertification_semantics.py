@@ -222,8 +222,14 @@ def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(tmp_pa
         observed = datetime.fromisoformat(content["observed_at_utc"].replace("Z", "+00:00"))
         assert observed.tzinfo is not None and observed.utcoffset() == timezone.utc.utcoffset(observed)
         assert content["observed_at_utc"].endswith("Z")
+        # JAA is an internal Market Aligner component.  Its certification digest
+        # remains scoped to that component tree, while the checkout containing it
+        # is always the canonical Market Aligner repository.
         assert content["source_content_revision"] == _independent_source_revision(
-            (tmp_path / "evidence").parent / "certification-repository"
+            (tmp_path / "evidence").parent
+            / "certification-repository"
+            / "internal"
+            / "jaa"
         )
         assert set(content["databases"]) == {"raw_jobs", "career_pipeline"}
         assert content["isolation"] == {
