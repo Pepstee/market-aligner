@@ -16,6 +16,7 @@ from career_automation.browser_executor import ReleaseExecutionAuthority
 from career_automation.candidate_release_authority import (
     CandidateReleaseExecutionAuthority,
 )
+from career_automation.application_quality_contracts import QualityReviewDisposition
 from career_automation.candidate_application_factory import (
     materialize_candidate_application_source,
 )
@@ -123,14 +124,50 @@ def test_candidate_execution_authority_requires_exact_workable_upload_mapping(
     monkeypatch.setattr(
         ReleaseExecutionAuthority, "__post_init__", lambda _self: None
     )
+    monkeypatch.setattr(
+        authority_module, "verify_ats_application_authority", lambda *_args, **_kwargs: None
+    )
     binding = _workable_binding()
+    ats_authority = SimpleNamespace(
+        document=lambda: {},
+        inventory_sha256="a" * 64,
+        answer_sha256="b" * 64,
+    )
+    quality_review = SimpleNamespace(
+        disposition=QualityReviewDisposition.ACCEPTED,
+        to_dict=lambda: {},
+    )
+    quality_input = SimpleNamespace(
+        ats_application_authority=ats_authority,
+        candidate_authority_sha256="c" * 64,
+        publication_receipt=object(),
+        editorial_skill_reviews=(),
+    )
+    monkeypatch.setattr(
+        authority_module,
+        "build_deterministic_preflight_quality_review",
+        lambda _quality_input: quality_review,
+    )
+    selected = {
+        "assurance.ats_application_authority": hashlib.sha256(b"{}\n").hexdigest(),
+        "assurance.ats_inventory": ats_authority.inventory_sha256,
+        "assurance.ats_answers": ats_authority.answer_sha256,
+        "assurance.application_quality": hashlib.sha256(b"{}\n").hexdigest(),
+    }
+    monkeypatch.setattr(
+        authority_module, "selected_archive_hashes", lambda *_args, **_kwargs: selected
+    )
     authority = object.__new__(CandidateReleaseExecutionAuthority)
     values = {
         "gate": FakeGate(),
         "vacancy_requirements": ("requirement",),
         "ats_provider": "workable",
+        "ats_application_authority": ats_authority,
+        "quality_input": quality_input,
+        "quality_review": quality_review,
         "workable_release_binding": binding,
         "application_url": binding.application_url,
+        "source": object(),
         "artifacts": SimpleNamespace(
             cv_pdf=SimpleNamespace(pdf_sha256=binding.cv_pdf_sha256),
             cover_letter_pdf=SimpleNamespace(
@@ -145,6 +182,9 @@ def test_candidate_execution_authority_requires_exact_workable_upload_mapping(
         ),
         "attached_roles": ("cv",),
         "upload_field_names": (("cv", "resume"),),
+        "archive_receipt": object(),
+        "archive_root": Path("/synthetic/archive"),
+        "repository_root": Path("/synthetic/repository"),
     }
     for name, value in values.items():
         object.__setattr__(authority, name, value)

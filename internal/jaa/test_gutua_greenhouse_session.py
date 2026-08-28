@@ -40,17 +40,34 @@ from career_automation.production_ats_executor import ProductionATSBoundaryError
 from career_automation.testing_sanity_review import fixture_pass_receipt
 
 
-PRODUCTION_DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
+PRODUCTION_ARCHIVE_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / ".market-aligner-data"
+    / "authority-inputs"
+)
+PRODUCTION_DISCOVERY_PATH = PRODUCTION_ARCHIVE_ROOT / "objects" / "39" / (
     "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
 )
-PRODUCTION_ARCHIVE_ROOT = Path("/home/gutua/software-factory/application-artifacts")
 TEST_CONTACT_PRIVATE_KEY = Ed25519PrivateKey.generate()
 TEST_CONTACT_PUBLIC_RAW = TEST_CONTACT_PRIVATE_KEY.public_key().public_bytes(
     encoding=serialization.Encoding.Raw,
     format=serialization.PublicFormat.Raw,
 )
 TEST_CONTACT_PUBLIC_SHA256 = hashlib.sha256(TEST_CONTACT_PUBLIC_RAW).hexdigest()
+
+
+def _require_private_candidate_fixture() -> None:
+    authority = (
+        PRODUCTION_ARCHIVE_ROOT
+        / "candidate-authorities"
+        / "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
+    )
+    if not PRODUCTION_DISCOVERY_PATH.is_file() or not authority.is_file():
+        pytest.skip(
+            "requires the exact private Gigabyte candidate-authority and "
+            "discovery artifacts; synthetic substitution would not test the "
+            "certified binding"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -364,6 +381,7 @@ def test_session_loads_materialized_receipts_and_ignores_legacy_fit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     discovery = json.loads(PRODUCTION_DISCOVERY_PATH.read_bytes())
     for observation in discovery["observations"]:
         for name in ("body_sha256", "network_evidence_sha256"):
@@ -421,6 +439,7 @@ def test_session_rejects_stale_duplicate_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     authority = materialize_candidate_authority(
         discovery_path=PRODUCTION_DISCOVERY_PATH,
         archive_root=tmp_path,
@@ -442,6 +461,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     authority = json.loads(
         (
             PRODUCTION_ARCHIVE_ROOT

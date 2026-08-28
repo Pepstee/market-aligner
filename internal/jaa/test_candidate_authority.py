@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from career_automation.candidate_authority import (
+    APPROVED_EVIDENCE_PATH,
     APPROVED_CANDIDATE_SOURCE_HASHES,
     APPROVED_EVIDENCE_IDS,
     TYPED_EVIDENCE_SCHEMA,
@@ -18,10 +19,31 @@ from career_automation.candidate_authority import (
 )
 
 
-PRODUCTION_DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
-    "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
+PRODUCTION_DISCOVERY_PATH = (
+    Path(__file__).resolve().parents[2]
+    / ".market-aligner-data"
+    / "authority-inputs"
+    / "objects"
+    / "39"
+    / "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
 )
+
+
+def _require_complete_private_authority_inputs() -> None:
+    sources = CandidateAuthoritySources()
+    required = (
+        PRODUCTION_DISCOVERY_PATH,
+        sources.availability,
+        sources.approved_evidence,
+        sources.operator_answers,
+        sources.negative_claim_suppressors,
+        sources.jobs_database,
+    )
+    if not all(path.is_file() for path in required):
+        pytest.skip(
+            "requires the exact private discovery and candidate source set; "
+            "synthetic substitution would not test certified materialization"
+        )
 
 
 def test_named_aws_service_and_deployment_require_exact_evidence() -> None:
@@ -179,12 +201,11 @@ def test_approved_atlas_covers_exactly_the_eighteen_statements(tmp_path):
     # the pinned-hash gate.
     from career_automation.candidate_authority import (
         _APPROVED_EVIDENCE_ATLAS,
-        _source_bytes,
         _approved_evidence,
     )
 
     evidence = _approved_evidence(
-        _source_bytes(CandidateAuthoritySources())["approved_evidence"]
+        APPROVED_EVIDENCE_PATH.read_bytes()
     )
     statement_hashes = {
         hashlib.sha256(str(row["statement"]).encode()).hexdigest() for row in evidence
@@ -241,11 +262,10 @@ _REAL_ATLAS_REQUIREMENT_BATTERY = [
 def test_real_atlas_requirement_battery(requirement, expected):
     from career_automation.candidate_authority import (
         _approved_evidence,
-        _source_bytes,
     )
 
     evidence = _approved_evidence(
-        _source_bytes(CandidateAuthoritySources())["approved_evidence"]
+        APPROVED_EVIDENCE_PATH.read_bytes()
     )
     assert _matched_evidence(requirement, evidence) == expected
 
@@ -327,6 +347,7 @@ def test_entailment_positive_controls(requirement, statement):
 def test_materializer_builds_content_addressed_candidate_authority(
     tmp_path: Path,
 ) -> None:
+    _require_complete_private_authority_inputs()
     result = materialize_candidate_authority(
         discovery_path=PRODUCTION_DISCOVERY_PATH,
         archive_root=tmp_path,
@@ -389,6 +410,7 @@ def _write_canonical_discovery(path: Path, discovery: dict) -> Path:
 def test_materializer_accepts_terminally_observed_cohort_shrinkage(
     tmp_path: Path,
 ) -> None:
+    _require_complete_private_authority_inputs()
     discovery = deepcopy(json.loads(PRODUCTION_DISCOVERY_PATH.read_bytes()))
     removed = discovery["live_pending_eligibility"].pop()
     observation = next(
@@ -421,6 +443,7 @@ def test_materializer_accepts_terminally_observed_cohort_shrinkage(
 
 
 def test_materializer_rejects_silent_cohort_shrinkage(tmp_path: Path) -> None:
+    _require_complete_private_authority_inputs()
     discovery = deepcopy(json.loads(PRODUCTION_DISCOVERY_PATH.read_bytes()))
     discovery["live_pending_eligibility"].pop()
     discovery_path = _write_canonical_discovery(
@@ -436,6 +459,7 @@ def test_materializer_rejects_silent_cohort_shrinkage(tmp_path: Path) -> None:
 
 
 def test_materializer_rejects_unknown_pending_vacancy(tmp_path: Path) -> None:
+    _require_complete_private_authority_inputs()
     discovery = deepcopy(json.loads(PRODUCTION_DISCOVERY_PATH.read_bytes()))
     unknown = deepcopy(discovery["live_pending_eligibility"][0])
     unknown["job_key"] = "greenhouse:unknown:999999"
@@ -453,6 +477,7 @@ def test_materializer_rejects_unknown_pending_vacancy(tmp_path: Path) -> None:
 
 
 def test_materializer_is_deterministic_and_create_only(tmp_path: Path) -> None:
+    _require_complete_private_authority_inputs()
     first = materialize_candidate_authority(
         discovery_path=PRODUCTION_DISCOVERY_PATH,
         archive_root=tmp_path,
@@ -477,6 +502,7 @@ def test_materializer_is_deterministic_and_create_only(tmp_path: Path) -> None:
 
 
 def test_materializer_rejects_mutated_candidate_source(tmp_path: Path) -> None:
+    _require_complete_private_authority_inputs()
     sources = CandidateAuthoritySources()
     mutated = tmp_path / "approved-evidence.json"
     mutated.write_bytes(sources.approved_evidence.read_bytes() + b"\n")
@@ -493,6 +519,7 @@ def test_materializer_rejects_mutated_candidate_source(tmp_path: Path) -> None:
 
 
 def test_materializer_rejects_symlinked_archive_namespace(tmp_path: Path) -> None:
+    _require_complete_private_authority_inputs()
     archive = tmp_path / "archive"
     external = tmp_path / "external"
     archive.mkdir()
@@ -509,6 +536,7 @@ def test_materializer_rejects_symlinked_archive_namespace(tmp_path: Path) -> Non
 
 
 def test_materializer_discards_legacy_numeric_fit(tmp_path: Path) -> None:
+    _require_complete_private_authority_inputs()
     result = materialize_candidate_authority(
         discovery_path=PRODUCTION_DISCOVERY_PATH,
         archive_root=tmp_path,
