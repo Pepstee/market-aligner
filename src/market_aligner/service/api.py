@@ -445,6 +445,96 @@ class MarketAlignerService:
     def gate(self, profile_id: str, job_key: str) -> OpportunityDecision:
         return apply_gate(self.assessments, profile_id, job_key)
 
+    @staticmethod
+    def prepare_internal_jaa(
+        *,
+        eligibility_receipt: bytes,
+        evidence_reference_sha256: str,
+        contact_reference_sha256: str,
+        forensic_root: Path,
+        attempt_id: str,
+        application_id: str,
+        ats_name: str = "fixture",
+        backend=None,
+    ) -> dict[str, object]:
+        """Run only the faceless, zero-interaction Market-to-JAA corridor."""
+        from market_aligner.applications.jaa import capture_or_recover, prepare_from_market
+
+        source, sanity = prepare_from_market(
+            eligibility_receipt=eligibility_receipt,
+            evidence_reference_sha256=evidence_reference_sha256,
+            contact_reference_sha256=contact_reference_sha256,
+        )
+        forensic = capture_or_recover(
+            root=forensic_root,
+            attempt_id=attempt_id,
+            application_id=application_id,
+            source=source,
+            sanity=sanity,
+            ats_name=ats_name,
+            backend=backend,
+        )
+        return {
+            "schema_version": "market-aligner.internal-jaa-result.v1",
+            "status": forensic.outcome,
+            "source": source.document(),
+            "sanity_receipt_sha256": sanity.receipt_sha256,
+            "forensic_receipt": forensic.document(),
+            "identity_authority": False,
+            "release_authority": False,
+            "submission_authority": False,
+        }
+
+    @staticmethod
+    def process_one(
+        data_home: Path,
+        envelope_name: str,
+        *,
+        supplied_operation_id: str,
+        supplied_config_path: str,
+        supplied_profile_id: str,
+        supplied_job_key: str,
+        supplied_track: str,
+    ) -> bytes:
+        """Run FIT-001 through the no-create retained admission seam."""
+        from market_aligner.processing import process_one
+
+        return process_one(
+            data_home,
+            envelope_name,
+            supplied_operation_id=supplied_operation_id,
+            supplied_config_path=supplied_config_path,
+            supplied_profile_id=supplied_profile_id,
+            supplied_job_key=supplied_job_key,
+            supplied_track=supplied_track,
+        )
+
+    @staticmethod
+    def eligibility_one(
+        data_home: Path,
+        envelope_name: str,
+        *,
+        supplied_operation_id: str,
+        supplied_fit_operation_id: str,
+        supplied_config_path: str,
+        supplied_profile_id: str,
+        supplied_job_key: str,
+        supplied_track: str,
+    ) -> bytes:
+        """Run ELIGIBILITY-001 without constructing the mutating service."""
+        from market_aligner.processing import eligibility_one
+
+        return eligibility_one(
+            data_home,
+            envelope_name,
+            supplied_operation_id=supplied_operation_id,
+            supplied_fit_operation_id=supplied_fit_operation_id,
+            supplied_config_path=supplied_config_path,
+            supplied_profile_id=supplied_profile_id,
+            supplied_job_key=supplied_job_key,
+            supplied_track=supplied_track,
+        )
+
     def promote_processing(
         self,
         *,

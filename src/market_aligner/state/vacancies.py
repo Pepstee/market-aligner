@@ -28,6 +28,18 @@ from market_aligner.state.importers import iter_raw_cache_roots
 
 
 LEGACY_PROCESSING_CONFIG_SHA256 = "0" * 64
+POSTING_READ_COLUMNS = (
+    "key",
+    "board",
+    "job_id",
+    "url",
+    "posted_at",
+    "fetched_at",
+    "raw_text",
+    "raw_json",
+    "content_hash",
+    "fetch_status",
+)
 
 
 def _reject_nonfinite_json(token: str) -> None:
@@ -1109,6 +1121,72 @@ def _insert_migrated_refresh(
             created_at, updated_at,
         ),
     )
+
+
+class ProjectionConflict(RuntimeError):
+    """An immutable projection exists with non-exact process-owned fields."""
+
+def cas_normalized_job(
+    connection: sqlite3.Connection,
+    *,
+    key: str,
+    normalized_json: str,
+    normalized_at: str,
+) -> str:
+    """Insert-absent/reuse-exact CAS on the caller's transaction.
+
+    Returns ``"inserted"`` when the key is absent (explicit ``normalized_at``
+    supplied — never a table default) and ``"reused"`` only when the stored
+    ``normalized_json`` is byte-exact. Any other existing row raises
+    :class:`ProjectionConflict`. There is no UPDATE path.
+    """
+    schema = "vacancy.normalised_jobs"
+    row = connection.execute(
+        f"SELECT normalized_json FROM {schema} WHERE key=?", (key,)
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            f"INSERT INTO {schema}(key,normalized_json,normalized_at) VALUES(?,?,?)",
+            (key, normalized_json, normalized_at),
+        )
+        return "inserted"
+    if row[0] != normalized_json:
+        raise ProjectionConflict(
+            "normalised_jobs projection differs from the accepted vacancy"
+        )
+    return "reused"
+
+def read_normalized_job(
+    connection: sqlite3.Connection, *, key: str
+) -> tuple[str, str] | None:
+    """Read ``(normalized_json, normalized_at)`` for one key, or None."""
+    row = connection.execute(
+        "SELECT normalized_json,normalized_at FROM vacancy.normalised_jobs WHERE key=?",
+        (key,),
+    ).fetchone()
+    return None if row is None else (row[0], row[1])
+
+def read_posting(
+    connection: sqlite3.Connection, *, key: str, schema: str = "main"
+) -> sqlite3.Row | None:
+    """Read the exact current posting row for one key, or None.
+
+    ``schema`` defaults to the literal ``"main"`` and may only ever be
+    ``"main"`` or ``"vacancy"``, so the statement can never silently
+    resolve an unqualified name against a different attached database.
+    The projection is the exact explicit column list in
+    :data:`POSTING_READ_COLUMNS`, and ``sqlite3.Row`` is set on the
+    cursor only, never on the connection's row factory.
+    """
+
+    if schema not in ("main", "vacancy"):
+        raise ValueError("schema must be the literal 'main' or 'vacancy'")
+    columns = ",".join(POSTING_READ_COLUMNS)
+    cursor = connection.execute(
+        f"SELECT {columns} FROM {schema}.postings WHERE key=?", (key,)
+    )
+    cursor.row_factory = sqlite3.Row
+    return cursor.fetchone()
 
 
 class JobDatabase:

@@ -181,12 +181,12 @@ class ServiceTests(unittest.TestCase):
                 os.umask(previous)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
-    def test_process_one_cli_requires_exact_job_key(self) -> None:
+    def test_process_job_cli_requires_exact_job_key(self) -> None:
         parser = build_parser()
         with self.assertRaises(SystemExit):
             parser.parse_args(
                 [
-                    "process-one",
+                    "process-job",
                     "--config", "config.yaml",
                     "--profile-id", "prf_fixture",
                     "--track", "automation",
@@ -196,7 +196,7 @@ class ServiceTests(unittest.TestCase):
             )
         parsed = parser.parse_args(
             [
-                "process-one",
+                "process-job",
                 "--config", "config.yaml",
                 "--profile-id", "prf_fixture",
                 "--track", "automation",
