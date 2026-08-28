@@ -102,7 +102,7 @@ def _receipt(runtime_root: Path) -> Path:
 
 
 def _assert_v2_evidence_bindings(
-    evidence: dict[str, object], receipt_document: dict[str, object], repository: Path,
+    evidence: dict[str, object], receipt_document: dict[str, object],
 ) -> None:
     """Independently compare every deterministic v2 publication binding."""
     content = receipt_document["content"]
@@ -118,17 +118,21 @@ def _assert_v2_evidence_bindings(
     assert revision["certified_revision"] == content["repository"]["revision"]
     assert revision["certification"] == content["certification"]
     assert evidence["runtime"]["observed"] == content["runtime"]
+    # These are capture-time dependency observations.  Comparing them with the
+    # current checkout would falsely promote an old lockfile into current proof.
     expected_dependencies = {
-        relative: {
-            "path": relative,
-            "role": role,
-            "bytes": (repository / relative).stat().st_size,
-            "sha256": hashlib.sha256((repository / relative).read_bytes()).hexdigest(),
-        }
-        for relative, role in (
-            ("requirements-test.lock", "fully-pinned-lock"),
-            ("requirements-scrapling-full.txt", "pinned-runtime-input"),
-        )
+        "requirements-test.lock": {
+            "path": "requirements-test.lock",
+            "role": "fully-pinned-lock",
+            "bytes": 369,
+            "sha256": "dd4d894bc89e6ed2ec3006f8e429e0d37eb74146e2a5c9b5461d47cb69f2b6ed",
+        },
+        "requirements-scrapling-full.txt": {
+            "path": "requirements-scrapling-full.txt",
+            "role": "pinned-runtime-input",
+            "bytes": 262,
+            "sha256": "bccc6c760d37c8467173d198efe26bbbb0566584fdeefd98079b483bbd903cd6",
+        },
     }
     assert {item["path"]: item for item in evidence["dependency_records"]} \
         == expected_dependencies
@@ -178,7 +182,7 @@ def test_independent_checks_reject_every_v2_evidence_binding_mismatch(mismatch: 
         evidence["revision_binding"]["certification"]["inputs_sha256"] = "0" * 64
 
     with pytest.raises(AssertionError):
-        _assert_v2_evidence_bindings(evidence, receipt_document, ROOT)
+        _assert_v2_evidence_bindings(evidence, receipt_document)
 
 
 def _public(
@@ -227,7 +231,7 @@ def _assert_no_sidecars_or_temporaries(root: Path) -> None:
     assert not offenders
 
 
-def test_tracked_online_snapshot_evidence_matches_frozen_receipt_and_public_commands(
+def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime_root()
@@ -259,33 +263,12 @@ def test_tracked_online_snapshot_evidence_matches_frozen_receipt_and_public_comm
         "--repository", str(repository),
         cwd=repository,
     )
-    assert review_result.returncode == 0, review_result.stderr
-    review = json.loads(review_result.stdout)
-    assert review["status"] == "certified"
-    assert review["receipt_provenance"]["content_sha256"] == receipt_document["content_sha256"]
-    assert review["receipt_provenance"]["contract"] == \
-        "jaa-00-source-revision-binding/v1"
-    assert review["receipt_provenance"]["adoption_revision_is_ancestor"] is True
-    assert review["canonical_repository"]["adoption_revision"] == content["repository"]["revision"]
-    assert review["database_reconciliation"] == reconciliation
-    assert review["preserved_originals_and_rollback"] == manifest
-
-    inventory = review["current_review"]["content_inventory"]
-    certified_inventory = review["secret_free_inventory"]
-    assert inventory
-    assert all(certified_inventory[key] == value for key, value in inventory.items())
-    runtime_prerequisites = review["runtime_prerequisites"]
-    assert runtime_prerequisites["result"] == "ok"
-    assert runtime_prerequisites["observed"] == review["current_review"]["runtime"]
-    assert set(runtime_prerequisites["observed"]["dependencies"]) == {
-        "PyYAML", "requests", "openpyxl", "pypdf"
-    }
-    assert review["pre_adoption_test_observation"] == {
-        "label": "pre-adoption career-control observation",
-        "observed_on": "2026-07-20",
-        "passed": 65,
-        "classification": "historical-observation-not-current-suite-total",
-    }
+    # The frozen databases and their content-addressed receipt remain valid
+    # historical evidence.  Their pre-integration repository revision is not in
+    # the canonical Market Aligner ancestry, however, so it must never be
+    # promoted to a current source certification.
+    assert review_result.returncode == 2
+    assert "receipt repository ancestry proof is unavailable" in review_result.stderr
 
     assert evidence["evidence"] == "JAA-00:first-adopted-frozen-baseline"
     assert evidence["receipt"] == {
@@ -297,7 +280,7 @@ def test_tracked_online_snapshot_evidence_matches_frozen_receipt_and_public_comm
         "label": content["repository"]["label"],
         "revision": content["repository"]["revision"],
     }
-    _assert_v2_evidence_bindings(evidence, receipt_document, repository)
+    _assert_v2_evidence_bindings(evidence, receipt_document)
 
     expected_reconciliation = evidence["reconciliation"]
     assert reconciliation["status"] == expected_reconciliation["result"] == "ok"
