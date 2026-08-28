@@ -196,6 +196,7 @@ def _collect_command(args: argparse.Namespace) -> int:
         once=bool(args.once),
         hours=float(args.hours or 0),
         poll_minutes=float(args.poll_minutes),
+        operation_id=args.operation_id,
         log=lambda message: print(message, file=sys.stderr),
     )
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
@@ -476,6 +477,11 @@ def build_parser() -> argparse.ArgumentParser:
     duration.add_argument("--once", action="store_true")
     duration.add_argument("--hours", type=float)
     collect.add_argument("--poll-minutes", type=float, default=15.0)
+    collect.add_argument(
+        "--operation-id",
+        required=True,
+        help="Stable opaque ID reused only to recover/replay this exact collection.",
+    )
     _add_data_home(collect)
     collect.set_defaults(handler=_collect_command)
 

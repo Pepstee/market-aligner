@@ -962,11 +962,17 @@ class CollectionTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            now = lambda: datetime(2026, 8, 20, tzinfo=timezone.utc)
+            def now() -> datetime:
+                return datetime(2026, 8, 20, tzinfo=timezone.utc)
             service = CollectionService(root, collector_factory=collector_factory, now=now)
 
             first = service.collect(
-                config, once=True, hours=0, poll_minutes=1, log=lambda _message: None
+                config,
+                once=True,
+                hours=0,
+                poll_minutes=1,
+                operation_id="collect-fixture-0001",
+                log=lambda _message: None,
             )
             self.assertEqual(
                 {"seen": 2, "new": 2, "fetched": 1, "errors": 1}, first["totals"]
@@ -976,7 +982,12 @@ class CollectionTests(unittest.TestCase):
             self.assertTrue(Path(first["receipt_path"]).is_file())
 
             second = service.collect(
-                config, once=True, hours=0, poll_minutes=1, log=lambda _message: None
+                config,
+                once=True,
+                hours=0,
+                poll_minutes=1,
+                operation_id="collect-fixture-0002",
+                log=lambda _message: None,
             )
             self.assertEqual(
                 {"seen": 2, "new": 0, "fetched": 1, "errors": 0}, second["totals"]
@@ -984,6 +995,18 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(first["config_sha256"], second["config_sha256"])
             self.assertEqual(first["source_sha256"], second["source_sha256"])
             self.assertNotEqual(first["state_sha256"], second["state_sha256"])
+            attempts_before_replay = dict(attempts)
+            replay = service.collect(
+                config,
+                once=True,
+                hours=0,
+                poll_minutes=1,
+                operation_id="collect-fixture-0002",
+                log=lambda _message: None,
+            )
+            self.assertTrue(replay["replayed"])
+            self.assertEqual("completed", replay["disposition"])
+            self.assertEqual(attempts_before_replay, attempts)
             database = JobDatabase(root / "state" / "vacancies.sqlite3")
             self.assertEqual(2, database.stats()["fetched"])
             stored = json.loads(Path(second["receipt_path"]).read_text(encoding="utf-8"))
@@ -1762,7 +1785,16 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["collect", "--config", "collect.yaml"])
         parsed = parser.parse_args(
-            ["collect", "--config", "collect.yaml", "--once", "--poll-minutes", "2"]
+            [
+                "collect",
+                "--config",
+                "collect.yaml",
+                "--once",
+                "--poll-minutes",
+                "2",
+                "--operation-id",
+                "collect-fixture-cli",
+            ]
         )
         self.assertTrue(parsed.once)
         self.assertIsNone(parsed.hours)
@@ -1797,15 +1829,18 @@ class CollectionTests(unittest.TestCase):
             service = CollectionService(root)
             with self.assertRaisesRegex(ValueError, "exactly one"):
                 service.collect(
-                    config, once=False, hours=0, poll_minutes=1, log=lambda _message: None
+                    config, once=False, hours=0, poll_minutes=1,
+                    operation_id="collect-invalid-0001", log=lambda _message: None
                 )
             with self.assertRaisesRegex(ValueError, r"\(0,24\]"):
                 service.collect(
-                    config, once=False, hours=25, poll_minutes=1, log=lambda _message: None
+                    config, once=False, hours=25, poll_minutes=1,
+                    operation_id="collect-invalid-0002", log=lambda _message: None
                 )
             with self.assertRaisesRegex(ValueError, "external data home"):
                 service.collect(
-                    config, once=True, hours=0, poll_minutes=1, log=lambda _message: None
+                    config, once=True, hours=0, poll_minutes=1,
+                    operation_id="collect-invalid-0003", log=lambda _message: None
                 )
 
     def test_collect_cli_emits_one_machine_readable_receipt(self) -> None:
@@ -1826,6 +1861,8 @@ class CollectionTests(unittest.TestCase):
                         "--once",
                         "--poll-minutes",
                         "3",
+                        "--operation-id",
+                        "collect-fixture-cli-run",
                         "--data-home",
                         "/tmp/external-market-data",
                     ]

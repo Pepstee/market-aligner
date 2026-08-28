@@ -8,8 +8,6 @@ non-release protected outbox bundle.  It never calls a model or a provider.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
 import os
@@ -32,7 +30,6 @@ from market_aligner.applications.producer import (
 )
 from market_aligner.assessment.scoring import ScoringParams
 from market_aligner.research.models import (
-    RESEARCH_ARCHIVE_ROOT_POLICY_SHA256,
     ClaimSupport,
     ResearchClaim,
     ResearchDossier,
@@ -45,6 +42,7 @@ from market_aligner.research.store import (
 )
 from market_aligner.service.api import MarketAlignerService
 from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
+from market_aligner.state.atomic_publish import publish_noreplace
 
 PRODUCTION_HANDOFF_TRUST_ROOT_ID = "gigabyte-market-aligner-protected-outbox-v1"
 PRODUCTION_VACANCY_MAXIMUM_AGE_SECONDS = 21_600
@@ -339,32 +337,7 @@ def _publish_execution_receipt_noreplace(
     directory_descriptor: int, temporary_name: str, final_name: str
 ) -> bool:
     """Publish one receipt without replacing an independently published replay."""
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = libc.renameat2
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    if (
-        renameat2(
-            directory_descriptor,
-            os.fsencode(temporary_name),
-            directory_descriptor,
-            os.fsencode(final_name),
-            1,  # RENAME_NOREPLACE
-        )
-        == 0
-    ):
-        return True
-    error = ctypes.get_errno()
-    if error == errno.EEXIST:
-        return False
-    raise OSError(error, os.strerror(error))
+    return publish_noreplace(directory_descriptor, temporary_name, final_name)
 
 
 def _persist_execution_receipt(root: Path, semantic_sha256: str, exact: bytes) -> Path:
@@ -1274,7 +1247,7 @@ def _build_production_handoff_from_authenticated_time(
     profile_path = profile_directory / "profile.yaml"
     evidence_path = profile_directory / "evidence.jsonl"
     projection_path = profile_directory / "projection-receipt.json"
-    profile_bytes = _read_regular(profile_path, "canonical profile")
+    _profile_bytes = _read_regular(profile_path, "canonical profile")
     evidence_bytes = _read_regular(evidence_path, "canonical evidence ledger")
     projection = _document(
         _read_regular(projection_path, "canonical projection receipt"),

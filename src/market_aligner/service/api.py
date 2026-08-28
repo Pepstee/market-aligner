@@ -22,10 +22,21 @@ from market_aligner.assessment.opportunity import OpportunityDecision, apply_gat
 from market_aligner.assessment.scoring import AssessmentAxes, ScoreResult, ScoringParams, score
 from market_aligner.collectors.engine import Collector
 from market_aligner.config import ProductPaths
-from market_aligner.config_loader import load_config
+from market_aligner.config_loader import closure_identity, load_config, snapshot_config
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.research.store import AssessmentStore
 from market_aligner.state.vacancies import JobDatabase
+from market_aligner.state.operations import (
+    INGEST_CYCLE_KIND,
+    OperationJournal,
+    OperationRefused,
+    canonical_json as operation_canonical_json,
+    make_record,
+    new_owner_id,
+    normalized_error,
+    utc_now,
+    validate_operation_id,
+)
 
 
 @dataclass(frozen=True)
@@ -129,42 +140,178 @@ class CollectionService:
         once: bool,
         hours: float,
         poll_minutes: float,
+        operation_id: str,
         log=print,
     ) -> dict[str, object]:
+        validate_operation_id(operation_id)
         if once == (hours > 0):
             raise ValueError("collect requires exactly one of --once or --hours")
         if hours < 0 or hours > 24:
             raise ValueError("collect --hours must be in (0,24]")
         if not 0 < poll_minutes <= 1440:
             raise ValueError("collect poll interval must be in (0,1440] minutes")
-        config = load_config(config_path)
+        config_source = Path(config_path).expanduser().resolve(strict=True)
+        config, config_identities = snapshot_config(config_source)
         _validate_collection_config(config)
         config_sha256 = _sha256(config)
-        board_names = list(config["boards"]["enabled"])
+        config_file_sha256 = closure_identity(config_identities)
+        board_names = sorted(config["boards"]["enabled"])
         source_projection = {
             "boards": {board: config.get(board, {}) for board in sorted(board_names)},
             "search_terms": config.get("search_terms") or [],
         }
         source_sha256 = _sha256(source_projection)
-        started_at = self.now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        collector = self.collector_factory(config, self.paths.root, log=log)
-        cycles = collector.run(hours=hours, poll_minutes=poll_minutes, once=once)
-        finished_at = self.now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        totals = {
-            key: sum(int(cycle.get(key, 0)) for cycle in cycles)
-            for key in ("seen", "new", "fetched", "errors")
+        journal = OperationJournal(self.paths.state / "operations")
+        binding = {
+            "kind": INGEST_CYCLE_KIND,
+            "config_source": str(config_source),
+            "config_file_sha256": config_file_sha256,
+            "config_sha256": config_sha256,
+            "source_scope": board_names,
+            "data_home": str(self.paths.root),
         }
+
+        def replay_or_refuse(record: dict[str, object]) -> dict[str, object]:
+            mismatches = [
+                key
+                for key, expected in binding.items()
+                if record.get(key) != expected
+            ]
+            if mismatches:
+                raise OperationRefused(
+                    "operation_binding_changed",
+                    "operation ID is already bound to different exact inputs: "
+                    + ", ".join(sorted(mismatches)),
+                    operation_id=operation_id,
+                    disposition=str(record.get("disposition")),
+                )
+            disposition = str(record["disposition"])
+            if disposition in {"completed", "failed"}:
+                return {
+                    "application_authority": False,
+                    "authority_scope": "collection_only",
+                    "schema_version": "market-aligner.collection-operation-replay.v1",
+                    "operation_id": operation_id,
+                    "disposition": disposition,
+                    "receipt_id": record["receipt_id"],
+                    "replayed": True,
+                    "result": record["result"],
+                    "error": record["error"],
+                    "source_scope": record["source_scope"],
+                }
+            raise OperationRefused(
+                "indeterminate_state" if disposition == "indeterminate" else "in_progress",
+                "operation has an unresolved external-call state and cannot be replayed",
+                operation_id=operation_id,
+                disposition=disposition,
+            )
+
+        existing = journal.load(operation_id)
+        if existing is not None:
+            return replay_or_refuse(existing)
+        locks = journal.acquire_board_locks(str(self.paths.root), board_names)
+        operation_lock_fd: int | None = None
+        try:
+            blockers = journal.scan_unresolved_scope_blockers(
+                str(self.paths.root), board_names
+            )
+            if blockers:
+                raise OperationRefused(
+                    "scope_blocked",
+                    "an unresolved earlier collection intersects this board scope",
+                    extra={"blocked_by": blockers},
+                )
+            operation_lock_fd = journal.open_operation_lock(operation_id)
+            current = journal.load(
+                operation_id, operation_lock_fd=operation_lock_fd
+            )
+            if current is not None:
+                return replay_or_refuse(current)
+            claim = make_record(
+                operation_id=operation_id,
+                disposition="in_flight",
+                owner_id=new_owner_id(),
+                **binding,
+            )
+            claim_bytes = operation_canonical_json(claim).encode("utf-8")
+            if not journal.claim(claim):
+                raise OperationRefused(
+                    "in_progress",
+                    "another process won the exact operation claim",
+                    operation_id=operation_id,
+                    disposition="in_flight",
+                )
+            started_at = self.now().astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            collector = self.collector_factory(config, self.paths.root, log=log)
+            try:
+                cycles = collector.run(
+                    hours=hours,
+                    poll_minutes=poll_minutes,
+                    once=once,
+                )
+            except Exception as exc:
+                failed = make_record(
+                    operation_id=operation_id,
+                    disposition="failed",
+                    owner_id=str(claim["owner_id"]),
+                    started_at=str(claim["started_at"]),
+                    finished_at=utc_now(),
+                    error=normalized_error(exc),
+                    **binding,
+                )
+                journal.cas_replace(
+                    failed,
+                    claim_bytes,
+                    operation_id=operation_id,
+                    operation_lock_fd=operation_lock_fd,
+                )
+                raise
+            finished_at = self.now().astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            totals = {
+                key: sum(int(cycle.get(key, 0)) for cycle in cycles)
+                for key in ("seen", "new", "fetched", "errors")
+            }
+            operation_result = {**totals, "database_total": (
+                int(cycles[-1].get("database_total", 0)) if cycles else 0
+            )}
+            completed = make_record(
+                operation_id=operation_id,
+                disposition="completed",
+                owner_id=str(claim["owner_id"]),
+                started_at=str(claim["started_at"]),
+                finished_at=utc_now(),
+                result=operation_result,
+                **binding,
+            )
+            journal.cas_replace(
+                completed,
+                claim_bytes,
+                operation_id=operation_id,
+                operation_lock_fd=operation_lock_fd,
+            )
+        finally:
+            if operation_lock_fd is not None:
+                OperationJournal.release_locks([operation_lock_fd])
+            OperationJournal.release_locks(locks)
         state_sha256 = _sha256(collector.db.collection_state())
         body: dict[str, object] = {
             "application_authority": False,
             "authority_scope": "collection_only",
             "config_sha256": config_sha256,
+            "config_file_sha256": config_file_sha256,
             "cycle_count": len(cycles),
             "finished_at": finished_at,
             "mode": "once" if once else "bounded_hours",
             "requested_hours": float(hours),
             "poll_minutes": float(poll_minutes),
             "schema_version": "market-aligner.collection-run-receipt.v1",
+            "operation_id": operation_id,
+            "operation_receipt_id": completed["receipt_id"],
+            "replayed": False,
             "source_sha256": source_sha256,
             "started_at": started_at,
             "state_sha256": state_sha256,
