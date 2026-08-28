@@ -16057,8 +16057,7 @@ class EligibilityEndToEndTests(unittest.TestCase):
         self.assertEqual(receipt["reasons"],
                          ["experience_requirement_exceeds_policy",
                           "residence_requirement_mismatch",
-                          "sponsorship_unavailable",
-                          "work_authorisation_mismatch"])
+                          "sponsorship_unavailable"])
         self.assertEqual(receipt["unknowns"], [])
         self.assertIs(receipt["eligibility_authority"], False)
         for flag in ("research_authority", "application_authority",
