@@ -329,18 +329,24 @@ def _runtime_environment(
 
 
 def _run(runtime: PopplerRuntime, tool: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        (dict(runtime.tool_paths)[tool], *arguments),
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-        env=_runtime_environment(runtime.library_directory, runtime.preload_paths),
-        pass_fds=(
-            tuple(dict(runtime.tool_descriptors).values())
-            + runtime.preload_descriptors
-        ),
-    )
+    timeout_seconds = 90 if tool == "pdftoppm" else 20
+    try:
+        completed = subprocess.run(
+            (dict(runtime.tool_paths)[tool], *arguments),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=_runtime_environment(runtime.library_directory, runtime.preload_paths),
+            pass_fds=(
+                tuple(dict(runtime.tool_descriptors).values())
+                + runtime.preload_descriptors
+            ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DocumentQualityError(
+            f"Poppler {tool} exceeded its {timeout_seconds}-second execution bound"
+        ) from exc
     if completed.returncode != 0:
         raise DocumentQualityError(f"Poppler {tool} failed")
     return completed
