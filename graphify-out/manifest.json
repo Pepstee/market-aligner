@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788039633.509903,
-    "ast_hash": "8d72edf559b092a203e2dfede1b3660d",
+    "mtime": 1788040831.860087,
+    "ast_hash": "d782678642e419dddf01c754922d9447",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
@@ -7457,6 +7457,16 @@
   "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260829_211147_report_on_your_progress.md": {
     "mtime": 1788037907.1646552,
     "ast_hash": "4f1ec259c701ca44ea10797bab530088",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260829_214507_how_do_the_recovered_public_research_provider_line.md": {
+    "mtime": 1788039907.2768483,
+    "ast_hash": "756bcbd7870442e82a4f8744bb1096f2",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260829_215156_report_on_your_progress.md": {
+    "mtime": 1788040316.0906613,
+    "ast_hash": "385ab4662d23b233e27715a65866a393",
     "semantic_hash": ""
   }
 }
