@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import platform
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -303,6 +304,27 @@ def test_certifier_replays_official_queue_semantics_from_portable_bytes(
             [{"job_key": "greenhouse:example:1"}],
             policies,
         )
+
+
+def test_certifier_retains_runtime_and_source_contract_provenance(monkeypatch) -> None:
+    certifier = _certifier()
+    monkeypatch.setattr(certifier, "revision", lambda: "a" * 40)
+    monkeypatch.setattr(certifier, "source_content_revision", lambda _root: "b" * 64)
+    assert certifier._source_identity() == ("a" * 40, "b" * 64)
+    provenance = certifier._certification_provenance("a" * 40, "b" * 64)
+    assert certifier.FORMAT == "jaa04-revision-certification/v5"
+    assert provenance == {
+        "source_revision": "a" * 40,
+        "source_content_revision": "b" * 64,
+        "source_content_revision_contract": certifier.source_content_revision_contract(),
+        "runtime": {
+            "python_implementation": platform.python_implementation(),
+            "python_version": platform.python_version(),
+        },
+    }
+    monkeypatch.setattr(certifier, "_source_identity", lambda: ("c" * 40, "d" * 64))
+    with pytest.raises(ValueError, match="source identity changed"):
+        certifier._require_unchanged_source(("a" * 40, "b" * 64))
 
 
 @pytest.mark.parametrize("attack", ("unsupported-receipt-schema", "manifest-digest-mismatch"))
