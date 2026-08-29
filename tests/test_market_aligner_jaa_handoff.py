@@ -1754,27 +1754,51 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
     class RoutedBrowserContext:
         def __init__(self, context):
             self._context = context
+            self._guard = None
 
         def new_page(self):
             page = self._context.new_page()
+
+            class FixtureRoute:
+                def __init__(self, route):
+                    self._route = route
+                    self.request = route.request
+
+                def continue_(self):
+                    return self._route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body=greenhouse_html,
+                    )
+
+                def abort(self, reason):
+                    return self._route.abort(reason)
+
+            def route_request(route):
+                if self._guard is None:
+                    return route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body=greenhouse_html,
+                    )
+                return self._guard(FixtureRoute(route))
+
             page.route(
                 "**/*",
-                lambda route: route.fulfill(
-                    status=200,
-                    content_type="text/html",
-                    body=greenhouse_html,
-                ),
+                route_request,
             )
             return page
 
         def route(self, *arguments, **keywords):
-            return self._context.route(*arguments, **keywords)
+            self._guard = arguments[1]
+            return None
 
         def on(self, *arguments, **keywords):
             return self._context.on(*arguments, **keywords)
 
         def unroute_all(self, **keywords):
-            return self._context.unroute_all(**keywords)
+            self._guard = None
+            return None
 
         def close(self):
             return self._context.close()
