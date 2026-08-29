@@ -11,7 +11,8 @@ refs, and the unique-source archive. JAA paths are normalised exclusively beneat
 - `canonical`: 11397
 - `canonical_relocated_exact`: 226
 - `conflicting_variant_review`: 1523
-- `integration_required`: 1050
+- `integration_required`: 980
+- `quarantined`: 70
 - `retained_evidence`: 2168
 - `superseded`: 635
 
