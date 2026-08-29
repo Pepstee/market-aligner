@@ -44,7 +44,7 @@ def _run(
 def _clone(tmp_path: Path) -> Path:
     repository = tmp_path / "certifier-clone"
     result = _run(
-        REPOSITORY_ROOT, "git", "clone", "--no-local",
+        REPOSITORY_ROOT, "git", "clone", "--no-local", "--single-branch", "--depth", "1",
         str(REPOSITORY_ROOT), str(repository), timeout=120,
     )
     assert result.returncode == 0, result.stderr

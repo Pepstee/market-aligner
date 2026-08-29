@@ -128,7 +128,8 @@ def test_real_passing_certification_runtime_emits_content_addressed_revision_bou
     """Only the public runtime command is allowed to mint the certification receipt."""
     repository = tmp_path / "clean-certification-source"
     copied = subprocess.run(
-        ("git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)),
+        ("git", "clone", "--no-local", "--single-branch", "--depth", "1",
+         str(REPOSITORY_ROOT), str(repository)),
         text=True,
         capture_output=True,
         check=False,

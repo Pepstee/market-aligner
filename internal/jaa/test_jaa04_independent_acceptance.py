@@ -297,7 +297,9 @@ def test_jaa04_command_is_declared_and_refuses_missing_external_authority(tmp_pa
     declaration = (ROOT / "acceptance").read_text(encoding="utf-8")
     assert "scripts/run_acceptance_declaration.py" in declaration
     repository = tmp_path / "certification-repository"
-    copied = subprocess.run(("git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)), text=True, capture_output=True, check=False)
+    copied = subprocess.run(("git", "clone", "--no-local", "--single-branch", "--depth", "1",
+                             str(REPOSITORY_ROOT), str(repository)), text=True,
+                            capture_output=True, check=False)
     assert copied.returncode == 0, copied.stderr
     clone = repository / "internal" / "jaa"
     receipt = tmp_path / "receipt"

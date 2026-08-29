@@ -109,7 +109,8 @@ def test_coordinator_advances_only_after_real_worker_completion_and_never_after_
 
 def test_missing_external_authority_cannot_emit_a_jaa04_receipt(tmp_path: Path) -> None:
     repository = tmp_path / "clone"
-    copied = subprocess.run(("git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)), text=True,
+    copied = subprocess.run(("git", "clone", "--no-local", "--single-branch", "--depth", "1",
+                             str(REPOSITORY_ROOT), str(repository)), text=True,
                             capture_output=True, check=False)
     assert copied.returncode == 0, copied.stderr
     clone = repository / "internal" / "jaa"

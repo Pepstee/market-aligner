@@ -37,7 +37,7 @@ def _run(directory: Path, *argv: str, timeout: int = 180) -> subprocess.Complete
 def _clone(tmp_path: Path) -> Path:
     repository = tmp_path / "clean-certifier"
     copied = _run(
-        REPOSITORY_ROOT, "git", "clone", "--no-local",
+        REPOSITORY_ROOT, "git", "clone", "--no-local", "--single-branch", "--depth", "1",
         str(REPOSITORY_ROOT), str(repository), timeout=120,
     )
     assert copied.returncode == 0, copied.stderr
