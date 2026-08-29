@@ -16,3 +16,21 @@ refs, and the unique-source archive. JAA paths are normalised exclusively beneat
 `integration_required` and `conflicting_variant_review` are fail-closed work
 queues, not evidence of safe mergeability. `retained_evidence` remains
 recoverable in the hash-bound external archaeology corpus.
+
+## Required lifecycle capabilities
+
+### `market.lifecycle.gmail-employer-response.v1`
+
+- **Owner:** Market Aligner / internal JAA.
+- **Status:** `required_missing_owner_gate_pending`.
+- **Current authority:** read-only Gmail only; forbidden mutations: send, reply, archive, delete, label mutation, attachment upload, Calendar write.
+- **Archive search:** all 146 preserved Git refs and the hash-unique source
+  archive were content-scanned. The only Gmail implementation is the retained
+  narrow submission-confirmation reconciler; no distinct employer-response
+  mailbox adapter was found.
+- **Retained downstream work:** gmail_confirmation.py (submission-confirmation metadata only); status_ingestion.py + status_ingestion_live.py (local exports; no mailbox); status_evidence_store.py + status_store_coordinator.py; outcome_feedback.py + outcome_feedback_live.py.
+- **Still missing:** read-only Gmail employer-response ingestion adapter; job_id/application_id/attempt_id correlation with explicit ambiguity; private exact-message/thread/body/attachment evidence preservation; append-only idempotent and superseding lifecycle transition receipts; closed response classification and operator action/deadline queue; architecture-owned generic capability adoption/liveness proof; bounded real-mailbox read-only canary with zero mutation.
+- **Closed classes required:** acknowledgement; assessment/action-required; interview; rejection; offer; withdrawal/cancellation; human-review-required; unknown/ambiguous.
+- **Canary:** withheld until the owner boundary is ready; the first canary must
+  be bounded real-mailbox read-only access with zero mailbox mutation and full
+  private evidence preservation.

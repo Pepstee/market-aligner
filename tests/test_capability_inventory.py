@@ -80,3 +80,19 @@ def test_semantic_hash_ignores_source_locations() -> None:
     first = ast.parse("def f():\n    return 1\n").body[0]
     second = ast.parse("\n\ndef f():\n    return 1\n").body[0]
     assert MODULE._semantic_bytes(first) == MODULE._semantic_bytes(second)
+
+
+def test_required_gmail_lifecycle_capability_is_fail_closed(tmp_path: Path) -> None:
+    report = tmp_path / "report.md"
+    MODULE._write_report(report, [])
+    rendered = report.read_text(encoding="utf-8")
+    assert "market.lifecycle.gmail-employer-response.v1" in rendered
+    assert "required_missing_owner_gate_pending" in rendered
+    assert "all 146 preserved Git refs" in rendered
+    assert "forbidden mutations: send, reply, archive, delete" in rendered
+    assert "unknown/ambiguous" in rendered
+    assert "**Canary:** withheld" in rendered
+    capability = MODULE.GMAIL_LIFECYCLE_CAPABILITY
+    assert capability["owner"] == "Market Aligner / internal JAA"
+    assert capability["status"] == "required_missing_owner_gate_pending"
+    assert "send" in capability["forbidden"]
