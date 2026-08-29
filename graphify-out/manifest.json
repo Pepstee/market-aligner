@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788032523.6767187,
-    "ast_hash": "f2fdd2fdb641e19b29adf478c41e83a9",
+    "mtime": 1788032911.2695255,
+    "ast_hash": "7cce9d50cf68fd4664367c4297abd2d8",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
@@ -7432,6 +7432,11 @@
   "/Users/admin/Projects/market-aligner/tests/test_candidate_intent.py": {
     "mtime": 1787995312.617635,
     "ast_hash": "558d3f8c57b21c9adc8b09d3c498c2a6",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260829_194604_do_the_unresolved_shadow_certification_variants_fe.md": {
+    "mtime": 1788032764.236172,
+    "ast_hash": "15be3875ac9132049dc8746ee508dd20",
     "semantic_hash": ""
   }
 }
