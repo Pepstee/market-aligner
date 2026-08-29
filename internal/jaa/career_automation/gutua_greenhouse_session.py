@@ -993,7 +993,10 @@ class GutuaGreenhouseSession:
             required_visible_markers=(marker,),
         )
         client = LLMClient.from_config(
+            cache_enabled=False,
             cache_dir=self.archive_root / "review-cache",
+            max_retries=1,
+            temperature=0,
             usage_log=self.archive_root / "review-usage.jsonl",
         )
         try:

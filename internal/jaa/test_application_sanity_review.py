@@ -133,6 +133,7 @@ def test_clean_relevant_canary_passes_and_legitimate_llm_claim_is_quoted(
     verify_sanity_review_receipt(receipt, candidate)
     assert receipt.verdict == "pass"
     assert receipt.backend_identity == "scripted_test"
+    assert receipt.model_identity == "scripted-v1"
     assert "built an LLM workflow" in backend.last_user
     assert "untrusted quoted data" in backend.last_system.casefold()
     assert "opaque receipt-binding identifiers" in backend.last_system
@@ -264,6 +265,36 @@ def test_missing_timeout_and_mock_provider_fail_closed(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"cache_enabled": True},
+        {"max_retries": 2},
+        {"temperature": 0.1},
+    ),
+)
+def test_review_requires_one_uncached_zero_temperature_transport_attempt(
+    override: dict[str, object], tmp_path
+) -> None:
+    runtime = client(ScriptedBackend(PASS), tmp_path)
+    for key, value in override.items():
+        setattr(runtime, key, value)
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package(package(), client=runtime)
+    assert captured.value.code == "review.runtime_unsafe"
+
+
+@pytest.mark.parametrize("model", ("", "provider-default", "codex-default"))
+def test_review_rejects_missing_or_placeholder_response_model_identity(
+    model: str, tmp_path
+) -> None:
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package(
+            package(), client=client(ScriptedBackend(PASS, model=model), tmp_path)
+        )
+    assert captured.value.code == "review.model_missing"
+
+
 def test_every_receipt_binding_detects_mutation(tmp_path, monkeypatch) -> None:
     original = package()
     receipt = review_application_package(
@@ -303,6 +334,17 @@ def test_every_receipt_binding_detects_mutation(tmp_path, monkeypatch) -> None:
         replace(receipt, backend_identity="other_backend")
     with pytest.raises(ValueError, match="identity"):
         replace(receipt, model_identity="other_model")
+    with pytest.raises(ValueError, match="reviewer identity"):
+        replace(
+            receipt,
+            model_identity="provider-default",
+            receipt_sha256=review_module.content_hash(
+                {
+                    **receipt.document(include_identity=False),
+                    "model_identity": "provider-default",
+                }
+            ),
+        )
     monkeypatch.setattr(review_module, "POLICY_SHA256", "e" * 64)
     with pytest.raises(ValueError, match="policy"):
         verify_sanity_review_receipt(receipt, original)

@@ -128,6 +128,13 @@ POLICY_SHA256 = content_hash(
     }
 )
 
+_NON_EXACT_MODEL_IDENTITIES = {
+    "codex-default",
+    "provider-default",
+    "replace_me",
+    "unknown",
+}
+
 
 class ApplicationSanityReviewError(ValueError):
     """No production authority may be issued for this review attempt."""
@@ -448,6 +455,7 @@ class SanityReviewReceipt:
             not self.backend_identity
             or self.backend_identity == "mock"
             or not self.model_identity
+            or self.model_identity.casefold() in _NON_EXACT_MODEL_IDENTITIES
         ):
             raise ValueError(
                 "sanity receipt lacks a production-capable reviewer identity"
@@ -497,9 +505,14 @@ def review_application_package(
         raise ApplicationSanityReviewError(
             "review.provider_unavailable", "configured backend is unavailable"
         )
+    if client.cache_enabled or client.max_retries != 1 or client.temperature != 0:
+        raise ApplicationSanityReviewError(
+            "review.runtime_unsafe",
+            "sanity review requires one uncached zero-temperature transport attempt",
+        )
     try:
         document, hashes = _package_document(package)
-        result = client.complete_json(
+        result, response = client.complete_json_with_response(
             REVIEWER_PROMPT,
             canonical_json(document),
             schema=RESULT_SCHEMA,
@@ -519,10 +532,11 @@ def review_application_package(
         raise ApplicationSanityReviewError(
             code, "review did not return a certain finding-free PASS", result=result
         )
-    model_identity = client.model.strip()
-    if not model_identity:
+    model_identity = response.model.strip()
+    if not model_identity or model_identity.casefold() in _NON_EXACT_MODEL_IDENTITIES:
         raise ApplicationSanityReviewError(
-            "review.model_missing", "backend returned no model identity"
+            "review.model_missing",
+            "backend returned no exact response model identity",
         )
     preimage = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
