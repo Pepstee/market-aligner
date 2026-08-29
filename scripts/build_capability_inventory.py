@@ -378,7 +378,11 @@ def _is_retained_evidence(path: str) -> bool:
 
 
 def _canonical_files(root: Path) -> Iterator[tuple[str, bytes]]:
-    raw = _run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=root)
+    # Build against the prospective canonical index, not the previous commit.
+    # A major integration is staged before archaeology regeneration; HEAD-only
+    # enumeration would keep newly adopted files falsely marked donor-only
+    # until a second, corrective commit.
+    raw = _run(["git", "ls-files", "--cached"], cwd=root)
     for line in raw.decode().splitlines():
         if not _candidate_suffix(line):
             continue

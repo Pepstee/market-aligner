@@ -29,6 +29,7 @@ from market_aligner.applications.producer import (
     write_protected_handoff_bundle,
 )
 from market_aligner.assessment.scoring import ScoringParams
+from market_aligner.profiler.intent import serialize_candidate_intent
 from market_aligner.research.models import (
     ClaimSupport,
     ResearchClaim,
@@ -1572,7 +1573,9 @@ def _build_production_handoff_from_authenticated_time(
         "role_track_ids": sorted(profile.tracks),
         "schema_version": "market-aligner.candidate-intent.v1",
     }
-    candidate_intent_bytes = _canonical(candidate_intent_document)
+    # The excavated intent authority module owns this wire contract.  Keep the
+    # production bytes identical while refusing drift from the strict schema.
+    candidate_intent_bytes = serialize_candidate_intent(candidate_intent_document)
 
     scoring_parameters_bytes = json.dumps(
         {

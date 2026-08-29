@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,6 +81,17 @@ def test_semantic_hash_ignores_source_locations() -> None:
     first = ast.parse("def f():\n    return 1\n").body[0]
     second = ast.parse("\n\ndef f():\n    return 1\n").body[0]
     assert MODULE._semantic_bytes(first) == MODULE._semantic_bytes(second)
+
+
+def test_canonical_files_include_staged_new_sources(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    source = tmp_path / "new_capability.py"
+    source.write_text("def adopted():\n    return True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "new_capability.py"], cwd=tmp_path, check=True)
+
+    files = dict(MODULE._canonical_files(tmp_path))
+
+    assert files["new_capability.py"] == source.read_bytes()
 
 
 def test_required_gmail_lifecycle_capability_is_fail_closed(tmp_path: Path) -> None:
