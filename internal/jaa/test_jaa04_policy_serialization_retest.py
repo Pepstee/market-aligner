@@ -7,7 +7,7 @@ import importlib.util
 import json
 import shutil
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +59,7 @@ def _cohort(tmp_path: Path) -> tuple[Path, dict[str, dict[str, object]]]:
     policy = CalibrationPolicy()
     records: list[dict[str, object]] = []
     original: dict[str, dict[str, object]] = {}
-    today = date.today().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     for number in range(30):
         board = ATS[number % len(ATS)]
         job_id = f"local-{number + 1:02d}"

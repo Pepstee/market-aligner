@@ -8,13 +8,13 @@ refs, and the unique-source archive. JAA paths are normalised exclusively beneat
 ## Status counts
 
 - `adopted_adapted`: 54
-- `canonical`: 11453
+- `canonical`: 11454
 - `canonical_relocated_exact`: 231
-- `conflicting_variant_review`: 922
-- `integration_required`: 529
+- `conflicting_variant_review`: 891
+- `integration_required`: 524
 - `quarantined`: 174
-- `retained_evidence`: 2180
-- `superseded`: 1523
+- `retained_evidence`: 2212
+- `superseded`: 1559
 
 `integration_required` and `conflicting_variant_review` are fail-closed work
 queues, not evidence of safe mergeability. `retained_evidence` remains

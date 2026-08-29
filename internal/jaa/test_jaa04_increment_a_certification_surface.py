@@ -21,6 +21,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 CERTIFIER = ("scripts/certify_jaa04_increment_a.py",)
 FOCUSED_SUITES = (
     "test_jaa04_increment_a_authority_canaries.py",
@@ -34,10 +35,13 @@ def _run(directory: Path, *argv: str, timeout: int = 180) -> subprocess.Complete
 
 
 def _clone(tmp_path: Path) -> Path:
-    clone = tmp_path / "clean-certifier"
-    copied = _run(ROOT, "git", "clone", "--no-local", str(ROOT), str(clone), timeout=120)
+    repository = tmp_path / "clean-certifier"
+    copied = _run(
+        REPOSITORY_ROOT, "git", "clone", "--no-local",
+        str(REPOSITORY_ROOT), str(repository), timeout=120,
+    )
     assert copied.returncode == 0, copied.stderr
-    return clone
+    return repository / "internal" / "jaa"
 
 
 def _commit(clone: Path, *paths: str) -> None:

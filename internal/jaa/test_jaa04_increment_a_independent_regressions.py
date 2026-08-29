@@ -18,6 +18,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 CERTIFIER = "scripts/certify_jaa04_increment_a.py"
 INVENTORY = "scripts/jaa04_increment_a_test_inventory.json"
 TEMPORAL_SUITE = "test_jaa04_sidecar_temporal_semantics.py"
@@ -41,9 +42,13 @@ def _run(
 
 
 def _clone(tmp_path: Path) -> Path:
-    clone = tmp_path / "certifier-clone"
-    result = _run(ROOT, "git", "clone", "--no-local", str(ROOT), str(clone), timeout=120)
+    repository = tmp_path / "certifier-clone"
+    result = _run(
+        REPOSITORY_ROOT, "git", "clone", "--no-local",
+        str(REPOSITORY_ROOT), str(repository), timeout=120,
+    )
     assert result.returncode == 0, result.stderr
+    clone = repository / "internal" / "jaa"
     for key, value in (
         ("user.email", "independent@example.invalid"),
         ("user.name", "Independent certification tester"),

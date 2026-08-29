@@ -21,6 +21,7 @@ from career_automation.models import IntelligenceKind
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 KINDS = tuple(IntelligenceKind)
 
 
@@ -192,7 +193,7 @@ def test_v2_authority_claim_text_must_exactly_reflect_its_excerpt(
     else:
         health["text"] = _paragraph(IntelligenceKind.OPERATIONAL_HEALTH)
     with pytest.raises(ValueError, match="exactly reflect"):
-        validate_dossier(dossier, cache)
+        validate_dossier(dossier, cache, as_of=date(2026, 7, 20))
 
 
 def test_operator_gate_declares_zero_skip_authority_suite() -> None:
@@ -204,13 +205,14 @@ def test_operator_gate_declares_zero_skip_authority_suite() -> None:
 
 
 def test_recertification_refuses_receipt_for_invalid_authority_corpus(tmp_path: Path) -> None:
-    clone = tmp_path / "clone"
+    repository = tmp_path / "clone"
     copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)),
+        ("git", "clone", "--no-local", str(REPOSITORY_ROOT), str(repository)),
         text=True,
         capture_output=True,
     )
     assert copied.returncode == 0, copied.stderr
+    clone = repository / "internal" / "jaa"
     result = subprocess.run(
         (sys.executable, "scripts/accept_jaa_04.py"),
         cwd=clone,

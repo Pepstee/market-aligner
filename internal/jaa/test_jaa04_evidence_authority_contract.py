@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -38,7 +38,7 @@ def test_opportunity_one_rejects_reason_not_grounded_in_completed_claim(tmp_path
                 b"<p>In 2026 Example reported operational revenue and profit performance.</p>"
             )
             digest, reference = cache.store(body)
-            timestamp = f"{date.today().isoformat()}T00:00:00+00:00"
+            timestamp = f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00+00:00"
             return Citation(source_id, "https://8.8.8.8/evidence", timestamp, timestamp,
                             digest, reference, 200)
 
