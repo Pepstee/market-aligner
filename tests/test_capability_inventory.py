@@ -113,8 +113,9 @@ def test_repository_dispositions_are_ledger_bound_and_target_real_code() -> None
     assert dispositions
     for value in dispositions.values():
         assert value["ledger_entry_id"] in ledger_ids
-        target = value["canonical_target"].split(":", 1)[0]
-        assert (ROOT / target).is_file()
+        for item in value["canonical_target"].split("+"):
+            target = item.split(":", 1)[0]
+            assert (ROOT / target).is_file()
 
 
 def test_semantic_hash_ignores_source_locations() -> None:
