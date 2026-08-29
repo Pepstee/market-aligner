@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Mapping
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .application_archive import ApplicationArchive, VacancyArchiveIdentity
 from .evidence_matching import canonical_json
@@ -69,6 +69,193 @@ def _bytes(document: Mapping[str, object]) -> bytes:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+class ProviderObservationNetworkBoundaryError(RuntimeError):
+    """The read-only collector observed a disallowed browser effect."""
+
+
+def _canonical_network_url(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\\" in value
+        or "#" in value
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise ProviderObservationNetworkBoundaryError(
+            "provider request URL contains forbidden syntax"
+        )
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ProviderObservationNetworkBoundaryError(
+            "provider request URL has a malformed authority"
+        ) from exc
+    if parsed.scheme.casefold() != "https" or parsed.username or parsed.password:
+        raise ProviderObservationNetworkBoundaryError(
+            "provider request URL must use canonical HTTPS without userinfo"
+        )
+    hostname = parsed.hostname
+    if hostname is None or hostname.casefold() not in _GREENHOUSE_HOSTS:
+        raise ProviderObservationNetworkBoundaryError(
+            "provider request escaped the Greenhouse host allowlist"
+        )
+    host = hostname.casefold()
+    if port is not None:
+        host = f"{host}:{port}"
+    if parsed.netloc.casefold() != host:
+        raise ProviderObservationNetworkBoundaryError(
+            "provider request authority contains non-host data"
+        )
+    return urlunsplit(("https", host, parsed.path or "/", parsed.query, ""))
+
+
+def _network_request_fingerprint(method: str, url: str) -> str:
+    parsed = urlsplit(_canonical_network_url(url))
+    redacted = urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path or "/", "", "")
+    )
+    return _sha256(f"{method.upper()} {redacted}".encode())
+
+
+class _ReadOnlyNetworkBoundary:
+    """Fail-closed Playwright guard for a signed provider observation."""
+
+    def __init__(
+        self,
+        *,
+        source_url: str,
+        events: list[dict[str, object]],
+    ) -> None:
+        self.source_url = _canonical_network_url(source_url)
+        self.events = events
+        self.document_gets = 0
+        self.blocked_requests = 0
+        self.web_sockets = 0
+        self.downloads = 0
+        self.popups = 0
+
+    def _event(
+        self,
+        *,
+        method: str,
+        url: str,
+        resource_type: str,
+        disposition: str,
+    ) -> None:
+        try:
+            fingerprint = _network_request_fingerprint(method, url)
+            parsed = urlsplit(_canonical_network_url(url))
+            redacted_url = urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path or "/", "", "")
+            )
+        except ProviderObservationNetworkBoundaryError:
+            fingerprint = _sha256(f"{method.upper()} malformed-url".encode())
+            redacted_url = "malformed-url"
+        self.events.append(
+            {
+                "method": method.upper(),
+                "resource_type": resource_type,
+                "status": None,
+                "url": redacted_url,
+                "request_sha256": fingerprint,
+                "disposition": disposition,
+            }
+        )
+
+    def guard(self, route: object) -> None:
+        request = route.request
+        method = str(request.method).upper()
+        url = str(request.url)
+        resource_type = str(request.resource_type)
+        try:
+            canonical = _canonical_network_url(url)
+            if method not in {"GET", "HEAD"}:
+                raise ProviderObservationNetworkBoundaryError(
+                    "provider observation attempted a non-read-only request"
+                )
+            if bool(request.is_navigation_request()) and resource_type == "document":
+                if self.document_gets == 0 and canonical != self.source_url:
+                    raise ProviderObservationNetworkBoundaryError(
+                        "initial provider navigation differs from signed authority"
+                    )
+                self.document_gets += 1
+        except ProviderObservationNetworkBoundaryError:
+            self.blocked_requests += 1
+            self._event(
+                method=method,
+                url=url,
+                resource_type=resource_type,
+                disposition="blocked",
+            )
+            route.abort("blockedbyclient")
+            return
+        self._event(
+            method=method,
+            url=canonical,
+            resource_type=resource_type,
+            disposition="allowed_read_only",
+        )
+        route.continue_()
+
+    def observe_web_socket(self, socket: object) -> None:
+        self.web_sockets += 1
+        self._event(
+            method="WEBSOCKET",
+            url=str(socket.url),
+            resource_type="websocket",
+            disposition="observed_disallowed",
+        )
+
+    def observe_download(self, download: object) -> None:
+        self.downloads += 1
+        self.events.append(
+            {
+                "method": "DOWNLOAD",
+                "resource_type": "download",
+                "status": None,
+                "url": "redacted",
+                "request_sha256": _sha256(
+                    str(download.suggested_filename).encode()
+                ),
+                "disposition": "observed_disallowed",
+            }
+        )
+
+    def observe_popup(self, popup: object) -> None:
+        self.popups += 1
+        self.events.append(
+            {
+                "method": "POPUP",
+                "resource_type": "page",
+                "status": None,
+                "url": "redacted",
+                "request_sha256": _sha256(str(getattr(popup, "url", "")).encode()),
+                "disposition": "observed_disallowed",
+            }
+        )
+        close = getattr(popup, "close", None)
+        if callable(close):
+            close()
+
+    def assert_clean(self) -> None:
+        if (
+            self.document_gets < 1
+            or self.blocked_requests
+            or self.web_sockets
+            or self.downloads
+            or self.popups
+        ):
+            raise ProviderObservationNetworkBoundaryError(
+                "provider observation crossed its read-only network boundary: "
+                f"document_gets={self.document_gets}; "
+                f"blocked_requests={self.blocked_requests}; "
+                f"web_sockets={self.web_sockets}; downloads={self.downloads}; "
+                f"popups={self.popups}"
+            )
 
 
 def _git(repository_root: Path, *arguments: str) -> bytes:
@@ -805,13 +992,27 @@ def capture_greenhouse_observation(
     response_status: int | None = None
     observed_at = datetime.now(timezone.utc).isoformat()
     browser = None
+    context = None
     stage = "playwright_start"
     try:
         with sync_playwright() as playwright:
             stage = "browser_launch"
             browser = playwright.chromium.launch(headless=True)
+            stage = "browser_context"
+            context = browser.new_context(
+                accept_downloads=False,
+                service_workers="block",
+            )
             stage = "page_create"
-            page = browser.new_page()
+            page = context.new_page()
+            boundary = _ReadOnlyNetworkBoundary(
+                source_url=source_url,
+                events=network,
+            )
+            context.route("**/*", boundary.guard)
+            context.on("page", boundary.observe_popup)
+            page.on("websocket", boundary.observe_web_socket)
+            page.on("download", boundary.observe_download)
 
             def record(response: object) -> None:
                 request = response.request
@@ -851,9 +1052,20 @@ def capture_greenhouse_observation(
 
             form_inventory = collect_greenhouse_form_inventory(page)
             final_url = page.url
+            stage = "network_boundary"
+            boundary.assert_clean()
             stage = "browser_close"
+            unroute_all = getattr(context, "unroute_all", None)
+            if callable(unroute_all):
+                unroute_all(behavior="wait")
+            context.close()
             browser.close()
     except Exception as exc:
+        if context is not None and stage != "browser_close":
+            try:
+                context.close()
+            except Exception:
+                pass
         if browser is not None and stage != "browser_close":
             try:
                 browser.close()
