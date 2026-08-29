@@ -4310,9 +4310,9 @@
     "semantic_hash": "63e298718d7c2f97aed9f628c4b71af5"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/provider_observation_capture.py": {
-    "mtime": 1787906937.7656138,
-    "ast_hash": "9aa262960e9eb0a9058b3b1e95a65233",
-    "semantic_hash": "9aa262960e9eb0a9058b3b1e95a65233"
+    "mtime": 1788025996.581514,
+    "ast_hash": "15c6ac751d8f25c4cad80c0ae6925572",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/public_access.py": {
     "mtime": 1787906899.7410116,
@@ -6385,9 +6385,9 @@
     "semantic_hash": "fc40c3dc7dcd7b6cb021c3a1e1b06c03"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_provider_observation_capture.py": {
-    "mtime": 1787906937.7671766,
-    "ast_hash": "ee647e0dbe5b4610f0c6f923670bd8bf",
-    "semantic_hash": "ee647e0dbe5b4610f0c6f923670bd8bf"
+    "mtime": 1788026031.2704356,
+    "ast_hash": "9a3767df2c10c40b380b95e1e4a43411",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_run_jaa_certification_profile.py": {
     "mtime": 1787906899.7903368,
@@ -7020,9 +7020,9 @@
     "semantic_hash": "4d6e5f8091420a2873c0e4a37e1458e2"
   },
   "/Users/admin/Projects/market-aligner/tests/test_market_aligner_jaa_handoff.py": {
-    "mtime": 1787906899.8016922,
-    "ast_hash": "eb82cc822a55e27e0eaf7316ee34d702",
-    "semantic_hash": "eb82cc822a55e27e0eaf7316ee34d702"
+    "mtime": 1788026536.568161,
+    "ast_hash": "7980aceec35bdd2ce486f7d4e573b2f8",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_migration_ledger.py": {
     "mtime": 1785590121.87038,
@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788025557.7669735,
-    "ast_hash": "66687c1ff5da33ca75bd467ce2b517ad",
+    "mtime": 1788027008.1246898,
+    "ast_hash": "fe68034a326c20cdca55074835f4327f",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
