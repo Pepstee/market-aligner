@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from playwright.sync_api import sync_playwright
 
 from career_automation.ats_fixture import (
+    FIXTURE_INERT_FAVICON_HREF,
     FixtureVacancy,
     LocalATSFixture,
 )
@@ -405,6 +406,10 @@ def test_local_fixture_exposes_accessible_common_and_conditional_fields() -> Non
         assert "<label " in html
         assert "Review application" in html
         assert "Local test fixture" in html
+        assert (
+            f'<link rel="icon" href="{FIXTURE_INERT_FAVICON_HREF}">'
+            in html
+        )
         assert headers["Cache-Control"] == "no-store"
         assert "form-action 'self'" in headers["Content-Security-Policy"]
 

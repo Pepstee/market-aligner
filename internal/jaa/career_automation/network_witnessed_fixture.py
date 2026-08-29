@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.metadata
+import ipaddress
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from time import perf_counter_ns
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from playwright._impl._driver import compute_driver_executable
 from playwright.sync_api import sync_playwright
@@ -33,7 +35,12 @@ from .application_artifacts import publish_application_artifacts
 from .application_compiler import CandidateContact, ProductionApplicationCompiler
 from cv_generation.service import validate_application_cv
 from .application_strategy import ApplicationStrategyStore
-from .ats_fixture import FixtureReceipt, FixtureVacancy, LocalATSFixture
+from .ats_fixture import (
+    FIXTURE_INERT_FAVICON_HREF,
+    FixtureReceipt,
+    FixtureVacancy,
+    LocalATSFixture,
+)
 from .browser_executor import (
     LocalBrowserExecutor,
     MaterializedValue,
@@ -219,6 +226,144 @@ HEX_64 = re.compile(r"[0-9a-f]{64}")
 
 class NetworkWitnessedFixtureError(RuntimeError):
     """The bounded synthetic integration failed closed."""
+
+
+class _ChromiumNetworkAudit:
+    """Request-ID-bound Chromium lifecycle evidence for the local fixture.
+
+    Playwright routing remains the enforcement boundary. This listener-only
+    audit closes the evidence gap for browser-owned requests that may not be
+    exposed to routing, and therefore never blocks or rewrites traffic itself.
+    """
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, str | None]] = []
+        self.protocol_errors: list[str] = []
+
+    def observe_request(self, event: Mapping[str, object]) -> None:
+        try:
+            request_id = event["requestId"]
+            request = event["request"]
+            resource_type = event["type"]
+            initiator = event["initiator"]
+            if (
+                type(request_id) is not str
+                or type(request) is not dict
+                or type(resource_type) is not str
+                or type(initiator) is not dict
+                or type(request.get("url")) is not str
+                or type(request.get("method")) is not str
+                or type(initiator.get("type")) is not str
+            ):
+                raise ValueError("request event fields are malformed")
+            if "redirectResponse" in event:
+                previous = next(
+                    (
+                        record
+                        for record in reversed(self.records)
+                        if record["request_id"] == request_id
+                        and record["terminal"] is None
+                    ),
+                    None,
+                )
+                if previous is None:
+                    raise ValueError("redirect lacks its prior request event")
+                previous["terminal"] = "redirected"
+            self.records.append(
+                {
+                    "initiator_type": str(initiator["type"]),
+                    "method": str(request["method"]).upper(),
+                    "request_id": request_id,
+                    "resource_type": resource_type,
+                    "terminal": None,
+                    "url": str(request["url"]),
+                }
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            self.protocol_errors.append(type(exc).__name__)
+
+    def _observe_terminal(
+        self,
+        event: Mapping[str, object],
+        state: str,
+    ) -> None:
+        request_id = event.get("requestId")
+        if type(request_id) is not str:
+            self.protocol_errors.append("terminal_request_id")
+            return
+        record = next(
+            (
+                candidate
+                for candidate in reversed(self.records)
+                if candidate["request_id"] == request_id
+                and candidate["terminal"] is None
+            ),
+            None,
+        )
+        if record is None:
+            self.protocol_errors.append("unbound_terminal")
+            return
+        record["terminal"] = state
+
+    def observe_finished(self, event: Mapping[str, object]) -> None:
+        self._observe_terminal(event, "finished")
+
+    def observe_failed(self, event: Mapping[str, object]) -> None:
+        self._observe_terminal(event, "failed")
+
+    def assert_accounted(self) -> None:
+        unaccounted = sum(record["terminal"] is None for record in self.records)
+        if self.protocol_errors or unaccounted:
+            raise NetworkWitnessedFixtureError(
+                "Chromium request audit is incomplete; "
+                f"protocol_errors={len(self.protocol_errors)}; "
+                f"unaccounted_requests={unaccounted}"
+            )
+
+    def assert_exact(
+        self,
+        expected: Sequence[tuple[str, str, str]],
+    ) -> None:
+        self.assert_accounted()
+        actual = tuple(
+            (
+                str(record["method"]),
+                str(record["url"]),
+                str(record["resource_type"]),
+            )
+            for record in self.records
+        )
+        if actual != tuple(expected):
+            raise NetworkWitnessedFixtureError(
+                "Chromium request audit differs from the exact fixture sequence; "
+                f"expected={len(expected)}; observed={len(actual)}"
+            )
+
+    def document(self) -> dict[str, object]:
+        self.assert_accounted()
+        return {
+            "schema_version": "jaa10.chromium-request-lifecycle-audit.v1",
+            "listener_mode": "cdp_read_only",
+            "records": [dict(record) for record in self.records],
+            "protocol_errors": list(self.protocol_errors),
+        }
+
+
+def _install_chromium_request_audit(context, page):
+    session = context.new_cdp_session(page)
+    audit = _ChromiumNetworkAudit()
+    try:
+        session.on("Network.requestWillBeSent", audit.observe_request)
+        session.on("Network.loadingFinished", audit.observe_finished)
+        session.on("Network.loadingFailed", audit.observe_failed)
+        session.send("Network.enable")
+    except Exception:
+        try:
+            session.detach()
+        except Exception:
+            pass
+        raise
+    return session, audit
 
 
 def _canonical_json(value: object) -> bytes:
@@ -1442,6 +1587,7 @@ def _execute_worker(
     )
     chromium_main: dict[str, object] | None = None
     derived_environment: dict[str, str] | None = None
+    chromium_request_audit_document: dict[str, object] | None = None
     chromium_version = ""
     with LocalATSFixture(
         vacancy,
@@ -1486,34 +1632,82 @@ def _execute_worker(
             )
             pages = context.pages
             page = pages[0] if pages else context.new_page()
-            chromium_main, derived_environment = _browser_process_evidence(
-                chromium_executable,
-                node_driver,
-            )
-            chromium_start = int(chromium_main["process_start_ticks"])
-            version = context.new_cdp_session(page).send("Browser.getVersion")
-            chromium_version = str(version["product"])
-            for action in workflow.actions:
-                started = perf_counter_ns()
-                completed = executor.execute_next(
+            cdp_session = None
+            try:
+                cdp_session, request_audit = _install_chromium_request_audit(
+                    context,
                     page,
-                    run_id=run_id,
-                    worker_id="jaa10_network_worker",
-                    approved_values=approvals,
-                    materialized_values=values,
-                    release_authority=execution_authority,
                 )
-                elapsed[action.step_id] = (
-                    perf_counter_ns() - started
-                ) // 1_000_000
-                if completed is None:
-                    raise NetworkWitnessedFixtureError(
-                        "browser action did not complete"
+                chromium_main, derived_environment = _browser_process_evidence(
+                    chromium_executable,
+                    node_driver,
+                )
+                chromium_start = int(chromium_main["process_start_ticks"])
+                version = cdp_session.send("Browser.getVersion")
+                chromium_version = str(version["product"])
+                for action in workflow.actions:
+                    started = perf_counter_ns()
+                    completed = executor.execute_next(
+                        page,
+                        run_id=run_id,
+                        worker_id="jaa10_network_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=execution_authority,
                     )
-            screenshot = page.screenshot(full_page=True)
-            if _proc_start_ticks(int(chromium_main["pid"])) != chromium_start:
-                raise NetworkWitnessedFixtureError("Chromium process identity changed")
-            context.close()
+                    elapsed[action.step_id] = (
+                        perf_counter_ns() - started
+                    ) // 1_000_000
+                    if completed is None:
+                        raise NetworkWitnessedFixtureError(
+                            "browser action did not complete"
+                        )
+                page.wait_for_load_state("networkidle")
+                icon_hrefs = page.locator("head link[rel]").evaluate_all(
+                    """(links) => links.filter((link) =>
+                      (link.getAttribute('rel') || '').toLowerCase().split(/\\s+/)
+                        .some((token) => token === 'icon' || token.endsWith('-icon'))
+                    ).map((link) => link.getAttribute('href'))"""
+                )
+                if icon_hrefs != [FIXTURE_INERT_FAVICON_HREF]:
+                    raise NetworkWitnessedFixtureError(
+                        "local fixture lacks its exact inert favicon declaration"
+                    )
+                application_url = fixture.application_url.rstrip("/")
+                expected_requests = (
+                    ("GET", application_url, "Document"),
+                    ("POST", application_url + "/review", "Document"),
+                    ("POST", application_url + "/submit", "Document"),
+                )
+                request_audit.assert_exact(expected_requests)
+                chromium_request_audit_document = {
+                    **request_audit.document(),
+                    "expected_requests": [
+                        {
+                            "method": method,
+                            "url": url,
+                            "resource_type": resource_type,
+                        }
+                        for method, url, resource_type in expected_requests
+                    ],
+                    "inert_favicon_href": FIXTURE_INERT_FAVICON_HREF,
+                    "exact_sequence_verified": True,
+                }
+                screenshot = page.screenshot(full_page=True)
+                if (
+                    _proc_start_ticks(int(chromium_main["pid"]))
+                    != chromium_start
+                ):
+                    raise NetworkWitnessedFixtureError(
+                        "Chromium process identity changed"
+                    )
+            finally:
+                if cdp_session is not None:
+                    try:
+                        cdp_session.detach()
+                    except Exception:
+                        pass
+                context.close()
         screenshot_path = output_root / "screenshot.png"
         _write_exclusive(screenshot_path, screenshot)
         outputs = store.checkpoint_outputs(run_id)["submit"]
@@ -1582,7 +1776,11 @@ def _execute_worker(
                 for control in REQUIRED_MUTATION_CONTROLS
             ),
         )
-    if chromium_main is None or derived_environment is None:
+    if (
+        chromium_main is None
+        or derived_environment is None
+        or chromium_request_audit_document is None
+    ):
         raise NetworkWitnessedFixtureError("browser process evidence is missing")
     if any(
         row["executable"]
@@ -1631,6 +1829,7 @@ def _execute_worker(
         "durable-submit-event.json": durable_document,
         "browser-launch-receipt.json": browser_launch,
         "browser-runtime-identities.json": identity_receipt,
+        "chromium-request-audit.json": chromium_request_audit_document,
     }
     for name, document in artifacts.items():
         _write_exclusive(output_root / name, _canonical_json(document))
@@ -1786,6 +1985,10 @@ def validate_worker_result(
         certifies_slice=bool(fixture["certifies_slice"]),
     )
     fixture_receipt.verify()
+    _validate_chromium_request_audit(
+        output_root / "chromium-request-audit.json",
+        application_id=fixture_receipt.application_id,
+    )
     for key in (
         "release_manifest_sha256",
         "receipt_id",
@@ -1812,6 +2015,113 @@ def validate_worker_result(
         or result.get("worker_artifact_inventory_sha256") != inventory_sha256
     ):
         raise NetworkWitnessedFixtureError("worker artifact inventory differs")
+
+
+def _validate_chromium_request_audit(
+    path: Path,
+    *,
+    application_id: str,
+) -> dict[str, Any]:
+    try:
+        document, _payload = _read_canonical(path, maximum=256_000)
+    except OSError as exc:
+        raise NetworkWitnessedFixtureError(
+            "Chromium request audit artifact is unavailable"
+        ) from exc
+    if set(document) != {
+        "schema_version",
+        "listener_mode",
+        "records",
+        "protocol_errors",
+        "expected_requests",
+        "inert_favicon_href",
+        "exact_sequence_verified",
+    }:
+        raise NetworkWitnessedFixtureError(
+            "Chromium request audit field set differs"
+        )
+    records = document.get("records")
+    expected = document.get("expected_requests")
+    if (
+        document.get("schema_version")
+        != "jaa10.chromium-request-lifecycle-audit.v1"
+        or document.get("listener_mode") != "cdp_read_only"
+        or document.get("protocol_errors") != []
+        or document.get("inert_favicon_href") != FIXTURE_INERT_FAVICON_HREF
+        or document.get("exact_sequence_verified") is not True
+        or not isinstance(records, list)
+        or not isinstance(expected, list)
+        or len(records) != 3
+        or len(expected) != 3
+    ):
+        raise NetworkWitnessedFixtureError(
+            "Chromium request audit authority differs"
+        )
+    expected_methods = ("GET", "POST", "POST")
+    expected_suffixes = ("", "/review", "/submit")
+    origin: tuple[str, str, int] | None = None
+    request_ids: set[str] = set()
+    for index, (record, expectation) in enumerate(zip(records, expected)):
+        if not isinstance(record, dict) or not isinstance(expectation, dict):
+            raise NetworkWitnessedFixtureError(
+                "Chromium request audit record is invalid"
+            )
+        if set(record) != {
+            "initiator_type",
+            "method",
+            "request_id",
+            "resource_type",
+            "terminal",
+            "url",
+        } or set(expectation) != {"method", "url", "resource_type"}:
+            raise NetworkWitnessedFixtureError(
+                "Chromium request audit record fields differ"
+            )
+        method = expected_methods[index]
+        url = record.get("url")
+        request_id = record.get("request_id")
+        if (
+            record.get("method") != method
+            or record.get("resource_type") != "Document"
+            or record.get("terminal") != "finished"
+            or not isinstance(record.get("initiator_type"), str)
+            or not record["initiator_type"]
+            or not isinstance(request_id, str)
+            or not request_id
+            or request_id in request_ids
+            or not isinstance(url, str)
+            or expectation
+            != {"method": method, "url": url, "resource_type": "Document"}
+        ):
+            raise NetworkWitnessedFixtureError(
+                "Chromium request audit record differs"
+            )
+        request_ids.add(request_id)
+        parsed = urlsplit(url)
+        try:
+            host = ipaddress.ip_address(parsed.hostname or "")
+            port = parsed.port or 80
+        except ValueError as exc:
+            raise NetworkWitnessedFixtureError(
+                "Chromium request audit host is invalid"
+            ) from exc
+        current_origin = (parsed.scheme, str(host), port)
+        if (
+            parsed.scheme != "http"
+            or not host.is_loopback
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path
+            != f"/applications/{application_id}{expected_suffixes[index]}"
+            or (origin is not None and current_origin != origin)
+        ):
+            raise NetworkWitnessedFixtureError(
+                "Chromium request audit route differs"
+            )
+        origin = current_origin
+    return document
 
 
 @dataclass(frozen=True, slots=True)
