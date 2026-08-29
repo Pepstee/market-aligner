@@ -1751,12 +1751,12 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
       };</script></body></html>"""
     real_sync_playwright = playwright_api.sync_playwright
 
-    class RoutedBrowser:
-        def __init__(self, browser):
-            self._browser = browser
+    class RoutedBrowserContext:
+        def __init__(self, context):
+            self._context = context
 
         def new_page(self):
-            page = self._browser.new_page()
+            page = self._context.new_page()
             page.route(
                 "**/*",
                 lambda route: route.fulfill(
@@ -1766,6 +1766,25 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
                 ),
             )
             return page
+
+        def route(self, *arguments, **keywords):
+            return self._context.route(*arguments, **keywords)
+
+        def on(self, *arguments, **keywords):
+            return self._context.on(*arguments, **keywords)
+
+        def unroute_all(self, **keywords):
+            return self._context.unroute_all(**keywords)
+
+        def close(self):
+            return self._context.close()
+
+    class RoutedBrowser:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def new_context(self, **keywords):
+            return RoutedBrowserContext(self._browser.new_context(**keywords))
 
         def close(self):
             return self._browser.close()
