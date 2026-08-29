@@ -11,6 +11,7 @@ from cv_generation import document_quality as quality
 from career_automation.rendering import (
     ApplicationArtifacts,
     EditableArtifacts,
+    RENDERER_POLICY_SHA256,
     _artifact,
 )
 from cv_generation.document_quality import (
@@ -175,6 +176,7 @@ I would welcome the opportunity to discuss the engineering challenges.
         "\n".join(
             (
                 source_id,
+                RENDERER_POLICY_SHA256,
                 editable.cv_sha256,
                 editable.cover_letter_sha256,
                 editable.answers_sha256,
@@ -193,6 +195,7 @@ def _rehash_editable(artifacts: ApplicationArtifacts, editable: EditableArtifact
         "\n".join(
             (
                 artifacts.source_id,
+                RENDERER_POLICY_SHA256,
                 editable.cv_sha256,
                 editable.cover_letter_sha256,
                 editable.answers_sha256,

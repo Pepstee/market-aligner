@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from career_automation import rendering as rendering_module
 from career_automation.application_compiler import (
     CandidateContact,
     FactualSentence,
@@ -32,10 +33,14 @@ from career_automation.application_strategy import ApplicationStrategyStore
 from career_automation.candidate_graph import CandidateGraph
 from career_automation.evidence_matching import canonical_json, content_hash
 from career_automation.rendering import (
+    ApplicationArtifacts,
     PDF_FORBIDDEN,
     PdfArtifact,
+    RENDERER_POLICY_SHA256,
     render_pdf_artifacts,
     validate_pdf_artifact,
+    validate_pdf_geometry,
+    verify_application_artifacts,
 )
 from test_jaa07_independent_acceptance import (
     DIGEST,
@@ -302,6 +307,92 @@ def test_pdf_rich_or_hidden_feature_markers_fail_closed() -> None:
             expected_page_count=1,
             required_values=("Example Ltd",),
         )
+
+
+def test_pdf_geometry_rejects_clipping_overlap_and_page_budget() -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    first_page = artifacts.cv_pdf.layout_boxes[0]
+    clipped = replace(first_page[0], x=594.0)
+    with pytest.raises(ValueError, match="clips"):
+        validate_pdf_geometry(((clipped, *first_page[1:]),))
+    overlapping = replace(first_page[1], baseline_y=first_page[0].baseline_y)
+    with pytest.raises(ValueError, match="overlap"):
+        validate_pdf_geometry(((first_page[0], overlapping, *first_page[2:]),))
+
+    blocks = tuple(
+        (
+            rendering_module._LineSpec(
+                f"Synthetic evidence line {index}",
+                "body",
+                rendering_module._BODY,
+            ),
+        )
+        for index in range(80)
+    )
+    layout = rendering_module._layout_blocks(blocks, max_pages=2)
+    assert len(layout) == 2
+    validate_pdf_geometry(layout)
+    with pytest.raises(ValueError, match="page budget"):
+        rendering_module._layout_blocks(blocks, max_pages=1)
+
+
+def test_coherently_rehashed_pdf_from_another_source_fails_exact_rerender() -> None:
+    source, _ = _source()
+    original = render_pdf_artifacts(source)
+    slot = source.style_slots[0]
+    proposed = "Evidence relevant to this role"
+    receipt = ModelReceipt(
+        "provider",
+        "critic",
+        DIGEST,
+        DIGEST,
+        hashlib.sha256(slot.text.encode()).hexdigest(),
+        hashlib.sha256(proposed.encode()).hexdigest(),
+    )
+    proposal = StyleProposal(
+        content_hash(
+            {
+                "contract": "jaa07.style-proposal.v1",
+                "input_sha256": receipt.input_sha256,
+                "model": receipt.model,
+                "output_sha256": receipt.output_sha256,
+                "policy_sha256": receipt.policy_sha256,
+                "prompt_sha256": receipt.prompt_sha256,
+                "provider": receipt.provider,
+                "slot_id": slot.slot_id,
+            }
+        ),
+        slot.slot_id,
+        slot.text,
+        proposed,
+        receipt,
+    )
+    other = render_pdf_artifacts(apply_style_proposal(source, proposal))
+    tampered_hash = hashlib.sha256(
+        "\n".join(
+            (
+                original.source_id,
+                RENDERER_POLICY_SHA256,
+                original.editable.cv_sha256,
+                original.editable.cover_letter_sha256,
+                original.editable.answers_sha256,
+                other.cv_pdf.pdf_sha256,
+                other.cv_pdf.extracted_text_sha256,
+                original.cover_letter_pdf.pdf_sha256,
+                original.cover_letter_pdf.extracted_text_sha256,
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    tampered = ApplicationArtifacts(
+        source_id=original.source_id,
+        editable=original.editable,
+        cv_pdf=other.cv_pdf,
+        cover_letter_pdf=original.cover_letter_pdf,
+        artifact_set_sha256=tampered_hash,
+    )
+    with pytest.raises(ValueError, match="exact source rerender"):
+        verify_application_artifacts(tampered, source)
 
 
 def test_artifact_publication_rejects_repository_and_symlink_roots(
