@@ -1,11 +1,11 @@
 {
-  "community_count": 816,
-  "edge_count": 140259,
-  "node_count": 33969,
+  "community_count": 827,
+  "edge_count": 140262,
+  "node_count": 33973,
   "outputs": {
     ".graphify_labels.json": "f36933096246a1f86e85db1d4abeb20af59e35aced8bfd3009fde253c3900e5c",
-    "GRAPH_REPORT.md": "b2e5c6ba4444a1a04493da35ef5c1b6d59be82e2f8c11b2c019c6124c3453ff8",
-    "graph.json": "2bcfad05a6b691040a186dae02847c388761cebd7cf2eb8483c00c50bf306156"
+    "GRAPH_REPORT.md": "2c77662518f25e850f920e36905e637252ad98776f5fbbf678ba185098fb9552",
+    "graph.json": "aa11724a4d63e0e8f575dad69552e77947e7094049430dd3fecc0d96955583a8"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Semantic extraction used the host Graphify subagent; provider token counts were unavailable, so zero is an unmetered placeholder rather than a no-token claim.",
     "output": 0
   },
-  "source_base_commit": "09bec26823a918c4a1080c7a8d12f77b0c55aa51",
+  "source_base_commit": "b746d9687e86eb09142c76fd4fc577ab9ca38a0b",
   "sources": {
     ".gitignore": "bb132dbd31220d532c0b13b8e82af0755ad8a54bdbbc12f980a40d48ea7eca02",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "b751acbca67154a07f0d478045d0e630d33bc05bc034c8d584bcc743980091c1",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "cea1b0f8b024d1322cf5a9eff52cfb2938cf68608b30ae7da38ef35ed529d349",
-    "docs/migration/CAPABILITY_INVENTORY.md": "e534b777a31963eab335906010d18e41e56b0859811b557e1e7496c2face9b56",
+    "docs/migration/CAPABILITY_INVENTORY.md": "24195a103f8901b0afd9538ef6de0700b87ae61659c5d92dc55e9d4a1e63f5e3",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "7de587aa7b2897048927443c1656418a4010c44faf8a1155472d18077d8de1c7",
-    "docs/migration/capability-inventory.jsonl": "38e7ad31eb6fd589f2d9614855f800085663a34fb3a52adf62f09fb832970c9d",
-    "docs/migration/ledger.jsonl": "c154c61d0d07085727a383c3a6cc9538d1a80a1f6962be84152923607ec4342f",
+    "docs/migration/capability-dispositions.jsonl": "cdc527746aac9ec35a90c0c089f155310bf82e1b33864e2114bb4b0d4bcd8546",
+    "docs/migration/capability-inventory.jsonl": "ca8d9aadd57c444a05ec03d6241a52788ce570f0489af6524069da5601cc5b68",
+    "docs/migration/ledger.jsonl": "9ffa8ed756804c9cd551b89b4c3a3aaf167d2f302587e269aea1af86c1731407",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -639,7 +639,7 @@
     "internal/jaa/test_seal_jaa_certification_evidence.py": "1358a81eafc0687058f03647438e1a411fd88a6e47b2ad9e0ff2b2a5299eb9ad",
     "internal/jaa/test_split_repair_contract.py": "486bd8159fcbcad9a2494a41eb76cf94886f61ab9cb9d6448a9c5d71672cfe55",
     "internal/jaa/test_test_evidence_import_boundaries.py": "0c183ba74ecf5cd2409eaacd40ad2986a6fdb31d324c92bbc3dd0503274bd9d7",
-    "internal/jaa/test_workable_live_adapter.py": "ca22462fc54e3de63e9cec6cbde2303acd1dfd160ca94fb66892043e1b248689",
+    "internal/jaa/test_workable_live_adapter.py": "c8ef8becd0aea8077cc63ce63b1d5f82646d251dbc87fb7fc1f7d34074302c11",
     "internal/jaa/test_workable_walking_skeleton.py": "173927d8a384810babee59b592699e8f64536b350e209f500b930030e44c7aaa",
     "internal/jaa/tracked_source_revision.py": "2ec59a513bc63d7606605b42531e293a5d474babf27a18c9698c500d335453a0",
     "pyproject.toml": "9e9517014a7e289db1569001f332d749de07e94f9ee46c1df58a3aeb1cc5132c",
