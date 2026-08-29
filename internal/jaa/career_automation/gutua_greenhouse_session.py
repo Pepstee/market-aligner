@@ -25,6 +25,7 @@ from .application_quality import (
 from .application_quality_contracts import QualityReviewDisposition
 from .application_sanity_review import (
     ApplicationSanityReviewError,
+    build_vacancy_review_material,
     package_from_application,
     review_application_package,
 )
@@ -907,9 +908,23 @@ class GutuaGreenhouseSession:
             source_body,
             page.content().encode("utf-8"),
         )
+        vacancy_review_material = build_vacancy_review_material(
+            raw_listing_bytes=source_body,
+            visible_listing_text_bytes=page.locator("body")
+            .inner_text()
+            .encode("utf-8"),
+            expected_raw_listing_sha256=vacancy.vacancy_sha256,
+        )
         recorder.add_revision(
             role="vacancy.destination_reverification",
             value=_json_bytes(equivalence),
+            media_type="application/json",
+            prior_sha256=None,
+            approved=True,
+        )
+        recorder.add_revision(
+            role="vacancy.review_material",
+            value=_json_bytes(vacancy_review_material.document()),
             media_type="application/json",
             prior_sha256=None,
             approved=True,
@@ -988,6 +1003,7 @@ class GutuaGreenhouseSession:
                     artifacts=package.artifacts,
                     questions=None,
                     vacancy_requirements=package.vacancy_requirements,
+                    vacancy_review_material=vacancy_review_material,
                 ),
                 client=client,
             )
@@ -1156,6 +1172,7 @@ class GutuaGreenhouseSession:
             jurisdiction="GB",
             contract_type="employee",
             consumed_at=issued.issued_at,
+            vacancy_review_material=vacancy_review_material,
             vacancy_requirements=package.vacancy_requirements,
         )
 

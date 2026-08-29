@@ -41,12 +41,13 @@ from career_automation.testing_sanity_review import fixture_pass_receipt
 
 
 PRODUCTION_ARCHIVE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / ".market-aligner-data"
-    / "authority-inputs"
+    Path(__file__).resolve().parents[2] / ".market-aligner-data" / "authority-inputs"
 )
-PRODUCTION_DISCOVERY_PATH = PRODUCTION_ARCHIVE_ROOT / "objects" / "39" / (
-    "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
+PRODUCTION_DISCOVERY_PATH = (
+    PRODUCTION_ARCHIVE_ROOT
+    / "objects"
+    / "39"
+    / ("39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47")
 )
 TEST_CONTACT_PRIVATE_KEY = Ed25519PrivateKey.generate()
 TEST_CONTACT_PUBLIC_RAW = TEST_CONTACT_PRIVATE_KEY.public_key().public_bytes(
@@ -611,6 +612,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             questions=None,
             state_root=tmp_path,
             vacancy_requirements=package.vacancy_requirements,
+            vacancy_review_material=package.vacancy_review_material,
         ),
     )
     from playwright.sync_api import sync_playwright
@@ -646,6 +648,11 @@ def test_repository_session_prepares_sink_bound_fixture_release(
         assert prepared.sanity_review_receipt.vacancy_requirements_sha256 == (
             content_hash(list(expected_requirements))
         )
+        assert prepared.vacancy_review_material.raw_listing_bytes == html.encode()
+        assert (
+            prepared.sanity_review_receipt.package_hashes["review_text_sha256"]
+            == prepared.vacancy_review_material.review_text_sha256
+        )
         assert page.locator('input[name="email"]').input_value() == (
             "jordan.smith@proton.me"
         )
@@ -657,10 +664,15 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             root=recorder.attempt.archive.root,
             repository_root=recorder.attempt.archive.repository_root,
         )
-        event_kinds = {
-            row["payload"]["event_kind"] for row in view["evidence_events"]
-        }
-        assert {"navigation", "preflight", "field_filled", "field_selected", "file_uploaded", "screenshot"} <= event_kinds
+        event_kinds = {row["payload"]["event_kind"] for row in view["evidence_events"]}
+        assert {
+            "navigation",
+            "preflight",
+            "field_filled",
+            "field_selected",
+            "file_uploaded",
+            "screenshot",
+        } <= event_kinds
         assert view["gaps"]["action_timeline"] is False
         assert "jordan.smith@proton.me" not in json.dumps(view, sort_keys=True)
         browser.close()
@@ -833,7 +845,15 @@ def test_graphcore_recurring_fields_use_only_stable_candidate_authority(
             repository_root=recorder.attempt.archive.repository_root,
         )
         kinds = {row["payload"]["event_kind"] for row in view["evidence_events"]}
-        assert {"navigation", "preflight", "field_filled", "field_selected", "file_uploaded", "click", "screenshot"} <= kinds
+        assert {
+            "navigation",
+            "preflight",
+            "field_filled",
+            "field_selected",
+            "file_uploaded",
+            "click",
+            "screenshot",
+        } <= kinds
         assert view["gaps"]["action_timeline"] is False
         assert "Alex Example" not in json.dumps(view, sort_keys=True)
         browser.close()

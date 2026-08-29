@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -25,6 +26,10 @@ from .external_document_assurance import IntendedVacancy
 PROMPT_SCHEMA_VERSION = "jaa.application-sanity-prompt.v1"
 RESULT_SCHEMA_VERSION = "jaa.application-sanity-result.v1"
 RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v1"
+REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v1"
+REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
+MAX_REVIEW_TEXT_BYTES = 500_000
+MAX_RAW_LISTING_BYTES = 2_000_000
 
 # This is policy, not model-specific advice. Vacancy and application content
 # are deliberately placed only in the quoted JSON user payload.
@@ -135,6 +140,113 @@ class ApplicationSanityReviewError(ValueError):
         super().__init__(f"application sanity review blocked ({code}): {message}")
 
 
+def _project_visible_listing_text(value: bytes) -> bytes:
+    """Apply the recovered exact UTF-8/NFC/LF employer-review projection."""
+    if not isinstance(value, bytes) or not value:
+        raise ValueError("visible vacancy listing must be exact non-empty bytes")
+    if len(value) > MAX_REVIEW_TEXT_BYTES:
+        raise ValueError("visible vacancy listing exceeds 500000 bytes")
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("visible vacancy listing is not UTF-8") from exc
+    if text.startswith("\ufeff"):
+        raise ValueError("visible vacancy listing contains a BOM")
+    if "\x00" in text:
+        raise ValueError("visible vacancy listing contains NUL")
+    projected = unicodedata.normalize(
+        "NFC", text.replace("\r\n", "\n").replace("\r", "\n")
+    )
+    projected_bytes = projected.encode("utf-8")
+    if not projected_bytes or len(projected_bytes) > MAX_REVIEW_TEXT_BYTES:
+        raise ValueError("projected vacancy listing is invalid")
+    return projected_bytes
+
+
+@dataclass(frozen=True)
+class VacancyReviewMaterial:
+    """Exact archived vacancy bytes plus current browser-visible review text.
+
+    Production constructs this only after the live destination has been proven
+    semantically equivalent to the archived raw listing.  Carrying both byte
+    identities into the sanity receipt prevents a caller from substituting a
+    shortened or different vacancy during review.
+    """
+
+    raw_listing_bytes: bytes
+    visible_listing_text_bytes: bytes
+    raw_listing_sha256: str
+    review_text_sha256: str
+    projection_sha256: str
+    projection_id: str = REVIEW_TEXT_PROJECTION_ID
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.raw_listing_bytes, bytes)
+            or not self.raw_listing_bytes
+            or len(self.raw_listing_bytes) > MAX_RAW_LISTING_BYTES
+        ):
+            raise ValueError("raw vacancy listing bytes are invalid")
+        if self.projection_id != REVIEW_TEXT_PROJECTION_ID:
+            raise ValueError("vacancy review projection is unsupported")
+        projected = _project_visible_listing_text(self.visible_listing_text_bytes)
+        if projected != self.visible_listing_text_bytes:
+            raise ValueError("visible vacancy listing is not canonical UTF-8/NFC/LF")
+        if (
+            self.raw_listing_sha256
+            != hashlib.sha256(self.raw_listing_bytes).hexdigest()
+        ):
+            raise ValueError("raw vacancy listing identity is invalid")
+        if self.review_text_sha256 != hashlib.sha256(projected).hexdigest():
+            raise ValueError("visible vacancy listing identity is invalid")
+        if self.projection_sha256 != content_hash(self.projection_document()):
+            raise ValueError("vacancy review projection identity is invalid")
+
+    def projection_document(self) -> dict[str, str]:
+        return {
+            "projection_id": self.projection_id,
+            "raw_listing_sha256": self.raw_listing_sha256,
+            "review_text_sha256": self.review_text_sha256,
+            "schema_version": REVIEW_TEXT_PROJECTION_SCHEMA,
+        }
+
+    def document(self) -> dict[str, str]:
+        return {
+            **self.projection_document(),
+            "exact_text": self.visible_listing_text_bytes.decode("utf-8"),
+            "projection_sha256": self.projection_sha256,
+        }
+
+
+def build_vacancy_review_material(
+    *,
+    raw_listing_bytes: bytes,
+    visible_listing_text_bytes: bytes,
+    expected_raw_listing_sha256: str,
+) -> VacancyReviewMaterial:
+    """Bind trusted raw vacancy bytes to one exact visible-text projection."""
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_raw_listing_sha256):
+        raise ValueError("expected raw vacancy identity must be lowercase SHA-256")
+    raw_sha256 = hashlib.sha256(raw_listing_bytes).hexdigest()
+    if raw_sha256 != expected_raw_listing_sha256:
+        raise ValueError("raw vacancy listing differs from application authority")
+    projected = _project_visible_listing_text(visible_listing_text_bytes)
+    review_sha256 = hashlib.sha256(projected).hexdigest()
+    projection = {
+        "projection_id": REVIEW_TEXT_PROJECTION_ID,
+        "raw_listing_sha256": raw_sha256,
+        "review_text_sha256": review_sha256,
+        "schema_version": REVIEW_TEXT_PROJECTION_SCHEMA,
+    }
+    return VacancyReviewMaterial(
+        raw_listing_bytes=raw_listing_bytes,
+        visible_listing_text_bytes=projected,
+        raw_listing_sha256=raw_sha256,
+        review_text_sha256=review_sha256,
+        projection_sha256=content_hash(projection),
+    )
+
+
 @dataclass(frozen=True)
 class SanityReviewPackage:
     cv_pdf_bytes: bytes
@@ -144,6 +256,7 @@ class SanityReviewPackage:
     vacancy_requirements: tuple[str, ...]
     approved_evidence_ids: tuple[str, ...]
     application_source_identity: str
+    vacancy_review_material: VacancyReviewMaterial | None = None
 
     def __post_init__(self) -> None:
         if not self.cv_pdf_bytes or not self.cover_letter_pdf_bytes:
@@ -156,6 +269,13 @@ class SanityReviewPackage:
             raise ValueError("sanity review requires approved-evidence identifiers")
         if len(set(self.approved_evidence_ids)) != len(self.approved_evidence_ids):
             raise ValueError("approved-evidence identifiers must be unique")
+        if self.vacancy_review_material is not None:
+            self.vacancy_review_material.__post_init__()
+            if (
+                self.vacancy_review_material.raw_listing_sha256
+                != self.intended_vacancy.vacancy_sha256
+            ):
+                raise ValueError("review listing differs from intended vacancy")
 
 
 def canonical_form_fields(
@@ -203,6 +323,7 @@ def package_from_application(
     artifacts: object,
     questions: Mapping[str, tuple[str, str]] | None,
     vacancy_requirements: Sequence[str] | None = None,
+    vacancy_review_material: VacancyReviewMaterial | None = None,
 ) -> SanityReviewPackage:
     """Build review data from the exact immutable application objects."""
     return SanityReviewPackage(
@@ -224,6 +345,7 @@ def package_from_application(
         ),
         approved_evidence_ids=approved_evidence_projection(source),
         application_source_identity=source.source_id,
+        vacancy_review_material=vacancy_review_material,
     )
 
 
@@ -266,13 +388,24 @@ def _package_document(
         "form_package_sha256": content_hash(form_document),
         "approved_evidence_projection_sha256": content_hash(evidence_document),
     }
+    vacancy_document: dict[str, object] = {
+        **package.intended_vacancy.document(),
+        "requirements": list(package.vacancy_requirements),
+    }
+    if package.vacancy_review_material is not None:
+        review_material = package.vacancy_review_material
+        hashes.update(
+            {
+                "raw_listing_sha256": review_material.raw_listing_sha256,
+                "review_text_sha256": review_material.review_text_sha256,
+                "review_text_projection_sha256": review_material.projection_sha256,
+            }
+        )
+        vacancy_document["exact_listing"] = review_material.document()
     document = {
         "contract": "jaa.application-sanity-input.v1",
         "instruction_boundary": "BEGIN UNTRUSTED QUOTED DATA",
-        "vacancy": {
-            **package.intended_vacancy.document(),
-            "requirements": list(package.vacancy_requirements),
-        },
+        "vacancy": vacancy_document,
         "application": {
             "cv_exact_pdf_extracted_text": cv_text,
             "cover_letter_exact_pdf_extracted_text": letter_text,
@@ -443,13 +576,18 @@ def verify_sanity_review_receipt(
 __all__ = [
     "ApplicationSanityReviewError",
     "FINDING_CODES",
+    "MAX_REVIEW_TEXT_BYTES",
     "POLICY_SHA256",
     "PROMPT_SHA256",
+    "REVIEW_TEXT_PROJECTION_ID",
+    "REVIEW_TEXT_PROJECTION_SCHEMA",
     "RESULT_SCHEMA",
     "SCHEMA_SHA256",
     "SanityReviewPackage",
     "SanityReviewReceipt",
+    "VacancyReviewMaterial",
     "approved_evidence_projection",
+    "build_vacancy_review_material",
     "canonical_form_fields",
     "package_from_application",
     "review_application_package",

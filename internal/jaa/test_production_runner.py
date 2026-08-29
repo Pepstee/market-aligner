@@ -24,11 +24,16 @@ from career_automation.production_runner import (
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE_AUTHORITY_ROOT = ROOT.parents[1] / ".market-aligner-data" / "authority-inputs"
-AUTHORITY_PATH = PRIVATE_AUTHORITY_ROOT / "candidate-authorities" / (
-    "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
+AUTHORITY_PATH = (
+    PRIVATE_AUTHORITY_ROOT
+    / "candidate-authorities"
+    / ("85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json")
 )
-DISCOVERY_PATH = PRIVATE_AUTHORITY_ROOT / "objects" / "39" / (
-    "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
+DISCOVERY_PATH = (
+    PRIVATE_AUTHORITY_ROOT
+    / "objects"
+    / "39"
+    / ("39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47")
 )
 
 
@@ -236,6 +241,7 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
         jurisdiction="GB",
         contract_type="employee",
         consumed_at=datetime.now(timezone.utc),
+        vacancy_review_material=object(),
         vacancy_requirements=("essential: requirement",),
         submit_button_name="Submit Application",
         timeout_ms=1000,

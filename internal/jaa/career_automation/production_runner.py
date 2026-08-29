@@ -20,7 +20,7 @@ from playwright.sync_api import Page
 
 from .application_archive import ApplicationArchive
 from .application_compiler import ApplicationSource, CandidateContact
-from .application_sanity_review import SanityReviewReceipt
+from .application_sanity_review import SanityReviewReceipt, VacancyReviewMaterial
 from .application_quality import ApplicationQualityInput
 from .application_quality_contracts import ApplicationPreflightQualityReview
 from .ats_application_authority import AtsApplicationAuthority
@@ -508,6 +508,7 @@ class PreparedGreenhouseRelease:
     jurisdiction: str
     contract_type: str
     consumed_at: datetime
+    vacancy_review_material: VacancyReviewMaterial
     vacancy_requirements: tuple[str, ...] = ()
     submit_button_name: str = "Submit Application"
     timeout_ms: int = 20_000
@@ -760,6 +761,7 @@ class GreenhouseProductionRunner:
             receipt_url=prepared.receipt_url,
             application_id=prepared.application_id,
             job_key=prepared.source.job_key,
+            vacancy_review_material=prepared.vacancy_review_material,
             vacancy_requirements=prepared.vacancy_requirements,
         )
         return self.executor.execute(
