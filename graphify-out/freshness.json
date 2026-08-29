@@ -1,11 +1,11 @@
 {
-  "community_count": 833,
-  "edge_count": 140082,
-  "node_count": 33910,
+  "community_count": 832,
+  "edge_count": 140085,
+  "node_count": 33911,
   "outputs": {
     ".graphify_labels.json": "f36933096246a1f86e85db1d4abeb20af59e35aced8bfd3009fde253c3900e5c",
-    "GRAPH_REPORT.md": "750277b724bfa7fdd7016be24317182ba8f5da5cf11aa3b3f6c62a4c3c62aeab",
-    "graph.json": "5cb4b9fa319701e00017e05ba26fc0c6891c53f442b9f5b615394f27e3b209d8"
+    "GRAPH_REPORT.md": "e3c07ebd5e74d36d16b1fbf5e175eef2d08071dd0a6b75844cbf372a2adae29e",
+    "graph.json": "fb850cf085eb2d7a1ba3060a1d49e8849ed749d30b31328b27f17bce6165964a"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Semantic extraction used the host Graphify subagent; provider token counts were unavailable, so zero is an unmetered placeholder rather than a no-token claim.",
     "output": 0
   },
-  "source_base_commit": "d1f3104484ece04713d1d8fcfa2745164d52579b",
+  "source_base_commit": "a33d20b4720eb3eb4a3765656f4d65f7c07953b5",
   "sources": {
     ".gitignore": "bb132dbd31220d532c0b13b8e82af0755ad8a54bdbbc12f980a40d48ea7eca02",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "b751acbca67154a07f0d478045d0e630d33bc05bc034c8d584bcc743980091c1",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "cea1b0f8b024d1322cf5a9eff52cfb2938cf68608b30ae7da38ef35ed529d349",
-    "docs/migration/CAPABILITY_INVENTORY.md": "cb4ac8d468e40e3d777ba3b2db4d52eb820e602ed75997c435c6c3cf726a7535",
+    "docs/migration/CAPABILITY_INVENTORY.md": "e98e995ce7e13e31b96251a9045a9b4d6be37e41650724ec05bb3d7abe43b171",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "2e072c15f41011cc19c0bc6565201623619716d919695dc9cde7d0a4b7472ca8",
-    "docs/migration/capability-inventory.jsonl": "27aed6b16a98c001b238f37c170364cb0c8bc785d47f312aecf5d5aadaae8801",
-    "docs/migration/ledger.jsonl": "1acde1ef1d5d8675ea455d7dc9c836be85031ebe1c60bbd68b501f7894d7ba8b",
+    "docs/migration/capability-dispositions.jsonl": "9ac5694466b1d47e2527b757d7eec28f82d3f92168f95f37fc346da2cdd9a9d5",
+    "docs/migration/capability-inventory.jsonl": "bb4f288f110124abdd01bfec3c078adf2cae979436632e729843ee600e5d7d29",
+    "docs/migration/ledger.jsonl": "0f27336bf80144588c55e62a48f63d59e8763107b489f48ffaf810f728f1b581",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -534,7 +534,7 @@
     "internal/jaa/test_jaa07_independent_acceptance.py": "fbd6734fc23f7e337bfa9950128dabfd67c893f358eb271ae4b5d452b4baf530",
     "internal/jaa/test_jaa07_negative_controls.py": "b6ac4e49062fdaaf91e3d347619b1f8eb4563a044dd230dab80042defe91c1c2",
     "internal/jaa/test_jaa08_independent_acceptance.py": "188bc3a202a197a8bbc5761f282b74941ec86dff27a7dd91415537322d7b8576",
-    "internal/jaa/test_jaa08_negative_controls.py": "609573dc4fa29ffcfecd591ddcccc5992820cfd0b9397b4dfbbe8e5fd3fdebb6",
+    "internal/jaa/test_jaa08_negative_controls.py": "a842370703f4f218f10539f80ba8663d4922ba90e8185459ab679fad26a8d41d",
     "internal/jaa/test_jaa09_independent_acceptance.py": "676d8453a110c6f362d53b54ade7b08fb185411430e95c8ab7bec15ed9016df9",
     "internal/jaa/test_jaa09_negative_controls.py": "2136ee1a79f23f54da0360c2b57c7f6a249ec01a507030952aa9c79efd2b3c99",
     "internal/jaa/test_jaa09_real_vacancy_acceptance.py": "4fc88fe9dbc47164b00d8f9bcee884ce25a2cfd6af65f077baa2e494d06b4469",

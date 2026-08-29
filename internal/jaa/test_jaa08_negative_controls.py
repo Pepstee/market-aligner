@@ -303,6 +303,47 @@ def test_compilation_registration_rejects_external_tamper_without_state_change(
         ).fetchone()[0] == "strategy_ready"
 
 
+def test_compilation_registration_rejects_question_drift_without_state_change(
+    tmp_path,
+) -> None:
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        _receipt,
+    ) = _compilation_inputs(tmp_path)
+    requirement_id = next(iter(questions))
+    question_id, question = questions[requirement_id]
+    changed_questions = dict(questions)
+    changed_questions[requirement_id] = (
+        question_id,
+        f"{question} changed",
+    )
+    store = ApplicationCompilationStore(database.path)
+    with pytest.raises(ValueError, match="source differs from current authority"):
+        store.register(
+            source=source,
+            artifacts=artifacts,
+            contact=contact,
+            questions=changed_questions,
+            artifact_root=artifact_root,
+            repository_root=ROOT,
+            as_of=_fixture_date(database),
+        )
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM application_compilations"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (source.job_key,),
+        ).fetchone()[0] == "strategy_ready"
+
+
 def test_compilation_insert_failure_rolls_back_lifecycle_transition(
     tmp_path,
 ) -> None:
