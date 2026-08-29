@@ -7,15 +7,18 @@ refs, and the unique-source archive. JAA paths are normalised exclusively beneat
 
 ## Status counts
 
-- `canonical`: 11368
-- `canonical_relocated_exact`: 206
-- `conflicting_variant_review`: 1761
-- `integration_required`: 1463
+- `adopted_adapted`: 2
+- `canonical`: 11397
+- `canonical_relocated_exact`: 226
+- `conflicting_variant_review`: 1767
+- `integration_required`: 1441
 - `retained_evidence`: 2166
 
 `integration_required` and `conflicting_variant_review` are fail-closed work
 queues, not evidence of safe mergeability. `retained_evidence` remains
-recoverable in the hash-bound external archaeology corpus.
+recoverable in the hash-bound external archaeology corpus. Reviewed non-exact
+dispositions are bound by feature ID in `capability-dispositions.jsonl` and
+must cite an append-only subsystem-ledger entry.
 
 ## Required lifecycle capabilities
 

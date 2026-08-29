@@ -9,9 +9,19 @@ from pathlib import Path
 
 from market_aligner.assessment.calibration import readiness
 from market_aligner.assessment.eligibility import (
+    EligibilityDecision,
     EligibilityInput,
     EligibilityPolicy,
     assess_eligibility,
+)
+from market_aligner.assessment.geography import (
+    EU_REMOTE_COUNTRIES,
+    LocationFacts,
+    SelectionBlocked,
+    SelectionPolicy,
+    classify_geography,
+    decide_selection,
+    rank_selected,
 )
 from market_aligner.assessment.opportunity import (
     PreProfileOpportunityConfidence,
@@ -22,7 +32,7 @@ from market_aligner.assessment.opportunity import (
     derive_opportunity_axes,
     pre_profile_opportunity_score,
 )
-from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, score
+from market_aligner.assessment.scoring import AssessmentAxes, FitStatus, ScoreResult, score
 from market_aligner.assessment.viability import (
     FirstJobScopePolicy,
     assess_first_job_scope,
@@ -73,6 +83,109 @@ def vacancy(board: str = "greenhouse", job_id: str = "1", **updates) -> Vacancy:
 
 
 class AssessmentTests(unittest.TestCase):
+    @staticmethod
+    def _location(country: str, mode: str, basis: str = "explicit") -> LocationFacts:
+        return LocationFacts(
+            country,
+            "",
+            "",
+            f"{country} {mode}",
+            mode,
+            basis,
+            "json:/location",
+        )
+
+    @staticmethod
+    def _selection_score(job_key: str, final: float, opportunity: float) -> ScoreResult:
+        return ScoreResult(
+            "prf_0123456789abcdef0123456789abcdef",
+            job_key,
+            "synthetic_track",
+            final / 100.0,
+            opportunity,
+            final,
+            FitStatus.UNCALIBRATED,
+            "0" * 64,
+            {"interest": final / 100.0},
+            {"market_demand": opportunity},
+        )
+
+    def test_explicit_geography_selection_is_evidence_bound_and_fail_closed(self) -> None:
+        expected = (
+            ("GB", "remote", "UK_REMOTE", 1),
+            ("GB", "hybrid", "UK_HYBRID", 2),
+            ("GB", "onsite", "UK_ONSITE", 3),
+            ("RO", "remote", "RO_REMOTE", 4),
+        )
+        for country, mode, bucket, rank in expected:
+            match = classify_geography(self._location(country, mode))
+            self.assertEqual((bucket, rank), (match.bucket, match.priority_rank))
+        for country in EU_REMOTE_COUNTRIES:
+            match = classify_geography(self._location(country, "remote"))
+            self.assertEqual(("EU_REMOTE", 5), (match.bucket, match.priority_rank))
+
+        for facts in (
+            self._location("GB", "unknown"),
+            self._location("RO", "hybrid"),
+            self._location("NO", "remote"),
+        ):
+            with self.assertRaises(SelectionBlocked):
+                classify_geography(facts)
+        with self.assertRaises(SelectionBlocked):
+            self._location("GB", "remote", "inferred")
+        with self.assertRaises(SelectionBlocked):
+            self._location("UK", "remote")
+
+    def test_deterministic_selection_enforces_hard_gates_and_geography_first_ranking(self) -> None:
+        policy = SelectionPolicy(0.6, 0.5, 0.4, True, 21_600, 86_400, 5)
+        geography = classify_geography(self._location("GB", "remote"))
+        score_result = self._selection_score("job_a", 80.0, 0.7)
+        selected = decide_selection(
+            eligibility=EligibilityDecision("pass", (), ()),
+            score=score_result,
+            geography=geography,
+            policy=policy,
+            employer_dossier_sha256="0" * 64,
+        )
+        self.assertTrue(selected.hard_gate_passed)
+        self.assertEqual(("UK_REMOTE", 1), (
+            selected.geography_bucket,
+            selected.geography_priority_rank,
+        ))
+
+        for eligibility in (
+            EligibilityDecision("review", (), ("unknown",)),
+            EligibilityDecision("reject", ("mismatch",), ()),
+        ):
+            with self.assertRaisesRegex(SelectionBlocked, "eligibility"):
+                decide_selection(
+                    eligibility=eligibility,
+                    score=score_result,
+                    geography=geography,
+                    policy=policy,
+                    employer_dossier_sha256="0" * 64,
+                )
+        with self.assertRaisesRegex(SelectionBlocked, "dossier"):
+            decide_selection(
+                eligibility=EligibilityDecision("pass", (), ()),
+                score=score_result,
+                geography=geography,
+                policy=policy,
+                employer_dossier_sha256=None,
+            )
+
+        ranked = rank_selected(
+            [
+                (classify_geography(self._location("FR", "remote")), self._selection_score("job_eu", 99.0, 0.9)),
+                (classify_geography(self._location("GB", "remote")), self._selection_score("job_uk", 61.0, 0.4)),
+                (classify_geography(self._location("RO", "remote")), self._selection_score("job_ro", 95.0, 0.8)),
+            ]
+        )
+        self.assertEqual(
+            ["UK_REMOTE", "RO_REMOTE", "EU_REMOTE"],
+            [match.bucket for match, _score in ranked],
+        )
+
     def test_generic_viability_and_deduplication(self) -> None:
         first = vacancy()
         second = vacancy(

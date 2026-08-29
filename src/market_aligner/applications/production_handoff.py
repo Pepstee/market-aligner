@@ -28,6 +28,7 @@ from market_aligner.applications.producer import (
     WrittenHandoffBundle,
     write_protected_handoff_bundle,
 )
+from market_aligner.assessment.geography import GeographyMatch, SelectionDecision
 from market_aligner.assessment.scoring import ScoringParams
 from market_aligner.profiler.intent import serialize_candidate_intent
 from market_aligner.research.models import (
@@ -1546,13 +1547,18 @@ def _build_production_handoff_from_authenticated_time(
             "selection_policy_passed",
         }
     )
+    selection_decision = SelectionDecision(
+        GeographyMatch(geography_bucket, geography_rank).bucket,
+        geography_rank,
+        tuple(rationale_codes),
+    )
     selection_receipt_document = {
         "decision": "selected_for_application",
-        "geography_bucket": geography_bucket,
-        "geography_priority_rank": geography_rank,
-        "hard_gate_passed": True,
+        "geography_bucket": selection_decision.geography_bucket,
+        "geography_priority_rank": selection_decision.geography_priority_rank,
+        "hard_gate_passed": selection_decision.hard_gate_passed,
         "promotion_receipt_sha256": str(promotion_row["receipt_sha256"]),
-        "rationale_codes": rationale_codes,
+        "rationale_codes": list(selection_decision.rationale_codes),
         "source_job_key": source_job_key,
     }
     selection_receipt_bytes = _canonical(selection_receipt_document)

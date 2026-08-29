@@ -6475,14 +6475,14 @@
     "semantic_hash": "a05002793ea00da9260661b7b37abae0"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/applications/production_handoff.py": {
-    "mtime": 1787995262.840221,
-    "ast_hash": "f202ce43e300bfdb205d2ae49f6c1c6f",
+    "mtime": 1787996014.9791455,
+    "ast_hash": "b7fb5d4454dd6bd59fa64a1ff7bdea16",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/assessment/__init__.py": {
-    "mtime": 1785588541.2530544,
-    "ast_hash": "03c098b5884ebb70ae5ada6074cbe6b5",
-    "semantic_hash": "03c098b5884ebb70ae5ada6074cbe6b5"
+    "mtime": 1787995926.771413,
+    "ast_hash": "6b5db25c93bea962de8fdb0f547b45b7",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/assessment/calibration.py": {
     "mtime": 1785588734.8630776,
@@ -6495,9 +6495,9 @@
     "semantic_hash": "e2d2ececd06c7c3b9e421c499e17d945"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/assessment/geography.py": {
-    "mtime": 1787906899.7921603,
-    "ast_hash": "bd7a619abf46b1de8839cdc760eb3feb",
-    "semantic_hash": "bd7a619abf46b1de8839cdc760eb3feb"
+    "mtime": 1787995913.174627,
+    "ast_hash": "8c557da425d9d589e5c44ea0630faa07",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/assessment/opportunity.py": {
     "mtime": 1787915967.4102478,
@@ -6820,9 +6820,9 @@
     "semantic_hash": "af0793145edad0c026b7beb09d50a007"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/reporting/reports.py": {
-    "mtime": 1787906899.798965,
-    "ast_hash": "045e309a58937d9796711f0df110d244",
-    "semantic_hash": "045e309a58937d9796711f0df110d244"
+    "mtime": 1787995940.7457201,
+    "ast_hash": "54a743333030ba2fb290fcf68ca502a1",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/research/__init__.py": {
     "mtime": 1785589629.6157212,
@@ -6970,9 +6970,9 @@
     "semantic_hash": "2619ae7f8ce7e21b514aabd21e38ff29"
   },
   "/Users/admin/Projects/market-aligner/tests/test_assessment.py": {
-    "mtime": 1787915921.9475248,
-    "ast_hash": "f4320c6306a913c29a649def282133a5",
-    "semantic_hash": "f4320c6306a913c29a649def282133a5"
+    "mtime": 1787995974.4188852,
+    "ast_hash": "27a4288ee89a4099fd88c937ecbbace8",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_collection.py": {
     "mtime": 1787909298.5670912,
@@ -7405,18 +7405,18 @@
     "semantic_hash": "1befacd98c374f22a75cd9fdf02d9d80"
   },
   "/Users/admin/Projects/market-aligner/scripts/build_capability_inventory.py": {
-    "mtime": 1787995534.0770385,
-    "ast_hash": "bbc4415650afca4d48e63d700e4c7300",
+    "mtime": 1787996179.460855,
+    "ast_hash": "7ceb2da4675754970f211ed4194dc4dd",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_capability_inventory.py": {
-    "mtime": 1787995534.0773811,
-    "ast_hash": "b318718e960bca42166f9862ebe141e2",
+    "mtime": 1787996137.031347,
+    "ast_hash": "9d6425d87533348c18f765fe81044797",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1787995603.0890343,
-    "ast_hash": "69f28cecc420519753a11c6edb694bc4",
+    "mtime": 1787996264.698386,
+    "ast_hash": "9d2ebcc11a9a7748f2ca4d24b246ff95",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {

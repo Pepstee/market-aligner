@@ -77,6 +77,46 @@ def test_changed_same_symbol_fails_closed_for_review() -> None:
     assert donor["status"] == "conflicting_variant_review"
 
 
+def test_reviewed_adaptation_closes_only_the_exact_donor_feature() -> None:
+    inventory = MODULE.Inventory()
+    inventory.add(
+        logical_path="src/market_aligner/donor.py",
+        data=b"def decide():\n    return 'donor'\n",
+        origin="git-history",
+        physical_path="donor.py",
+    )
+    unresolved = inventory.serialise()[0]
+    disposition = {
+        "canonical_target": "src/market_aligner/current.py:decide",
+        "feature_id": unresolved["feature_id"],
+        "ledger_entry_id": "ma-test",
+        "reason": "adapted to the current contract",
+        "schema": MODULE.DISPOSITION_SCHEMA,
+        "status": "adopted_adapted",
+    }
+
+    reviewed = inventory.serialise({unresolved["feature_id"]: disposition})[0]
+
+    assert reviewed["status"] == "adopted_adapted"
+    assert reviewed["reviewed_disposition"] == disposition
+
+
+def test_repository_dispositions_are_ledger_bound_and_target_real_code() -> None:
+    dispositions = MODULE._load_dispositions(
+        ROOT / "docs/migration/capability-dispositions.jsonl"
+    )
+    ledger_ids = {
+        __import__("json").loads(line)["entry_id"]
+        for line in (ROOT / "docs/migration/ledger.jsonl").read_text().splitlines()
+        if line.strip()
+    }
+    assert dispositions
+    for value in dispositions.values():
+        assert value["ledger_entry_id"] in ledger_ids
+        target = value["canonical_target"].split(":", 1)[0]
+        assert (ROOT / target).is_file()
+
+
 def test_semantic_hash_ignores_source_locations() -> None:
     first = ast.parse("def f():\n    return 1\n").body[0]
     second = ast.parse("\n\ndef f():\n    return 1\n").body[0]

@@ -13,15 +13,20 @@ import argparse
 import ast
 import hashlib
 import json
+import re
 import subprocess
 import tarfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 
 SCHEMA = "market-aligner.capability-inventory.v1"
+DISPOSITION_SCHEMA = "market-aligner.capability-disposition.v1"
+REVIEWED_STATUSES = frozenset(
+    {"adopted_adapted", "superseded", "quarantined", "deferred_required"}
+)
 SOURCE_SUFFIXES = {".py", ".sh", ".toml", ".yaml", ".yml"}
 DONOR_EXCLUDES = (
     "/.git/",
@@ -308,7 +313,12 @@ class Inventory:
             return "conflicting_variant_review"
         return "integration_required"
 
-    def serialise(self) -> list[dict[str, object]]:
+    def serialise(
+        self,
+        dispositions: Mapping[str, Mapping[str, str]] | None = None,
+    ) -> list[dict[str, object]]:
+        dispositions = dispositions or {}
+        used_dispositions: set[str] = set()
         output: list[dict[str, object]] = []
         for record in sorted(
             self.records.values(),
@@ -331,6 +341,14 @@ class Inventory:
                     }
                 )
             )
+            reviewed = dispositions.get(feature_id)
+            if reviewed is not None:
+                if status in {"canonical", "canonical_relocated_exact"}:
+                    raise ValueError(
+                        f"reviewed disposition {feature_id} cannot override {status}"
+                    )
+                status = reviewed["status"]
+                used_dispositions.add(feature_id)
             implementations = []
             for implementation in sorted(
                 record.implementations.values(), key=lambda item: item.content_sha256
@@ -350,8 +368,7 @@ class Inventory:
                         ),
                     }
                 )
-            output.append(
-                {
+            serialised: dict[str, object] = {
                     "schema": SCHEMA,
                     "feature_id": feature_id,
                     "logical_path": feature.logical_path,
@@ -361,8 +378,47 @@ class Inventory:
                     "status": status,
                     "implementations": implementations,
                 }
+            if reviewed is not None:
+                serialised["reviewed_disposition"] = dict(reviewed)
+            output.append(serialised)
+        unused = set(dispositions) - used_dispositions
+        if unused:
+            raise ValueError(
+                f"dispositions reference unknown or canonical features: {sorted(unused)}"
             )
         return output
+
+
+def _load_dispositions(path: Path) -> dict[str, Mapping[str, str]]:
+    required = {
+        "canonical_target",
+        "feature_id",
+        "ledger_entry_id",
+        "reason",
+        "schema",
+        "status",
+    }
+    values: dict[str, Mapping[str, str]] = {}
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        if not isinstance(value, dict) or set(value) != required:
+            raise ValueError(f"invalid capability disposition fields at line {number}")
+        if value["schema"] != DISPOSITION_SCHEMA:
+            raise ValueError(f"unsupported capability disposition schema at line {number}")
+        feature_id = value["feature_id"]
+        if not isinstance(feature_id, str) or not re.fullmatch(r"[0-9a-f]{64}", feature_id):
+            raise ValueError(f"invalid capability feature ID at line {number}")
+        if value["status"] not in REVIEWED_STATUSES:
+            raise ValueError(f"invalid reviewed capability status at line {number}")
+        if feature_id in values:
+            raise ValueError(f"duplicate capability disposition for {feature_id}")
+        for key in ("canonical_target", "ledger_entry_id", "reason"):
+            if not isinstance(value[key], str) or not value[key].strip():
+                raise ValueError(f"empty capability disposition {key} at line {number}")
+        values[feature_id] = value
+    return values
 
 
 def _is_retained_evidence(path: str) -> bool:
@@ -506,7 +562,9 @@ def _write_report(path: Path, records: list[dict[str, object]]) -> None:
             "",
             "`integration_required` and `conflicting_variant_review` are fail-closed work",
             "queues, not evidence of safe mergeability. `retained_evidence` remains",
-            "recoverable in the hash-bound external archaeology corpus.",
+            "recoverable in the hash-bound external archaeology corpus. Reviewed non-exact",
+            "dispositions are bound by feature ID in `capability-dispositions.jsonl` and",
+            "must cite an append-only subsystem-ledger entry.",
             "",
             "## Required lifecycle capabilities",
             "",
@@ -541,6 +599,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--dispositions", type=Path)
     args = parser.parse_args(argv)
     inventory = build_inventory(
         repository=args.repository.resolve(),
@@ -548,7 +607,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_archive=args.source_archive.resolve(),
         source_manifest=args.source_manifest.resolve(),
     )
-    records = inventory.serialise()
+    disposition_path = args.dispositions or (
+        args.repository.resolve() / "docs/migration/capability-dispositions.jsonl"
+    )
+    dispositions = _load_dispositions(disposition_path) if disposition_path.is_file() else {}
+    records = inventory.serialise(dispositions)
     args.output.write_bytes(b"".join(_canonical_json(record) for record in records))
     _write_report(args.report, records)
     print(json.dumps({"schema": SCHEMA, "records": len(records)}, sort_keys=True))
