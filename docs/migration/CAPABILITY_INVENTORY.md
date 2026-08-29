@@ -10,11 +10,11 @@ refs, and the unique-source archive. JAA paths are normalised exclusively beneat
 - `adopted_adapted`: 26
 - `canonical`: 11422
 - `canonical_relocated_exact`: 231
-- `conflicting_variant_review`: 1275
-- `integration_required`: 778
+- `conflicting_variant_review`: 1266
+- `integration_required`: 756
 - `quarantined`: 93
 - `retained_evidence`: 2174
-- `superseded`: 1040
+- `superseded`: 1071
 
 `integration_required` and `conflicting_variant_review` are fail-closed work
 queues, not evidence of safe mergeability. `retained_evidence` remains
