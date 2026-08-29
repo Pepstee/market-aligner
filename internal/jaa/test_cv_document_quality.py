@@ -104,6 +104,35 @@ def test_pinned_poppler_rejects_library_hash_substitution(
             os.close(descriptor)
 
 
+def test_poppler_failure_output_never_echoes_protected_content(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = "PROTECTED-CANDIDATE-CANARY-641dd08ace"
+    runtime = quality.PopplerRuntime(
+        version="pdftoppm version test",
+        tool_paths=tuple((tool, f"/test/{tool}") for tool in quality.POPPLER_TOOLS),
+        tool_sha256=tuple((tool, "a" * 64) for tool in quality.POPPLER_TOOLS),
+        runtime_sha256="b" * 64,
+    )
+    monkeypatch.setattr(
+        quality.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=canary,
+            stderr=canary,
+        ),
+    )
+
+    with pytest.raises(DocumentQualityError, match="Poppler pdfinfo failed") as raised:
+        quality._run(runtime, "pdfinfo", "/private/candidate/cv.pdf")
+
+    captured = capsys.readouterr()
+    assert canary not in str(raised.value)
+    assert canary not in captured.out
+    assert canary not in captured.err
+
+
 def _clean_artifacts() -> ApplicationArtifacts:
     cv_text = """Alex Example
 alex@example.test

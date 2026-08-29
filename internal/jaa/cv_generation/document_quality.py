@@ -54,6 +54,10 @@ QUALITY_POLICY_SHA256 = content_hash(
         "forbidden_structure": ("image", "table", "form", "annotation"),
         "duplicate_prose": "exact-normalized-logical-line-at-least-24-characters",
         "raster": "poppler-png-144-dpi-sha256-per-page",
+        "protected_failure_output": (
+            "generic-reason-only; never text, path, identifier, exception, metadata, "
+            "subprocess-output, or raster bytes"
+        ),
         "visual_judgement": "separate-required",
     }
 )
