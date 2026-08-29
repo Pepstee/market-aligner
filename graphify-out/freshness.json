@@ -1,11 +1,11 @@
 {
-  "community_count": 807,
+  "community_count": 805,
   "edge_count": 139894,
   "node_count": 33850,
   "outputs": {
     ".graphify_labels.json": "f36933096246a1f86e85db1d4abeb20af59e35aced8bfd3009fde253c3900e5c",
-    "GRAPH_REPORT.md": "fb21c6712e06cd4d464b885c9e288401ef611217e0e24813efb55455bc31fee4",
-    "graph.json": "ebffeca7794bbc6659ce1f92c4d60603d2bafe61f637be4a5df48c245d95fc69"
+    "GRAPH_REPORT.md": "514997fe1bd25fba933e9766fee7603576cef0197723f80663000b716c9b7c5e",
+    "graph.json": "36864459df58e98469ca5f60b62c22b1274d6ddac6c4327d5d8949ff52aca33d"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Semantic extraction used the host Graphify subagent; provider token counts were unavailable, so zero is an unmetered placeholder rather than a no-token claim.",
     "output": 0
   },
-  "source_base_commit": "4b4c5b551841607509dce21325ac40c5a10c0233",
+  "source_base_commit": "2814c4cc4dcf348c29f92f3cbf86b9cba80d05ec",
   "sources": {
     ".gitignore": "bb132dbd31220d532c0b13b8e82af0755ad8a54bdbbc12f980a40d48ea7eca02",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "b751acbca67154a07f0d478045d0e630d33bc05bc034c8d584bcc743980091c1",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "cea1b0f8b024d1322cf5a9eff52cfb2938cf68608b30ae7da38ef35ed529d349",
-    "docs/migration/CAPABILITY_INVENTORY.md": "85d18eaa6bce8c7957e443b348e49348cac457b3420472b5e8a3abb7a63a5d76",
+    "docs/migration/CAPABILITY_INVENTORY.md": "4c86668453786fe6a9f08c37a61bbc43ffeede8302ad181efa23c720ded733e3",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "4b8eb06a38848bca7c59233963786f39804b9e387525a57492c2721bd2712ec8",
-    "docs/migration/capability-inventory.jsonl": "ab0cd70fe63cd942f81a985c6a0857d4a80468d1c9616d38086c6a0a2026ad52",
-    "docs/migration/ledger.jsonl": "3171cdcbb9604a99536141733056065710f02f696f7a6e7a93716ee83790eb8f",
+    "docs/migration/capability-dispositions.jsonl": "445bfc34a33d24b0d6ae6e583853a26db2ab5af38fecc8a0650cb8cc2f7909ec",
+    "docs/migration/capability-inventory.jsonl": "28e692a8aa7c850c38c37154465be4828c05e92315925652db97518fc568df4e",
+    "docs/migration/ledger.jsonl": "19c8402e666f49461e4c7c535d878eabdd19f4a2ec834aaef85c2a1edd4edf6f",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -627,7 +627,7 @@
     "internal/jaa/test_portable_lock_verification.py": "d5a33f7ebcd7b557df177e388351c3b0801081bd36ee67bb0fa946c26114c3de",
     "internal/jaa/test_preview_candidate_selection.py": "5b4708be9f818836b1b4be39996e68b1a2938421f489e6dd8f63ca556fa4af47",
     "internal/jaa/test_production_ats_executor.py": "27fe3e28b1fafc4c92728bbe5e6e0ed3f5e40ac605bcc9b403ab4c349f205ed1",
-    "internal/jaa/test_production_handoff_runner.py": "a9281b96ffac34f93c1d63c99fccebb9ae180a8486e155b9e867713d99708534",
+    "internal/jaa/test_production_handoff_runner.py": "2439114cf43c80a77fc8ccede3f66a9b1621c98b10f719897e8421860bc6962e",
     "internal/jaa/test_production_operational_surfaces.py": "3cde9f0de37e7890863cebb7e3d5c1e1a37bcb303aa74108463e4c936d4bdea8",
     "internal/jaa/test_production_preparation_runner.py": "d214f3f92e476c36e354612a6675bcc759dee16bd1fae2d6271bc7bad3c113ab",
     "internal/jaa/test_production_queue.py": "6ebbb39273adb58c7dfba9b6ac15b3b06046977a8f4b766d81769509703a8235",
