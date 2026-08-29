@@ -44,6 +44,81 @@ class CollectionTests(unittest.TestCase):
                 os.umask(previous)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
+    def test_raw_snapshot_history_is_append_only_and_current_head_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = JobDatabase(Path(temporary) / "state" / "vacancies.sqlite3")
+            job = JobUrl("board", "snapshot-1", "https://example.test/snapshot-1")
+            database.upsert_discovered(job)
+            first = RawPosting(
+                job.board, job.job_id, job.url, "2026-08-20T00:00:00Z",
+                raw_json={"version": 1},
+            )
+            second = RawPosting(
+                job.board, job.job_id, job.url, "2026-08-21T00:00:00Z",
+                raw_json={"version": 2},
+            )
+            first_hash = raw_posting_content_sha256(first)
+            second_hash = raw_posting_content_sha256(second)
+
+            database.store_raw(first)
+            self.assertEqual(raw_posting_bytes(first), database.raw_snapshot(job.key, first_hash))
+            self.assertEqual(first, database.load_current_raw_snapshot(job.key))
+            database.store_raw(second)
+
+            self.assertEqual(first, database.load_raw_snapshot(job.key, first_hash))
+            self.assertEqual(second, database.load_raw_snapshot(job.key, second_hash))
+            self.assertEqual(second, database.load_current_raw_snapshot(job.key))
+            with database.connect() as connection:
+                self.assertEqual(
+                    2,
+                    connection.execute(
+                        "SELECT COUNT(*) FROM posting_raw_snapshots WHERE job_key=?",
+                        (job.key,),
+                    ).fetchone()[0],
+                )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    connection.execute(
+                        "UPDATE posting_raw_snapshots SET fetched_at='changed' WHERE job_key=?",
+                        (job.key,),
+                    )
+
+    def test_legacy_fetched_row_is_blocked_until_exact_snapshot_is_recaptured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state" / "vacancies.sqlite3"
+            database = JobDatabase(path)
+            job = JobUrl("board", "legacy-1", "https://example.test/legacy-1")
+            database.upsert_discovered(job)
+            legacy = RawPosting(
+                job.board, job.job_id, job.url, "2026-08-20T00:00:00Z",
+                raw_text="legacy bytes",
+            )
+            with database.connect() as connection, connection:
+                connection.execute(
+                    """UPDATE postings SET fetched_at=?,raw_text=?,content_hash=?,
+                         fetch_status='fetched' WHERE key=?""",
+                    (
+                        legacy.fetched_at,
+                        legacy.raw_text,
+                        raw_posting_content_sha256(legacy),
+                        job.key,
+                    ),
+                )
+
+            reopened = JobDatabase(path)
+            block = reopened.snapshot_migration_block(job.key)
+            self.assertIsNotNone(block)
+            assert block is not None
+            self.assertEqual(
+                "legacy_fetched_without_immutable_raw_snapshot",
+                block["reason_code"],
+            )
+            with self.assertRaises(KeyError):
+                reopened.load_current_raw_snapshot(job.key)
+
+            reopened.store_raw(legacy)
+            self.assertIsNone(reopened.snapshot_migration_block(job.key))
+            self.assertEqual(legacy, reopened.load_current_raw_snapshot(job.key))
+
     _LEGACY_REFRESH_SCHEMA = """
     CREATE TABLE vacancy_refreshes (
       refresh_id TEXT PRIMARY KEY,

@@ -286,6 +286,42 @@ CREATE TABLE IF NOT EXISTS collection_runs (
   finished_at TEXT, discovered INTEGER NOT NULL DEFAULT 0, fetched INTEGER NOT NULL DEFAULT 0,
   errors INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS posting_raw_snapshots (
+  job_key TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  object_sha256 TEXT NOT NULL,
+  exact_raw_bytes BLOB NOT NULL,
+  fetched_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(job_key,object_sha256),
+  UNIQUE(job_key,content_sha256,object_sha256)
+);
+CREATE TABLE IF NOT EXISTS posting_raw_snapshot_heads (
+  job_key TEXT PRIMARY KEY,
+  content_sha256 TEXT NOT NULL,
+  object_sha256 TEXT NOT NULL,
+  FOREIGN KEY(job_key,content_sha256,object_sha256)
+    REFERENCES posting_raw_snapshots(job_key,content_sha256,object_sha256)
+    ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS posting_raw_snapshot_migration_blocks (
+  job_key TEXT PRIMARY KEY,
+  reason_code TEXT NOT NULL,
+  legacy_content_hash TEXT,
+  detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER IF NOT EXISTS posting_raw_snapshots_no_update
+  BEFORE UPDATE ON posting_raw_snapshots
+  BEGIN SELECT RAISE(ABORT,'raw posting snapshots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_raw_snapshots_no_delete
+  BEFORE DELETE ON posting_raw_snapshots
+  BEGIN SELECT RAISE(ABORT,'raw posting snapshots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_raw_snapshot_migration_blocks_no_update
+  BEFORE UPDATE ON posting_raw_snapshot_migration_blocks
+  BEGIN SELECT RAISE(ABORT,'raw snapshot migration blocks are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_raw_snapshot_migration_blocks_no_delete
+  BEFORE DELETE ON posting_raw_snapshot_migration_blocks
+  BEGIN SELECT RAISE(ABORT,'raw snapshot migration blocks are immutable'); END;
 CREATE TABLE IF NOT EXISTS processing_jobs (
   profile_id TEXT NOT NULL,
   track TEXT NOT NULL,
@@ -1200,6 +1236,19 @@ class JobDatabase:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with owner_private_umask(), closing(self.connect()) as conn, conn:
             conn.executescript(SCHEMA)
+            conn.execute(
+                """INSERT OR IGNORE INTO posting_raw_snapshot_migration_blocks(
+                     job_key,reason_code,legacy_content_hash
+                   )
+                   SELECT p.key,'legacy_fetched_without_immutable_raw_snapshot',
+                          p.content_hash
+                   FROM postings p
+                   WHERE p.fetch_status='fetched'
+                     AND NOT EXISTS(
+                       SELECT 1 FROM posting_raw_snapshot_heads h
+                       WHERE h.job_key=p.key
+                     )"""
+            )
             self._migrate_vacancy_refresh_schema(conn)
             self._validate_vacancy_refresh_rows(conn)
             self._migrate_processing_identity(conn)
@@ -1500,15 +1549,125 @@ class JobDatabase:
                 "SELECT 1 FROM postings WHERE key=? AND fetch_status='fetched'", (key,)
             ).fetchone() is not None
 
+    @staticmethod
+    def _record_raw_snapshot(
+        conn: sqlite3.Connection,
+        row: RawPosting,
+        *,
+        content_sha256: str,
+        exact_raw_bytes: bytes | None = None,
+    ) -> str:
+        """Append one exact canonical raw object and advance its mutable head."""
+
+        exact = raw_posting_bytes(row) if exact_raw_bytes is None else exact_raw_bytes
+        decoded = raw_posting_from_bytes(exact)
+        if decoded.key != row.key or raw_posting_content_sha256(row) != content_sha256:
+            raise ValueError("raw snapshot identity differs from the posting")
+        object_sha256 = hashlib.sha256(exact).hexdigest()
+        conn.execute(
+            """INSERT OR IGNORE INTO posting_raw_snapshots(
+                 job_key,content_sha256,object_sha256,exact_raw_bytes,fetched_at
+               ) VALUES(?,?,?,?,?)""",
+            (row.key, content_sha256, object_sha256, exact, decoded.fetched_at),
+        )
+        stored = conn.execute(
+            """SELECT content_sha256,exact_raw_bytes,fetched_at
+               FROM posting_raw_snapshots WHERE job_key=? AND object_sha256=?""",
+            (row.key, object_sha256),
+        ).fetchone()
+        if (
+            stored is None
+            or stored[0] != content_sha256
+            or bytes(stored[1]) != exact
+            or stored[2] != decoded.fetched_at
+        ):
+            raise ValueError("raw snapshot identity conflicts with preserved bytes")
+        conn.execute(
+            """INSERT INTO posting_raw_snapshot_heads(
+                 job_key,content_sha256,object_sha256
+               ) VALUES(?,?,?)
+               ON CONFLICT(job_key) DO UPDATE SET
+                 content_sha256=excluded.content_sha256,
+                 object_sha256=excluded.object_sha256""",
+            (row.key, content_sha256, object_sha256),
+        )
+        return object_sha256
+
     def store_raw(self, row: RawPosting) -> None:
         raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
         digest = raw_posting_content_sha256(row)
         with closing(self.connect()) as conn, conn:
-            conn.execute(
+            cursor = conn.execute(
                 """UPDATE postings SET fetched_at=?,raw_text=?,raw_json=?,content_hash=?,
                    fetch_status='fetched',fetch_error=NULL WHERE key=?""",
                 (row.fetched_at, row.raw_text, raw_json, digest, row.key),
             )
+            if cursor.rowcount == 1:
+                self._record_raw_snapshot(conn, row, content_sha256=digest)
+
+    def snapshot_migration_block(self, job_key: str) -> sqlite3.Row | None:
+        """Return an active block for a fetched row lacking exact replay bytes."""
+
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """SELECT b.job_key,b.reason_code,b.legacy_content_hash,b.detected_at
+                   FROM posting_raw_snapshot_migration_blocks b
+                   WHERE b.job_key=? AND NOT EXISTS(
+                     SELECT 1 FROM posting_raw_snapshot_heads h
+                     WHERE h.job_key=b.job_key
+                   )""",
+                (job_key,),
+            )
+            cursor.row_factory = sqlite3.Row
+            return cursor.fetchone()
+
+    def raw_snapshot(self, job_key: str, content_sha256: str) -> bytes:
+        """Return preserved canonical raw bytes for one semantic content identity."""
+
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """SELECT s.exact_raw_bytes
+                   FROM posting_raw_snapshots s
+                   LEFT JOIN posting_raw_snapshot_heads h
+                     ON h.job_key=s.job_key AND h.object_sha256=s.object_sha256
+                   WHERE s.job_key=? AND s.content_sha256=?
+                   ORDER BY (h.job_key IS NOT NULL) DESC,
+                            s.fetched_at DESC,s.recorded_at DESC,s.object_sha256 DESC
+                   LIMIT 1""",
+                (job_key, content_sha256),
+            ).fetchone()
+        if row is None:
+            raise KeyError((job_key, content_sha256))
+        return bytes(row[0])
+
+    def load_raw_snapshot(self, job_key: str, content_sha256: str) -> RawPosting:
+        """Rehydrate a preserved raw object by canonical vacancy/content identity."""
+
+        raw = raw_posting_from_bytes(self.raw_snapshot(job_key, content_sha256))
+        if raw.key != job_key:
+            raise ValueError("preserved raw snapshot no longer matches its identity")
+        return raw
+
+    def load_current_raw_snapshot(self, job_key: str) -> RawPosting:
+        """Rehydrate the exact raw object selected by the current snapshot head."""
+
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """SELECT s.content_sha256,s.exact_raw_bytes
+                   FROM posting_raw_snapshot_heads h
+                   JOIN posting_raw_snapshots s
+                     ON s.job_key=h.job_key
+                    AND s.content_sha256=h.content_sha256
+                    AND s.object_sha256=h.object_sha256
+                   WHERE h.job_key=?""",
+                (job_key,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(job_key)
+        raw = raw_posting_from_bytes(bytes(row[1]))
+        if raw.key != job_key:
+            raise ValueError("current raw snapshot head differs from preserved bytes")
+        return raw
 
     def fetched_posting(self, key: str) -> tuple[JobUrl, str, str]:
         """Load one existing fetched row and its guarded refresh identity."""
@@ -2012,6 +2171,12 @@ class JobDatabase:
                 raise VacancyRefreshConflict(
                     f"vacancy changed before refresh commit: {transition['job_key']}"
                 )
+            self._record_raw_snapshot(
+                conn,
+                new_raw,
+                content_sha256=str(transition["new_content_sha256"]),
+                exact_raw_bytes=new_raw_bytes,
+            )
             state = self._collection_state_from_connection(conn)
             basis = {
                 **dict(receipt_basis),
