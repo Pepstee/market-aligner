@@ -124,6 +124,43 @@ def test_semantic_hash_ignores_source_locations() -> None:
     assert MODULE._semantic_bytes(first) == MODULE._semantic_bytes(second)
 
 
+def test_module_and_class_assignments_are_independent_capabilities() -> None:
+    features = MODULE._features(
+        "internal/jaa/capability.py",
+        b"STAGES = ('ats', 'human')\n\nclass Policy:\n    mode: str = 'strict'\n\n    def decide(self):\n        return self.mode\n",
+    )
+    indexed = {(feature.symbol, feature.kind) for feature in features}
+
+    assert ("STAGES", "assignment") in indexed
+    assert ("Policy.mode", "assignment") in indexed
+    assert ("Policy.decide", "function") in indexed
+
+
+def test_changed_assignment_fails_closed_independently_of_its_module() -> None:
+    inventory = MODULE.Inventory()
+    inventory.add(
+        logical_path="internal/jaa/capability.py",
+        data=b"STAGES = ('ats', 'human')\n",
+        origin="canonical",
+        physical_path="canonical.py",
+    )
+    inventory.add(
+        logical_path="internal/jaa/capability.py",
+        data=b"STAGES = ('ats', 'human', 'interview')\n",
+        origin="git-history",
+        physical_path="donor.py",
+    )
+
+    records = inventory.serialise()
+    donor = next(
+        item
+        for item in records
+        if item["symbol"] == "STAGES" and item["status"] != "canonical"
+    )
+
+    assert donor["status"] == "conflicting_variant_review"
+
+
 def test_canonical_files_include_staged_new_sources(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     source = tmp_path / "new_capability.py"

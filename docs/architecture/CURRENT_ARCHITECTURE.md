@@ -70,6 +70,12 @@ unused-symbol observation with incomplete counterevidence; they remain fail-clos
 deletion authority. A destructive 292-file deletion patch is quarantined. Duplicate or superseded
 operational lanes remain recoverable in the external audit evidence, not executable here.
 
+The deterministic capability inventory treats complete modules, functions, classes, and module-
+or class-level assignments as separately reviewable capabilities. Assignment coverage is required
+because schemas, policy constants, stage sets and authority identifiers can carry behavior even
+when no unique function or class exposes them. A whole-file disposition therefore cannot silently
+erase a distinct donor schema or policy dimension.
+
 One verified net delta survived: the cover-letter runtime dispatch and exact request-type guards.
 The same patch was present in a dirty Gigabyte worktree and the Windows-native patch set, was
 byte-identical in both places, and was selectively adopted into this repository.
