@@ -17,6 +17,10 @@ import yaml
 
 from market_aligner.cli import build_parser, main
 from market_aligner.collectors.adapters.base import load_adapter
+from market_aligner.collectors.adapters.uk_common import (
+    _EU27_2026_08_REMOTE_MARKERS,
+    uk_or_eligible_remote,
+)
 from market_aligner.collectors.adapters.workable import WorkableAdapter
 from market_aligner.collectors.engine import Collector
 from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
@@ -34,6 +38,14 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class CollectionTests(unittest.TestCase):
+    def test_eu27_country_markers_are_remote_discovery_recall_only(self) -> None:
+        for marker in _EU27_2026_08_REMOTE_MARKERS:
+            country = marker.strip()
+            with self.subTest(country=country):
+                self.assertTrue(uk_or_eligible_remote(country, remote=True))
+                self.assertFalse(uk_or_eligible_remote(country, remote=False))
+        self.assertFalse(uk_or_eligible_remote("Norway", remote=True))
+
     def test_fresh_vacancy_database_is_owner_private_under_common_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "state" / "vacancies.sqlite3"
