@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788069922.7566962,
-    "ast_hash": "81bd8c0bd62ecd0d87bc547816a72295",
+    "mtime": 1788072188.176005,
+    "ast_hash": "b73baec3ff9eecf179b0583790427117",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
