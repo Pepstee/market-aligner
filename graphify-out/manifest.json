@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788079251.3942444,
-    "ast_hash": "1e9eb6d083fe002ac0335d68ceef318f",
+    "mtime": 1788085367.74294,
+    "ast_hash": "baafc381cfc98bf4bfdc418ed5a465cd",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
@@ -7522,6 +7522,16 @@
   "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260830_081233_does_the_recovered_application_event_projector_fil.md": {
     "mtime": 1788077553.3348918,
     "ast_hash": "8989b6884f84b457482e9b9b72b95f38",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/event_receipts.py": {
+    "mtime": 1788083368.4520895,
+    "ast_hash": "33c2eca24af33a00068cecb8a7f80261",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/test_event_receipts.py": {
+    "mtime": 1788083376.048128,
+    "ast_hash": "7c7703ea45a36e4d36b8f33a03e6ce42",
     "semantic_hash": ""
   }
 }
