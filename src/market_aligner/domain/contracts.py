@@ -38,6 +38,7 @@ class RawPosting:
     content_type: str | None = None
     http_status: int | None = None
     content_sha256: str | None = None
+    public_content_base64: str | None = None
 
     @property
     def key(self) -> str:

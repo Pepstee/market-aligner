@@ -15,6 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from market_aligner.applications.canonical import ContractValidationError
+from market_aligner.collectors.evidence import (
+    bind_public_listing,
+    sanitized_attempts,
+    validate_public_listing_url,
+)
 from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
 from market_aligner.collectors.adapters.base import SourceUnavailable, load_adapter
 from market_aligner.state.vacancies import (
@@ -22,7 +28,6 @@ from market_aligner.state.vacancies import (
     VacancyRefreshConflict,
     VacancyRefreshIndeterminate,
     raw_posting_bytes,
-    raw_posting_content_sha256,
     raw_posting_from_bytes,
 )
 from market_aligner.collectors.scrapling_client import ScraplingClient, ScraplingFetchError
@@ -349,7 +354,11 @@ class Collector:
         self.fetch_workers = int(collection.get("fetch_workers", 12))
         scrapling = plan["scrapling"]
         self.scrapling = (
-            ScraplingClient(plan["runtime_root"], scrapling)
+            ScraplingClient(
+                plan["runtime_root"],
+                scrapling,
+                protected_roots=(self.root, plan["runtime_root"]),
+            )
             if scrapling.get("enabled", False)
             else None
         )
@@ -453,50 +462,48 @@ class Collector:
         """Backward-compatible view over :meth:`plan` (paths only)."""
         return Collector.plan(root, cfg)
 
-    def _save_scrapling_failure(self, row: JobUrl, attempts: tuple[dict[str, Any], ...]) -> Path:
+    def _save_transport_receipt(
+        self, row: JobUrl, attempts: tuple[dict[str, Any], ...]
+    ) -> Path:
+        safe_attempts = sanitized_attempts(attempts)
         safe = row.job_id.replace("/", "_").replace(":", "_")
-        path = self.raw_cache / "_scrapling_failures" / row.board / f"{safe}.json"
+        path = self.root / "state" / "transport-receipts" / row.board / f"{safe}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
             "board": row.board,
             "job_id": row.job_id,
-            "url": row.url,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
-            "attempts": list(attempts),
+            "attempts": list(safe_attempts),
+            "schema_version": "market-aligner.sanitized-fetch-attempts.v1",
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
     def _fetch_row(self, adapter: Any, row: JobUrl) -> tuple[RawPosting, str | None]:
         try:
-            return adapter.fetch(row, True), None
-        except Exception as adapter_error:
+            raw, _ = bind_public_listing(
+                adapter.fetch(row, True), protected_roots=(self.root,)
+            )
+            return raw, None
+        except Exception:
             if self.scrapling is None:
                 raise
             try:
                 result = self.scrapling.fetch_with_chain(row.url)
             except ScraplingFetchError as scrapling_error:
-                failure_path = self._save_scrapling_failure(row, scrapling_error.attempts)
-                raise RuntimeError(
-                    f"adapter failed ({adapter_error!r}); full Scrapling chain failed; "
-                    f"complete attempts saved to {failure_path}"
-                ) from scrapling_error
-            raw = RawPosting(
+                self._save_transport_receipt(row, scrapling_error.attempts)
+                raise RuntimeError("adapter and configured Scrapling chain failed") from scrapling_error
+            self._save_transport_receipt(row, result.attempts)
+            raw, _ = bind_public_listing(RawPosting(
                 board=row.board,
                 job_id=row.job_id,
-                url=str(result.response.get("url") or row.url),
-                fetched_at=datetime.now(timezone.utc).isoformat(),
+                url=row.url,
+                fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 raw_text=str(result.response.get("text") or ""),
-                raw_json={
-                    "_collector": {
-                        "primary_adapter_error": repr(adapter_error),
-                        "fallback": "scrapling-full",
-                        "selected_engine": result.engine,
-                    },
-                    "_scrapling": {
-                        "attempts": list(result.attempts),
-                    },
-                },
-            )
+                raw_json=None,
+                content_type="text/html",
+                http_status=int(result.response["status"]),
+                public_content_base64=str(result.response["body_base64"]),
+            ), protected_roots=(self.root,))
             return raw, result.engine
 
     def migrate_existing(self) -> None:
@@ -727,6 +734,12 @@ class Collector:
                     adapters[board] = adapter
                     discovered += len(rows)
                     for row in rows:
+                        try:
+                            validate_public_listing_url(row.url)
+                        except ContractValidationError:
+                            errors += 1
+                            self.log(f"[discover] {board} rejected an unsafe listing URL")
+                            continue
                         is_new = self.db.upsert_discovered(row)
                         new += int(is_new)
                         if not self.db.has_raw(row.key):
@@ -774,10 +787,10 @@ class Collector:
                         self.log(f"[fetch] {row.key} recovered by Scrapling {fallback_engine}")
                     if fetched % 25 == 0:
                         self.log(f"[fetch] {fetched}/{len(fetch_queue)} stored")
-                except Exception as exc:
+                except Exception:
                     errors += 1
-                    self.db.record_error(row.key, repr(exc))
-                    self.log(f"[fetch] {row.key} failed: {exc}")
+                    self.db.record_error(row.key, "fetch_error")
+                    self.log(f"[fetch] {row.key} failed: fetch_error")
         total = self.db.export_urls(self.urls_path)
         result = {"seen": discovered, "new": new, "fetched": fetched, "errors": errors, "database_total": total}
         self.log(f"[cycle] {result}")

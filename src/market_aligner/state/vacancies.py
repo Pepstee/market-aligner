@@ -22,6 +22,10 @@ from market_aligner.domain.contracts import (
     to_dict,
     write_jsonl,
 )
+from market_aligner.collectors.evidence import (
+    public_listing_bytes,
+    validate_public_listing_url,
+)
 from market_aligner.config_loader import load_config
 from market_aligner.config import owner_private_umask
 from market_aligner.state.importers import iter_raw_cache_roots
@@ -224,6 +228,12 @@ def _load_vacancy_refresh_receipt(
 def raw_posting_content_sha256(row: RawPosting) -> str:
     """Return the existing collector content identity for a raw posting."""
 
+    if row.public_content_base64 is not None:
+        exact_public_bytes = public_listing_bytes(row)
+        digest = hashlib.sha256(exact_public_bytes).hexdigest()
+        if row.content_sha256 is not None and row.content_sha256 != digest:
+            raise ValueError("raw posting digest differs from exact public bytes")
+        return digest
     raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
     material = (row.raw_text or "") + (raw_json or "")
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -1532,6 +1542,7 @@ class JobDatabase:
         return conn
 
     def upsert_discovered(self, row: JobUrl) -> bool:
+        validate_public_listing_url(row.url)
         with closing(self.connect()) as conn, conn:
             existed = conn.execute("SELECT 1 FROM postings WHERE key=?", (row.key,)).fetchone()
             conn.execute(
@@ -1594,6 +1605,9 @@ class JobDatabase:
         return object_sha256
 
     def store_raw(self, row: RawPosting) -> None:
+        # Scan every persistence representation, including legacy raw_text/raw_json
+        # rows that do not carry the newer exact-byte field, before any state change.
+        public_listing_bytes(row)
         raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
         digest = raw_posting_content_sha256(row)
         with closing(self.connect()) as conn, conn:

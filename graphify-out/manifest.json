@@ -6460,9 +6460,9 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/applications/handoff.py": {
-    "mtime": 1787906899.7916431,
-    "ast_hash": "a2ea6d8e4e0a8801f9062f98581539f0",
-    "semantic_hash": "a2ea6d8e4e0a8801f9062f98581539f0"
+    "mtime": 1788087358.730722,
+    "ast_hash": "f25cbcbd06980fa5a6a527d508b2cb21",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/applications/jaa.py": {
     "mtime": 1787914833.8402421,
@@ -6705,9 +6705,9 @@
     "semantic_hash": "1ac65d838723124e8e7733b8dc0a5842"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/collectors/engine.py": {
-    "mtime": 1787915300.8931842,
-    "ast_hash": "10eed720e16fecbe69586b1279f6c766",
-    "semantic_hash": "10eed720e16fecbe69586b1279f6c766"
+    "mtime": 1788087726.165579,
+    "ast_hash": "73aab759ef499f55dec01f2f00a82604",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/collectors/fetch_control.py": {
     "mtime": 1785588428.98929,
@@ -6715,14 +6715,14 @@
     "semantic_hash": "dcb4ca189aef1c841ed8f8242b71e740"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/collectors/scrapling_client.py": {
-    "mtime": 1785588257.8784833,
-    "ast_hash": "49a0ca1a5c2dc183083ba4c901fb2044",
-    "semantic_hash": "49a0ca1a5c2dc183083ba4c901fb2044"
+    "mtime": 1788087726.1647937,
+    "ast_hash": "fc99bb19375a4d87e4d0831d0c958720",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/collectors/scrapling_worker.py": {
-    "mtime": 1785588099.5505743,
-    "ast_hash": "be17d0dd5dc86ca18af9c8096f05a634",
-    "semantic_hash": "be17d0dd5dc86ca18af9c8096f05a634"
+    "mtime": 1788087683.5643306,
+    "ast_hash": "011fc63e324e38213a1b394fc8f8afe7",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/config.py": {
     "mtime": 1787914930.2241852,
@@ -6740,9 +6740,9 @@
     "semantic_hash": "7d04d741b160116fa70718dd4c7d0c07"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/domain/contracts.py": {
-    "mtime": 1785587847.4353776,
-    "ast_hash": "5a8926c6e6e229bbe03c6b4eb658e5de",
-    "semantic_hash": "5a8926c6e6e229bbe03c6b4eb658e5de"
+    "mtime": 1788087358.730159,
+    "ast_hash": "8dd079ef63fba885e7797441bcbb5766",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/integrations/__init__.py": {
     "mtime": 1785589040.1865482,
@@ -6895,8 +6895,8 @@
     "semantic_hash": "44f6dc0472a8c0f705917d39ffb062f7"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/state/vacancies.py": {
-    "mtime": 1788008554.5823116,
-    "ast_hash": "73aad59e228fe5095d448fdc830dd3ad",
+    "mtime": 1788087683.5636394,
+    "ast_hash": "a674295f6f67eb8871c6326cc632de18",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/fixtures/jobkorea/45872301.json": {
@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788086690.6020622,
-    "ast_hash": "86617ce2cb7d280402827b9903d6e1f3",
+    "mtime": 1788088101.8847773,
+    "ast_hash": "a9512325ebdd5fde68a6dd4d9c94a3b1",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
@@ -7532,6 +7532,16 @@
   "/Users/admin/Projects/market-aligner/internal/jaa/test_event_receipts.py": {
     "mtime": 1788083376.048128,
     "ast_hash": "7c7703ea45a36e4d36b8f33a03e6ce42",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/src/market_aligner/collectors/evidence.py": {
+    "mtime": 1788087342.5289931,
+    "ast_hash": "cb8ca6bab5a2d6c2d90b9948cc7e852a",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/tests/test_collector_evidence.py": {
+    "mtime": 1788087683.564977,
+    "ast_hash": "f8c41f862a57c7700db223f184d34ee4",
     "semantic_hash": ""
   }
 }

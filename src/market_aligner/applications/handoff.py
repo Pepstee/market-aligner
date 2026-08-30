@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import ipaddress
 from dataclasses import dataclass
 from typing import Any, Mapping
-from urllib.parse import urlsplit
 
 from market_aligner.applications.canonical import (
     CODE_PATTERN,
@@ -29,6 +27,10 @@ from market_aligner.applications.canonical import (
     require_timestamp,
     validate_strings,
 )
+from market_aligner.assessment.geography import EU_REMOTE_COUNTRIES
+from market_aligner.collectors.evidence import validate_public_listing_url
+
+
 JAA_HANDOFF_VERSION = "market-aligner.jaa-handoff.v1"
 STRICT_PROFILE = "strict_v1"
 BASE_COMPATIBILITY_PROFILE = "base_v1_compatibility"
@@ -97,42 +99,6 @@ _BUCKETS = {
     "UK_ONSITE": (3, "GB", "onsite"),
     "RO_REMOTE": (4, "RO", "remote"),
 }
-EU_REMOTE_COUNTRIES = frozenset(
-    {
-        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR",
-        "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL",
-        "PL", "PT", "SK", "SI", "ES", "SE",
-    }
-)
-
-
-def validate_public_listing_url(url: str) -> None:
-    """Require a public HTTP(S) job URL with no embedded credentials."""
-
-    if not isinstance(url, str) or not url or any(character.isspace() for character in url):
-        raise ContractValidationError("public listing URL must be non-empty and contain no whitespace")
-    try:
-        parsed = urlsplit(url)
-        port = parsed.port
-    except ValueError as exc:
-        raise ContractValidationError("public listing URL is malformed") from exc
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ContractValidationError("public listing URL must use HTTP(S) with a host")
-    if parsed.username is not None or parsed.password is not None:
-        raise ContractValidationError("public listing URL must not contain credentials")
-    if port is not None and not 1 <= port <= 65535:
-        raise ContractValidationError("public listing URL port is invalid")
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
-        raise ContractValidationError("public listing URL host is not public")
-    try:
-        address = ipaddress.ip_address(hostname)
-    except ValueError:
-        return
-    if not address.is_global:
-        raise ContractValidationError("public listing URL address is not globally routable")
-
-
 def job_key_for(
     *, adapter: str, canonical_url: str, source_job_id: str, strict_strings: bool = True
 ) -> str:
