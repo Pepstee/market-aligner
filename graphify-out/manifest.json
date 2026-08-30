@@ -4520,9 +4520,9 @@
     "semantic_hash": "c1fcd8b6123b69fe859719b36f089cc5"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/cv_generation/adversarial_rebuild.py": {
-    "mtime": 1787906899.747122,
-    "ast_hash": "518903336ae9cd8c15e76d5968a41ee9",
-    "semantic_hash": "518903336ae9cd8c15e76d5968a41ee9"
+    "mtime": 1788073308.9259744,
+    "ast_hash": "e00502a0557701b7227e8333015fbf6f",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/cv_generation/benchmark_learning.py": {
     "mtime": 1787906899.7472334,
@@ -7110,8 +7110,8 @@
     "semantic_hash": "007e825cb39353c6f9cef40c863a39db"
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/CURRENT_ARCHITECTURE.md": {
-    "mtime": 1788056453.5042493,
-    "ast_hash": "d9b4e44c9ead9aae62dfb3ecfeeb534c",
+    "mtime": 1788073935.5695648,
+    "ast_hash": "dbef4af2b53775a936b2bea1de920098",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": {
@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788072188.176005,
-    "ast_hash": "b73baec3ff9eecf179b0583790427117",
+    "mtime": 1788074076.6672027,
+    "ast_hash": "61dae659d5c747b7d717ddb748bdb478",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
@@ -7492,6 +7492,11 @@
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/testing_adversarial_recruiter.py": {
     "mtime": 1788054118.9077854,
     "ast_hash": "7d6c905bc0a8b0d25650645fe781d072",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/test_application_evidence_safe_rebuild.py": {
+    "mtime": 1788073463.2660656,
+    "ast_hash": "8c6a8202b8bdc217d12cbf505a0c9840",
     "semantic_hash": ""
   }
 }

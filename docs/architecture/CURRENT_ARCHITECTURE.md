@@ -51,6 +51,14 @@ runtime receipts remain outside the repository. Product code refers to profiles 
   result preserves the recovered full-funnel value as explicit ATS, recruiter, hiring-manager and
   interview-invitation progression estimates, plus evidence gaps and uncertainty drivers. These
   remain labelled uncalibrated and cannot be consumed as an eligibility or submission decision.
+- Evidence-safe rebuild now has one canonical owner under `cv_generation.adversarial_rebuild`.
+  In addition to CV and cover-letter editorial rebuilds, it can map exact full-application source
+  deltas (including one identified form answer) to current approved evidence, route every
+  unsupported or profile-level recommendation to a development roadmap, rerender all artifacts,
+  and obtain fresh sanity and detached-recruiter receipts. The plan and result explicitly carry no
+  release authority; the canonical handoff and release gates must still revalidate the rebuilt
+  source. Recovered `/etc/majaa` loaders, Gigabyte entry points and deployment attestations remain
+  quarantined rather than becoming a second runtime owner.
 - Hermetic recruiter fixtures and final-sanity fixtures have distinct modules. This prevents the
   historical combined employer-review fixture from recreating a shared diagnostic/release owner.
 - Legacy `career_automation` code remains behind these boundaries while capabilities are moved
