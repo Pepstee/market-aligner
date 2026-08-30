@@ -59,6 +59,40 @@ class TimeoutBackend(ScriptedBackend):
 PASS = {"schema_version": RESULT_SCHEMA_VERSION, "verdict": "pass", "findings": []}
 
 
+class TransportScriptedBackend(ScriptedBackend):
+    endpoint_sha256 = hashlib.sha256(
+        b"https://api.openai.com/v1/responses"
+    ).hexdigest()
+    name = f"openai.responses.https@sha256:{endpoint_sha256}"
+
+    def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
+        super().complete(system, user, temperature)
+        semantic_text = json.dumps(
+            PASS, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return LLMResponse(
+            text=semantic_text,
+            model=self.model,
+            transport_evidence={
+                "schema_version": "jaa.llm.openai-response-evidence.v1",
+                "provider_identity": "openai.responses-api",
+                "model_identity": self.model,
+                "endpoint_sha256": self.endpoint_sha256,
+                "transport_identity": self.name,
+                "transport_version": "test-transport/1",
+                "client_request_id": "client-test-1",
+                "transport_request_id": "req-test-1",
+                "provider_response_id": "resp-test-1",
+                "request_sha256": hashlib.sha256(b"request").hexdigest(),
+                "response_sha256": hashlib.sha256(b"response").hexdigest(),
+                "semantic_output_sha256": hashlib.sha256(
+                    semantic_text.encode()
+                ).hexdigest(),
+                "archive_manifest_sha256": hashlib.sha256(b"manifest").hexdigest(),
+            },
+        )
+
+
 def block(code: str, location: str = "cv:summary") -> dict[str, object]:
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -293,6 +327,39 @@ def test_review_rejects_missing_or_placeholder_response_model_identity(
             package(), client=client(ScriptedBackend(PASS, model=model), tmp_path)
         )
     assert captured.value.code == "review.model_missing"
+
+
+def test_openai_transport_evidence_is_receipt_bound_and_fail_closed(tmp_path) -> None:
+    candidate = package()
+    receipt = review_application_package(
+        candidate,
+        client=client(TransportScriptedBackend(PASS), tmp_path),
+    )
+    verify_sanity_review_receipt(receipt, candidate)
+    assert receipt.transport_evidence is not None
+    assert receipt.transport_evidence["provider_response_id"] == "resp-test-1"
+    assert (
+        receipt.transport_evidence["semantic_output_sha256"]
+        == receipt.model_result_sha256
+    )
+    with pytest.raises(ValueError, match="transport hash"):
+        replace(
+            receipt,
+            transport_evidence={
+                **receipt.transport_evidence,
+                "response_sha256": "not-a-hash",
+            },
+        )
+    with pytest.raises(ValueError, match="semantic transport"):
+        replace(
+            receipt,
+            transport_evidence={
+                **receipt.transport_evidence,
+                "semantic_output_sha256": "f" * 64,
+            },
+        )
+    with pytest.raises(ValueError, match="transport evidence"):
+        replace(receipt, transport_evidence=None)
 
 
 def test_every_receipt_binding_detects_mutation(tmp_path, monkeypatch) -> None:

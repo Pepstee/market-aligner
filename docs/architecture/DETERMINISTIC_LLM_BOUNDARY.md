@@ -10,7 +10,13 @@
 | Fit and opportunity arithmetic | deterministic host code | parameter hash; fit remains `uncalibrated` |
 | Research admission, queues, leases and dossiers | deterministic host code | opportunity-gate event and cited dossier receipt |
 | Application documents and answers | separately certified application component | evidence citations and validation release |
+| Final employer-visible semantic sanity review | one-shot LLM through a strict schema; CLI or opt-in direct Responses transport | exact package/policy/model/result binding and provider transport hashes when available |
 | Submission, legal consent, irreversible external action | operator | explicit approval and external receipt |
 
 LLM output is data, not authority. Invalid schemas, unknown evidence IDs, missing content hashes,
 or non-portable output are rejected before state changes.
+
+The direct OpenAI adapter is owned by `internal/jaa/llm`; it is an optional
+transport beneath the same client and review policy, not a separate JAA or
+employer-review product. It is tool-free and stateless (`store=false`), and its
+secret-free request/response identities are bound into the final sanity receipt.

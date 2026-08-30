@@ -30,6 +30,7 @@ import shutil
 import stat
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -151,6 +152,15 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model: str = ""
+    # Secret-free provider/transport evidence for authority-bearing callers.
+    # Cache entries deliberately omit this field: a prior provider exchange
+    # must never be replayed as evidence for a fresh call.
+    transport_evidence: Optional[dict[str, str]] = None
+    # Exact provider bytes are private runtime material. The client persists
+    # them create-only before returning, then clears this in-memory field.
+    private_transport_payload: Optional[dict[str, bytes]] = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def total_tokens(self) -> int:
@@ -497,6 +507,7 @@ def make_backend(cfg: dict[str, Any]) -> Backend:
 
       claude_cli -> ClaudeCliBackend (model + cli_timeout_seconds from config)
       codex_cli  -> CodexCliBackend  (codex_model + cli_timeout_seconds from config)
+      openai_responses -> OpenAIResponsesBackend (direct structured Responses API)
       mock       -> MockBackend       (offline, deterministic)
       stub       -> StubBackend       (real-provider shape; unwired)
 
@@ -513,6 +524,22 @@ def make_backend(cfg: dict[str, Any]) -> Backend:
         return CodexCliBackend(
             model=str(cfg.get("codex_model", "") or ""),   # "" = codex CLI default
             cli_timeout_seconds=float(cfg.get("cli_timeout_seconds", 120) or 120),
+        )
+    if name == "openai_responses":
+        # Lazy import avoids a module cycle: the provider implements Backend.
+        from .openai_responses import OpenAIResponsesBackend, OpenAIResponsesConfig
+
+        return OpenAIResponsesBackend(
+            OpenAIResponsesConfig(
+                requested_model=str(
+                    cfg.get("openai_model", cfg.get("model", "")) or ""
+                ),
+                api_key_environment_variable=str(
+                    cfg.get("openai_api_key_env", "OPENAI_API_KEY")
+                    or "OPENAI_API_KEY"
+                ),
+                timeout_seconds=int(cfg.get("openai_timeout_seconds", 90) or 90),
+            )
         )
     if name == "stub":
         return StubBackend(model=str(cfg.get("model", "REPLACE_ME") or "REPLACE_ME"))
@@ -537,6 +564,7 @@ class LLMClient:
     cache_enabled: bool = True
     cache_dir: Path = _CACHE_DIR
     usage_log: Path = _USAGE_LOG
+    transport_archive_dir: Optional[Path] = None
     price_per_1k_prompt: float = 0.0      # cost knobs; 0 for mock/unpriced runs
     price_per_1k_completion: float = 0.0
     _backoff_base: float = 0.2            # seconds; overridable so tests stay fast
@@ -546,6 +574,9 @@ class LLMClient:
         self.usage_log = Path(self.usage_log)
         _ensure_private_directory(self.cache_dir)
         _ensure_private_directory(self.usage_log.parent)
+        if self.transport_archive_dir is not None:
+            self.transport_archive_dir = Path(self.transport_archive_dir)
+            _ensure_private_directory(self.transport_archive_dir)
 
     # -- factory: build from skeleton/config.yaml --------------------------- #
     @classmethod
@@ -556,9 +587,13 @@ class LLMClient:
         **overrides: Any,
     ) -> "LLMClient":
         cfg = load_llm_config(config_path)
+        selected_backend = backend if backend is not None else make_backend(cfg)
+        configured_model = cfg.get("model", "REPLACE_ME")
+        if selected_backend.name.startswith("openai.responses.https@sha256:"):
+            configured_model = cfg.get("openai_model", configured_model)
         kwargs: dict[str, Any] = dict(
-            backend=backend if backend is not None else make_backend(cfg),
-            model=cfg.get("model", "REPLACE_ME"),
+            backend=selected_backend,
+            model=configured_model,
             temperature=float(cfg.get("temperature", 0.0) or 0.0),
             max_retries=int(cfg.get("max_retries", 3) or 3),
             cache_enabled=bool(cfg.get("cache", True)),
@@ -696,6 +731,81 @@ class LLMClient:
             + resp.completion_tokens / 1000.0 * self.price_per_1k_completion
         )
 
+    @staticmethod
+    def _write_private_create_only(path: Path, payload: bytes) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            _require_private_file(path, descriptor)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _archive_private_transport(self, response: LLMResponse) -> None:
+        payload = response.private_transport_payload
+        if payload is None:
+            return
+        if set(payload) != {"request", "response"} or any(
+            not isinstance(value, bytes) or not value for value in payload.values()
+        ):
+            raise LLMError("private provider transport payload is malformed")
+        evidence = response.transport_evidence
+        if evidence is None:
+            raise LLMError("private provider bytes lack public transport evidence")
+        if (
+            hashlib.sha256(payload["request"]).hexdigest()
+            != evidence.get("request_sha256")
+            or hashlib.sha256(payload["response"]).hexdigest()
+            != evidence.get("response_sha256")
+        ):
+            raise LLMError("private provider bytes disagree with transport evidence")
+        if self.transport_archive_dir is None:
+            raise LLMError(
+                "exact provider transport requires a private archive directory"
+            )
+        root = Path(self.transport_archive_dir)
+        _ensure_private_directory(root)
+        exchange_id = evidence.get("client_request_id", "")
+        if not re.fullmatch(r"[0-9a-f-]{36}", exchange_id):
+            raise LLMError("provider exchange identity is malformed")
+        # UUID parsing rejects a merely shape-compatible directory name.
+        try:
+            uuid.UUID(exchange_id)
+        except ValueError as exc:
+            raise LLMError("provider exchange identity is malformed") from exc
+        exchange_dir = root / exchange_id
+        try:
+            exchange_dir.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise LLMError("provider exchange archive already exists") from exc
+        _ensure_private_directory(exchange_dir)
+        self._write_private_create_only(exchange_dir / "request.json", payload["request"])
+        self._write_private_create_only(
+            exchange_dir / "response.json", payload["response"]
+        )
+        manifest = {
+            "schema_version": "jaa.llm.private-provider-exchange.v1",
+            "transport_evidence": dict(evidence),
+        }
+        manifest_bytes = (
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode()
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        self._write_private_create_only(
+            exchange_dir / "manifest.json", manifest_bytes
+        )
+        evidence["archive_manifest_sha256"] = manifest_sha256
+        response.private_transport_payload = None
+
     # -- core call ---------------------------------------------------------- #
     def complete(self, system: str, user: str, *, task: str = "generic") -> LLMResponse:
         """One completion, with cache → (retry/backoff) → log. Cache HIT skips backend."""
@@ -723,6 +833,65 @@ class LLMClient:
                 if attempt < self.max_retries:
                     time.sleep(self._backoff_base * (2 ** (attempt - 1)))
         raise LLMError(f"backend failed after {self.max_retries} attempts: {last}")
+
+    def _complete_structured(
+        self,
+        system: str,
+        user: str,
+        *,
+        schema: dict[str, Any],
+        task: str,
+    ) -> LLMResponse:
+        """Use a provider-native structured-output seam when one is present.
+
+        The ordinary Backend contract remains unchanged for existing CLI and
+        offline implementations. A native structured backend is discovered by
+        its explicit ``complete_structured`` method and still passes through
+        the client's cache, retry and usage-accounting boundaries.
+        """
+
+        structured = getattr(self.backend, "complete_structured", None)
+        if not callable(structured):
+            return self.complete(system, user, task=task)
+        key = self.cache_key(
+            system,
+            user,
+            self.temperature,
+            self.model,
+            backend=self.backend.name,
+        )
+        cached = self._cache_get(key)
+        if cached is not None:
+            self._log_usage(task, cached, cache_hit=True)
+            return cached
+
+        last: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = structured(
+                    system,
+                    user,
+                    self.temperature,
+                    schema=schema,
+                    task=task,
+                )
+                if not isinstance(response, LLMResponse):
+                    raise LLMError(
+                        "structured backend returned an unsupported response"
+                    )
+                self._archive_private_transport(response)
+                self._cache_put(key, response)
+                self._log_usage(task, response, cache_hit=False)
+                return response
+            except LLMError:
+                raise
+            except Exception as exc:
+                last = exc
+                if attempt < self.max_retries:
+                    time.sleep(self._backoff_base * (2 ** (attempt - 1)))
+        raise LLMError(
+            f"structured backend failed after {self.max_retries} attempts: {last}"
+        )
 
     # -- structured output helper ------------------------------------------ #
     def complete_json(
@@ -782,7 +951,16 @@ class LLMClient:
                     + last_err
                     + "\nCorrect that error and return the complete JSON object only."
                 )
-            resp = self.complete(attempt_system, user, task=task)
+            resp = (
+                self._complete_structured(
+                    attempt_system,
+                    user,
+                    schema=schema,
+                    task=task,
+                )
+                if schema is not None
+                else self.complete(attempt_system, user, task=task)
+            )
             try:
                 data = _coerce_json(resp.text)
                 if schema is not None:

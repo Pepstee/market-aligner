@@ -3805,8 +3805,8 @@
     "semantic_hash": "19c8c6c8bb60e306cda7968b7860a49f"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/application_sanity_review.py": {
-    "mtime": 1788045919.4667294,
-    "ast_hash": "aea8d2f6e7e6b4e0b38a9279f58ea000",
+    "mtime": 1788048428.1629887,
+    "ast_hash": "2eb57e93ffbce319abde9dd4937c2fd8",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/application_strategy.py": {
@@ -4075,8 +4075,8 @@
     "semantic_hash": "77728078fe7055ff6902381085b7d4c6"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/gutua_greenhouse_session.py": {
-    "mtime": 1788045704.1919792,
-    "ast_hash": "a54eb1b270e218f2ae259762e27e69df",
+    "mtime": 1788048428.1641047,
+    "ast_hash": "12b3261a4f322d905a33ab42fd1125bb",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/handoff_admission.py": {
@@ -4610,9 +4610,9 @@
     "semantic_hash": "ff9b9f00b31777ea589e17b2ad8bb3ab"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/llm/client.py": {
-    "mtime": 1787907433.720903,
-    "ast_hash": "1cf1122914a7e30953f58875d22922b5",
-    "semantic_hash": "1cf1122914a7e30953f58875d22922b5"
+    "mtime": 1788048416.7119327,
+    "ast_hash": "39881a564a22450a5e23e6b23c8e8933",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/llm/prompt_loader.py": {
     "mtime": 1787906899.752208,
@@ -5480,8 +5480,8 @@
     "semantic_hash": "99ab2ab7c07b99852b561d4459c0dbf3"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_application_sanity_review.py": {
-    "mtime": 1788045919.4953408,
-    "ast_hash": "3c755649c92a0e6e812780240cf64497",
+    "mtime": 1788048451.1949248,
+    "ast_hash": "c13507b6b004d46d91247b8d6be6ea56",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_archive_observation_bundle.py": {
@@ -7110,14 +7110,14 @@
     "semantic_hash": "007e825cb39353c6f9cef40c863a39db"
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/CURRENT_ARCHITECTURE.md": {
-    "mtime": 1787942916.9753861,
-    "ast_hash": "bf642c20132ae07d31b844ea9ac44085",
-    "semantic_hash": "bf642c20132ae07d31b844ea9ac44085"
+    "mtime": 1788048356.4320974,
+    "ast_hash": "a16bf9fca8c0313153ffc9ea32881274",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": {
-    "mtime": 1785588628.7911446,
-    "ast_hash": "52608c08251315ca1c40e157f26dfa01",
-    "semantic_hash": "52608c08251315ca1c40e157f26dfa01"
+    "mtime": 1788048356.3912344,
+    "ast_hash": "26e98821d353019c220edb4a83a8b6fa",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/collection/SOURCE_POLICY.md": {
     "mtime": 1785588352.215245,
@@ -7185,9 +7185,9 @@
     "semantic_hash": "9a613f2512314678a846ac7a5e25ba53"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/docs/APPLICATION_SANITY_REVIEW.md": {
-    "mtime": 1787906899.7480185,
-    "ast_hash": "a0eef07ad4045cdc51406f7010e65deb",
-    "semantic_hash": "a0eef07ad4045cdc51406f7010e65deb"
+    "mtime": 1788048356.3897169,
+    "ast_hash": "0d040353c6c0715271506448e8de5248",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/docs/AUTONOMOUS_CAREER_PIPELINE.md": {
     "mtime": 1787906899.7481337,
@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788046575.4974198,
-    "ast_hash": "93f1bf61c4248fb7fb9cfbdb58a8d82c",
+    "mtime": 1788049606.6291816,
+    "ast_hash": "4f1a5e2a862cb1da3a2efad0eb880899",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
@@ -7477,6 +7477,16 @@
   "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260829_223451_report_on_your_progress.md": {
     "mtime": 1788042891.5616255,
     "ast_hash": "3817b5b2e3774f4e436a99ce74cf07dd",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/llm/openai_responses.py": {
+    "mtime": 1788048428.1619773,
+    "ast_hash": "cde8f49296b6a2c7c6dd6c8cb0597c1c",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/llm/test_openai_responses.py": {
+    "mtime": 1788048697.0877712,
+    "ast_hash": "cae13b4c618210c3ddaec928938af50e",
     "semantic_hash": ""
   }
 }

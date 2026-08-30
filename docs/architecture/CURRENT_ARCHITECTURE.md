@@ -1,6 +1,6 @@
 # Current canonical architecture
 
-Updated 2026-08-29 after the two-laptop and GitHub archaeology pass. The only
+Updated 2026-08-30 during the two-laptop and GitHub archaeology pass. The only
 canonical repository is `/Users/admin/Projects/market-aligner`; its GitHub
 authority is `Pepstee/market-aligner`. The consolidation branch is
 `codex/market-aligner-canonical-union-20260828`, based on `466ad4b`. No
@@ -37,6 +37,9 @@ runtime receipts remain outside the repository. Product code refers to profiles 
 - `cv_generation` owns evidence-bound CV and cover-letter composition, deterministic document
   constraints, rendering and detached adversarial assessment.
 - `form_filling` owns question/field binding, supported ATS interaction and certified execution.
+- `llm` owns every model transport, including the optional direct OpenAI Responses adapter;
+  application policy remains in `career_automation.application_sanity_review`, and provider
+  adapters cannot gain release, browser, or content-materialisation authority.
 - Legacy `career_automation` code remains behind these boundaries while capabilities are moved
   incrementally; its presence is not proof that every historical path is production-ready. Cover
   letters and CVs have separate exact-type runtime entry points. Preparation dispatches

@@ -997,6 +997,7 @@ class GutuaGreenhouseSession:
             cache_dir=self.archive_root / "review-cache",
             max_retries=1,
             temperature=0,
+            transport_archive_dir=self.archive_root / "provider-exchanges",
             usage_log=self.archive_root / "review-usage.jsonl",
         )
         try:

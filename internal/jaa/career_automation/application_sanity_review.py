@@ -25,7 +25,7 @@ from .external_document_assurance import IntendedVacancy
 
 PROMPT_SCHEMA_VERSION = "jaa.application-sanity-prompt.v1"
 RESULT_SCHEMA_VERSION = "jaa.application-sanity-result.v1"
-RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v1"
+RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v2"
 REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v1"
 REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
 MAX_REVIEW_TEXT_BYTES = 500_000
@@ -133,6 +133,24 @@ _NON_EXACT_MODEL_IDENTITIES = {
     "provider-default",
     "replace_me",
     "unknown",
+}
+_OPENAI_TRANSPORT_PREFIX = "openai.responses.https@sha256:"
+_OPENAI_TRANSPORT_EVIDENCE_SCHEMA = "jaa.llm.openai-response-evidence.v1"
+_OPENAI_PROVIDER_IDENTITY = "openai.responses-api"
+_TRANSPORT_EVIDENCE_KEYS = {
+    "schema_version",
+    "provider_identity",
+    "model_identity",
+    "endpoint_sha256",
+    "transport_identity",
+    "transport_version",
+    "client_request_id",
+    "transport_request_id",
+    "provider_response_id",
+    "request_sha256",
+    "response_sha256",
+    "semantic_output_sha256",
+    "archive_manifest_sha256",
 }
 
 
@@ -436,6 +454,7 @@ class SanityReviewReceipt:
     policy_sha256: str
     backend_identity: str
     model_identity: str
+    transport_evidence: Mapping[str, str] | None
     model_result: Mapping[str, object]
     model_result_sha256: str
     verdict: str
@@ -460,6 +479,35 @@ class SanityReviewReceipt:
             raise ValueError(
                 "sanity receipt lacks a production-capable reviewer identity"
             )
+        if self.transport_evidence is not None:
+            evidence = dict(self.transport_evidence)
+            if set(evidence) != _TRANSPORT_EVIDENCE_KEYS:
+                raise ValueError("sanity receipt transport evidence is malformed")
+            if (
+                evidence.get("schema_version")
+                != _OPENAI_TRANSPORT_EVIDENCE_SCHEMA
+                or evidence.get("provider_identity") != _OPENAI_PROVIDER_IDENTITY
+                or evidence.get("model_identity") != self.model_identity
+                or evidence.get("transport_identity") != self.backend_identity
+                or self.backend_identity
+                != _OPENAI_TRANSPORT_PREFIX + evidence.get("endpoint_sha256", "")
+                or not evidence.get("transport_version")
+                or not evidence.get("client_request_id")
+                or not evidence.get("transport_request_id")
+                or not evidence.get("provider_response_id")
+            ):
+                raise ValueError("sanity receipt transport evidence is inconsistent")
+            for key in (
+                "endpoint_sha256",
+                "request_sha256",
+                "response_sha256",
+                "semantic_output_sha256",
+                "archive_manifest_sha256",
+            ):
+                if not re.fullmatch(r"[0-9a-f]{64}", evidence.get(key, "")):
+                    raise ValueError("sanity receipt transport hash is invalid")
+        elif self.backend_identity.startswith(_OPENAI_TRANSPORT_PREFIX):
+            raise ValueError("OpenAI sanity receipt lacks exact transport evidence")
         validate_json(dict(self.model_result), RESULT_SCHEMA)
         if (
             self.model_result.get("verdict") != "pass"
@@ -468,6 +516,12 @@ class SanityReviewReceipt:
             raise ValueError("sanity PASS receipt contains a non-PASS model result")
         if self.model_result_sha256 != content_hash(dict(self.model_result)):
             raise ValueError("sanity receipt model-result identity is invalid")
+        if (
+            self.transport_evidence is not None
+            and self.transport_evidence["semantic_output_sha256"]
+            != self.model_result_sha256
+        ):
+            raise ValueError("sanity receipt semantic transport binding is invalid")
         if self.receipt_sha256 != content_hash(self.document(include_identity=False)):
             raise ValueError("sanity receipt identity is invalid")
 
@@ -484,6 +538,11 @@ class SanityReviewReceipt:
             "policy_sha256": self.policy_sha256,
             "backend_identity": self.backend_identity,
             "model_identity": self.model_identity,
+            "transport_evidence": (
+                dict(self.transport_evidence)
+                if self.transport_evidence is not None
+                else None
+            ),
             "model_result": dict(self.model_result),
             "model_result_sha256": self.model_result_sha256,
             "verdict": self.verdict,
@@ -550,6 +609,11 @@ def review_application_package(
         "policy_sha256": POLICY_SHA256,
         "backend_identity": client.backend.name,
         "model_identity": model_identity,
+        "transport_evidence": (
+            dict(response.transport_evidence)
+            if response.transport_evidence is not None
+            else None
+        ),
         "model_result": result,
         "model_result_sha256": content_hash(result),
         "verdict": "pass",
@@ -564,6 +628,11 @@ def review_application_package(
         policy_sha256=POLICY_SHA256,
         backend_identity=client.backend.name,
         model_identity=model_identity,
+        transport_evidence=(
+            dict(response.transport_evidence)
+            if response.transport_evidence is not None
+            else None
+        ),
         model_result=result,
         model_result_sha256=preimage["model_result_sha256"],
         verdict="pass",
