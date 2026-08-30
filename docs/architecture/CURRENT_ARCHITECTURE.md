@@ -49,6 +49,23 @@ restoring its parallel MigrationRunner, duplicate snapshot tables, or weaker ref
 Vacancy refresh remains owned by the current v3 journal and its exact context, receipt,
 transition, migration-quarantine and crash-recovery checks.
 
+## Structured extraction and evidence alignment
+
+`market_aligner.llm.structured` is the deterministic alternative to the bounded probabilistic
+gateway for JSON vacancy listings. It accepts only retained public listing bytes whose declared
+SHA-256, canonical URL and transport/secret separation pass the vacancy evidence boundary. Every
+emitted vacancy fact comes from one explicit non-root RFC 6901 pointer; missing fields, malformed
+pointers, duplicate JSON keys, non-finite values and ambiguous timestamps fail closed rather than
+being inferred. Location and eligibility facts remain owned by the canonical assessment and
+domain contracts, not by a recovered selection package.
+
+Evidence alignment is likewise deterministic: a requirement is supported only when its complete
+normalised text occurs in an explicitly selected, approved and content-bound evidence claim.
+Unknown or duplicate evidence selections are rejected, unmatched requirements remain explicit,
+and both extraction and alignment produce hash-bound receipts consumable by the existing LLM
+pipeline validators. The byte-identical recovered `internal/jaa/llm/structured.py` copy is
+provenance only; there is one runtime owner under Market Aligner and no parallel JAA package.
+
 ## JAA module boundaries
 
 - `jaa_core` owns stable identities, admission, evidence authority and lifecycle contracts.
