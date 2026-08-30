@@ -1076,7 +1076,8 @@ def _canonical_market_jaa_materialization(
     job_key: str | None = None,
     source_job_id: str | None = None,
 ):
-    import career_automation.candidate_application_factory as candidate_factory_module
+    import career_automation.application_compiler as application_compiler_module
+    import career_automation.candidate_authority as candidate_authority_module
     from career_automation.application_compiler import CandidateContact
     from career_automation.candidate_application_factory import (
         CandidateApplicationPackage,
@@ -1358,20 +1359,22 @@ def _canonical_market_jaa_materialization(
         evidence_path.write_bytes(evidence_bytes)
         evidence_path.chmod(0o600)
         monkeypatch.setitem(
-            candidate_factory_module.APPROVED_CANDIDATE_SOURCE_HASHES,
+            candidate_authority_module.APPROVED_CANDIDATE_SOURCE_HASHES,
             "approved_evidence",
             hashlib.sha256(evidence_bytes).hexdigest(),
         )
         monkeypatch.setattr(
-            candidate_factory_module,
-            "OUTWARD_PROFILE_REWRITES",
+            candidate_authority_module,
+            "APPROVED_EVIDENCE_PATH",
+            evidence_path,
+        )
+        monkeypatch.setattr(
+            application_compiler_module,
+            "EXACT_OUTWARD_PROFILE_REWRITES",
             {
                 evidence_id: statement
                 for evidence_id, _kind, statement in statements
             },
-        )
-        monkeypatch.setattr(
-            candidate_factory_module, "OUTWARD_LETTER_REWRITES", {}
         )
         candidate_authority_path = tmp_path / "synthetic-candidate-authority.json"
         candidate_authority_path.write_bytes(candidate_authority_bytes)

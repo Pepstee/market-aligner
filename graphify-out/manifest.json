@@ -6440,9 +6440,9 @@
     "semantic_hash": "b547ec1e7f0228cb3e453f410e3290a2"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/applications/__init__.py": {
-    "mtime": 1785589040.1860044,
-    "ast_hash": "0618a6644fd425b274a5c71606f3c3f9",
-    "semantic_hash": "0618a6644fd425b274a5c71606f3c3f9"
+    "mtime": 1788077856.7923656,
+    "ast_hash": "38156a3d364dfb8ca96acbd22faedf98",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/applications/assessment_promotion.py": {
     "mtime": 1787906899.7913246,
@@ -6455,9 +6455,9 @@
     "semantic_hash": "6bd9e3ca4cd76a6cfef2933a7a91a7c8"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/applications/contracts.py": {
-    "mtime": 1785589040.1862342,
-    "ast_hash": "2d513dc8715a74ebd2c71808f22f9c5b",
-    "semantic_hash": "2d513dc8715a74ebd2c71808f22f9c5b"
+    "mtime": 1788078191.2408907,
+    "ast_hash": "b73d619b04969a1e5c50489c1dff365b",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/applications/handoff.py": {
     "mtime": 1787906899.7916431,
@@ -7020,8 +7020,8 @@
     "semantic_hash": "4d6e5f8091420a2873c0e4a37e1458e2"
   },
   "/Users/admin/Projects/market-aligner/tests/test_market_aligner_jaa_handoff.py": {
-    "mtime": 1788026536.568161,
-    "ast_hash": "7980aceec35bdd2ce486f7d4e573b2f8",
+    "mtime": 1788078041.3168185,
+    "ast_hash": "b61d0e7ce41a630fc50002b5b0a375ef",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_migration_ledger.py": {
@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788077002.7744095,
-    "ast_hash": "20e2684b3fc45668da9dee38b90c0203",
+    "mtime": 1788079251.3942444,
+    "ast_hash": "1e9eb6d083fe002ac0335d68ceef318f",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {
@@ -7502,6 +7502,26 @@
   "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260830_080030_explain_authenticatedoutwardrewrite.md": {
     "mtime": 1788076830.3981657,
     "ast_hash": "709889d2b5e653f64edfc3f88f782d67",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/src/market_aligner/applications/events.py": {
+    "mtime": 1788077856.7787693,
+    "ast_hash": "c17a9e4b4b0564b133427568bbf9d794",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/src/market_aligner/applications/legacy_v0.py": {
+    "mtime": 1788077856.7826347,
+    "ast_hash": "6817e7738c40def41dbb4b895a1debfd",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/tests/test_jaa_events_v1.py": {
+    "mtime": 1788077935.6029785,
+    "ast_hash": "669a0f190f71ba71f3dd8c337d194b45",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260830_081233_does_the_recovered_application_event_projector_fil.md": {
+    "mtime": 1788077553.3348918,
+    "ast_hash": "8989b6884f84b457482e9b9b72b95f38",
     "semantic_hash": ""
   }
 }
