@@ -44,24 +44,34 @@ class CollectionTests(unittest.TestCase):
                 os.umask(previous)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
-    def test_raw_snapshot_history_is_append_only_and_current_head_is_exact(self) -> None:
+    def test_raw_snapshot_history_is_append_only_and_current_head_is_exact(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = JobDatabase(Path(temporary) / "state" / "vacancies.sqlite3")
             job = JobUrl("board", "snapshot-1", "https://example.test/snapshot-1")
             database.upsert_discovered(job)
             first = RawPosting(
-                job.board, job.job_id, job.url, "2026-08-20T00:00:00Z",
+                job.board,
+                job.job_id,
+                job.url,
+                "2026-08-20T00:00:00Z",
                 raw_json={"version": 1},
             )
             second = RawPosting(
-                job.board, job.job_id, job.url, "2026-08-21T00:00:00Z",
+                job.board,
+                job.job_id,
+                job.url,
+                "2026-08-21T00:00:00Z",
                 raw_json={"version": 2},
             )
             first_hash = raw_posting_content_sha256(first)
             second_hash = raw_posting_content_sha256(second)
 
             database.store_raw(first)
-            self.assertEqual(raw_posting_bytes(first), database.raw_snapshot(job.key, first_hash))
+            self.assertEqual(
+                raw_posting_bytes(first), database.raw_snapshot(job.key, first_hash)
+            )
             self.assertEqual(first, database.load_current_raw_snapshot(job.key))
             database.store_raw(second)
 
@@ -82,14 +92,113 @@ class CollectionTests(unittest.TestCase):
                         (job.key,),
                     )
 
-    def test_legacy_fetched_row_is_blocked_until_exact_snapshot_is_recaptured(self) -> None:
+    def test_trusted_discovery_creates_immutable_release_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = JobDatabase(Path(temporary) / "state" / "vacancies.sqlite3")
+            job = JobUrl(
+                "board",
+                "release-1",
+                "https://example.test/release-1",
+                discovered_at="2026-08-20T00:00:00Z",
+            )
+            raw = RawPosting(
+                job.board,
+                job.job_id,
+                job.url,
+                "2026-08-20T00:01:00Z",
+                raw_text="exact public vacancy",
+                content_type="text/html",
+                http_status=200,
+            )
+            database.upsert_discovered(job, release_trusted=True)
+            database.store_raw(raw, release_trusted=True)
+
+            content_sha256 = raw_posting_content_sha256(raw)
+            capture = database.listing_release_capture(job.key, content_sha256)
+            self.assertEqual(job.discovered_at, capture.discovered_at)
+            self.assertEqual(raw.fetched_at, capture.fetched_at)
+            self.assertEqual(content_sha256, capture.content_sha256)
+            self.assertEqual(
+                hashlib.sha256(raw_posting_bytes(raw)).hexdigest(),
+                capture.raw_object_sha256,
+            )
+            self.assertEqual(
+                capture.provenance_sha256,
+                hashlib.sha256(capture.exact_provenance_bytes).hexdigest(),
+            )
+            self.assertIsNone(
+                database.release_capture_block(
+                    job.key, content_sha256, capture.raw_object_sha256
+                )
+            )
+            with database.connect() as connection:
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    connection.execute(
+                        """UPDATE posting_release_captures
+                           SET fetched_at='changed' WHERE provenance_sha256=?""",
+                        (capture.provenance_sha256,),
+                    )
+            with database.connect() as connection, connection:
+                connection.execute("DELETE FROM postings WHERE key=?", (job.key,))
+                self.assertEqual(
+                    [], connection.execute("PRAGMA foreign_key_check").fetchall()
+                )
+                self.assertEqual(
+                    1,
+                    connection.execute(
+                        """SELECT COUNT(*) FROM posting_discovery_observations
+                           WHERE job_key=?""",
+                        (job.key,),
+                    ).fetchone()[0],
+                )
+
+    def test_untrusted_or_unstamped_discovery_cannot_create_release_capture(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = JobDatabase(Path(temporary) / "state" / "vacancies.sqlite3")
+            job = JobUrl("board", "untrusted-1", "https://example.test/untrusted-1")
+            with self.assertRaisesRegex(ValueError, "explicit collection timestamp"):
+                database.upsert_discovered(job, release_trusted=True)
+
+            database.upsert_discovered(job)
+            raw = RawPosting(
+                job.board,
+                job.job_id,
+                job.url,
+                "2026-08-20T00:01:00Z",
+                raw_text="legacy public vacancy",
+            )
+            with self.assertRaisesRegex(ValueError, "trusted discovery"):
+                database.store_raw(raw, release_trusted=True)
+            database.store_raw(raw)
+            content_sha256 = raw_posting_content_sha256(raw)
+            object_sha256 = hashlib.sha256(raw_posting_bytes(raw)).hexdigest()
+            with self.assertRaises(KeyError):
+                database.listing_release_capture(job.key, content_sha256)
+            block = database.release_capture_block(
+                job.key, content_sha256, object_sha256
+            )
+            self.assertIsNotNone(block)
+            assert block is not None
+            self.assertEqual(
+                "snapshot_without_trusted_discovery_provenance",
+                block["reason_code"],
+            )
+
+    def test_legacy_fetched_row_is_blocked_until_exact_snapshot_is_recaptured(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "state" / "vacancies.sqlite3"
             database = JobDatabase(path)
             job = JobUrl("board", "legacy-1", "https://example.test/legacy-1")
             database.upsert_discovered(job)
             legacy = RawPosting(
-                job.board, job.job_id, job.url, "2026-08-20T00:00:00Z",
+                job.board,
+                job.job_id,
+                job.url,
+                "2026-08-20T00:00:00Z",
                 raw_text="legacy bytes",
             )
             with database.connect() as connection, connection:
@@ -174,10 +283,15 @@ class CollectionTests(unittest.TestCase):
 
     @staticmethod
     def _canonical_hash(value: object) -> str:
-        return hashlib.sha256(json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
 
     def _refresh_fixture(
         self,
@@ -212,7 +326,9 @@ class CollectionTests(unittest.TestCase):
             raw_text="old official bytes",
         )
         database.store_raw(old_raw)
-        write_jsonl(root / "raw" / "vacancies" / "injected" / "tenant_1.json", [old_raw])
+        write_jsonl(
+            root / "raw" / "vacancies" / "injected" / "tenant_1.json", [old_raw]
+        )
         _job, old_hash, _fetched_at = database.fetched_posting(job.key)
         calls = {"fetch": 0}
 
@@ -252,13 +368,19 @@ class CollectionTests(unittest.TestCase):
         old_path = root / "raw" / "vacancies" / "injected" / "tenant_1.json"
         old_bytes = old_path.read_bytes()
         old_raw = RawPosting(
-            "injected", "tenant:1", "https://example.test/jobs/1",
-            "2026-08-20T00:00:00Z", raw_text="old official bytes",
+            "injected",
+            "tenant:1",
+            "https://example.test/jobs/1",
+            "2026-08-20T00:00:00Z",
+            raw_text="old official bytes",
         )
         self.assertEqual(old_bytes, raw_posting_bytes(old_raw))
         new_raw = RawPosting(
-            "injected", "tenant:1", "https://example.test/jobs/1",
-            "2026-08-20T05:00:00Z", raw_text="legacy fetched official bytes",
+            "injected",
+            "tenant:1",
+            "https://example.test/jobs/1",
+            "2026-08-20T05:00:00Z",
+            raw_text="legacy fetched official bytes",
         )
         new_bytes = raw_posting_bytes(new_raw)
         new_content = raw_posting_content_sha256(new_raw)
@@ -267,11 +389,13 @@ class CollectionTests(unittest.TestCase):
         operation_id = f"legacy-{status}"
         loaded_config = yaml.safe_load(config.read_text(encoding="utf-8"))
         config_sha = self._canonical_hash(loaded_config)
-        source_sha = self._canonical_hash({
-            "adapter": "injected",
-            "adapter_config": loaded_config["injected"],
-            "job_key": "injected:tenant:1",
-        })
+        source_sha = self._canonical_hash(
+            {
+                "adapter": "injected",
+                "adapter_config": loaded_config["injected"],
+                "job_key": "injected:tenant:1",
+            }
+        )
         context = {
             "config_sha256": config_sha,
             "expected_content_sha256": old_hash,
@@ -281,10 +405,12 @@ class CollectionTests(unittest.TestCase):
             "source_sha256": source_sha,
         }
         context_sha = self._canonical_hash(context)
-        refresh_id = self._canonical_hash({
-            "context_sha256": context_sha,
-            "schema_version": "market-aligner.vacancy-refresh-id.v1",
-        })
+        refresh_id = self._canonical_hash(
+            {
+                "context_sha256": context_sha,
+                "schema_version": "market-aligner.vacancy-refresh-id.v1",
+            }
+        )
         receipt = None
         if status == "committed":
             basis = {
@@ -301,16 +427,20 @@ class CollectionTests(unittest.TestCase):
                 "new_content_sha256": new_content,
                 "new_fetched_at": new_raw.fetched_at,
                 "new_raw_object_path": str(
-                    Path("state") / "collection-refresh-objects"
-                    / new_object[:2] / new_object
+                    Path("state")
+                    / "collection-refresh-objects"
+                    / new_object[:2]
+                    / new_object
                 ),
                 "new_raw_object_sha256": new_object,
                 "official_fetch_count": 1,
                 "old_content_sha256": old_hash,
                 "old_fetched_at": old_raw.fetched_at,
                 "old_raw_object_path": str(
-                    Path("state") / "collection-refresh-objects"
-                    / old_object[:2] / old_object
+                    Path("state")
+                    / "collection-refresh-objects"
+                    / old_object[:2]
+                    / old_object
                 ),
                 "old_raw_object_sha256": old_object,
                 "operation_id": operation_id,
@@ -339,13 +469,23 @@ class CollectionTests(unittest.TestCase):
                      receipt_basis_json,created_at,updated_at
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    refresh_id, operation_id, context_sha, "injected:tenant:1",
-                    old_hash, status, "2026-08-20T04:59:00Z", old_hash,
-                    old_raw.fetched_at, old_bytes, old_object, *new_fields,
-                    None if receipt is None else json.dumps(
-                        receipt, sort_keys=True, separators=(",", ":")
-                    ),
-                    "2026-08-20 04:59:00", "2026-08-20 05:01:00",
+                    refresh_id,
+                    operation_id,
+                    context_sha,
+                    "injected:tenant:1",
+                    old_hash,
+                    status,
+                    "2026-08-20T04:59:00Z",
+                    old_hash,
+                    old_raw.fetched_at,
+                    old_bytes,
+                    old_object,
+                    *new_fields,
+                    None
+                    if receipt is None
+                    else json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+                    "2026-08-20 04:59:00",
+                    "2026-08-20 05:01:00",
                 ),
             )
             conn.commit()
@@ -376,13 +516,17 @@ class CollectionTests(unittest.TestCase):
     ) -> None:
         with sqlite3.connect(database.path) as conn:
             conn.row_factory = sqlite3.Row
-            row = dict(conn.execute(
-                "SELECT * FROM vacancy_refreshes WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone())
+            row = dict(
+                conn.execute(
+                    "SELECT * FROM vacancy_refreshes WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+            )
             if status in ("intent", "fetch_started", "indeterminate"):
                 for key in (
-                    "new_content_sha256", "new_fetched_at", "new_raw_bytes",
+                    "new_content_sha256",
+                    "new_fetched_at",
+                    "new_raw_bytes",
                     "new_object_sha256",
                 ):
                     row[key] = None
@@ -393,12 +537,14 @@ class CollectionTests(unittest.TestCase):
                     """UPDATE postings SET url=?,fetched_at=?,raw_text=?,raw_json=?,
                          content_hash=?,fetch_status='fetched',fetch_error=NULL WHERE key=?""",
                     (
-                        old_payload["url"], old_payload["fetched_at"],
+                        old_payload["url"],
+                        old_payload["fetched_at"],
                         old_payload.get("raw_text"),
-                        None if old_payload.get("raw_json") is None else json.dumps(
-                            old_payload["raw_json"], ensure_ascii=False
-                        ),
-                        row["old_content_sha256"], row["job_key"],
+                        None
+                        if old_payload.get("raw_json") is None
+                        else json.dumps(old_payload["raw_json"], ensure_ascii=False),
+                        row["old_content_sha256"],
+                        row["job_key"],
                     ),
                 )
             receipt_json = None
@@ -429,11 +575,15 @@ class CollectionTests(unittest.TestCase):
                     "status": "committed",
                 }
                 transition_sha256 = self._canonical_hash(transition)
-                receipt_json = json.dumps({
-                    **basis,
-                    "receipt_basis_sha256": receipt_basis_sha256,
-                    "transition_sha256": transition_sha256,
-                }, sort_keys=True, separators=(",", ":"))
+                receipt_json = json.dumps(
+                    {
+                        **basis,
+                        "receipt_basis_sha256": receipt_basis_sha256,
+                        "transition_sha256": transition_sha256,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             old_bytes = (
                 b'{"substituted":true}\n' if corrupt_old_bytes else row["old_raw_bytes"]
             )
@@ -449,14 +599,27 @@ class CollectionTests(unittest.TestCase):
                      receipt_basis_sha256,transition_sha256,created_at,updated_at
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    row["refresh_id"], row["operation_id"], row["context_sha256"],
-                    row["context_json"], row["job_key"], row["expected_content_sha256"],
-                    row["status"], row["started_at"], row["old_content_sha256"],
-                    row["old_fetched_at"], old_bytes, row["old_object_sha256"],
-                    row["new_content_sha256"], row["new_fetched_at"],
-                    row["new_raw_bytes"], row["new_object_sha256"], receipt_json,
-                    receipt_basis_sha256, transition_sha256,
-                    row["created_at"], row["updated_at"],
+                    row["refresh_id"],
+                    row["operation_id"],
+                    row["context_sha256"],
+                    row["context_json"],
+                    row["job_key"],
+                    row["expected_content_sha256"],
+                    row["status"],
+                    row["started_at"],
+                    row["old_content_sha256"],
+                    row["old_fetched_at"],
+                    old_bytes,
+                    row["old_object_sha256"],
+                    row["new_content_sha256"],
+                    row["new_fetched_at"],
+                    row["new_raw_bytes"],
+                    row["new_object_sha256"],
+                    receipt_json,
+                    receipt_basis_sha256,
+                    transition_sha256,
+                    row["created_at"],
+                    row["updated_at"],
                 ),
             )
 
@@ -475,9 +638,13 @@ class CollectionTests(unittest.TestCase):
             database = JobDatabase(root / "state" / "vacancies.sqlite3")
             row = JobUrl("board", "1", "https://example.test/1")
             self.assertTrue(database.upsert_discovered(row))
-            self.assertEqual({"board"}, database.boards_with_pending_discoveries(["board"]))
+            self.assertEqual(
+                {"board"}, database.boards_with_pending_discoveries(["board"])
+            )
             database.store_raw(
-                RawPosting("board", "1", row.url, "2026-08-01T00:00:00Z", raw_text="complete")
+                RawPosting(
+                    "board", "1", row.url, "2026-08-01T00:00:00Z", raw_text="complete"
+                )
             )
             self.assertTrue(database.has_raw(row.key))
             self.assertEqual(set(), database.boards_with_pending_discoveries(["board"]))
@@ -503,9 +670,17 @@ class CollectionTests(unittest.TestCase):
                 conn.execute(self._V2_REFRESH_SCHEMA)
             JobDatabase(database.path)
             with sqlite3.connect(database.path) as conn:
-                columns = [row[1] for row in conn.execute("PRAGMA table_info(vacancy_refreshes)")]
+                columns = [
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(vacancy_refreshes)")
+                ]
                 self.assertIn("old_canonical_content_sha256", columns)
-                self.assertEqual(0, conn.execute("SELECT COUNT(*) FROM vacancy_refreshes_v2").fetchone()[0])
+                self.assertEqual(
+                    0,
+                    conn.execute(
+                        "SELECT COUNT(*) FROM vacancy_refreshes_v2"
+                    ).fetchone()[0],
+                )
 
     def test_v2_committed_refresh_migrates_and_replays(self) -> None:
         class Adapter:
@@ -517,34 +692,64 @@ class CollectionTests(unittest.TestCase):
             def fetch(self, job, live=False):
                 self.calls["fetch"] += 1
                 return RawPosting(
-                    job.board, job.job_id, job.url, "2026-08-20T01:00:00Z",
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T01:00:00Z",
                     raw_text="v2 new bytes",
                 )
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = Adapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             service = CollectionService(root, collector_factory=factory)
             service.refresh_vacancy(
-                config, job_key="injected:tenant:1", expected_content_sha256=old_hash,
-                operation_id="v2-committed", log=lambda _message: None,
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                operation_id="v2-committed",
+                log=lambda _message: None,
             )
             self._downgrade_refresh_to_v2(database, "v2-committed", status="committed")
             reopened = JobDatabase(database.path)
             with sqlite3.connect(database.path) as conn:
-                self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM vacancy_refreshes_v2").fetchone()[0])
-            context_sha = sqlite3.connect(database.path).execute(
-                "SELECT context_sha256 FROM vacancy_refreshes WHERE operation_id='v2-committed'"
-            ).fetchone()[0]
-            transition = reopened.refresh_transition("v2-committed", context_sha256=context_sha)
-            self.assertEqual("market-aligner.vacancy-refresh-receipt.v3", transition["receipt_basis"]["schema_version"])
-            self.assertEqual("market-aligner.vacancy-refresh-v2-to-v3.v1", transition["receipt_basis"]["journal_migration"])
-            replay = service.refresh_vacancy(
-                config, job_key="injected:tenant:1", expected_content_sha256=old_hash,
-                operation_id="v2-committed", log=lambda _message: None,
+                self.assertEqual(
+                    1,
+                    conn.execute(
+                        "SELECT COUNT(*) FROM vacancy_refreshes_v2"
+                    ).fetchone()[0],
+                )
+            context_sha = (
+                sqlite3.connect(database.path)
+                .execute(
+                    "SELECT context_sha256 FROM vacancy_refreshes WHERE operation_id='v2-committed'"
+                )
+                .fetchone()[0]
             )
-            self.assertEqual("market-aligner.vacancy-refresh-receipt.v3", replay["schema_version"])
+            transition = reopened.refresh_transition(
+                "v2-committed", context_sha256=context_sha
+            )
+            self.assertEqual(
+                "market-aligner.vacancy-refresh-receipt.v3",
+                transition["receipt_basis"]["schema_version"],
+            )
+            self.assertEqual(
+                "market-aligner.vacancy-refresh-v2-to-v3.v1",
+                transition["receipt_basis"]["journal_migration"],
+            )
+            replay = service.refresh_vacancy(
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                operation_id="v2-committed",
+                log=lambda _message: None,
+            )
+            self.assertEqual(
+                "market-aligner.vacancy-refresh-receipt.v3", replay["schema_version"]
+            )
             self.assertEqual(1, calls["fetch"])
 
     def test_v2_inflight_refresh_migrates_and_resumes_without_refetch(self) -> None:
@@ -557,25 +762,40 @@ class CollectionTests(unittest.TestCase):
             def fetch(self, job, live=False):
                 self.calls["fetch"] += 1
                 return RawPosting(
-                    job.board, job.job_id, job.url, "2026-08-20T01:00:00Z",
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T01:00:00Z",
                     raw_text="v2 fetched bytes",
                 )
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = Adapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             CollectionService(root, collector_factory=factory).refresh_vacancy(
-                config, job_key="injected:tenant:1", expected_content_sha256=old_hash,
-                operation_id="v2-fetched", log=lambda _message: None,
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                operation_id="v2-fetched",
+                log=lambda _message: None,
             )
             self._downgrade_refresh_to_v2(database, "v2-fetched", status="fetched")
             JobDatabase(database.path)
-            receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
-                config, job_key="injected:tenant:1", expected_content_sha256=old_hash,
-                operation_id="v2-fetched", log=lambda _message: None,
+            receipt = CollectionService(
+                root, collector_factory=factory
+            ).refresh_vacancy(
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                operation_id="v2-fetched",
+                log=lambda _message: None,
             )
-            self.assertEqual("market-aligner.vacancy-refresh-receipt.v3", receipt["schema_version"])
+            self.assertEqual(
+                "market-aligner.vacancy-refresh-receipt.v3", receipt["schema_version"]
+            )
             self.assertEqual(1, calls["fetch"])
 
     def test_invalid_v2_refresh_is_archived_and_quarantined(self) -> None:
@@ -588,26 +808,49 @@ class CollectionTests(unittest.TestCase):
             def fetch(self, job, live=False):
                 self.calls["fetch"] += 1
                 return RawPosting(
-                    job.board, job.job_id, job.url, "2026-08-20T01:00:00Z",
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T01:00:00Z",
                     raw_text="v2 bytes",
                 )
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = Adapter()
-            config, database, old_hash, _calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, _calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             CollectionService(root, collector_factory=factory).refresh_vacancy(
-                config, job_key="injected:tenant:1", expected_content_sha256=old_hash,
-                operation_id="v2-invalid", log=lambda _message: None,
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                operation_id="v2-invalid",
+                log=lambda _message: None,
             )
             self._downgrade_refresh_to_v2(
                 database, "v2-invalid", status="committed", corrupt_old_bytes=True
             )
             reopened = JobDatabase(database.path)
             with sqlite3.connect(database.path) as conn:
-                self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM vacancy_refreshes_v2").fetchone()[0])
-                self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM vacancy_refresh_migration_quarantine").fetchone()[0])
-                self.assertEqual(0, conn.execute("SELECT COUNT(*) FROM vacancy_refreshes").fetchone()[0])
+                self.assertEqual(
+                    1,
+                    conn.execute(
+                        "SELECT COUNT(*) FROM vacancy_refreshes_v2"
+                    ).fetchone()[0],
+                )
+                self.assertEqual(
+                    1,
+                    conn.execute(
+                        "SELECT COUNT(*) FROM vacancy_refresh_migration_quarantine"
+                    ).fetchone()[0],
+                )
+                self.assertEqual(
+                    0,
+                    conn.execute("SELECT COUNT(*) FROM vacancy_refreshes").fetchone()[
+                        0
+                    ],
+                )
                 context_sha = conn.execute(
                     "SELECT context_sha256 FROM vacancy_refreshes_v2 WHERE operation_id='v2-invalid'"
                 ).fetchone()[0]
@@ -623,13 +866,12 @@ class CollectionTests(unittest.TestCase):
             config, database, old_hash, _calls, _factory = self._refresh_fixture(
                 root, Adapter()
             )
-            self._install_legacy_refresh(
-                root, config, database, old_hash, status=None
-            )
+            self._install_legacy_refresh(root, config, database, old_hash, status=None)
             JobDatabase(database.path)
             with sqlite3.connect(database.path) as conn:
                 columns = tuple(
-                    row[1] for row in conn.execute("PRAGMA table_info(vacancy_refreshes)")
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(vacancy_refreshes)")
                 )
                 archived = conn.execute(
                     "SELECT COUNT(*) FROM vacancy_refreshes_legacy_036d"
@@ -650,10 +892,15 @@ class CollectionTests(unittest.TestCase):
                 raise AssertionError("quarantined legacy transition must never refetch")
 
         for legacy_status in ("intent", "fetched", "object_ready"):
-            with self.subTest(status=legacy_status), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(status=legacy_status),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 root = Path(temporary)
                 adapter = ForbiddenAdapter()
-                config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                config, database, old_hash, calls, factory = self._refresh_fixture(
+                    root, adapter
+                )
                 legacy = self._install_legacy_refresh(
                     root, config, database, old_hash, status=legacy_status
                 )
@@ -709,7 +956,9 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = ForbiddenAdapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             legacy = self._install_legacy_refresh(
                 root, config, database, old_hash, status="committed"
             )
@@ -737,7 +986,9 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(legacy["new_bytes"], archived[1])
             self.assertIsNotNone(archived[2])
             self.assertEqual(0, quarantined)
-            receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
+            receipt = CollectionService(
+                root, collector_factory=factory
+            ).refresh_vacancy(
                 config,
                 job_key="injected:tenant:1",
                 expected_content_sha256=old_hash,
@@ -785,13 +1036,20 @@ class CollectionTests(unittest.TestCase):
 
             def fetch(self, _job, live=False):
                 self.calls["fetch"] += 1
-                raise AssertionError("invalid legacy disposition must block before fetch")
+                raise AssertionError(
+                    "invalid legacy disposition must block before fetch"
+                )
 
         for corruption in ("orphan", "duplicate", "projection", "archive"):
-            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(corruption=corruption),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 root = Path(temporary)
                 adapter = ForbiddenAdapter()
-                config, database, old_hash, calls, _factory = self._refresh_fixture(root, adapter)
+                config, database, old_hash, calls, _factory = self._refresh_fixture(
+                    root, adapter
+                )
                 legacy_status = "intent" if corruption == "orphan" else "committed"
                 legacy = self._install_legacy_refresh(
                     root, config, database, old_hash, status=legacy_status
@@ -809,18 +1067,24 @@ class CollectionTests(unittest.TestCase):
                                FROM vacancy_refreshes_legacy_036d WHERE operation_id=?""",
                             (legacy["operation_id"],),
                         ).fetchone()
-                        receipt = json.loads(conn.execute(
-                            "SELECT receipt_basis_json FROM vacancy_refreshes WHERE operation_id=?",
-                            (legacy["operation_id"],),
-                        ).fetchone()[0])
+                        receipt = json.loads(
+                            conn.execute(
+                                "SELECT receipt_basis_json FROM vacancy_refreshes WHERE operation_id=?",
+                                (legacy["operation_id"],),
+                            ).fetchone()[0]
+                        )
                         conn.execute(
                             """INSERT INTO vacancy_refresh_migration_quarantine(
                                  operation_id,refresh_id,job_key,expected_content_sha256,
                                  legacy_status,legacy_table,legacy_row_sha256,reason
                                ) VALUES(?,?,?,?,?,'vacancy_refreshes_legacy_036d',?,?)""",
                             (
-                                legacy["operation_id"], archived[0], archived[1], archived[2],
-                                archived[3], receipt["legacy_archive_row_sha256"],
+                                legacy["operation_id"],
+                                archived[0],
+                                archived[1],
+                                archived[2],
+                                archived[3],
+                                receipt["legacy_archive_row_sha256"],
                                 "injected duplicate disposition",
                             ),
                         )
@@ -872,8 +1136,12 @@ class CollectionTests(unittest.TestCase):
                                  receipt_basis_sha256=?,transition_sha256=?
                                WHERE operation_id=?""",
                             (
-                                json.dumps(resealed, sort_keys=True, separators=(",", ":")),
-                                basis_sha, transition_sha, legacy["operation_id"],
+                                json.dumps(
+                                    resealed, sort_keys=True, separators=(",", ":")
+                                ),
+                                basis_sha,
+                                transition_sha,
+                                legacy["operation_id"],
                             ),
                         )
                     conn.commit()
@@ -888,10 +1156,12 @@ class CollectionTests(unittest.TestCase):
                         "source_sha256": "2" * 64,
                     }
                     context_sha = self._canonical_hash(context)
-                    refresh_id = self._canonical_hash({
-                        "context_sha256": context_sha,
-                        "schema_version": "market-aligner.vacancy-refresh-id.v1",
-                    })
+                    refresh_id = self._canonical_hash(
+                        {
+                            "context_sha256": context_sha,
+                            "schema_version": "market-aligner.vacancy-refresh-id.v1",
+                        }
+                    )
                     with self.assertRaisesRegex(
                         VacancyRefreshConflict, "exactly one current or quarantine"
                     ):
@@ -922,10 +1192,15 @@ class CollectionTests(unittest.TestCase):
                 raise AssertionError("unsafe object path must fail before network")
 
         for attack in ("directory", "object", "hardlink"):
-            with self.subTest(attack=attack), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(attack=attack),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 root = Path(temporary)
                 adapter = Adapter()
-                config, _database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                config, _database, old_hash, calls, factory = self._refresh_fixture(
+                    root, adapter
+                )
                 old_cache = root / "raw" / "vacancies" / "injected" / "tenant_1.json"
                 old_object = hashlib.sha256(old_cache.read_bytes()).hexdigest()
                 objects = root / "state" / "collection-refresh-objects"
@@ -963,7 +1238,13 @@ class CollectionTests(unittest.TestCase):
                     yield JobUrl("bulk", str(index), f"https://example.test/{index}")
 
             def fetch(self, row, live=False):
-                return RawPosting(row.board, row.job_id, row.url, "2026-08-01T00:00:00Z", raw_text="x")
+                return RawPosting(
+                    row.board,
+                    row.job_id,
+                    row.url,
+                    row.discovered_at or "2026-08-01T00:00:00Z",
+                    raw_text="x",
+                )
 
         with tempfile.TemporaryDirectory() as temporary:
             config = {
@@ -972,14 +1253,19 @@ class CollectionTests(unittest.TestCase):
                 "bulk": {"minimum_poll_minutes": 0},
             }
             collector = Collector(config, Path(temporary), log=lambda _message: None)
-            with mock.patch("market_aligner.collectors.engine.load_adapter", return_value=BulkAdapter()):
+            with mock.patch(
+                "market_aligner.collectors.engine.load_adapter",
+                return_value=BulkAdapter(),
+            ):
                 result = collector.cycle()
             self.assertEqual(301, result["seen"])
             self.assertEqual(301, result["new"])
             self.assertEqual(301, result["fetched"])
             self.assertEqual(301, collector.db.stats()["postings"])
 
-    def test_service_resumes_interrupted_fetch_and_emits_hash_bound_receipts(self) -> None:
+    def test_service_resumes_interrupted_fetch_and_emits_hash_bound_receipts(
+        self,
+    ) -> None:
         attempts = {"2": 0}
 
         class InterruptedAdapter:
@@ -999,7 +1285,7 @@ class CollectionTests(unittest.TestCase):
                     row.board,
                     row.job_id,
                     row.url,
-                    "2026-08-20T00:00:00Z",
+                    row.discovered_at or "2026-08-20T00:00:00Z",
                     raw_text=f"posting {row.job_id}",
                 )
 
@@ -1037,9 +1323,13 @@ class CollectionTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+
             def now() -> datetime:
                 return datetime(2026, 8, 20, tzinfo=timezone.utc)
-            service = CollectionService(root, collector_factory=collector_factory, now=now)
+
+            service = CollectionService(
+                root, collector_factory=collector_factory, now=now
+            )
 
             first = service.collect(
                 config,
@@ -1084,7 +1374,9 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(attempts_before_replay, attempts)
             database = JobDatabase(root / "state" / "vacancies.sqlite3")
             self.assertEqual(2, database.stats()["fetched"])
-            stored = json.loads(Path(second["receipt_path"]).read_text(encoding="utf-8"))
+            stored = json.loads(
+                Path(second["receipt_path"]).read_text(encoding="utf-8")
+            )
             self.assertNotIn("receipt_path", stored)
             self.assertEqual(second["receipt_sha256"], stored["receipt_sha256"])
 
@@ -1109,7 +1401,9 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = ChangedAdapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             service = CollectionService(
                 root,
                 collector_factory=factory,
@@ -1128,10 +1422,14 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(old_hash, receipt["old_content_sha256"])
             self.assertNotEqual(old_hash, receipt["new_content_sha256"])
             self.assertEqual(1, receipt["official_fetch_count"])
-            _job, current_hash, fetched_at = database.fetched_posting("injected:tenant:1")
+            _job, current_hash, fetched_at = database.fetched_posting(
+                "injected:tenant:1"
+            )
             self.assertEqual(receipt["new_content_sha256"], current_hash)
             self.assertEqual("2026-08-20T01:00:00Z", fetched_at)
-            stored = json.loads(Path(receipt["receipt_path"]).read_text(encoding="utf-8"))
+            stored = json.loads(
+                Path(receipt["receipt_path"]).read_text(encoding="utf-8")
+            )
             self.assertEqual(receipt["receipt_sha256"], stored["receipt_sha256"])
             raw_cache = root / receipt["raw_cache_path"]
             self.assertTrue(raw_cache.is_file())
@@ -1199,8 +1497,12 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = UnchangedAdapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
-            receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
+            receipt = CollectionService(
+                root, collector_factory=factory
+            ).refresh_vacancy(
                 config,
                 job_key="injected:tenant:1",
                 expected_content_sha256=old_hash,
@@ -1225,17 +1527,25 @@ class CollectionTests(unittest.TestCase):
             def fetch(self, job, live=False):
                 self.calls["fetch"] += 1
                 return RawPosting(
-                    job.board, job.job_id, job.url, "2026-08-20T02:00:00Z",
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    "2026-08-20T02:00:00Z",
                     raw_json={"z": 1, "a": {"y": 2, "b": 3}},
                 )
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = JsonAdapter()
-            config, database, _old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, _old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             old = RawPosting(
-                "injected", "tenant:1", "https://example.test/jobs/1",
-                "2026-08-20T00:00:00Z", raw_json={"z": 1, "a": {"y": 2, "b": 3}},
+                "injected",
+                "tenant:1",
+                "https://example.test/jobs/1",
+                "2026-08-20T00:00:00Z",
+                raw_json={"z": 1, "a": {"y": 2, "b": 3}},
             )
             database.store_raw(old)
             old_cache = root / "raw" / "vacancies" / "injected" / "tenant_1.json"
@@ -1243,22 +1553,34 @@ class CollectionTests(unittest.TestCase):
             exact_old_bytes = old_cache.read_bytes()
             _job, legacy_hash, _fetched_at = database.fetched_posting(old.key)
             cache_payload = json.loads(exact_old_bytes)
-            canonical_hash = raw_posting_content_sha256(RawPosting(
-                old.board, old.job_id, old.url, old.fetched_at,
-                raw_json=cache_payload["raw_json"],
-            ))
+            canonical_hash = raw_posting_content_sha256(
+                RawPosting(
+                    old.board,
+                    old.job_id,
+                    old.url,
+                    old.fetched_at,
+                    raw_json=cache_payload["raw_json"],
+                )
+            )
             self.assertNotEqual(legacy_hash, canonical_hash)
 
-            receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
-                config, job_key=old.key, expected_content_sha256=legacy_hash,
-                operation_id="legacy-json-order", log=lambda _message: None,
+            receipt = CollectionService(
+                root, collector_factory=factory
+            ).refresh_vacancy(
+                config,
+                job_key=old.key,
+                expected_content_sha256=legacy_hash,
+                operation_id="legacy-json-order",
+                log=lambda _message: None,
             )
             self.assertEqual(1, calls["fetch"])
             self.assertFalse(receipt["changed"])
             self.assertEqual(legacy_hash, receipt["old_content_sha256"])
             self.assertEqual(canonical_hash, receipt["old_canonical_content_sha256"])
             self.assertEqual(canonical_hash, receipt["new_content_sha256"])
-            self.assertEqual(exact_old_bytes, (root / receipt["old_raw_object_path"]).read_bytes())
+            self.assertEqual(
+                exact_old_bytes, (root / receipt["old_raw_object_path"]).read_bytes()
+            )
 
     def test_exact_refresh_rejects_cache_semantic_mismatch_before_fetch(self) -> None:
         class NeverAdapter:
@@ -1274,19 +1596,28 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = NeverAdapter()
-            config, _database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, _database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             write_jsonl(
                 root / "raw" / "vacancies" / "injected" / "tenant_1.json",
-                [RawPosting(
-                    "injected", "tenant:1", "https://example.test/jobs/1",
-                    "2026-08-20T00:00:00Z", raw_text="substituted bytes",
-                )],
+                [
+                    RawPosting(
+                        "injected",
+                        "tenant:1",
+                        "https://example.test/jobs/1",
+                        "2026-08-20T00:00:00Z",
+                        raw_text="substituted bytes",
+                    )
+                ],
             )
             with self.assertRaisesRegex(ValueError, "differs semantically"):
                 CollectionService(root, collector_factory=factory).refresh_vacancy(
-                    config, job_key="injected:tenant:1",
+                    config,
+                    job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
-                    operation_id="semantic-mismatch", log=lambda _message: None,
+                    operation_id="semantic-mismatch",
+                    log=lambda _message: None,
                 )
             self.assertEqual(0, calls["fetch"])
 
@@ -1304,7 +1635,11 @@ class CollectionTests(unittest.TestCase):
         cases = (
             ("bool-int", {"value": True}, {"value": 1}),
             ("int-float", {"value": 1}, {"value": 1.0}),
-            ("nested-bool-int", {"items": [{"value": False}]}, {"items": [{"value": 0}]}),
+            (
+                "nested-bool-int",
+                {"items": [{"value": False}]},
+                {"items": [{"value": 0}]},
+            ),
             ("list-int-float", {"items": [1, 2]}, {"items": [1.0, 2]}),
         )
         for label, database_json, cache_json in cases:
@@ -1315,23 +1650,33 @@ class CollectionTests(unittest.TestCase):
                     root, adapter
                 )
                 database_raw = RawPosting(
-                    "injected", "tenant:1", "https://example.test/jobs/1",
-                    "2026-08-20T00:00:00Z", raw_json=database_json,
+                    "injected",
+                    "tenant:1",
+                    "https://example.test/jobs/1",
+                    "2026-08-20T00:00:00Z",
+                    raw_json=database_json,
                 )
                 database.store_raw(database_raw)
                 write_jsonl(
                     root / "raw" / "vacancies" / "injected" / "tenant_1.json",
-                    [RawPosting(
-                        database_raw.board, database_raw.job_id, database_raw.url,
-                        database_raw.fetched_at, raw_json=cache_json,
-                    )],
+                    [
+                        RawPosting(
+                            database_raw.board,
+                            database_raw.job_id,
+                            database_raw.url,
+                            database_raw.fetched_at,
+                            raw_json=cache_json,
+                        )
+                    ],
                 )
                 old_hash = database.fetched_posting(database_raw.key)[1]
                 with self.assertRaisesRegex(ValueError, "differs semantically"):
                     CollectionService(root, collector_factory=factory).refresh_vacancy(
-                        config, job_key=database_raw.key,
+                        config,
+                        job_key=database_raw.key,
                         expected_content_sha256=old_hash,
-                        operation_id=f"type-strict-{label}", log=lambda _message: None,
+                        operation_id=f"type-strict-{label}",
+                        log=lambda _message: None,
                     )
                 self.assertEqual(0, calls["fetch"])
 
@@ -1349,19 +1694,28 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = NeverAdapter()
-            config, _database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, _database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             write_jsonl(
                 root / "raw" / "vacancies" / "injected" / "tenant_1.json",
-                [RawPosting(
-                    "injected", "tenant:1", "https://example.test/jobs/1",
-                    "2026-08-20T00:00:00Z", raw_json={"value": float("nan")},
-                )],
+                [
+                    RawPosting(
+                        "injected",
+                        "tenant:1",
+                        "https://example.test/jobs/1",
+                        "2026-08-20T00:00:00Z",
+                        raw_json={"value": float("nan")},
+                    )
+                ],
             )
             with self.assertRaisesRegex(ValueError, "not valid UTF-8 JSON"):
                 CollectionService(root, collector_factory=factory).refresh_vacancy(
-                    config, job_key="injected:tenant:1",
+                    config,
+                    job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
-                    operation_id="nonfinite-json", log=lambda _message: None,
+                    operation_id="nonfinite-json",
+                    log=lambda _message: None,
                 )
             self.assertEqual(0, calls["fetch"])
 
@@ -1379,7 +1733,9 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = NeverAdapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             with sqlite3.connect(database.path) as conn:
                 conn.execute(
                     "UPDATE postings SET raw_text=? WHERE key=?",
@@ -1387,9 +1743,11 @@ class CollectionTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(VacancyRefreshConflict, "legacy identity"):
                 CollectionService(root, collector_factory=factory).refresh_vacancy(
-                    config, job_key="injected:tenant:1",
+                    config,
+                    job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
-                    operation_id="db-text-mismatch", log=lambda _message: None,
+                    operation_id="db-text-mismatch",
+                    log=lambda _message: None,
                 )
             self.assertEqual(0, calls["fetch"])
 
@@ -1422,7 +1780,9 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = RacingAdapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             with self.assertRaises(VacancyRefreshConflict):
                 CollectionService(root, collector_factory=factory).refresh_vacancy(
                     config,
@@ -1432,11 +1792,15 @@ class CollectionTests(unittest.TestCase):
                     log=lambda _message: None,
                 )
             self.assertEqual(1, calls["fetch"])
-            self.assertNotEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
+            self.assertNotEqual(
+                old_hash, database.fetched_posting("injected:tenant:1")[1]
+            )
             self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
             self.assertIn(
                 b"old official bytes",
-                (root / "raw" / "vacancies" / "injected" / "tenant_1.json").read_bytes(),
+                (
+                    root / "raw" / "vacancies" / "injected" / "tenant_1.json"
+                ).read_bytes(),
             )
 
     def test_exact_refresh_fetch_error_preserves_existing_good_state(self) -> None:
@@ -1453,7 +1817,9 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = ErrorAdapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
             with self.assertRaisesRegex(RuntimeError, "official source unavailable"):
                 CollectionService(root, collector_factory=factory).refresh_vacancy(
                     config,
@@ -1486,7 +1852,9 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             adapter = ReturnedAdapter()
-            config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+            config, database, old_hash, calls, factory = self._refresh_fixture(
+                root, adapter
+            )
 
             def crash_factory(loaded_config, data_home, log=print):
                 collector = factory(loaded_config, data_home, log=log)
@@ -1499,7 +1867,9 @@ class CollectionTests(unittest.TestCase):
                 return collector
 
             with self.assertRaisesRegex(RuntimeError, "lost-after-official-return"):
-                CollectionService(root, collector_factory=crash_factory).refresh_vacancy(
+                CollectionService(
+                    root, collector_factory=crash_factory
+                ).refresh_vacancy(
                     config,
                     job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
@@ -1561,10 +1931,12 @@ class CollectionTests(unittest.TestCase):
 
         def substitute_bool_for_integer(conn, _receipt, _root):
             conn.row_factory = sqlite3.Row
-            row = dict(conn.execute(
-                "SELECT * FROM vacancy_refreshes WHERE operation_id=?",
-                ("tamper-refresh",),
-            ).fetchone())
+            row = dict(
+                conn.execute(
+                    "SELECT * FROM vacancy_refreshes WHERE operation_id=?",
+                    ("tamper-refresh",),
+                ).fetchone()
+            )
             basis = json.loads(row["receipt_basis_json"])
             basis.pop("receipt_basis_sha256")
             basis.pop("transition_sha256")
@@ -1599,7 +1971,9 @@ class CollectionTests(unittest.TestCase):
                      receipt_basis_sha256=?,transition_sha256=? WHERE operation_id=?""",
                 (
                     json.dumps(sealed, sort_keys=True, separators=(",", ":")),
-                    basis_sha256, transition_sha256, "tamper-refresh",
+                    basis_sha256,
+                    transition_sha256,
+                    "tamper-refresh",
                 ),
             )
 
@@ -1652,14 +2026,18 @@ class CollectionTests(unittest.TestCase):
         }
 
         def corrupt_object(_conn, receipt, root):
-            (root / receipt["new_raw_object_path"]).write_bytes(b"substituted object bytes")
+            (root / receipt["new_raw_object_path"]).write_bytes(
+                b"substituted object bytes"
+            )
 
         mutations = {**database_mutations, "object-bytes": corrupt_object}
         for label, mutate in mutations.items():
             with self.subTest(tamper=label), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 adapter = StableAdapter()
-                config, _database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                config, _database, old_hash, calls, factory = self._refresh_fixture(
+                    root, adapter
+                )
                 service = CollectionService(root, collector_factory=factory)
                 receipt = service.refresh_vacancy(
                     config,
@@ -1711,10 +2089,15 @@ class CollectionTests(unittest.TestCase):
             "after_cas_pre_cache",
             "after_cache_pre_receipt",
         ):
-            with self.subTest(crash_point=crash_point), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(crash_point=crash_point),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 root = Path(temporary)
                 adapter = RecoverableAdapter()
-                config, database, old_hash, calls, factory = self._refresh_fixture(root, adapter)
+                config, database, old_hash, calls, factory = self._refresh_fixture(
+                    root, adapter
+                )
                 old_cache = root / "raw" / "vacancies" / "injected" / "tenant_1.json"
                 exact_old_bytes = old_cache.read_bytes()
 
@@ -1730,7 +2113,9 @@ class CollectionTests(unittest.TestCase):
 
                 operation_id = f"recovery-{crash_point}"
                 with self.assertRaisesRegex(RuntimeError, f"crash:{crash_point}"):
-                    CollectionService(root, collector_factory=crash_factory).refresh_vacancy(
+                    CollectionService(
+                        root, collector_factory=crash_factory
+                    ).refresh_vacancy(
                         config,
                         job_key="injected:tenant:1",
                         expected_content_sha256=old_hash,
@@ -1742,7 +2127,9 @@ class CollectionTests(unittest.TestCase):
                     (root / "state" / "collection-refresh-receipts").exists()
                 )
 
-                receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
+                receipt = CollectionService(
+                    root, collector_factory=factory
+                ).refresh_vacancy(
                     config,
                     job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
@@ -1750,7 +2137,10 @@ class CollectionTests(unittest.TestCase):
                     log=lambda _message: None,
                 )
                 self.assertEqual(1, calls["fetch"])
-                self.assertEqual("market-aligner.vacancy-refresh-receipt.v3", receipt["schema_version"])
+                self.assertEqual(
+                    "market-aligner.vacancy-refresh-receipt.v3",
+                    receipt["schema_version"],
+                )
                 self.assertEqual(operation_id, receipt["operation_id"])
                 self.assertTrue(receipt["changed"])
                 old_object = root / receipt["old_raw_object_path"]
@@ -1769,7 +2159,9 @@ class CollectionTests(unittest.TestCase):
                     database.fetched_posting("injected:tenant:1")[1],
                 )
 
-                replay = CollectionService(root, collector_factory=factory).refresh_vacancy(
+                replay = CollectionService(
+                    root, collector_factory=factory
+                ).refresh_vacancy(
                     config,
                     job_key="injected:tenant:1",
                     expected_content_sha256=old_hash,
@@ -1830,7 +2222,7 @@ class CollectionTests(unittest.TestCase):
                     row.board,
                     row.job_id,
                     row.url,
-                    "2026-08-20T00:00:00Z",
+                    row.discovered_at or "2026-08-20T00:00:00Z",
                     raw_text=row.job_id,
                 )
 
@@ -1853,7 +2245,9 @@ class CollectionTests(unittest.TestCase):
             )
             state = collector.db.collection_state()
             self.assertEqual(["a", "b"], [row["job_id"] for row in state["postings"]])
-            self.assertIn("source ended after page two", state["sources"][0]["last_error"])
+            self.assertIn(
+                "source ended after page two", state["sources"][0]["last_error"]
+            )
 
     def test_collect_cli_requires_explicit_bounded_mode(self) -> None:
         parser = build_parser()
@@ -1888,7 +2282,9 @@ class CollectionTests(unittest.TestCase):
         )
         self.assertEqual("workable:cogna:847CFBC5F4", refresh.job_key)
 
-    def test_collection_service_rejects_unbounded_run_and_data_home_escape(self) -> None:
+    def test_collection_service_rejects_unbounded_run_and_data_home_escape(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = root / "collect.yaml"
@@ -1904,18 +2300,30 @@ class CollectionTests(unittest.TestCase):
             service = CollectionService(root)
             with self.assertRaisesRegex(ValueError, "exactly one"):
                 service.collect(
-                    config, once=False, hours=0, poll_minutes=1,
-                    operation_id="collect-invalid-0001", log=lambda _message: None
+                    config,
+                    once=False,
+                    hours=0,
+                    poll_minutes=1,
+                    operation_id="collect-invalid-0001",
+                    log=lambda _message: None,
                 )
             with self.assertRaisesRegex(ValueError, r"\(0,24\]"):
                 service.collect(
-                    config, once=False, hours=25, poll_minutes=1,
-                    operation_id="collect-invalid-0002", log=lambda _message: None
+                    config,
+                    once=False,
+                    hours=25,
+                    poll_minutes=1,
+                    operation_id="collect-invalid-0002",
+                    log=lambda _message: None,
                 )
             with self.assertRaisesRegex(ValueError, "external data home"):
                 service.collect(
-                    config, once=True, hours=0, poll_minutes=1,
-                    operation_id="collect-invalid-0003", log=lambda _message: None
+                    config,
+                    once=True,
+                    hours=0,
+                    poll_minutes=1,
+                    operation_id="collect-invalid-0003",
+                    log=lambda _message: None,
                 )
 
     def test_collect_cli_emits_one_machine_readable_receipt(self) -> None:

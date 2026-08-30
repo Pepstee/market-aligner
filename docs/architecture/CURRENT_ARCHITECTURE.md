@@ -9,7 +9,8 @@ Gigabyte or GitHub ref is a descendant of that base.
 ```text
 public vacancy sources
   -> Market Aligner collectors/adapters + full Scrapling sidecar
-  -> external raw cache + shared vacancy SQLite
+  -> trusted discovery observation + exact public-byte capture
+  -> external raw cache + shared vacancy SQLite + immutable release provenance
   -> deterministic identity, deduplication, viability and hard eligibility
   -> validated semantic extraction + evidence-linked fit/opportunity scoring
   -> employer/role research and ranked opportunity reports
@@ -30,6 +31,23 @@ nested JAA copies recovered from either laptop are provenance and salvage inputs
 Profile data, candidate evidence, vacancy bodies, generated applications, credentials and
 runtime receipts remain outside the repository. Product code refers to profiles through opaque
 `profile_id` values. No generated claim may exceed the candidate evidence authority.
+
+## Vacancy evidence boundary
+
+The live collector stamps an explicit whole-second UTC discovery observation before a URL enters
+its fetch queue. The vacancy store preserves every observation append-only and grants release
+trust only when the caller explicitly selects that boundary. A releaseable capture binds the
+trusted discovery time, fetch time, canonical URL, source identity, exact public-content digest
+and exact canonical raw-object digest in immutable canonical JSON. The capture is revalidated on
+read, including discovery-before-fetch chronology.
+
+Legacy JSONL/raw-cache imports and ordinary direct store calls remain non-authoritative by
+default. Their exact bytes are still retained, but an append-only block explains why the snapshot
+cannot support release until a fresh trusted discovery and fetch creates a current capture. This
+adopts the valid discovery/release semantics from the quarantined migration lineage without
+restoring its parallel MigrationRunner, duplicate snapshot tables, or weaker refresh schema.
+Vacancy refresh remains owned by the current v3 journal and its exact context, receipt,
+transition, migration-quarantine and crash-recovery checks.
 
 ## JAA module boundaries
 

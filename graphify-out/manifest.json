@@ -6705,8 +6705,8 @@
     "semantic_hash": "1ac65d838723124e8e7733b8dc0a5842"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/collectors/engine.py": {
-    "mtime": 1788087726.165579,
-    "ast_hash": "73aab759ef499f55dec01f2f00a82604",
+    "mtime": 1788103040.9006119,
+    "ast_hash": "9a21e28ce6ba78117448f0e3f271881e",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/collectors/fetch_control.py": {
@@ -6895,8 +6895,8 @@
     "semantic_hash": "44f6dc0472a8c0f705917d39ffb062f7"
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/state/vacancies.py": {
-    "mtime": 1788087683.5636394,
-    "ast_hash": "a674295f6f67eb8871c6326cc632de18",
+    "mtime": 1788103509.6635435,
+    "ast_hash": "3a7afb344a9d1150e56e1d1a35f3af10",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/fixtures/jobkorea/45872301.json": {
@@ -6975,8 +6975,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_collection.py": {
-    "mtime": 1788008299.6921008,
-    "ast_hash": "50966170b4ab5bb72d8d7336b4b225ae",
+    "mtime": 1788103610.7214217,
+    "ast_hash": "45ae4985da83b31ecb5d5c0926a48bbe",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_config.py": {
@@ -7110,8 +7110,8 @@
     "semantic_hash": "007e825cb39353c6f9cef40c863a39db"
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/CURRENT_ARCHITECTURE.md": {
-    "mtime": 1788073935.5695648,
-    "ast_hash": "dbef4af2b53775a936b2bea1de920098",
+    "mtime": 1788102992.229588,
+    "ast_hash": "f3fb3646399ca7d58b179be37c3868d0",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": {
@@ -7415,8 +7415,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/CAPABILITY_INVENTORY.md": {
-    "mtime": 1788088101.8847773,
-    "ast_hash": "a9512325ebdd5fde68a6dd4d9c94a3b1",
+    "mtime": 1788103666.1003215,
+    "ast_hash": "9f6df8507212b6475da9553f0ccbefc6",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/profiler/intent.py": {

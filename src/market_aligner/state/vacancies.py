@@ -14,6 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping
 
+from market_aligner.applications.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    parse_timestamp,
+    require_timestamp,
+)
 from market_aligner.domain.contracts import (
     JobUrl,
     RawPosting,
@@ -81,6 +87,24 @@ class VerifiedVacancyRefreshReceipt:
     receipt_file_sha256: str
     receipt_path: Path
     new_raw_object_sha256: str
+
+
+@dataclass(frozen=True)
+class VerifiedPublicListingCapture:
+    """Immutable discovery-to-fetch provenance for one releaseable listing."""
+
+    provenance_sha256: str
+    job_key: str
+    content_sha256: str
+    raw_object_sha256: str
+    board: str
+    source_job_id: str
+    canonical_url: str
+    discovered_at: str
+    fetched_at: str
+    content_type: str | None
+    http_status: int | None
+    exact_provenance_bytes: bytes
 
 
 @dataclass(frozen=True)
@@ -234,7 +258,11 @@ def raw_posting_content_sha256(row: RawPosting) -> str:
         if row.content_sha256 is not None and row.content_sha256 != digest:
             raise ValueError("raw posting digest differs from exact public bytes")
         return digest
-    raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
+    raw_json = (
+        json.dumps(row.raw_json, ensure_ascii=False)
+        if row.raw_json is not None
+        else None
+    )
     material = (row.raw_text or "") + (raw_json or "")
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -243,10 +271,9 @@ def raw_posting_bytes(row: RawPosting) -> bytes:
     """Serialize the exact collector C2 response stored in raw-cache objects."""
 
     return (
-        json.dumps(to_dict(row), ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n"
-    ).encode(
-        "utf-8"
-    )
+        json.dumps(to_dict(row), ensure_ascii=False, sort_keys=True, allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
 
 
 def raw_posting_from_bytes(value: bytes) -> RawPosting:
@@ -265,7 +292,9 @@ def raw_posting_from_bytes(value: bytes) -> RawPosting:
     try:
         row = from_dict(RawPosting, payload)
     except (TypeError, ValueError) as exc:
-        raise ValueError("raw response object does not satisfy the collector schema") from exc
+        raise ValueError(
+            "raw response object does not satisfy the collector schema"
+        ) from exc
     if raw_posting_bytes(row) != value:
         raise ValueError("raw response object is not in canonical collector encoding")
     return row
@@ -276,7 +305,8 @@ PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=30000;
 CREATE TABLE IF NOT EXISTS postings (
   key TEXT PRIMARY KEY, board TEXT NOT NULL, job_id TEXT NOT NULL, url TEXT NOT NULL,
-  posted_at TEXT, first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  posted_at TEXT, discovered_at TEXT,
+  first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, fetched_at TEXT,
   raw_text TEXT, raw_json TEXT, content_hash TEXT, fetch_status TEXT NOT NULL DEFAULT 'discovered',
   fetch_error TEXT
@@ -354,6 +384,70 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 """
 
 
+LISTING_PROVENANCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS posting_discovery_observations (
+  job_key TEXT NOT NULL,
+  discovered_at TEXT NOT NULL,
+  canonical_url TEXT NOT NULL,
+  release_trusted INTEGER NOT NULL CHECK(release_trusted IN (0,1)),
+  recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(job_key,discovered_at,canonical_url,release_trusted)
+);
+CREATE TABLE IF NOT EXISTS posting_release_captures (
+  provenance_sha256 TEXT PRIMARY KEY,
+  job_key TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  raw_object_sha256 TEXT NOT NULL,
+  exact_provenance_bytes BLOB NOT NULL,
+  board TEXT NOT NULL,
+  source_job_id TEXT NOT NULL,
+  canonical_url TEXT NOT NULL,
+  discovered_at TEXT NOT NULL,
+  fetched_at TEXT NOT NULL,
+  content_type TEXT,
+  http_status INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(job_key,content_sha256,raw_object_sha256,discovered_at,fetched_at),
+  FOREIGN KEY(job_key,content_sha256,raw_object_sha256)
+    REFERENCES posting_raw_snapshots(job_key,content_sha256,object_sha256)
+    ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS posting_release_capture_blocks (
+  job_key TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  raw_object_sha256 TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(job_key,content_sha256,raw_object_sha256),
+  FOREIGN KEY(job_key,content_sha256,raw_object_sha256)
+    REFERENCES posting_raw_snapshots(job_key,content_sha256,object_sha256)
+    ON DELETE RESTRICT
+);
+CREATE TRIGGER IF NOT EXISTS postings_discovered_at_immutable
+  BEFORE UPDATE OF discovered_at ON postings
+  WHEN NEW.discovered_at IS NOT OLD.discovered_at
+  BEGIN SELECT RAISE(ABORT,'posting discovered_at is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_discovery_observations_no_update
+  BEFORE UPDATE ON posting_discovery_observations
+  BEGIN SELECT RAISE(ABORT,'posting discoveries are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_discovery_observations_no_delete
+  BEFORE DELETE ON posting_discovery_observations
+  BEGIN SELECT RAISE(ABORT,'posting discoveries are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_release_captures_no_update
+  BEFORE UPDATE ON posting_release_captures
+  BEGIN SELECT RAISE(ABORT,'release captures are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_release_captures_no_delete
+  BEFORE DELETE ON posting_release_captures
+  BEGIN SELECT RAISE(ABORT,'release captures are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_release_capture_blocks_no_update
+  BEFORE UPDATE ON posting_release_capture_blocks
+  BEGIN SELECT RAISE(ABORT,'release capture blocks are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS posting_release_capture_blocks_no_delete
+  BEFORE DELETE ON posting_release_capture_blocks
+  BEGIN SELECT RAISE(ABORT,'release capture blocks are immutable'); END;
+"""
+
+
 VACANCY_REFRESH_SCHEMA = """
 CREATE TABLE vacancy_refreshes (
   refresh_id TEXT PRIMARY KEY,
@@ -401,29 +495,73 @@ CREATE TABLE IF NOT EXISTS vacancy_refresh_migration_quarantine (
 
 
 LEGACY_VACANCY_REFRESH_COLUMNS = (
-    "refresh_id", "operation_id", "context_sha256", "job_key",
-    "expected_content_sha256", "status", "started_at", "old_content_sha256",
-    "old_fetched_at", "old_raw_bytes", "old_object_sha256",
-    "new_content_sha256", "new_fetched_at", "new_raw_bytes",
-    "new_object_sha256", "receipt_basis_json", "created_at", "updated_at",
+    "refresh_id",
+    "operation_id",
+    "context_sha256",
+    "job_key",
+    "expected_content_sha256",
+    "status",
+    "started_at",
+    "old_content_sha256",
+    "old_fetched_at",
+    "old_raw_bytes",
+    "old_object_sha256",
+    "new_content_sha256",
+    "new_fetched_at",
+    "new_raw_bytes",
+    "new_object_sha256",
+    "receipt_basis_json",
+    "created_at",
+    "updated_at",
 )
 
 V2_VACANCY_REFRESH_COLUMNS = (
-    "refresh_id", "operation_id", "context_sha256", "context_json", "job_key",
-    "expected_content_sha256", "status", "started_at", "old_content_sha256",
-    "old_fetched_at", "old_raw_bytes", "old_object_sha256",
-    "new_content_sha256", "new_fetched_at", "new_raw_bytes",
-    "new_object_sha256", "receipt_basis_json", "receipt_basis_sha256",
-    "transition_sha256", "created_at", "updated_at",
+    "refresh_id",
+    "operation_id",
+    "context_sha256",
+    "context_json",
+    "job_key",
+    "expected_content_sha256",
+    "status",
+    "started_at",
+    "old_content_sha256",
+    "old_fetched_at",
+    "old_raw_bytes",
+    "old_object_sha256",
+    "new_content_sha256",
+    "new_fetched_at",
+    "new_raw_bytes",
+    "new_object_sha256",
+    "receipt_basis_json",
+    "receipt_basis_sha256",
+    "transition_sha256",
+    "created_at",
+    "updated_at",
 )
 
 CURRENT_VACANCY_REFRESH_COLUMNS = (
-    "refresh_id", "operation_id", "context_sha256", "context_json", "job_key",
-    "expected_content_sha256", "status", "started_at", "old_content_sha256",
-    "old_canonical_content_sha256", "old_fetched_at", "old_raw_bytes",
-    "old_object_sha256", "new_content_sha256", "new_fetched_at", "new_raw_bytes",
-    "new_object_sha256", "receipt_basis_json", "receipt_basis_sha256",
-    "transition_sha256", "created_at", "updated_at",
+    "refresh_id",
+    "operation_id",
+    "context_sha256",
+    "context_json",
+    "job_key",
+    "expected_content_sha256",
+    "status",
+    "started_at",
+    "old_content_sha256",
+    "old_canonical_content_sha256",
+    "old_fetched_at",
+    "old_raw_bytes",
+    "old_object_sha256",
+    "new_content_sha256",
+    "new_fetched_at",
+    "new_raw_bytes",
+    "new_object_sha256",
+    "receipt_basis_json",
+    "receipt_basis_sha256",
+    "transition_sha256",
+    "created_at",
+    "updated_at",
 )
 
 
@@ -434,8 +572,16 @@ def _canonical_hash(value: object) -> str:
 
 def _canonical_json_bytes(value: object) -> bytes:
     return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
+
+
+def _strict_utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _authority_equal(left: object, right: object) -> bool:
@@ -477,7 +623,9 @@ def _refresh_transition_document(value: Mapping[str, object]) -> dict[str, objec
     }
 
 
-def _refresh_transition_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
+def _refresh_transition_from_row(
+    row: sqlite3.Row | tuple[object, ...],
+) -> dict[str, object]:
     try:
         context = _strict_json_loads(str(row[3]))
         receipt_basis = None if row[17] is None else _strict_json_loads(str(row[17]))
@@ -528,8 +676,10 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
         raise VacancyRefreshConflict("refresh operation context differs from journal")
     for key in ("config_sha256", "source_sha256"):
         identity = context.get(key)
-        if not isinstance(identity, str) or len(identity) != 64 or any(
-            character not in "0123456789abcdef" for character in identity
+        if (
+            not isinstance(identity, str)
+            or len(identity) != 64
+            or any(character not in "0123456789abcdef" for character in identity)
         ):
             raise VacancyRefreshConflict(f"refresh operation {key} is not a SHA-256")
     expected_refresh_id = _canonical_hash(
@@ -544,9 +694,13 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
     try:
         old_raw = raw_posting_from_bytes(old_bytes)
     except ValueError as exc:
-        raise VacancyRefreshConflict("journalled old response bytes are invalid") from exc
+        raise VacancyRefreshConflict(
+            "journalled old response bytes are invalid"
+        ) from exc
     if old_raw.key != value["job_key"]:
-        raise VacancyRefreshConflict("journalled old response has another vacancy identity")
+        raise VacancyRefreshConflict(
+            "journalled old response has another vacancy identity"
+        )
     if hashlib.sha256(old_bytes).hexdigest() != value["old_object_sha256"]:
         raise VacancyRefreshConflict("journalled old response object hash differs")
     if (
@@ -568,24 +722,34 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
         value["new_object_sha256"],
     )
     if status in empty_new and any(item is not None for item in new_fields):
-        raise VacancyRefreshConflict("pre-fetch refresh journal contains response material")
+        raise VacancyRefreshConflict(
+            "pre-fetch refresh journal contains response material"
+        )
     if status in complete_new:
         if any(item is None for item in new_fields):
-            raise VacancyRefreshConflict("post-fetch refresh journal lacks response material")
+            raise VacancyRefreshConflict(
+                "post-fetch refresh journal lacks response material"
+            )
         new_bytes = bytes(value["new_raw_bytes"])
         try:
             new_raw = raw_posting_from_bytes(new_bytes)
         except ValueError as exc:
-            raise VacancyRefreshConflict("journalled new response bytes are invalid") from exc
+            raise VacancyRefreshConflict(
+                "journalled new response bytes are invalid"
+            ) from exc
         if new_raw.key != value["job_key"]:
-            raise VacancyRefreshConflict("journalled new response has another vacancy identity")
+            raise VacancyRefreshConflict(
+                "journalled new response has another vacancy identity"
+            )
         if hashlib.sha256(new_bytes).hexdigest() != value["new_object_sha256"]:
             raise VacancyRefreshConflict("journalled new response object hash differs")
         if (
             raw_posting_content_sha256(new_raw) != value["new_content_sha256"]
             or new_raw.fetched_at != value["new_fetched_at"]
         ):
-            raise VacancyRefreshConflict("journalled new response content identity differs")
+            raise VacancyRefreshConflict(
+                "journalled new response content identity differs"
+            )
 
     receipt_fields = (
         value["receipt_basis"],
@@ -593,10 +757,14 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
         value["transition_sha256"],
     )
     if status != "committed" and any(item is not None for item in receipt_fields):
-        raise VacancyRefreshConflict("uncommitted refresh journal contains receipt authority")
+        raise VacancyRefreshConflict(
+            "uncommitted refresh journal contains receipt authority"
+        )
     if status == "committed":
         if any(item is None for item in receipt_fields):
-            raise VacancyRefreshConflict("committed refresh journal lacks receipt authority")
+            raise VacancyRefreshConflict(
+                "committed refresh journal lacks receipt authority"
+            )
         receipt = value["receipt_basis"]
         if not isinstance(receipt, dict):
             raise VacancyRefreshConflict("sealed receipt basis is not an object")
@@ -629,7 +797,8 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
             "new_content_sha256": value["new_content_sha256"],
             "new_fetched_at": value["new_fetched_at"],
             "new_raw_object_path": str(
-                Path("state") / "collection-refresh-objects"
+                Path("state")
+                / "collection-refresh-objects"
                 / str(value["new_object_sha256"])[:2]
                 / str(value["new_object_sha256"])
             ),
@@ -638,7 +807,8 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
             "old_canonical_content_sha256": value["old_canonical_content_sha256"],
             "old_fetched_at": value["old_fetched_at"],
             "old_raw_object_path": str(
-                Path("state") / "collection-refresh-objects"
+                Path("state")
+                / "collection-refresh-objects"
                 / str(value["old_object_sha256"])[:2]
                 / str(value["old_object_sha256"])
             ),
@@ -655,7 +825,9 @@ def _validate_refresh_transition(value: Mapping[str, object]) -> None:
             not _authority_equal(receipt.get(key), expected)
             for key, expected in exact_receipt_fields.items()
         ):
-            raise VacancyRefreshConflict("sealed receipt basis differs from journal authorities")
+            raise VacancyRefreshConflict(
+                "sealed receipt basis differs from journal authorities"
+            )
 
 
 def _legacy_row_identity(value: Mapping[str, object]) -> str:
@@ -677,7 +849,10 @@ def _v2_row_identity(value: Mapping[str, object]) -> str:
     for key in V2_VACANCY_REFRESH_COLUMNS:
         item = value[key]
         if isinstance(item, bytes):
-            material[key] = {"sha256": hashlib.sha256(item).hexdigest(), "size": len(item)}
+            material[key] = {
+                "sha256": hashlib.sha256(item).hexdigest(),
+                "size": len(item),
+            }
         else:
             material[key] = item
     return _canonical_hash(material)
@@ -715,7 +890,10 @@ def _convert_v2_refresh(value: Mapping[str, object]) -> dict[str, object]:
         )
     except (json.JSONDecodeError, ValueError) as exc:
         raise VacancyRefreshConflict("v2 refresh JSON is invalid") from exc
-    if not isinstance(context, dict) or _canonical_hash(context) != value["context_sha256"]:
+    if (
+        not isinstance(context, dict)
+        or _canonical_hash(context) != value["context_sha256"]
+    ):
         raise VacancyRefreshConflict("v2 refresh context identity differs")
     old_bytes = bytes(value["old_raw_bytes"])
     old_raw = raw_posting_from_bytes(old_bytes)
@@ -732,8 +910,10 @@ def _convert_v2_refresh(value: Mapping[str, object]) -> dict[str, object]:
     empty_new = ("intent", "fetch_started", "indeterminate")
     complete_new = ("fetched", "object_ready", "committed")
     new_fields = (
-        value["new_content_sha256"], value["new_fetched_at"],
-        value["new_raw_bytes"], value["new_object_sha256"],
+        value["new_content_sha256"],
+        value["new_fetched_at"],
+        value["new_raw_bytes"],
+        value["new_object_sha256"],
     )
     if status not in (*empty_new, *complete_new):
         raise VacancyRefreshConflict("v2 refresh status is invalid")
@@ -752,14 +932,18 @@ def _convert_v2_refresh(value: Mapping[str, object]) -> dict[str, object]:
         ):
             raise VacancyRefreshConflict("v2 new response authorities differ")
     receipt_fields = (
-        receipt, value["receipt_basis_sha256"], value["transition_sha256"]
+        receipt,
+        value["receipt_basis_sha256"],
+        value["transition_sha256"],
     )
     if status != "committed" and any(item is not None for item in receipt_fields):
         raise VacancyRefreshConflict("v2 uncommitted row contains receipt authority")
     legacy_receipt_sha256 = None
     legacy_transition_sha256 = None
     if status == "committed":
-        if any(item is None for item in receipt_fields) or not isinstance(receipt, dict):
+        if any(item is None for item in receipt_fields) or not isinstance(
+            receipt, dict
+        ):
             raise VacancyRefreshConflict("v2 committed row lacks receipt authority")
         unsealed = dict(receipt)
         legacy_receipt_sha256 = unsealed.pop("receipt_basis_sha256", None)
@@ -805,15 +989,17 @@ def _convert_v2_refresh(value: Mapping[str, object]) -> dict[str, object]:
         basis = dict(receipt)
         basis.pop("receipt_basis_sha256", None)
         basis.pop("transition_sha256", None)
-        basis.update({
-            "changed": value["new_content_sha256"] != old_canonical,
-            "journal_migration": "market-aligner.vacancy-refresh-v2-to-v3.v1",
-            "old_canonical_content_sha256": old_canonical,
-            "schema_version": "market-aligner.vacancy-refresh-receipt.v3",
-            "v2_archive_row_sha256": _v2_row_identity(value),
-            "v2_receipt_basis_sha256": legacy_receipt_sha256,
-            "v2_transition_sha256": legacy_transition_sha256,
-        })
+        basis.update(
+            {
+                "changed": value["new_content_sha256"] != old_canonical,
+                "journal_migration": "market-aligner.vacancy-refresh-v2-to-v3.v1",
+                "old_canonical_content_sha256": old_canonical,
+                "schema_version": "market-aligner.vacancy-refresh-receipt.v3",
+                "v2_archive_row_sha256": _v2_row_identity(value),
+                "v2_receipt_basis_sha256": legacy_receipt_sha256,
+                "v2_transition_sha256": legacy_transition_sha256,
+            }
+        )
         receipt_basis_sha256 = _canonical_hash(basis)
         current["receipt_basis_sha256"] = receipt_basis_sha256
         transition_sha256 = _canonical_hash(_refresh_transition_document(current))
@@ -924,10 +1110,12 @@ def _convert_legacy_committed_refresh(value: Mapping[str, object]) -> dict[str, 
         "receipt_basis_sha256": receipt_basis_sha256,
         "transition_sha256": transition_sha256,
     }
-    transition.update({
-        "receipt_basis": receipt,
-        "transition_sha256": transition_sha256,
-    })
+    transition.update(
+        {
+            "receipt_basis": receipt,
+            "transition_sha256": transition_sha256,
+        }
+    )
     _validate_refresh_transition(transition)
     return transition
 
@@ -936,9 +1124,15 @@ def _verify_quarantined_legacy_row(
     conn: sqlite3.Connection,
     quarantine: tuple[object, ...],
 ) -> dict[str, object]:
-    operation_id, refresh_id, job_key, expected, legacy_status, legacy_table, row_sha256 = map(
-        str, quarantine
-    )
+    (
+        operation_id,
+        refresh_id,
+        job_key,
+        expected,
+        legacy_status,
+        legacy_table,
+        row_sha256,
+    ) = map(str, quarantine)
     if legacy_table == "vacancy_refreshes_legacy_036d":
         columns = LEGACY_VACANCY_REFRESH_COLUMNS
         identity = _legacy_row_identity
@@ -952,7 +1146,9 @@ def _verify_quarantined_legacy_row(
         (operation_id,),
     ).fetchone()
     if archive is None:
-        raise VacancyRefreshConflict("quarantined legacy refresh archive row is unavailable")
+        raise VacancyRefreshConflict(
+            "quarantined legacy refresh archive row is unavailable"
+        )
     legacy = dict(zip(columns, archive, strict=True))
     exact = {
         "refresh_id": refresh_id,
@@ -972,21 +1168,27 @@ def _validate_legacy_dispositions(
     *,
     job_key: str | None = None,
 ) -> None:
-    archive_exists = conn.execute(
-        """SELECT 1 FROM sqlite_master WHERE type='table'
+    archive_exists = (
+        conn.execute(
+            """SELECT 1 FROM sqlite_master WHERE type='table'
            AND name='vacancy_refreshes_legacy_036d'"""
-    ).fetchone() is not None
+        ).fetchone()
+        is not None
+    )
     clause = " WHERE job_key=?" if job_key is not None else ""
     arguments: tuple[object, ...] = (job_key,) if job_key is not None else ()
     quarantined = conn.execute(
         """SELECT operation_id,refresh_id,job_key,expected_content_sha256,
                   legacy_status,legacy_table,legacy_row_sha256
-           FROM vacancy_refresh_migration_quarantine""" + clause,
+           FROM vacancy_refresh_migration_quarantine"""
+        + clause,
         arguments,
     ).fetchall()
     quarantine_by_operation = {str(row[0]): row for row in quarantined}
     if len(quarantine_by_operation) != len(quarantined):
-        raise VacancyRefreshConflict("legacy refresh has duplicate quarantine dispositions")
+        raise VacancyRefreshConflict(
+            "legacy refresh has duplicate quarantine dispositions"
+        )
     for row in quarantined:
         _verify_quarantined_legacy_row(conn, row)
 
@@ -997,7 +1199,9 @@ def _validate_legacy_dispositions(
     ).fetchall()
     current_by_operation = {str(row[1]): row for row in current_rows}
     if len(current_by_operation) != len(current_rows):
-        raise VacancyRefreshConflict("legacy refresh has duplicate current dispositions")
+        raise VacancyRefreshConflict(
+            "legacy refresh has duplicate current dispositions"
+        )
 
     archived_rows: list[tuple[object, ...]] = []
     if archive_exists:
@@ -1032,12 +1236,25 @@ def _validate_legacy_dispositions(
             ) from exc
         current = _refresh_transition_from_row(current_row)
         for key in (
-            "refresh_id", "operation_id", "context_sha256", "context", "job_key",
-            "expected_content_sha256", "status", "started_at", "old_content_sha256",
-            "old_canonical_content_sha256", "old_fetched_at", "old_raw_bytes",
+            "refresh_id",
+            "operation_id",
+            "context_sha256",
+            "context",
+            "job_key",
+            "expected_content_sha256",
+            "status",
+            "started_at",
+            "old_content_sha256",
+            "old_canonical_content_sha256",
+            "old_fetched_at",
+            "old_raw_bytes",
             "old_object_sha256",
-            "new_content_sha256", "new_fetched_at", "new_raw_bytes",
-            "new_object_sha256", "receipt_basis", "receipt_basis_sha256",
+            "new_content_sha256",
+            "new_fetched_at",
+            "new_raw_bytes",
+            "new_object_sha256",
+            "receipt_basis",
+            "receipt_basis_sha256",
             "transition_sha256",
         ):
             if not _authority_equal(current[key], expected[key]):
@@ -1045,10 +1262,13 @@ def _validate_legacy_dispositions(
                     "legacy refresh current disposition differs from archived authority"
                 )
 
-    v2_archive_exists = conn.execute(
-        """SELECT 1 FROM sqlite_master WHERE type='table'
+    v2_archive_exists = (
+        conn.execute(
+            """SELECT 1 FROM sqlite_master WHERE type='table'
            AND name='vacancy_refreshes_v2'"""
-    ).fetchone() is not None
+        ).fetchone()
+        is not None
+    )
     v2_rows: list[tuple[object, ...]] = []
     if v2_archive_exists:
         v2_rows = conn.execute(
@@ -1069,9 +1289,7 @@ def _validate_legacy_dispositions(
             expected = _convert_v2_refresh(archived)
         except (TypeError, ValueError, VacancyRefreshConflict):
             if quarantine_row is None:
-                raise VacancyRefreshConflict(
-                    "invalid v2 refresh was not quarantined"
-                )
+                raise VacancyRefreshConflict("invalid v2 refresh was not quarantined")
             _verify_quarantined_legacy_row(conn, quarantine_row)
             continue
         if quarantine_row is not None:
@@ -1079,9 +1297,18 @@ def _validate_legacy_dispositions(
         assert current_row is not None
         current = _refresh_transition_from_row(current_row)
         immutable_keys = (
-            "refresh_id", "operation_id", "context_sha256", "context", "job_key",
-            "expected_content_sha256", "status", "started_at", "old_content_sha256",
-            "old_canonical_content_sha256", "old_fetched_at", "old_raw_bytes",
+            "refresh_id",
+            "operation_id",
+            "context_sha256",
+            "context",
+            "job_key",
+            "expected_content_sha256",
+            "status",
+            "started_at",
+            "old_content_sha256",
+            "old_canonical_content_sha256",
+            "old_fetched_at",
+            "old_raw_bytes",
             "old_object_sha256",
         )
         for key in immutable_keys:
@@ -1092,7 +1319,14 @@ def _validate_legacy_dispositions(
                     "v2 refresh current disposition differs from archived authority"
                 )
         allowed_progressions = {
-            "intent": {"intent", "fetch_started", "indeterminate", "fetched", "object_ready", "committed"},
+            "intent": {
+                "intent",
+                "fetch_started",
+                "indeterminate",
+                "fetched",
+                "object_ready",
+                "committed",
+            },
             "fetch_started": {"fetch_started", "indeterminate"},
             "indeterminate": {"indeterminate"},
             "fetched": {"fetched", "object_ready", "committed"},
@@ -1103,7 +1337,9 @@ def _validate_legacy_dispositions(
             raise VacancyRefreshConflict("v2 refresh disposition regressed or forked")
         if expected["status"] in ("fetched", "object_ready", "committed"):
             for key in (
-                "new_content_sha256", "new_fetched_at", "new_raw_bytes",
+                "new_content_sha256",
+                "new_fetched_at",
+                "new_raw_bytes",
                 "new_object_sha256",
             ):
                 if not _authority_equal(current[key], expected[key]):
@@ -1150,27 +1386,49 @@ def _insert_migrated_refresh(
              created_at,updated_at
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            current["refresh_id"], current["operation_id"],
-            current["context_sha256"], json.dumps(
-                current["context"], ensure_ascii=False, sort_keys=True,
-                separators=(",", ":"), allow_nan=False,
-            ), current["job_key"], current["expected_content_sha256"],
-            current["status"], current["started_at"], current["old_content_sha256"],
-            current["old_canonical_content_sha256"], current["old_fetched_at"],
-            current["old_raw_bytes"], current["old_object_sha256"],
-            current["new_content_sha256"], current["new_fetched_at"],
-            current["new_raw_bytes"], current["new_object_sha256"],
-            None if receipt is None else json.dumps(
-                receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            current["refresh_id"],
+            current["operation_id"],
+            current["context_sha256"],
+            json.dumps(
+                current["context"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
                 allow_nan=False,
-            ), current["receipt_basis_sha256"], current["transition_sha256"],
-            created_at, updated_at,
+            ),
+            current["job_key"],
+            current["expected_content_sha256"],
+            current["status"],
+            current["started_at"],
+            current["old_content_sha256"],
+            current["old_canonical_content_sha256"],
+            current["old_fetched_at"],
+            current["old_raw_bytes"],
+            current["old_object_sha256"],
+            current["new_content_sha256"],
+            current["new_fetched_at"],
+            current["new_raw_bytes"],
+            current["new_object_sha256"],
+            None
+            if receipt is None
+            else json.dumps(
+                receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+            current["receipt_basis_sha256"],
+            current["transition_sha256"],
+            created_at,
+            updated_at,
         ),
     )
 
 
 class ProjectionConflict(RuntimeError):
     """An immutable projection exists with non-exact process-owned fields."""
+
 
 def cas_normalized_job(
     connection: sqlite3.Connection,
@@ -1202,6 +1460,7 @@ def cas_normalized_job(
         )
     return "reused"
 
+
 def read_normalized_job(
     connection: sqlite3.Connection, *, key: str
 ) -> tuple[str, str] | None:
@@ -1211,6 +1470,7 @@ def read_normalized_job(
         (key,),
     ).fetchone()
     return None if row is None else (row[0], row[1])
+
 
 def read_posting(
     connection: sqlite3.Connection, *, key: str, schema: str = "main"
@@ -1236,7 +1496,9 @@ def read_posting(
 
 
 class JobDatabase:
-    def __init__(self, path: str | Path, *, data_home: str | Path | None = None) -> None:
+    def __init__(
+        self, path: str | Path, *, data_home: str | Path | None = None
+    ) -> None:
         self.path = Path(path)
         self.data_home = (
             Path(data_home).absolute()
@@ -1246,6 +1508,7 @@ class JobDatabase:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with owner_private_umask(), closing(self.connect()) as conn, conn:
             conn.executescript(SCHEMA)
+            self._migrate_listing_provenance_schema(conn)
             conn.execute(
                 """INSERT OR IGNORE INTO posting_raw_snapshot_migration_blocks(
                      job_key,reason_code,legacy_content_hash
@@ -1262,6 +1525,42 @@ class JobDatabase:
             self._migrate_vacancy_refresh_schema(conn)
             self._validate_vacancy_refresh_rows(conn)
             self._migrate_processing_identity(conn)
+
+    @staticmethod
+    def _migrate_listing_provenance_schema(conn: sqlite3.Connection) -> None:
+        """Adopt discovery provenance without granting legacy rows release trust."""
+
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(postings)")}
+        if "discovered_at" not in columns:
+            conn.execute("ALTER TABLE postings ADD COLUMN discovered_at TEXT")
+        conn.execute("DROP TRIGGER IF EXISTS postings_discovered_at_immutable")
+        conn.execute(
+            """UPDATE postings
+               SET discovered_at=strftime('%Y-%m-%dT%H:%M:%SZ',first_seen_at)
+               WHERE discovered_at IS NULL"""
+        )
+        conn.executescript(LISTING_PROVENANCE_SCHEMA)
+        conn.execute(
+            """INSERT OR IGNORE INTO posting_discovery_observations(
+                 job_key,discovered_at,canonical_url,release_trusted
+               )
+               SELECT key,discovered_at,url,0 FROM postings
+               WHERE discovered_at IS NOT NULL"""
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO posting_release_capture_blocks(
+                 job_key,content_sha256,raw_object_sha256,reason_code
+               )
+               SELECT s.job_key,s.content_sha256,s.object_sha256,
+                      'legacy_snapshot_without_trusted_discovery_provenance'
+               FROM posting_raw_snapshots s
+               WHERE NOT EXISTS(
+                 SELECT 1 FROM posting_release_captures r
+                 WHERE r.job_key=s.job_key
+                   AND r.content_sha256=s.content_sha256
+                   AND r.raw_object_sha256=s.object_sha256
+               )"""
+        )
 
     @classmethod
     def resolve_vacancy_refresh_collector(
@@ -1324,10 +1623,10 @@ class JobDatabase:
         try:
             root_metadata = current.lstat()
         except OSError as exc:
-            raise VacancyRefreshConflict(
-                "external data home is unavailable"
-            ) from exc
-        if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
+            raise VacancyRefreshConflict("external data home is unavailable") from exc
+        if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(
+            root_metadata.st_mode
+        ):
             raise VacancyRefreshConflict("external data home is unsafe")
         directory_chain.append(
             (current, int(root_metadata.st_dev), int(root_metadata.st_ino))
@@ -1394,7 +1693,9 @@ class JobDatabase:
         if columns == CURRENT_VACANCY_REFRESH_COLUMNS:
             sql = str(table[0] or "")
             if "fetch_started" not in sql or "indeterminate" not in sql:
-                raise VacancyRefreshConflict("vacancy refresh schema has an unknown status contract")
+                raise VacancyRefreshConflict(
+                    "vacancy refresh schema has an unknown status contract"
+                )
             return
         if columns == V2_VACANCY_REFRESH_COLUMNS:
             archive = conn.execute(
@@ -1402,7 +1703,9 @@ class JobDatabase:
                 ("vacancy_refreshes_v2",),
             ).fetchone()
             if archive is not None:
-                raise VacancyRefreshConflict("v2 vacancy refresh archive already exists")
+                raise VacancyRefreshConflict(
+                    "v2 vacancy refresh archive already exists"
+                )
             conn.execute("ALTER TABLE vacancy_refreshes RENAME TO vacancy_refreshes_v2")
             conn.execute(VACANCY_REFRESH_SCHEMA)
             rows = conn.execute(
@@ -1420,27 +1723,38 @@ class JobDatabase:
                              legacy_status,legacy_table,legacy_row_sha256,reason
                            ) VALUES(?,?,?,?,?,'vacancy_refreshes_v2',?,?)""",
                         (
-                            v2["operation_id"], v2["refresh_id"], v2["job_key"],
-                            v2["expected_content_sha256"], v2["status"],
+                            v2["operation_id"],
+                            v2["refresh_id"],
+                            v2["job_key"],
+                            v2["expected_content_sha256"],
+                            v2["status"],
                             _v2_row_identity(v2),
                             f"v2 row is not exactly representable: {exc}",
                         ),
                     )
                 else:
                     _insert_migrated_refresh(
-                        conn, current, created_at=v2["created_at"],
+                        conn,
+                        current,
+                        created_at=v2["created_at"],
                         updated_at=v2["updated_at"],
                     )
             return
         if columns != LEGACY_VACANCY_REFRESH_COLUMNS:
-            raise VacancyRefreshConflict("vacancy refresh schema version is unsupported")
+            raise VacancyRefreshConflict(
+                "vacancy refresh schema version is unsupported"
+            )
         archive = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
             ("vacancy_refreshes_legacy_036d",),
         ).fetchone()
         if archive is not None:
-            raise VacancyRefreshConflict("legacy vacancy refresh archive already exists")
-        conn.execute("ALTER TABLE vacancy_refreshes RENAME TO vacancy_refreshes_legacy_036d")
+            raise VacancyRefreshConflict(
+                "legacy vacancy refresh archive already exists"
+            )
+        conn.execute(
+            "ALTER TABLE vacancy_refreshes RENAME TO vacancy_refreshes_legacy_036d"
+        )
         conn.execute(VACANCY_REFRESH_SCHEMA)
         selected = ",".join(LEGACY_VACANCY_REFRESH_COLUMNS)
         rows = conn.execute(
@@ -1456,7 +1770,9 @@ class JobDatabase:
                     reason = f"legacy completed row is not exactly representable: {exc}"
                 else:
                     _insert_migrated_refresh(
-                        conn, current, created_at=legacy["created_at"],
+                        conn,
+                        current,
+                        created_at=legacy["created_at"],
                         updated_at=legacy["updated_at"],
                     )
                     continue
@@ -1466,9 +1782,13 @@ class JobDatabase:
                      legacy_status,legacy_table,legacy_row_sha256,reason
                    ) VALUES(?,?,?,?,?,'vacancy_refreshes_legacy_036d',?,?)""",
                 (
-                    legacy["operation_id"], legacy["refresh_id"], legacy["job_key"],
-                    legacy["expected_content_sha256"], legacy["status"],
-                    _legacy_row_identity(legacy), reason,
+                    legacy["operation_id"],
+                    legacy["refresh_id"],
+                    legacy["job_key"],
+                    legacy["expected_content_sha256"],
+                    legacy["status"],
+                    _legacy_row_identity(legacy),
+                    reason,
                 ),
             )
 
@@ -1541,24 +1861,57 @@ class JobDatabase:
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
-    def upsert_discovered(self, row: JobUrl) -> bool:
+    def upsert_discovered(self, row: JobUrl, *, release_trusted: bool = False) -> bool:
         validate_public_listing_url(row.url)
+        if not isinstance(release_trusted, bool):
+            raise TypeError("release_trusted must be boolean")
+        if release_trusted and row.discovered_at is None:
+            raise ValueError(
+                "trusted discovery requires an explicit collection timestamp"
+            )
+        discovered_at = row.discovered_at or _strict_utc_now()
+        require_timestamp(
+            discovered_at,
+            "job discovery discovered_at",
+            strict_profile=True,
+        )
         with closing(self.connect()) as conn, conn:
-            existed = conn.execute("SELECT 1 FROM postings WHERE key=?", (row.key,)).fetchone()
+            existed = conn.execute(
+                "SELECT 1 FROM postings WHERE key=?", (row.key,)
+            ).fetchone()
             conn.execute(
-                """INSERT INTO postings(key,board,job_id,url,posted_at) VALUES(?,?,?,?,?)
+                """INSERT INTO postings(
+                     key,board,job_id,url,posted_at,discovered_at
+                   ) VALUES(?,?,?,?,?,?)
                    ON CONFLICT(key) DO UPDATE SET url=excluded.url,
                      posted_at=COALESCE(excluded.posted_at,postings.posted_at),
                      last_seen_at=CURRENT_TIMESTAMP""",
-                (row.key, row.board, row.job_id, row.url, row.posted_at),
+                (
+                    row.key,
+                    row.board,
+                    row.job_id,
+                    row.url,
+                    row.posted_at,
+                    discovered_at,
+                ),
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO posting_discovery_observations(
+                     job_key,discovered_at,canonical_url,release_trusted
+                   ) VALUES(?,?,?,?)""",
+                (row.key, discovered_at, row.url, int(release_trusted)),
             )
         return existed is None
 
     def has_raw(self, key: str) -> bool:
         with closing(self.connect()) as conn, conn:
-            return conn.execute(
-                "SELECT 1 FROM postings WHERE key=? AND fetch_status='fetched'", (key,)
-            ).fetchone() is not None
+            return (
+                conn.execute(
+                    "SELECT 1 FROM postings WHERE key=? AND fetch_status='fetched'",
+                    (key,),
+                ).fetchone()
+                is not None
+            )
 
     @staticmethod
     def _record_raw_snapshot(
@@ -1604,20 +1957,214 @@ class JobDatabase:
         )
         return object_sha256
 
-    def store_raw(self, row: RawPosting) -> None:
+    def store_raw(self, row: RawPosting, *, release_trusted: bool = False) -> None:
         # Scan every persistence representation, including legacy raw_text/raw_json
         # rows that do not carry the newer exact-byte field, before any state change.
+        if not isinstance(release_trusted, bool):
+            raise TypeError("release_trusted must be boolean")
         public_listing_bytes(row)
-        raw_json = json.dumps(row.raw_json, ensure_ascii=False) if row.raw_json is not None else None
+        raw_json = (
+            json.dumps(row.raw_json, ensure_ascii=False)
+            if row.raw_json is not None
+            else None
+        )
         digest = raw_posting_content_sha256(row)
         with closing(self.connect()) as conn, conn:
+            discovered_at: str | None = None
+            if release_trusted:
+                require_timestamp(
+                    row.fetched_at,
+                    "raw posting fetched_at",
+                    strict_profile=True,
+                )
+                discovery = conn.execute(
+                    """SELECT discovered_at
+                       FROM posting_discovery_observations
+                       WHERE job_key=? AND canonical_url=? AND release_trusted=1
+                       ORDER BY discovered_at DESC LIMIT 1""",
+                    (row.key, row.url),
+                ).fetchone()
+                if discovery is None:
+                    raise ValueError(
+                        "release capture requires a trusted discovery observation"
+                    )
+                discovered_at = str(discovery[0])
+                require_timestamp(
+                    discovered_at,
+                    "persisted discovered_at",
+                    strict_profile=True,
+                )
+                if parse_timestamp(discovered_at) > parse_timestamp(row.fetched_at):
+                    raise ValueError("raw posting fetch precedes its trusted discovery")
             cursor = conn.execute(
                 """UPDATE postings SET fetched_at=?,raw_text=?,raw_json=?,content_hash=?,
                    fetch_status='fetched',fetch_error=NULL WHERE key=?""",
                 (row.fetched_at, row.raw_text, raw_json, digest, row.key),
             )
             if cursor.rowcount == 1:
-                self._record_raw_snapshot(conn, row, content_sha256=digest)
+                object_sha256 = self._record_raw_snapshot(
+                    conn, row, content_sha256=digest
+                )
+                if release_trusted:
+                    assert discovered_at is not None
+                    provenance_bytes = canonical_json_bytes(
+                        {
+                            "board": row.board,
+                            "canonical_url": row.url,
+                            "content_sha256": digest,
+                            "content_type": row.content_type,
+                            "discovered_at": discovered_at,
+                            "fetched_at": row.fetched_at,
+                            "http_status": row.http_status,
+                            "job_key": row.key,
+                            "raw_object_sha256": object_sha256,
+                            "schema_version": (
+                                "market-aligner.public-listing-release-capture.v1"
+                            ),
+                            "source_job_id": row.job_id,
+                        }
+                    )
+                    provenance_sha256 = digest_bytes(provenance_bytes)
+                    conn.execute(
+                        """INSERT OR IGNORE INTO posting_release_captures(
+                             provenance_sha256,job_key,content_sha256,
+                             raw_object_sha256,exact_provenance_bytes,board,
+                             source_job_id,canonical_url,discovered_at,fetched_at,
+                             content_type,http_status
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            provenance_sha256,
+                            row.key,
+                            digest,
+                            object_sha256,
+                            provenance_bytes,
+                            row.board,
+                            row.job_id,
+                            row.url,
+                            discovered_at,
+                            row.fetched_at,
+                            row.content_type,
+                            row.http_status,
+                        ),
+                    )
+                    stored = conn.execute(
+                        """SELECT exact_provenance_bytes,job_key,content_sha256,
+                                  raw_object_sha256
+                           FROM posting_release_captures
+                           WHERE provenance_sha256=?""",
+                        (provenance_sha256,),
+                    ).fetchone()
+                    if stored is None or (
+                        bytes(stored[0]) != provenance_bytes
+                        or str(stored[1]) != row.key
+                        or str(stored[2]) != digest
+                        or str(stored[3]) != object_sha256
+                    ):
+                        raise ValueError("release capture identity conflicts")
+                else:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO posting_release_capture_blocks(
+                             job_key,content_sha256,raw_object_sha256,reason_code
+                           ) VALUES(?,?,?,
+                             'snapshot_without_trusted_discovery_provenance')""",
+                        (row.key, digest, object_sha256),
+                    )
+
+    def listing_release_capture(
+        self, job_key: str, content_sha256: str | None = None
+    ) -> VerifiedPublicListingCapture:
+        """Return and revalidate the newest releaseable capture for a snapshot."""
+
+        with closing(self.connect()) as conn:
+            parameters: tuple[object, ...]
+            predicate = "r.job_key=?"
+            parameters = (job_key,)
+            if content_sha256 is not None:
+                predicate += " AND r.content_sha256=?"
+                parameters = (job_key, content_sha256)
+            row = conn.execute(
+                f"""SELECT r.provenance_sha256,r.job_key,r.content_sha256,
+                           r.raw_object_sha256,r.exact_provenance_bytes,r.board,
+                           r.source_job_id,r.canonical_url,r.discovered_at,
+                           r.fetched_at,r.content_type,r.http_status
+                    FROM posting_release_captures r
+                    JOIN posting_raw_snapshots s
+                      ON s.job_key=r.job_key
+                     AND s.content_sha256=r.content_sha256
+                     AND s.object_sha256=r.raw_object_sha256
+                    WHERE {predicate}
+                    ORDER BY r.fetched_at DESC,r.discovered_at DESC,
+                             r.provenance_sha256 DESC
+                    LIMIT 1""",
+                parameters,
+            ).fetchone()
+        if row is None:
+            raise KeyError((job_key, content_sha256))
+        exact = bytes(row[4])
+        if digest_bytes(exact) != str(row[0]):
+            raise ValueError("release capture digest differs from preserved bytes")
+        document = _strict_json_loads(exact)
+        if not isinstance(document, dict) or canonical_json_bytes(document) != exact:
+            raise ValueError("release capture is not canonical JSON")
+        expected = {
+            "board": str(row[5]),
+            "canonical_url": str(row[7]),
+            "content_sha256": str(row[2]),
+            "content_type": None if row[10] is None else str(row[10]),
+            "discovered_at": str(row[8]),
+            "fetched_at": str(row[9]),
+            "http_status": None if row[11] is None else int(row[11]),
+            "job_key": str(row[1]),
+            "raw_object_sha256": str(row[3]),
+            "schema_version": "market-aligner.public-listing-release-capture.v1",
+            "source_job_id": str(row[6]),
+        }
+        if document != expected:
+            raise ValueError("release capture fields differ from preserved bytes")
+        require_timestamp(
+            expected["discovered_at"], "discovered_at", strict_profile=True
+        )
+        require_timestamp(expected["fetched_at"], "fetched_at", strict_profile=True)
+        if parse_timestamp(expected["discovered_at"]) > parse_timestamp(
+            expected["fetched_at"]
+        ):
+            raise ValueError("release capture chronology is invalid")
+        return VerifiedPublicListingCapture(
+            provenance_sha256=str(row[0]),
+            job_key=str(row[1]),
+            content_sha256=str(row[2]),
+            raw_object_sha256=str(row[3]),
+            exact_provenance_bytes=exact,
+            board=str(row[5]),
+            source_job_id=str(row[6]),
+            canonical_url=str(row[7]),
+            discovered_at=str(row[8]),
+            fetched_at=str(row[9]),
+            content_type=None if row[10] is None else str(row[10]),
+            http_status=None if row[11] is None else int(row[11]),
+        )
+
+    def release_capture_block(
+        self, job_key: str, content_sha256: str, raw_object_sha256: str
+    ) -> sqlite3.Row | None:
+        """Explain why one preserved snapshot is not trusted for release."""
+
+        with closing(self.connect()) as conn:
+            cursor = conn.execute(
+                """SELECT b.job_key,b.content_sha256,b.raw_object_sha256,
+                          b.reason_code,b.detected_at
+                   FROM posting_release_capture_blocks b
+                   WHERE b.job_key=? AND b.content_sha256=?
+                     AND b.raw_object_sha256=? AND NOT EXISTS(
+                       SELECT 1 FROM posting_release_captures r
+                       WHERE r.job_key=b.job_key
+                         AND r.content_sha256=b.content_sha256
+                         AND r.raw_object_sha256=b.raw_object_sha256
+                     )""",
+                (job_key, content_sha256, raw_object_sha256),
+            )
+            cursor.row_factory = sqlite3.Row
+            return cursor.fetchone()
 
     def snapshot_migration_block(self, job_key: str) -> sqlite3.Row | None:
         """Return an active block for a fetched row lacking exact replay bytes."""
@@ -1696,7 +2243,9 @@ class JobDatabase:
             raise KeyError(f"unknown vacancy key: {key}")
         if row[6] != "fetched" or not row[4] or not row[5]:
             raise ValueError(f"vacancy is not an existing fetched row: {key}")
-        job = JobUrl(board=str(row[0]), job_id=str(row[1]), url=str(row[2]), posted_at=row[3])
+        job = JobUrl(
+            board=str(row[0]), job_id=str(row[1]), url=str(row[2]), posted_at=row[3]
+        )
         if job.key != key:
             raise ValueError(f"stored vacancy identity does not match key: {key}")
         return job, str(row[4]), str(row[5])
@@ -1729,8 +2278,7 @@ class JobDatabase:
         body = loaded_receipt.sealed_body
         receipt_sha256 = loaded_receipt.receipt_sha256
         if (
-            receipt.get("schema_version")
-            != "market-aligner.vacancy-refresh-receipt.v3"
+            receipt.get("schema_version") != "market-aligner.vacancy-refresh-receipt.v3"
             or receipt.get("job_key") != job_key
             or receipt.get("application_authority") is not False
             or receipt.get("authority_scope") != "collection_only"
@@ -1753,10 +2301,14 @@ class JobDatabase:
                 raise VacancyRefreshConflict("refresh receipt has no exact journal")
             transition = _refresh_transition_from_row(row)
             if transition["job_key"] != job_key or transition["status"] != "committed":
-                raise VacancyRefreshConflict("refresh journal is not the committed vacancy")
+                raise VacancyRefreshConflict(
+                    "refresh journal is not the committed vacancy"
+                )
             sealed = transition.get("receipt_basis")
             if not isinstance(sealed, dict) or not _authority_equal(body, sealed):
-                raise VacancyRefreshConflict("refresh receipt differs from sealed journal")
+                raise VacancyRefreshConflict(
+                    "refresh receipt differs from sealed journal"
+                )
             posting = collector_connection.execute(
                 f"""SELECT board,job_id,url,fetched_at,raw_text,raw_json,
                            content_hash,fetch_status
@@ -1766,9 +2318,13 @@ class JobDatabase:
             if posting is None or posting[7] != "fetched":
                 raise VacancyRefreshConflict("refresh vacancy is not currently fetched")
             try:
-                raw_json = None if posting[5] is None else _strict_json_loads(str(posting[5]))
+                raw_json = (
+                    None if posting[5] is None else _strict_json_loads(str(posting[5]))
+                )
             except (json.JSONDecodeError, ValueError) as exc:
-                raise VacancyRefreshConflict("current collector raw JSON is invalid") from exc
+                raise VacancyRefreshConflict(
+                    "current collector raw JSON is invalid"
+                ) from exc
             current_raw = RawPosting(
                 board=str(posting[0]),
                 job_id=str(posting[1]),
@@ -1800,9 +2356,7 @@ class JobDatabase:
             job_key=job_key,
             changed=bool(receipt["changed"]),
             old_content_sha256=str(receipt["old_content_sha256"]),
-            old_canonical_content_sha256=str(
-                receipt["old_canonical_content_sha256"]
-            ),
+            old_canonical_content_sha256=str(receipt["old_canonical_content_sha256"]),
             new_content_sha256=str(receipt["new_content_sha256"]),
             old_fetched_at=str(receipt["old_fetched_at"]),
             new_fetched_at=str(receipt["new_fetched_at"]),
@@ -1840,7 +2394,9 @@ class JobDatabase:
             if row is None and quarantined is not None:
                 legacy = _verify_quarantined_legacy_row(conn, quarantined[:7])
                 if legacy["context_sha256"] != context_sha256:
-                    raise ValueError("refresh operation ID is already bound to another context")
+                    raise ValueError(
+                        "refresh operation ID is already bound to another context"
+                    )
         if row is None:
             if quarantined is not None:
                 raise VacancyRefreshIndeterminate(
@@ -1871,16 +2427,20 @@ class JobDatabase:
             ("context", context_sha256),
             ("expected content", expected_content_sha256),
         ):
-            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
                 raise ValueError(f"{label} identity must be lowercase SHA-256")
         old_raw = raw_posting_from_bytes(old_raw_bytes)
-        canonical_context = json.loads(json.dumps(
-            dict(context_document),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ))
+        canonical_context = json.loads(
+            json.dumps(
+                dict(context_document),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
         if _canonical_hash(canonical_context) != context_sha256:
             raise ValueError("refresh operation context bytes differ from its identity")
         if old_raw.key != job_key:
@@ -1897,7 +2457,9 @@ class JobDatabase:
             if existing is not None:
                 conn.rollback()
                 if existing[0] != context_sha256:
-                    raise ValueError("refresh operation ID is already bound to another context")
+                    raise ValueError(
+                        "refresh operation ID is already bound to another context"
+                    )
                 loaded = self.refresh_transition(
                     operation_id, context_sha256=context_sha256
                 )
@@ -1951,16 +2513,23 @@ class JobDatabase:
                     f"vacancy differs from refresh intent: {job_key}"
                 )
             stored_material = (current[4] or "") + (current[5] or "")
-            if hashlib.sha256(stored_material.encode("utf-8")).hexdigest() != current[0]:
+            if (
+                hashlib.sha256(stored_material.encode("utf-8")).hexdigest()
+                != current[0]
+            ):
                 conn.rollback()
                 raise VacancyRefreshConflict(
                     "stored vacancy content bytes differ from its legacy identity"
                 )
             try:
-                stored_raw_json = None if current[5] is None else _strict_json_loads(current[5])
+                stored_raw_json = (
+                    None if current[5] is None else _strict_json_loads(current[5])
+                )
             except (json.JSONDecodeError, ValueError) as exc:
                 conn.rollback()
-                raise VacancyRefreshConflict("stored vacancy raw JSON is invalid") from exc
+                raise VacancyRefreshConflict(
+                    "stored vacancy raw JSON is invalid"
+                ) from exc
             if (
                 old_raw.url != current[3]
                 or old_raw.raw_text != current[4]
@@ -1983,8 +2552,13 @@ class JobDatabase:
                     refresh_id,
                     operation_id,
                     context_sha256,
-                    json.dumps(canonical_context, ensure_ascii=False, sort_keys=True,
-                               separators=(",", ":"), allow_nan=False),
+                    json.dumps(
+                        canonical_context,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ),
                     job_key,
                     expected_content_sha256,
                     started_at,
@@ -2021,7 +2595,9 @@ class JobDatabase:
                 (refresh_id,),
             )
             if cursor.rowcount != 1:
-                raise VacancyRefreshConflict("refresh fetch window was claimed concurrently")
+                raise VacancyRefreshConflict(
+                    "refresh fetch window was claimed concurrently"
+                )
 
     def mark_vacancy_refresh_indeterminate(self, refresh_id: str) -> None:
         """Seal an unresolved fetch window so it can never auto-refetch."""
@@ -2038,7 +2614,9 @@ class JobDatabase:
             if transition["status"] == "indeterminate":
                 return
             if transition["status"] != "fetch_started":
-                raise VacancyRefreshConflict("only an unresolved fetch can be indeterminate")
+                raise VacancyRefreshConflict(
+                    "only an unresolved fetch can be indeterminate"
+                )
             conn.execute(
                 """UPDATE vacancy_refreshes SET status='indeterminate',
                      updated_at=CURRENT_TIMESTAMP
@@ -2111,7 +2689,9 @@ class JobDatabase:
             if transition["status"] in ("object_ready", "committed"):
                 return
             if transition["status"] != "fetched":
-                raise VacancyRefreshConflict("refresh object cannot precede fetched bytes")
+                raise VacancyRefreshConflict(
+                    "refresh object cannot precede fetched bytes"
+                )
             conn.execute(
                 """UPDATE vacancy_refreshes SET status='object_ready',
                      updated_at=CURRENT_TIMESTAMP
@@ -2249,8 +2829,10 @@ class JobDatabase:
 
     def record_error(self, key: str, message: str) -> None:
         with closing(self.connect()) as conn, conn:
-            conn.execute("UPDATE postings SET fetch_status='error',fetch_error=? WHERE key=?",
-                         (message[:2000], key))
+            conn.execute(
+                "UPDATE postings SET fetch_status='error',fetch_error=? WHERE key=?",
+                (message[:2000], key),
+            )
 
     def mark_source(self, board: str, error: str | None = None) -> None:
         with closing(self.connect()) as conn, conn:
@@ -2263,11 +2845,15 @@ class JobDatabase:
 
     def source_due(self, board: str, minimum_minutes: float) -> bool:
         with closing(self.connect()) as conn, conn:
-            row = conn.execute("SELECT last_polled_at FROM source_state WHERE board=?", (board,)).fetchone()
+            row = conn.execute(
+                "SELECT last_polled_at FROM source_state WHERE board=?", (board,)
+            ).fetchone()
         if not row or not row[0]:
             return True
         last = datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - last).total_seconds() >= minimum_minutes * 60
+        return (
+            datetime.now(timezone.utc) - last
+        ).total_seconds() >= minimum_minutes * 60
 
     def boards_with_pending_discoveries(self, boards: Iterable[str]) -> set[str]:
         """Boards whose discovered URLs still need their complete detail page.
@@ -2289,11 +2875,33 @@ class JobDatabase:
 
     def export_urls(self, path: str | Path) -> int:
         with closing(self.connect()) as conn, conn:
-            rows = [JobUrl(board=r[0], job_id=r[1], url=r[2], posted_at=r[3]) for r in
-                    conn.execute("SELECT board,job_id,url,posted_at FROM postings ORDER BY first_seen_at,key")]
+            rows = [
+                JobUrl(
+                    board=r[0],
+                    job_id=r[1],
+                    url=r[2],
+                    posted_at=r[3],
+                    discovered_at=r[4],
+                )
+                for r in conn.execute(
+                    """SELECT p.board,p.job_id,p.url,p.posted_at,
+                              COALESCE(
+                                (SELECT d.discovered_at
+                                 FROM posting_discovery_observations d
+                                 WHERE d.job_key=p.key
+                                   AND d.canonical_url=p.url
+                                   AND d.release_trusted=1
+                                 ORDER BY d.discovered_at DESC LIMIT 1),
+                                p.discovered_at
+                              )
+                       FROM postings p ORDER BY p.first_seen_at,p.key"""
+                )
+            ]
         return write_jsonl(path, rows)
 
-    def import_existing(self, urls_path: str | Path, raw_cache: str | Path) -> tuple[int, int]:
+    def import_existing(
+        self, urls_path: str | Path, raw_cache: str | Path
+    ) -> tuple[int, int]:
         return self.import_existing_roots(urls_path, [raw_cache])
 
     def import_existing_roots(
@@ -2305,12 +2913,15 @@ class JobDatabase:
         added = fetched = 0
         if urls.exists():
             for row in read_jsonl(urls, JobUrl):
-                added += int(self.upsert_discovered(row))
+                added += int(self.upsert_discovered(row, release_trusted=False))
         for row in iter_raw_cache_roots(raw_cache_roots):
             if not self.has_raw(row.key):
-                if self.upsert_discovered(JobUrl(row.board, row.job_id, row.url)):
+                if self.upsert_discovered(
+                    JobUrl(row.board, row.job_id, row.url),
+                    release_trusted=False,
+                ):
                     added += 1
-                self.store_raw(row)
+                self.store_raw(row, release_trusted=False)
                 fetched += 1
         return added, fetched
 
@@ -2335,10 +2946,19 @@ class JobDatabase:
     def stats(self) -> dict[str, int]:
         with closing(self.connect()) as conn, conn:
             total = conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0]
-            fetched = conn.execute("SELECT COUNT(*) FROM postings WHERE fetch_status='fetched'").fetchone()[0]
-            normalized = conn.execute("SELECT COUNT(*) FROM normalised_jobs").fetchone()[0]
+            fetched = conn.execute(
+                "SELECT COUNT(*) FROM postings WHERE fetch_status='fetched'"
+            ).fetchone()[0]
+            normalized = conn.execute(
+                "SELECT COUNT(*) FROM normalised_jobs"
+            ).fetchone()[0]
             scored = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
-        return {"postings": total, "fetched": fetched, "normalized": normalized, "scored": scored}
+        return {
+            "postings": total,
+            "fetched": fetched,
+            "normalized": normalized,
+            "scored": scored,
+        }
 
     def collection_state(self) -> dict[str, object]:
         """Return a deterministic projection of resumable collection state."""
@@ -2399,14 +3019,28 @@ class JobDatabase:
         if not source.is_file():
             raise FileNotFoundError(f"collector database does not exist: {source}")
 
-        with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)) as src:
+        with closing(
+            sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)
+        ) as src:
             src.execute("PRAGMA query_only=ON")
             src.execute("BEGIN")
-            columns = {str(row[1]) for row in src.execute("PRAGMA table_info(postings)")}
+            columns = {
+                str(row[1]) for row in src.execute("PRAGMA table_info(postings)")
+            }
             required = {
-                "key", "board", "job_id", "url", "posted_at", "first_seen_at",
-                "last_seen_at", "fetched_at", "raw_text", "raw_json", "content_hash",
-                "fetch_status", "fetch_error",
+                "key",
+                "board",
+                "job_id",
+                "url",
+                "posted_at",
+                "first_seen_at",
+                "last_seen_at",
+                "fetched_at",
+                "raw_text",
+                "raw_json",
+                "content_hash",
+                "fetch_status",
+                "fetch_error",
             }
             if not required <= columns:
                 raise ValueError(
@@ -2447,7 +3081,9 @@ class JobDatabase:
                     """SELECT key,board,job_id,url,posted_at,first_seen_at,last_seen_at,
                               fetched_at,raw_text,raw_json,content_hash
                        FROM postings WHERE fetch_status='fetched' AND content_hash IS NOT NULL
-                       """ + (" AND key=?" if job_key is not None else "") + " ORDER BY key",
+                       """
+                    + (" AND key=?" if job_key is not None else "")
+                    + " ORDER BY key",
                     key_params,
                 )
             ]
@@ -2457,9 +3093,15 @@ class JobDatabase:
                 raise ValueError(f"exact collector vacancy is not fetched: {job_key}")
             for row in rows:
                 if row["key"] != f"{row['board']}:{row['job_id']}":
-                    raise ValueError(f"collector row has inconsistent identity: {row['key']}")
-                if row["raw_json"] is not None and not isinstance(json.loads(row["raw_json"]), dict):
-                    raise ValueError(f"collector raw JSON must be an object: {row['key']}")
+                    raise ValueError(
+                        f"collector row has inconsistent identity: {row['key']}"
+                    )
+                if row["raw_json"] is not None and not isinstance(
+                    json.loads(row["raw_json"]), dict
+                ):
+                    raise ValueError(
+                        f"collector raw JSON must be an object: {row['key']}"
+                    )
                 material = str(row["raw_text"] or "") + str(row["raw_json"] or "")
                 digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
                 if digest != row["content_hash"]:
@@ -2504,9 +3146,16 @@ class JobDatabase:
                              raw_text=excluded.raw_text,raw_json=excluded.raw_json,
                              content_hash=excluded.content_hash,fetch_status='fetched',fetch_error=NULL""",
                         (
-                            row["key"], row["board"], row["job_id"], row["url"],
-                            row["posted_at"], row["first_seen_at"], row["last_seen_at"],
-                            row["fetched_at"], row["raw_text"], row["raw_json"],
+                            row["key"],
+                            row["board"],
+                            row["job_id"],
+                            row["url"],
+                            row["posted_at"],
+                            row["first_seen_at"],
+                            row["last_seen_at"],
+                            row["fetched_at"],
+                            row["raw_text"],
+                            row["raw_json"],
                             row["content_hash"],
                         ),
                     )
@@ -2575,8 +3224,13 @@ class JobDatabase:
                           OR (q.status='leased' AND q.lease_until<?))
                    ORDER BY p.key LIMIT ?""",
                 (
-                    *scope_params, profile_id, track, authority_sha256,
-                    processing_config_sha256, now, limit,
+                    *scope_params,
+                    profile_id,
+                    track,
+                    authority_sha256,
+                    processing_config_sha256,
+                    now,
+                    limit,
                 ),
             ).fetchall()
             for row in rows:
@@ -2629,7 +3283,9 @@ class JobDatabase:
         worker_id: str,
         result: dict[str, object],
     ) -> None:
-        payload = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
         with closing(self.connect()) as conn, conn:
             cursor = conn.execute(
                 """UPDATE processing_jobs SET status='completed',lease_owner=NULL,
@@ -2649,7 +3305,9 @@ class JobDatabase:
                 ),
             )
             if cursor.rowcount != 1:
-                raise RuntimeError("processing completion requires the active shard lease")
+                raise RuntimeError(
+                    "processing completion requires the active shard lease"
+                )
 
     def fail_processing(
         self,
@@ -2713,7 +3371,10 @@ class JobDatabase:
                      AND q.status='completed' AND q.result_json IS NOT NULL
                    ORDER BY q.job_key""",
                 (
-                    *scope_params, profile_id, track, authority_sha256,
+                    *scope_params,
+                    profile_id,
+                    track,
+                    authority_sha256,
                     processing_config_sha256,
                 ),
             ).fetchall()
@@ -2768,7 +3429,12 @@ class JobDatabase:
                      AND q.authority_sha256=? AND q.source_content_sha256=p.content_hash
                      AND q.processing_config_sha256=?""",
                 (
-                    *scope_params, now, now, profile_id, track, authority_sha256,
+                    *scope_params,
+                    now,
+                    now,
+                    profile_id,
+                    track,
+                    authority_sha256,
                     processing_config_sha256,
                 ),
             ).fetchone()
@@ -2819,7 +3485,10 @@ class JobDatabase:
                          AND q.status='completed' AND q.result_json IS NOT NULL
                        ORDER BY q.job_key""",
                     (
-                        *scope_params, profile_id, track, authority_sha256,
+                        *scope_params,
+                        profile_id,
+                        track,
+                        authority_sha256,
                         processing_config_sha256,
                     ),
                 ).fetchall()
@@ -2854,8 +3523,12 @@ class JobDatabase:
                      AND status='completed' AND result_json IS NOT NULL
                    ORDER BY updated_at DESC, processing_config_sha256 DESC LIMIT 1""",
                 (
-                    profile_id, track, job_key, authority_sha256,
-                    source_content_sha256, processing_config_sha256,
+                    profile_id,
+                    track,
+                    job_key,
+                    authority_sha256,
+                    source_content_sha256,
+                    processing_config_sha256,
                 ),
             ).fetchone()
         return None if row is None else json.loads(row[0])
