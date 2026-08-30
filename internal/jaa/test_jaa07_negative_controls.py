@@ -18,11 +18,14 @@ from career_automation.application_compiler import (
     CandidateContact,
     FactualSentence,
     ModelReceipt,
+    ProfileFactAuthority,
     ProductionApplicationCompiler,
     StyleProposal,
     StyleSlot,
+    approved_candidate_outward_text,
     apply_style_proposal,
     compile_application_source,
+    resolve_authenticated_outward_rewrite,
     verify_application_source,
 )
 from career_automation.application_artifacts import (
@@ -30,6 +33,7 @@ from career_automation.application_artifacts import (
     publish_application_artifacts,
 )
 from career_automation.application_strategy import ApplicationStrategyStore
+from career_automation import candidate_authority as candidate_authority_module
 from career_automation.candidate_graph import CandidateGraph
 from career_automation.evidence_matching import canonical_json, content_hash
 from career_automation.rendering import (
@@ -57,6 +61,125 @@ def test_factual_sentence_cannot_paraphrase_or_add_an_unsupported_metric() -> No
     fact = source.facts[0]
     with pytest.raises(ValueError, match="equal its approved"):
         replace(fact, text=f"{fact.text} Improved availability by 40%.")
+
+
+def _install_approved_evidence(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    evidence_id: str,
+    statement: str,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "id": evidence_id,
+        "statement": statement,
+        "proof_class": "portfolio_artifact",
+    }
+    value = json.dumps({"statements": [evidence]}).encode()
+    path = tmp_path / "approved-evidence.json"
+    path.write_bytes(value)
+    monkeypatch.setattr(candidate_authority_module, "APPROVED_EVIDENCE_PATH", path)
+    monkeypatch.setitem(
+        candidate_authority_module.APPROVED_CANDIDATE_SOURCE_HASHES,
+        "approved_evidence",
+        hashlib.sha256(value).hexdigest(),
+    )
+    return evidence
+
+
+@pytest.mark.parametrize(
+    ("evidence_id", "approved_source", "expected_prefix"),
+    (
+        ("E-011", "Synthetic exact-allowlist source.", "I led"),
+        ("E-007", "I sold a synthetic service.", "Sold"),
+    ),
+)
+def test_outward_rewrite_requires_current_authenticated_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    evidence_id: str,
+    approved_source: str,
+    expected_prefix: str,
+) -> None:
+    evidence = _install_approved_evidence(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        evidence_id=evidence_id,
+        statement=approved_source,
+    )
+    source = str(evidence["statement"])
+    outward = approved_candidate_outward_text(
+        evidence_id,
+        source,
+        document_kind="cv",
+    )
+    assert outward.startswith(expected_prefix)
+    receipt = resolve_authenticated_outward_rewrite(
+        candidate_evidence_id=evidence_id,
+        approved_source_text=source,
+        outward_text=outward,
+        document_kind="cv",
+    )
+    authority = ProfileFactAuthority(
+        candidate_profile_hash="a" * 64,
+        candidate_claim_id=f"approved-claim:{evidence_id}",
+        candidate_claim_version=1,
+        candidate_evidence_id=evidence_id,
+        candidate_evidence_version=1,
+        candidate_evidence_sha256=hashlib.sha256(source.encode()).hexdigest(),
+        proof_class=str(evidence["proof_class"]),
+        rewrite_authority=receipt,
+    )
+    sentence = FactualSentence(
+        content_hash({"evidence_id": evidence_id, "outward": outward}),
+        outward,
+        source,
+        "candidate",
+        "cv",
+        authority,
+    )
+    assert sentence.authority.outward_text_sha256 == hashlib.sha256(
+        outward.encode()
+    ).hexdigest()
+    assert sentence.document()["authority"]["rewrite_authority"] == receipt.document()
+
+    forged = replace(receipt, issuer_identity="caller-forged")
+    with pytest.raises(ValueError, match="authentic"):
+        replace(sentence, authority=replace(authority, rewrite_authority=forged))
+
+
+def test_outward_rewrite_receipt_is_deterministic_and_rejects_wrong_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    evidence = _install_approved_evidence(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        evidence_id="E-007",
+        statement="I sold a synthetic service.",
+    )
+    source = str(evidence["statement"])
+    outward = approved_candidate_outward_text("E-007", source, document_kind="cv")
+    first = resolve_authenticated_outward_rewrite(
+        candidate_evidence_id="E-007",
+        approved_source_text=source,
+        outward_text=outward,
+        document_kind="cv",
+    )
+    second = resolve_authenticated_outward_rewrite(
+        candidate_evidence_id="E-007",
+        approved_source_text=source,
+        outward_text=outward,
+        document_kind="cv",
+    )
+    assert first == second
+    with pytest.raises(ValueError, match="not approved"):
+        resolve_authenticated_outward_rewrite(
+            candidate_evidence_id="E-007",
+            approved_source_text=source,
+            outward_text=f"{outward} Added claim.",
+            document_kind="cv",
+        )
 
 
 @pytest.mark.parametrize(
