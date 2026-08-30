@@ -158,10 +158,18 @@ class ApplicationSanityReviewError(ValueError):
     """No production authority may be issued for this review attempt."""
 
     def __init__(
-        self, code: str, message: str, *, result: Mapping[str, object] | None = None
+        self,
+        code: str,
+        message: str,
+        *,
+        result: Mapping[str, object] | None = None,
+        transport_evidence: Mapping[str, str] | None = None,
     ) -> None:
         self.code = code
         self.result = dict(result) if result is not None else None
+        self.transport_evidence = (
+            dict(transport_evidence) if transport_evidence is not None else None
+        )
         super().__init__(f"application sanity review blocked ({code}): {message}")
 
 
@@ -605,7 +613,10 @@ def review_application_package(
             else "review.material_finding"
         )
         raise ApplicationSanityReviewError(
-            code, "review did not return a certain finding-free PASS", result=result
+            code,
+            "review did not return a certain finding-free PASS",
+            result=result,
+            transport_evidence=response.transport_evidence,
         )
     model_identity = response.model.strip()
     if not model_identity or model_identity.casefold() in _NON_EXACT_MODEL_IDENTITIES:

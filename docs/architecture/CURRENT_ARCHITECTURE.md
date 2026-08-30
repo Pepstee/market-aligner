@@ -40,6 +40,10 @@ runtime receipts remain outside the repository. Product code refers to profiles 
 - `llm` owns every model transport, including the optional direct OpenAI Responses adapter;
   application policy remains in `career_automation.application_sanity_review`, and provider
   adapters cannot gain release, browser, or content-materialisation authority.
+- Synthetic provider acceptance is an opt-in mode of the one canonical application-sanity smoke
+  runner. Direct Responses acceptance requires explicit model and credential seams plus private
+  create-only exact transport archives outside Git; the retired parallel employer-review launcher
+  is not restored and the mode remains withheld until canonicalization acceptance.
 - Final sanity authority is one exact receipt/package contract. Its verifier rejects subclasses
   and reconstructs nested invariants at each release boundary; the recovered parallel
   employer-review runtime identity and release-verifier composition is not a second owner.

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -20,11 +22,14 @@ from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.rendering import _build_text_pdf
 from llm.client import Backend, LLMClient, LLMResponse, MockBackend
 from llm.client import ClaudeCliBackend, CodexCliBackend
+from llm.openai_responses import OpenAIResponsesBackend
 from scripts.run_application_sanity_live_smoke import (
     INCIDENT_PDF_SHA256,
     _build_backend,
     _incident_pdf_bytes,
     _package,
+    _publish_external_trace,
+    _require_external_private_directory,
     _review_case,
 )
 
@@ -68,8 +73,9 @@ class TransportScriptedBackend(ScriptedBackend):
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
         super().complete(system, user, temperature)
+        result = self.result if isinstance(self.result, dict) else PASS
         semantic_text = json.dumps(
-            PASS, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
         return LLMResponse(
             text=semantic_text,
@@ -496,12 +502,29 @@ def test_findings_and_suggestions_are_never_employer_facing_values(tmp_path) -> 
 def test_live_smoke_selects_subscription_backend_without_hard_coding_claude() -> None:
     codex = _build_backend("codex_cli", "", 17)
     claude = _build_backend("claude_cli", "sonnet", 19)
+    openai = _build_backend(
+        "openai_responses",
+        "gpt-test-1",
+        23,
+        api_key_environment_variable="OPENAI_TEST_KEY",
+    )
     assert isinstance(codex, CodexCliBackend)
     assert codex.model == ""
     assert codex.cli_timeout_seconds == 17
     assert isinstance(claude, ClaudeCliBackend)
     assert claude.model == "sonnet"
     assert claude.cli_timeout_seconds == 19
+    assert isinstance(openai, OpenAIResponsesBackend)
+    assert openai.config.requested_model == "gpt-test-1"
+    assert openai.config.timeout_seconds == 23
+    assert openai.config.api_key_environment_variable == "OPENAI_TEST_KEY"
+
+
+def test_openai_live_smoke_requires_explicit_model_and_integer_timeout() -> None:
+    with pytest.raises(ValueError, match="explicit model"):
+        _build_backend("openai_responses", "", 23)
+    with pytest.raises(ValueError, match="whole seconds"):
+        _build_backend("openai_responses", "gpt-test-1", 23.5)
 
 
 def test_live_smoke_rejects_unknown_backend_instead_of_falling_back_to_mock() -> None:
@@ -549,6 +572,74 @@ def test_live_smoke_infrastructure_failure_cannot_satisfy_block_canary(
     assert record["verdict"] == "error"
     assert record["matched_expectation"] is False
     assert record["review_error_code"] == error_code
+
+
+def test_live_smoke_retains_public_transport_evidence_for_provider_pass(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    backend = TransportScriptedBackend(PASS)
+    monkeypatch.setattr(
+        "scripts.run_application_sanity_live_smoke._build_backend",
+        lambda *_args, **_kwargs: backend,
+    )
+    record = _review_case(
+        case_id="provider_pass",
+        expected="pass",
+        package=_package("synthetic"),
+        backend_name="openai_responses",
+        model="scripted-v1",
+        timeout=17,
+        root=tmp_path,
+    )
+    assert record["matched_expectation"] is True
+    assert record["transport_evidence"]["provider_identity"] == "openai.responses-api"
+    assert record["transport_evidence"]["model_identity"] == "scripted-v1"
+
+
+def test_live_smoke_retains_public_transport_evidence_for_provider_block(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    backend = TransportScriptedBackend(block("framing.apology"))
+    monkeypatch.setattr(
+        "scripts.run_application_sanity_live_smoke._build_backend",
+        lambda *_args, **_kwargs: backend,
+    )
+    record = _review_case(
+        case_id="provider_block",
+        expected="block",
+        package=_package("synthetic"),
+        backend_name="openai_responses",
+        model="scripted-v1",
+        timeout=17,
+        root=tmp_path,
+    )
+    assert record["matched_expectation"] is True
+    assert record["review_error_code"] == "review.material_finding"
+    assert record["transport_evidence"]["provider_identity"] == "openai.responses-api"
+    assert record["transport_evidence"]["model_identity"] == "scripted-v1"
+
+
+def test_openai_smoke_trace_is_external_private_and_create_only(tmp_path) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    assert _require_external_private_directory(private) == private.resolve()
+    output = private / "trace.json"
+    _publish_external_trace(output, b'{"safe":true}\n')
+    assert output.read_bytes() == b'{"safe":true}\n'
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        _publish_external_trace(output, b'{"overwrite":true}\n')
+
+    insecure = tmp_path / "insecure"
+    insecure.mkdir(mode=0o755)
+    insecure.chmod(0o755)
+    with pytest.raises(ValueError, match="operator-owned mode 0700"):
+        _require_external_private_directory(insecure)
+    with pytest.raises(ValueError, match="outside the Git worktree"):
+        _require_external_private_directory(Path(__file__).resolve().parent)
 
 
 def test_live_smoke_incident_input_is_bound_to_permanent_hash(tmp_path) -> None:

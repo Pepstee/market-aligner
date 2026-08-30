@@ -154,3 +154,24 @@ The default backend is `codex_cli`. A backend change is a reviewer-model change,
 so its evidence is not interchangeable with earlier Claude CLI receipts. When
 `--incident-pdf` is supplied, the script first requires the exact permanently
 quarantined SHA-256 before asking the selected reviewer to block it.
+
+The recovered direct-Responses acceptance path is now an opt-in mode of this
+same canonical smoke runner; there is no second employer-review entry point.
+It requires an explicit model, credential environment-variable name, an
+existing operator-owned mode-0700 transport archive outside the repository and
+an existing mode-0700 output parent outside the repository. Exact request and
+response bytes are create-only mode-0600 files beneath the transport archive;
+the public hash receipt is also create-only mode 0600. Run it only after the
+canonicalization gate authorises provider acceptance:
+
+```bash
+.venv/bin/python scripts/run_application_sanity_live_smoke.py \
+  --backend openai_responses \
+  --model <exact-model> \
+  --api-key-env OPENAI_API_KEY \
+  --transport-archive-dir /private/outside-git/provider-exchanges \
+  --output /private/outside-git/application-sanity-openai.json
+```
+
+This mode remains synthetic and has no browser, release, application or mailbox
+authority. Excavation and hermetic tests do not execute the provider command.
