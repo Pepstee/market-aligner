@@ -11,6 +11,7 @@ from career_automation.application_sanity_review import (
     ApplicationSanityReviewError,
     RESULT_SCHEMA_VERSION,
     SanityReviewPackage,
+    SanityReviewReceipt,
     build_vacancy_review_material,
     review_application_package,
     verify_sanity_review_receipt,
@@ -360,6 +361,63 @@ def test_openai_transport_evidence_is_receipt_bound_and_fail_closed(tmp_path) ->
         )
     with pytest.raises(ValueError, match="transport evidence"):
         replace(receipt, transport_evidence=None)
+
+
+def test_sanity_verification_rejects_subclass_authority_objects(tmp_path) -> None:
+    candidate = package()
+    receipt = review_application_package(
+        candidate, client=client(ScriptedBackend(PASS), tmp_path)
+    )
+
+    class ReceiptSubclass(SanityReviewReceipt):
+        def __post_init__(self) -> None:
+            pass
+
+    forged_receipt = ReceiptSubclass(
+        **{
+            field: getattr(receipt, field)
+            for field in SanityReviewReceipt.__dataclass_fields__
+        }
+    )
+    with pytest.raises(TypeError, match="exact receipt type"):
+        verify_sanity_review_receipt(forged_receipt, candidate)
+
+    class PackageSubclass(SanityReviewPackage):
+        def __post_init__(self) -> None:
+            pass
+
+    forged_package = PackageSubclass(
+        **{
+            field: getattr(candidate, field)
+            for field in SanityReviewPackage.__dataclass_fields__
+        }
+    )
+    with pytest.raises(TypeError, match="exact package type"):
+        verify_sanity_review_receipt(receipt, forged_package)
+
+
+def test_sanity_authority_rejects_nested_and_mapping_subclasses(tmp_path) -> None:
+    candidate = package()
+    receipt = review_application_package(
+        candidate, client=client(ScriptedBackend(PASS), tmp_path)
+    )
+
+    class VacancySubclass(IntendedVacancy):
+        pass
+
+    with pytest.raises(TypeError, match="exact intended-vacancy type"):
+        replace(
+            candidate,
+            intended_vacancy=VacancySubclass(
+                **candidate.intended_vacancy.document()
+            ),
+        )
+
+    class ResultDictSubclass(dict):
+        pass
+
+    with pytest.raises(TypeError, match="inexact authority type"):
+        replace(receipt, model_result=ResultDictSubclass(receipt.model_result))
 
 
 def test_every_receipt_binding_detects_mutation(tmp_path, monkeypatch) -> None:

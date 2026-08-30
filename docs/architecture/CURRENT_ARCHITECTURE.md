@@ -40,6 +40,9 @@ runtime receipts remain outside the repository. Product code refers to profiles 
 - `llm` owns every model transport, including the optional direct OpenAI Responses adapter;
   application policy remains in `career_automation.application_sanity_review`, and provider
   adapters cannot gain release, browser, or content-materialisation authority.
+- Final sanity authority is one exact receipt/package contract. Its verifier rejects subclasses
+  and reconstructs nested invariants at each release boundary; the recovered parallel
+  employer-review runtime identity and release-verifier composition is not a second owner.
 - Legacy `career_automation` code remains behind these boundaries while capabilities are moved
   incrementally; its presence is not proof that every historical path is production-ready. Cover
   letters and CVs have separate exact-type runtime entry points. Preparation dispatches

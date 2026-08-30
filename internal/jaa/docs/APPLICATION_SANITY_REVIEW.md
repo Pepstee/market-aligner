@@ -91,6 +91,15 @@ the PDFs and verifies every deterministic binding. `_execute_submit` repeats
 that verification against the current in-memory package immediately before
 release consumption and the sole consequential `locator.click()`.
 
+Verification accepts only the exact `SanityReviewReceipt` and
+`SanityReviewPackage` concrete types, with exact intended-vacancy,
+vacancy-review-material and dictionary authority members. It invokes the
+canonical class invariants explicitly, so a subclass cannot suppress
+`__post_init__` or substitute an overridable document method. This retains the
+useful anti-substitution guarantee recovered from the historical
+employer-review runtime without restoring its separate runtime-identity,
+release-verifier or exact-package authority composition.
+
 Provider transport evidence is deliberately not written into the generic LLM
 cache. A cached semantic answer can never masquerade as the provider receipt
 for a fresh authority-bearing exchange. Exact private request and response

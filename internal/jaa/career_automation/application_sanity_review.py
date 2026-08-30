@@ -284,6 +284,9 @@ class SanityReviewPackage:
     vacancy_review_material: VacancyReviewMaterial | None = None
 
     def __post_init__(self) -> None:
+        if type(self.intended_vacancy) is not IntendedVacancy:
+            raise TypeError("sanity review requires the exact intended-vacancy type")
+        IntendedVacancy.__post_init__(self.intended_vacancy)
         if not self.cv_pdf_bytes or not self.cover_letter_pdf_bytes:
             raise ValueError("sanity review requires both exact final PDFs")
         if not re.fullmatch(r"[0-9a-f]{64}", self.application_source_identity):
@@ -295,7 +298,9 @@ class SanityReviewPackage:
         if len(set(self.approved_evidence_ids)) != len(self.approved_evidence_ids):
             raise ValueError("approved-evidence identifiers must be unique")
         if self.vacancy_review_material is not None:
-            self.vacancy_review_material.__post_init__()
+            if type(self.vacancy_review_material) is not VacancyReviewMaterial:
+                raise TypeError("sanity review requires exact vacancy-review material")
+            VacancyReviewMaterial.__post_init__(self.vacancy_review_material)
             if (
                 self.vacancy_review_material.raw_listing_sha256
                 != self.intended_vacancy.vacancy_sha256
@@ -462,6 +467,17 @@ class SanityReviewReceipt:
     schema_version: str = RECEIPT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        if (
+            type(self.package_hashes) is not dict
+            or type(self.intended_vacancy) is not IntendedVacancy
+            or type(self.model_result) is not dict
+            or (
+                self.transport_evidence is not None
+                and type(self.transport_evidence) is not dict
+            )
+        ):
+            raise TypeError("sanity receipt contains an inexact authority type")
+        IntendedVacancy.__post_init__(self.intended_vacancy)
         if self.schema_version != RECEIPT_SCHEMA_VERSION or self.verdict != "pass":
             raise ValueError("only a current PASS sanity receipt is valid")
         if (
@@ -644,7 +660,12 @@ def verify_sanity_review_receipt(
     receipt: SanityReviewReceipt, package: SanityReviewPackage
 ) -> None:
     """Recompute every deterministic binding without making a second model call."""
-    receipt.__post_init__()
+    if type(receipt) is not SanityReviewReceipt:
+        raise TypeError("sanity verification requires the exact receipt type")
+    if type(package) is not SanityReviewPackage:
+        raise TypeError("sanity verification requires the exact package type")
+    SanityReviewPackage.__post_init__(package)
+    SanityReviewReceipt.__post_init__(receipt)
     _, hashes = _package_document(package)
     if (
         dict(receipt.package_hashes) != hashes
