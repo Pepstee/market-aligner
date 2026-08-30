@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 ROOT = Path(__file__).resolve().parent
 DOMAIN = b"jaa-source-content-revision-v2\0"
 EXCLUDED_PREFIXES = (b"runtime_evidence/",)
@@ -82,11 +84,7 @@ def _runtime() -> Path:
 
 @pytest.fixture()
 def isolated_repository(tmp_path: Path) -> Path:
-    clone = tmp_path / "repository"
-    completed = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)), text=True, capture_output=True, check=False
-    )
-    assert completed.returncode == 0, completed.stderr
+    clone = clone_jaa_repository(ROOT, tmp_path / "repository")
     _git(clone, "config", "user.email", "jaa01-test@example.test")
     _git(clone, "config", "user.name", "JAA-01 test")
     current_sources = (
@@ -265,8 +263,13 @@ def test_certifier_rejects_unsafe_tracked_source_trees(
         target.unlink()
     elif attack == "unmerged":
         blob = _git(isolated_repository, "hash-object", "-w", "README.md").strip()
+        repository_prefix = _git(
+            isolated_repository, "rev-parse", "--show-prefix"
+        ).strip()
+        index_path = repository_prefix + b"README.md"
         _git(isolated_repository, "update-index", "-z", "--index-info", input=(
-            b"100644 " + blob + b" 1\tREADME.md\0" + b"100644 " + blob + b" 2\tREADME.md\0"
+            b"100644 " + blob + b" 1\t" + index_path + b"\0"
+            + b"100644 " + blob + b" 2\t" + index_path + b"\0"
         ))
     else:
         target.unlink()

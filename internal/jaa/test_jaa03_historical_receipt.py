@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 ROOT = Path(__file__).resolve().parent
 VALIDATOR = "scripts/accept_jaa03_receipt.py"
 
@@ -23,12 +25,7 @@ def _validate(root: Path) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture()
 def certified_clone(tmp_path: Path) -> Path:
-    clone = tmp_path / "certified-clone"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)),
-        text=True, capture_output=True, check=False,
-    )
-    assert copied.returncode == 0, copied.stderr
+    clone = clone_jaa_repository(ROOT, tmp_path / "certified-clone")
     assert _git(clone, "config", "user.name", "JAA-03 receipt tester").returncode == 0
     assert _git(clone, "config", "user.email", "jaa03-receipt@example.test").returncode == 0
     return clone

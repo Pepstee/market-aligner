@@ -7,19 +7,32 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 
 ROOT = Path(__file__).resolve().parent
 
 
 @pytest.fixture()
 def repository(tmp_path: Path) -> Path:
-    clone = tmp_path / "repository"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    return clone_jaa_repository(ROOT, tmp_path / "repository")
+
+
+def test_disposable_repository_preserves_the_market_aligner_jaa_boundary(
+    repository: Path,
+) -> None:
+    discovered = subprocess.run(
+        ("git", "rev-parse", "--show-toplevel"),
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
     )
-    assert copied.returncode == 0, copied.stderr
-    return clone
+    assert discovered.returncode == 0, discovered.stderr
+    market_aligner_root = Path(discovered.stdout.strip())
+    assert repository == market_aligner_root / "internal" / "jaa"
+    assert (market_aligner_root / ".git").is_dir()
+    assert not (repository / ".git").exists()
 
 
 def test_acceptance_declaration_runs_directly_and_as_extracted_data(

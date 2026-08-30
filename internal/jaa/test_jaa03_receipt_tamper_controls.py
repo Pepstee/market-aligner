@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 
 ROOT = Path(__file__).resolve().parent
 VALIDATOR = Path("scripts/accept_jaa03_receipt.py")
@@ -37,12 +39,7 @@ def _canonical(document: object) -> bytes:
 
 @pytest.fixture()
 def certified_repository(tmp_path: Path) -> Path:
-    clone = tmp_path / "certified"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    )
-    assert copied.returncode == 0, copied.stderr
+    clone = clone_jaa_repository(ROOT, tmp_path / "certified")
     assert _git(clone, "config", "user.name", "independent JAA-03 receipt tester").returncode == 0
     assert _git(clone, "config", "user.email", "jaa03-tester@example.test").returncode == 0
     return clone

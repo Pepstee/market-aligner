@@ -42,6 +42,13 @@ JAA00_EVIDENCE_SHA256 = "bf4a9726c9d0608f21fadcf2591bcc8ba92516cca9659288fc28e7b
 JAA00_RECEIPT_CONTENT_SHA256 = "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
 JAA00_RECEIPT_FILE_SHA256 = "a5c878dd91ee80a1709c5c8d17b64e9ac0486c917029a1d69e2c514db73f5357"
 JAA00_CAREER_PIPELINE_SHA256 = "6f57c4d62ea22cfd303a9481e2620cc6f747540597d9de96b5e5822abcb7b328"
+JAA00_LEGACY_REVISION = "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6"
+JAA_SUBTREE_IMPORT_COMMIT = "cb5da012c840b65a768a9b87db56a71a81082cd0"
+JAA_SUBTREE_SYNTHETIC_COMMIT = "c05fa7ab6ea17d7eca00c72d490db182a3d97ab2"
+JAA_SUBTREE_SPLIT_REVISION = "d56969dd94402186aa054fd1abe6ad8f142525d2"
+JAA_SUBTREE_TREE = "66082d2ca3d2c6ab21c7440ebd37dd1f892ec237"
+
+
 class CertificationError(RuntimeError):
     pass
 
@@ -74,6 +81,83 @@ def source_git_revision() -> str:
         return tracked_source_git_revision(ROOT)
     except TrackedSourceRevisionError as exc:
         raise CertificationError(str(exc)) from exc
+
+
+def _git_output(*argv: str) -> str:
+    completed = subprocess.run(
+        ("git", *argv),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        completed.returncode == 0,
+        f"cannot verify JAA Git lineage: {completed.stderr.strip()}",
+    )
+    return completed.stdout.strip()
+
+
+def require_trusted_jaa00_lineage(evidence_revision: str) -> dict[str, str]:
+    """Accept direct legacy ancestry or its exact, immutable subtree import."""
+    direct = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", evidence_revision, "HEAD"),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if direct.returncode == 0:
+        return {
+            "mode": "direct-ancestor",
+            "legacy_revision": evidence_revision,
+        }
+
+    require(
+        evidence_revision == JAA00_LEGACY_REVISION,
+        "tracked JAA-00 certification revision is not trusted legacy provenance",
+    )
+    imported = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", JAA_SUBTREE_IMPORT_COMMIT, "HEAD"),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        imported.returncode == 0,
+        "tracked JAA-00 certification revision has no trusted Market Aligner import",
+    )
+    require(
+        _git_output("rev-parse", "--show-prefix") == "internal/jaa/",
+        "trusted JAA subtree import is not running inside canonical Market Aligner",
+    )
+    import_record = _git_output(
+        "rev-list", "--parents", "-n", "1", JAA_SUBTREE_IMPORT_COMMIT
+    ).split()
+    require(
+        JAA_SUBTREE_SYNTHETIC_COMMIT in import_record[1:],
+        "trusted JAA subtree import is missing its synthetic source parent",
+    )
+    synthetic_tree = _git_output("rev-parse", f"{JAA_SUBTREE_SYNTHETIC_COMMIT}^{{tree}}")
+    imported_tree = _git_output("rev-parse", f"{JAA_SUBTREE_IMPORT_COMMIT}:internal/jaa")
+    require(
+        synthetic_tree == imported_tree == JAA_SUBTREE_TREE,
+        "trusted JAA subtree import tree does not match its source snapshot",
+    )
+    import_message = _git_output("show", "-s", "--format=%B", JAA_SUBTREE_SYNTHETIC_COMMIT)
+    require(
+        f"git-subtree-split: {JAA_SUBTREE_SPLIT_REVISION}" in import_message,
+        "trusted JAA subtree import is missing its source revision binding",
+    )
+    return {
+        "mode": "git-subtree-import",
+        "legacy_revision": evidence_revision,
+        "source_split_revision": JAA_SUBTREE_SPLIT_REVISION,
+        "synthetic_commit": JAA_SUBTREE_SYNTHETIC_COMMIT,
+        "import_commit": JAA_SUBTREE_IMPORT_COMMIT,
+        "imported_tree": JAA_SUBTREE_TREE,
+    }
 
 
 def readonly_observation(path: Path) -> dict[str, Any]:
@@ -200,12 +284,7 @@ def require_trusted_jaa00_receipt(
     require(evidence_repository.get("label") == "canonical-repository"
             and isinstance(evidence_revision, str) and len(evidence_revision) == 40,
             "tracked JAA-00 certification evidence has invalid repository provenance")
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", evidence_revision, "HEAD"],
-        cwd=ROOT, capture_output=True, text=True, check=False,
-    )
-    require(ancestry.returncode == 0,
-            "tracked JAA-00 certification revision is not an ancestor of the current source")
+    lineage = require_trusted_jaa00_lineage(evidence_revision)
     return {
         "status": "certified",
         "receipt_provenance": {
@@ -214,6 +293,7 @@ def require_trusted_jaa00_receipt(
         "evidence_sha256": JAA00_EVIDENCE_SHA256,
         "receipt_file_sha256": JAA00_RECEIPT_FILE_SHA256,
         "certified_revision": evidence_revision,
+        "lineage": lineage,
     }
 
 
@@ -330,6 +410,7 @@ def certify(args: argparse.Namespace) -> Path:
             "evidence_sha256": jaa00_review["evidence_sha256"],
             "receipt_file_sha256": jaa00_review["receipt_file_sha256"],
             "certified_revision": jaa00_review["certified_revision"],
+            "lineage": jaa00_review["lineage"],
         },
         "source_content_revision": revision,
         "source_content_revision_contract": source_content_revision_contract(),

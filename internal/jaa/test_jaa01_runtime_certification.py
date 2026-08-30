@@ -18,6 +18,7 @@ import pytest
 
 from career_automation.database import SCHEMA
 from career_automation.migrations import JAA_01_MIGRATIONS
+from testing_repository import clone_jaa_repository
 
 
 ROOT = Path(__file__).resolve().parent
@@ -115,12 +116,7 @@ def _receipt_for(database: Path, directory: Path) -> Path:
 @pytest.fixture()
 def clean_certifier_root(tmp_path: Path) -> Path:
     """Run clean-tree certification checks outside this edited test checkout."""
-    clone = tmp_path / "clean-certifier-repository"
-    cloned = subprocess.run(
-        ["git", "clone", "--no-local", str(ROOT), str(clone)],
-        text=True, capture_output=True, check=False,
-    )
-    assert cloned.returncode == 0, cloned.stderr
+    clone = clone_jaa_repository(ROOT, tmp_path / "clean-certifier-repository")
     current_sources = (
         CERTIFIER.relative_to(ROOT),
         Path("tracked_source_revision.py"),
@@ -213,6 +209,14 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
         "contract": "jaa-00-exact-evidence-trust-anchor/v1",
         "evidence_sha256": "bf4a9726c9d0608f21fadcf2591bcc8ba92516cca9659288fc28e7b9452ed161",
         "certified_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
+        "lineage": {
+            "mode": "git-subtree-import",
+            "legacy_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
+            "source_split_revision": "d56969dd94402186aa054fd1abe6ad8f142525d2",
+            "synthetic_commit": "c05fa7ab6ea17d7eca00c72d490db182a3d97ab2",
+            "import_commit": "cb5da012c840b65a768a9b87db56a71a81082cd0",
+            "imported_tree": "66082d2ca3d2c6ab21c7440ebd37dd1f892ec237",
+        },
     }
     assert document["scenario"]["replay_equal"] is True
     assert document["source_git_revision"] == _head(clean_certifier_root)

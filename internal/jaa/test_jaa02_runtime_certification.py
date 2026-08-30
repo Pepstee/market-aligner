@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 
 ROOT = Path(__file__).resolve().parent
 CERTIFIER = Path("scripts/certify_jaa02_runtime.py")
@@ -33,12 +35,7 @@ def _git(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture()
 def repository(tmp_path: Path) -> Path:
-    clone = tmp_path / "repository"
-    completed = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)),
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
+    clone = clone_jaa_repository(ROOT, tmp_path / "repository")
     assert _git(clone, "config", "user.name", "JAA-02 certification test").returncode == 0
     assert _git(clone, "config", "user.email", "jaa02@example.test").returncode == 0
     tracked_receipts = [
