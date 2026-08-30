@@ -7,7 +7,6 @@ from dataclasses import replace
 import pytest
 
 from career_automation.adversarial_recruiter import (
-    RESULT_SCHEMA_VERSION,
     RecruiterAssessmentPackage,
     assess_application_as_recruiter,
 )
@@ -17,6 +16,9 @@ from career_automation.candidate_application_factory import (
 from career_automation.evidence_matching import canonical_json
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.rendering import _build_text_pdf
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 from cv_generation.adversarial_rebuild import (
     AdversarialRebuildError,
     bind_cover_letter_recruiter_improvement,
@@ -769,28 +771,23 @@ def test_natural_full_letter_uses_only_typed_rhetoric_and_exact_evidence() -> No
 
 
 def _result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 61,
-        "verdict": "progress",
-        "reasons": ["The application uses relevant evidence."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 62,
-        "fit_range_percent": {"low": 50, "high": 72},
-        "overall_verdict": "strong_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
-        "strengths": [{"location": "cover_letter", "assessment": "Specific evidence."}],
-        "risks": [{"category": "relevance", "severity": "low", "location": "cover_letter", "assessment": "Employer proof could appear sooner."}],
+    value = fixture_recruiter_result(
+        fit_percent=62,
+        fit_low=50,
+        fit_high=72,
+        overall_verdict="strong_fit",
+    )
+    value.update({
+        "strengths": [{"location": "cover_letter", "assessment": "Specific evidence.", "outward_evidence_refs": ["cover_letter:char:0:1"]}],
+        "risks": [{"category": "relevance", "severity": "low", "location": "cover_letter", "assessment": "Employer proof could appear sooner.", "outward_evidence_refs": ["cover_letter:char:0:1"]}],
         "application_improvements": [
-            {"target": "cover_letter", "recommendation": "Lead with the evidence-led employer fact.", "expected_effect": "Makes the company match visible sooner."},
-            {"target": "cover_letter", "recommendation": "Add five years of unsupported ownership.", "expected_effect": "Would inflate seniority."},
-            {"target": "cv", "recommendation": "Change the CV order.", "expected_effect": "Moves project evidence."},
+            {"rank": 1, "target": "cover_letter", "recommendation": "Lead with the evidence-led employer fact.", "expected_effect": "Makes the company match visible sooner.", "support_required": False, "outward_evidence_refs": ["cover_letter:char:0:1"]},
+            {"rank": 2, "target": "cover_letter", "recommendation": "Add five years of unsupported ownership.", "expected_effect": "Would inflate seniority.", "support_required": True, "outward_evidence_refs": ["cover_letter:char:0:1"]},
+            {"rank": 3, "target": "cv", "recommendation": "Change the CV order.", "expected_effect": "Moves project evidence.", "support_required": False, "outward_evidence_refs": ["cv:char:0:1"]},
         ],
         "profile_improvements": [{"category": "experience", "recommendation": "Build larger-scale evidence.", "time_horizon": "months", "expected_effect": "Strengthens future applications."}],
-    }
+    })
+    return value
 
 
 class _Recruiter(Backend):

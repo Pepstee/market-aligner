@@ -43,6 +43,12 @@ runtime receipts remain outside the repository. Product code refers to profiles 
 - Final sanity authority is one exact receipt/package contract. Its verifier rejects subclasses
   and reconstructs nested invariants at each release boundary; the recovered parallel
   employer-review runtime identity and release-verifier composition is not a second owner.
+- Detached adversarial recruiter assessment is diagnostic and never release authority. Its v2
+  result preserves the recovered full-funnel value as explicit ATS, recruiter, hiring-manager and
+  interview-invitation progression estimates, plus evidence gaps and uncertainty drivers. These
+  remain labelled uncalibrated and cannot be consumed as an eligibility or submission decision.
+- Hermetic recruiter fixtures and final-sanity fixtures have distinct modules. This prevents the
+  historical combined employer-review fixture from recreating a shared diagnostic/release owner.
 - Legacy `career_automation` code remains behind these boundaries while capabilities are moved
   incrementally; its presence is not proof that every historical path is production-ready. Cover
   letters and CVs have separate exact-type runtime entry points. Preparation dispatches

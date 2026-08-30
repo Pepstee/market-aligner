@@ -7,13 +7,15 @@ from dataclasses import replace
 import pytest
 
 from career_automation.adversarial_recruiter import (
-    RESULT_SCHEMA_VERSION,
     RecruiterAssessmentPackage,
     assess_application_as_recruiter,
 )
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.evidence_matching import content_hash
 from career_automation.rendering import _build_text_pdf
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 from cv_generation.adversarial_rebuild import (
     AdversarialRebuildError,
     bind_recruiter_improvement,
@@ -63,21 +65,14 @@ def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
 
 
 def _recruiter_result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 55,
-        "verdict": "borderline",
-        "reasons": ["Relevant automation work is present but not prominent."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 52,
-        "fit_range_percent": {"low": 40, "high": 65},
-        "overall_verdict": "plausible_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
+    value = fixture_recruiter_result()
+    value.update({
         "strengths": [
-            {"location": "cv:projects", "assessment": "Relevant automation project."}
+            {
+                "location": "cv:projects",
+                "assessment": "Relevant automation project.",
+                "outward_evidence_refs": ["cv:char:0:1"],
+            }
         ],
         "risks": [
             {
@@ -85,18 +80,25 @@ def _recruiter_result() -> dict[str, object]:
                 "severity": "medium",
                 "location": "cv:projects",
                 "assessment": "The closest project is not prominent enough.",
+                "outward_evidence_refs": ["cv:char:0:1"],
             }
         ],
         "application_improvements": [
             {
+                "rank": 1,
                 "target": "cv",
                 "recommendation": "Lead with the strongest automation project.",
                 "expected_effect": "Makes the closest evidence visible sooner.",
+                "support_required": False,
+                "outward_evidence_refs": ["cv:char:0:1"],
             },
             {
+                "rank": 2,
                 "target": "cv",
                 "recommendation": "Claim five years of Kubernetes ownership.",
                 "expected_effect": "Would address a stated platform requirement.",
+                "support_required": True,
+                "outward_evidence_refs": ["job_listing:char:0:1"],
             },
         ],
         "profile_improvements": [
@@ -107,7 +109,8 @@ def _recruiter_result() -> dict[str, object]:
                 "expected_effect": "Addresses the remaining production-depth gap.",
             }
         ],
-    }
+    })
+    return value
 
 
 def _pdf(text: str) -> bytes:
