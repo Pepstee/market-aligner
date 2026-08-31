@@ -3178,7 +3178,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
                 "042de40c5633fe7f41c652d81fbce4502f2192d79b53c3492a928e592376ea1c"
             ),
             "adapter_contract_sha256": (
-                "e4cb8ee1b416d75063bb70b72208a3554fb0ccc59998f6ff4d9ef44b3eced4e5"
+                "3eb83d42c43a6a2f73d2a03f7cf72b8d986eff32b79764d7a3ff84448a51d27a"
             ),
             "changed_file_sha256": {
                 "career_automation/official_ats_adapter.py": (

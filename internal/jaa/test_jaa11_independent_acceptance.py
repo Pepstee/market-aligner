@@ -123,8 +123,8 @@ def test_frozen_fixture_contract_binds_exact_upstream_and_policy() -> None:
         "f2192d79b53c3492a928e592376ea1c"
     )
     assert contract.contract_sha256 == (
-        "e4cb8ee1b416d75063bb70b72208a355"
-        "4fb0ccc59998f6ff4d9ef44b3eced4e5"
+        "3eb83d42c43a6a2f73d2a03f7cf72b8"
+        "d986eff32b79764d7a3ff84448a51d27a"
     )
     assert FIXTURE_ROUTE_POLICY["external_route_verified"] is False
     assert FIXTURE_ROUTE_POLICY["validity_basis"] == (

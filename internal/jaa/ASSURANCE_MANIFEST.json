@@ -3059,7 +3059,7 @@
           "phase_a_source_content_revision": "sha256:127cefe54cac785661cc704df66a6f33532fa98a15cb4501754f9d6ddb408f06",
           "route_url": "http://127.0.0.1:0/applications/graphcore-build-engineer",
           "route_policy_sha256": "042de40c5633fe7f41c652d81fbce4502f2192d79b53c3492a928e592376ea1c",
-          "adapter_contract_sha256": "e4cb8ee1b416d75063bb70b72208a3554fb0ccc59998f6ff4d9ef44b3eced4e5",
+          "adapter_contract_sha256": "3eb83d42c43a6a2f73d2a03f7cf72b8d986eff32b79764d7a3ff84448a51d27a",
           "changed_file_sha256": {
             "career_automation/official_ats_adapter.py": "c80f8281e7f5a531c423a31e48644a803493673e10d0b45a9dbd458f11dea37a",
             "test_jaa11_independent_acceptance.py": "cbaaec9457b7f56195102eabe6c3301dfdae95b8924c6023ef3573cb0c302a87",
