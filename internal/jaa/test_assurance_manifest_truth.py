@@ -39,7 +39,7 @@ def _git(*arguments: str) -> bytes:
 
 
 def _source_content_revision_at(revision: str) -> str:
-    entries: list[tuple[bytes, bytes, bytes]] = []
+    metadata_entries: list[tuple[bytes, bytes, bytes]] = []
     for record in _git("ls-tree", "-r", "-z", "--full-tree", revision).split(b"\0"):
         if not record:
             continue
@@ -48,7 +48,38 @@ def _source_content_revision_at(revision: str) -> str:
         assert separator and object_type == b"blob"
         if path.startswith(b"runtime_evidence/"):
             continue
-        entries.append((path, mode, _git("cat-file", "blob", object_id.decode())))
+        metadata_entries.append((path, mode, object_id))
+
+    object_ids = [object_id for _path, _mode, object_id in metadata_entries]
+    completed = subprocess.run(
+        ("git", "cat-file", "--batch"),
+        cwd=REPOSITORY_ROOT,
+        input=b"\n".join(object_ids) + b"\n",
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    payloads: list[bytes] = []
+    cursor = 0
+    for expected_object_id in object_ids:
+        header_end = completed.stdout.index(b"\n", cursor)
+        actual_object_id, object_type, size_bytes = completed.stdout[
+            cursor:header_end
+        ].split()
+        assert actual_object_id == expected_object_id and object_type == b"blob"
+        payload_start = header_end + 1
+        payload_end = payload_start + int(size_bytes)
+        payloads.append(completed.stdout[payload_start:payload_end])
+        assert completed.stdout[payload_end : payload_end + 1] == b"\n"
+        cursor = payload_end + 1
+    assert cursor == len(completed.stdout)
+
+    entries = [
+        (path, mode, payload)
+        for (path, mode, _object_id), payload in zip(
+            metadata_entries, payloads, strict=True
+        )
+    ]
     digest = hashlib.sha256(SOURCE_CONTENT_REVISION_DOMAIN)
     for path, mode, payload in sorted(entries):
         for field in (path, mode, payload):

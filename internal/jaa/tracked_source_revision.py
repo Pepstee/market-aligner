@@ -50,9 +50,7 @@ def _git(repository: Path, *arguments: str, input_bytes: bytes | None = None) ->
     )
     if completed.returncode != 0:
         detail = completed.stderr.decode(errors="replace").strip()
-        raise TrackedSourceRevisionError(
-            f"git {' '.join(arguments)} failed: {detail}"
-        )
+        raise TrackedSourceRevisionError(f"git {' '.join(arguments)} failed: {detail}")
     return completed.stdout
 
 
@@ -63,8 +61,10 @@ def _excluded(path: bytes) -> bool:
 def _safe_relative_path(path: bytes) -> bool:
     decoded = os.fsdecode(path)
     pure = PurePosixPath(decoded)
-    return bool(decoded) and not pure.is_absolute() and all(
-        component not in {"", ".", ".."} for component in pure.parts
+    return (
+        bool(decoded)
+        and not pure.is_absolute()
+        and all(component not in {"", ".", ".."} for component in pure.parts)
     )
 
 
@@ -78,10 +78,7 @@ def source_git_revision(repository: str | Path) -> str:
     if not root.is_dir():
         raise TrackedSourceRevisionError("source repository is not a directory")
     revision = _git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()
-    if (
-        len(revision) != 40
-        or any(byte not in b"0123456789abcdef" for byte in revision)
-    ):
+    if len(revision) != 40 or any(byte not in b"0123456789abcdef" for byte in revision):
         raise TrackedSourceRevisionError("source Git revision is not a SHA-1 commit")
     return revision.decode("ascii")
 
@@ -173,18 +170,38 @@ def source_content_revision(repository: str | Path) -> str:
             raise TrackedSourceRevisionError(f"{message}: {display_path}") from exc
 
         if actual_mode != declared_mode:
-            raise TrackedSourceRevisionError(f"dirty tracked source mode: {display_path}")
+            raise TrackedSourceRevisionError(
+                f"dirty tracked source mode: {display_path}"
+            )
         identity_before = (
-            status_before.st_dev, status_before.st_ino, status_before.st_mode,
-            status_before.st_size, status_before.st_mtime_ns,
+            status_before.st_dev,
+            status_before.st_ino,
+            status_before.st_mode,
+            status_before.st_size,
+            status_before.st_mtime_ns,
         )
         identity_after = (
-            status_after.st_dev, status_after.st_ino, status_after.st_mode,
-            status_after.st_size, status_after.st_mtime_ns,
+            status_after.st_dev,
+            status_after.st_ino,
+            status_after.st_mode,
+            status_after.st_size,
+            status_after.st_mtime_ns,
         )
         if identity_before != identity_after:
             raise TrackedSourceRevisionError("dirty tracked source tree")
-        actual_object_id = _git(root, "hash-object", "--stdin", input_bytes=payload).strip()
+        # Git's loose-object identity is SHA-1 over the canonical blob header
+        # and payload.  Calculate it directly instead of starting one
+        # ``git hash-object`` process per tracked file; large recovered trees
+        # contain tens of thousands of files and the process-per-file form
+        # made certification take tens of minutes without changing evidence.
+        actual_object_id = (
+            hashlib.sha1(
+                b"blob " + str(len(payload)).encode("ascii") + b"\0" + payload,
+                usedforsecurity=False,
+            )
+            .hexdigest()
+            .encode("ascii")
+        )
         if actual_object_id != object_id:
             raise TrackedSourceRevisionError("dirty tracked source tree")
         for field in (path, declared_mode, payload):
