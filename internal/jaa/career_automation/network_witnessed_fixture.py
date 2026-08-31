@@ -823,6 +823,17 @@ def _fit_database(
         raise NetworkWitnessedFixtureError("frozen job identity differs")
     if OpportunityGate(database).bootstrap([job]).queued != 1:
         raise NetworkWitnessedFixtureError("frozen vacancy was not queued")
+    with database.transaction(immediate=True) as connection:
+        if (
+            connection.execute(
+                "UPDATE pipeline_jobs SET created_at=? WHERE job_key=?",
+                (today.isoformat(), job.key),
+            ).rowcount
+            != 1
+        ):
+            raise NetworkWitnessedFixtureError(
+                "frozen vacancy observation time was not bound"
+            )
     cache = RawResponseCache(output_root / "raw-cache")
     coordinator = Opportunity1Coordinator(
         database,
