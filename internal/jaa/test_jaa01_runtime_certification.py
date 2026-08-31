@@ -513,6 +513,14 @@ def test_checked_in_jaa01_evidence_is_historical_content_addressed_and_path_free
         "contract": "jaa-00-exact-evidence-trust-anchor/v1",
         "evidence_sha256": "bf4a9726c9d0608f21fadcf2591bcc8ba92516cca9659288fc28e7b9452ed161",
         "certified_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
+        "lineage": {
+            "mode": "git-subtree-import",
+            "legacy_revision": "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6",
+            "source_split_revision": "d56969dd94402186aa054fd1abe6ad8f142525d2",
+            "synthetic_commit": "c05fa7ab6ea17d7eca00c72d490db182a3d97ab2",
+            "import_commit": "cb5da012c840b65a768a9b87db56a71a81082cd0",
+            "imported_tree": "66082d2ca3d2c6ab21c7440ebd37dd1f892ec237",
+        },
     }
     # A checked-in receipt records what its historical certification observed.
     # Present mutable-source state belongs exclusively to JAA-00 recertification,

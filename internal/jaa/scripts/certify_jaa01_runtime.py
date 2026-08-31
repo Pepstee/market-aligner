@@ -110,23 +110,7 @@ def _git_output(*argv: str) -> str:
 
 def require_trusted_jaa00_lineage(evidence_revision: str) -> dict[str, str]:
     """Accept direct legacy ancestry or its exact, immutable subtree import."""
-    direct = subprocess.run(
-        ("git", "merge-base", "--is-ancestor", evidence_revision, "HEAD"),
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if direct.returncode == 0:
-        return {
-            "mode": "direct-ancestor",
-            "legacy_revision": evidence_revision,
-        }
-
-    require(
-        evidence_revision == JAA00_LEGACY_REVISION,
-        "tracked JAA-00 certification revision is not trusted legacy provenance",
-    )
+    prefix = _git_output("rev-parse", "--show-prefix")
     imported = subprocess.run(
         ("git", "merge-base", "--is-ancestor", JAA_SUBTREE_IMPORT_COMMIT, "HEAD"),
         cwd=ROOT,
@@ -134,12 +118,30 @@ def require_trusted_jaa00_lineage(evidence_revision: str) -> dict[str, str]:
         text=True,
         check=False,
     )
+    if prefix != "internal/jaa/" or imported.returncode != 0:
+        direct = subprocess.run(
+            ("git", "merge-base", "--is-ancestor", evidence_revision, "HEAD"),
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if direct.returncode == 0:
+            return {
+                "mode": "direct-ancestor",
+                "legacy_revision": evidence_revision,
+            }
+
+    require(
+        evidence_revision == JAA00_LEGACY_REVISION,
+        "tracked JAA-00 certification revision is not trusted legacy provenance",
+    )
     require(
         imported.returncode == 0,
         "tracked JAA-00 certification revision has no trusted Market Aligner import",
     )
     require(
-        _git_output("rev-parse", "--show-prefix") == "internal/jaa/",
+        prefix == "internal/jaa/",
         "trusted JAA subtree import is not running inside canonical Market Aligner",
     )
     import_record = _git_output(
