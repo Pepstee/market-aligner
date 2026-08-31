@@ -19,6 +19,7 @@ import pytest
 from career_automation.database import SCHEMA
 from career_automation.migrations import JAA_01_MIGRATIONS
 from testing_repository import clone_jaa_repository
+from tracked_source_revision import source_content_revision
 
 
 ROOT = Path(__file__).resolve().parent
@@ -47,10 +48,20 @@ def _head(root: Path) -> str:
 
 def _jaa01_receipt() -> Path:
     receipts = sorted((ROOT / "runtime_evidence" / "jaa01").glob("sha256-*.json"))
-    assert len(receipts) == 1, (
-        f"expected exactly one checked-in JAA-01 receipt, found {receipts}"
+    current_revision = source_content_revision(ROOT)
+    current = [
+        receipt
+        for receipt in receipts
+        if json.loads(receipt.read_text(encoding="utf-8")).get(
+            "source_content_revision"
+        )
+        == current_revision
+    ]
+    assert len(current) == 1, (
+        "expected one current checked-in JAA-01 receipt while preserving historical "
+        f"receipts, found {current} among {receipts}"
     )
-    return receipts[0]
+    return current[0]
 
 
 def _runtime() -> Path:
@@ -324,6 +335,16 @@ def test_runtime_certifier_writes_disposable_absolute_evidence_and_fails_closed(
     assert not any(value.startswith("/") for value in _strings(document))
     assert _sha256(database) == database_hash_before
     assert _sha256(receipt) == receipt_hash_before
+
+    historical_payload = b'{"historical":true}\n'
+    historical_path = evidence / (
+        "sha256-" + hashlib.sha256(historical_payload).hexdigest() + ".json"
+    )
+    historical_path.write_bytes(historical_payload)
+    replayed = _run(database, receipt, evidence, clean_certifier_root)
+    assert replayed.returncode == 0, replayed.stderr
+    assert historical_path.read_bytes() == historical_payload
+    assert Path(json.loads(replayed.stdout)["receipt"]) == document_path
 
     # A conflicting pre-existing content-addressed receipt cannot be overwritten.
     document_path.write_text("{}", encoding="utf-8")

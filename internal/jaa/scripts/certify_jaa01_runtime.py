@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -601,11 +602,16 @@ def certify(args: argparse.Namespace) -> Path:
     require_unlinked_output_path(evidence_directory)
     destination = evidence_directory / f"sha256-{content_hash}.json"
     require_unlinked_output_path(destination)
-    existing = list(evidence_directory.glob("*.json"))
-    require(
-        not existing or existing == [destination],
-        "refusing to retain multiple JAA-01 certification receipts",
-    )
+    existing = sorted(evidence_directory.glob("*.json"))
+    for historical in existing:
+        if historical == destination:
+            continue
+        match = re.fullmatch(r"sha256-([0-9a-f]{64})\.json", historical.name)
+        require(
+            match is not None
+            and hashlib.sha256(historical.read_bytes()).hexdigest() == match.group(1),
+            "historical JAA-01 receipt is not valid content-addressed evidence",
+        )
     if destination.exists():
         require(
             destination.read_bytes() == payload,
