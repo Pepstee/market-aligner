@@ -31,7 +31,7 @@ def _manifest() -> dict[str, object]:
 def _git(*arguments: str) -> bytes:
     return subprocess.run(
         ("git", *arguments),
-        cwd=ROOT,
+        cwd=REPOSITORY_ROOT,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

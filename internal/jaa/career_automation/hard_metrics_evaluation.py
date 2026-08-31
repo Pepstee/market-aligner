@@ -327,7 +327,9 @@ class _RegistryEntry:
 _FIXTURE_ENTRY = _RegistryEntry(
     evidence_id="jaa07-locked-application-packs-v1",
     path_base="repository_root",
-    relative_path="career_automation/fixtures/jaa07_locked_application_packs.json",
+    relative_path=(
+        "career_automation/fixtures/jaa07_locked_application_packs_hard_metrics_v1.json"
+    ),
     sha256="e24029378de5a36d1a43f676efa6d1ef2417763305af0bdbf55d4700af66d6d5",
 )
 _REPORT_ENTRY = _RegistryEntry(
@@ -452,7 +454,9 @@ def _operator_control_root(repository_root: Path) -> Path:
     configured = os.environ.get("JAA_OPERATOR_CONTROL_ROOT")
     if configured is not None:
         if not configured or "\0" in configured:
-            raise EvidenceRegistryError("operator control root configuration is invalid")
+            raise EvidenceRegistryError(
+                "operator control root configuration is invalid"
+            )
         control = Path(configured)
         if not control.is_absolute() or control.is_symlink():
             raise EvidenceRegistryError(
@@ -472,7 +476,9 @@ def _operator_control_root(repository_root: Path) -> Path:
     if not resolved.is_dir():
         raise EvidenceRegistryError("operator control root is not a directory")
     if configured is not None and resolved != control:
-        raise EvidenceRegistryError("operator control root must be lexical and canonical")
+        raise EvidenceRegistryError(
+            "operator control root must be lexical and canonical"
+        )
     return resolved
 
 
