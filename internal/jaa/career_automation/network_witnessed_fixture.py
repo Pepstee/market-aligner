@@ -1559,7 +1559,11 @@ def _execute_worker(
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
         elapsed: dict[str, int] = {}
-        executor = LocalBrowserExecutor(store, repository_root=repository)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=repository,
+            clock=lambda: _fixture_now(database),
+        )
         user_data = output_root / "chromium-profile"
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
