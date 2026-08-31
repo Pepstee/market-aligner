@@ -777,6 +777,11 @@ def _fit_database(
     authority: FrozenVacancyAuthority,
 ) -> tuple[CareerDatabase, object, tuple[Requirement, ...]]:
     database = CareerDatabase(output_root / "workflow.sqlite3")
+    # This is a replay of a content-addressed frozen corpus.  Bind every
+    # downstream temporal decision to the corpus observation date so the
+    # synthetic acceptance fixture remains reproducible instead of expiring
+    # with the host wall clock.
+    today = datetime.fromisoformat(authority.observed_at.replace("Z", "+00:00")).date()
     payload = dict(authority.queue_payload)
     payload.update(
         {
@@ -823,6 +828,7 @@ def _fit_database(
             "jaa10-network-witnessed-worker",
             cache,
             retriever=_FrozenCorpusResearch(cache, authority),
+            as_of=today,
         ),
         signal_deriver=lambda _dossier: [],
     )
@@ -852,11 +858,6 @@ def _fit_database(
         )
         for index, anchor in enumerate(authority.requirement_anchors, 1)
     )
-    # This is a replay of a content-addressed frozen corpus.  Bind every
-    # downstream temporal decision to the corpus observation date so the
-    # synthetic acceptance fixture remains reproducible instead of expiring
-    # with the host wall clock.
-    today = datetime.fromisoformat(authority.observed_at.replace("Z", "+00:00")).date()
     valid_until = today.replace(year=today.year + 1).isoformat()
     graph = CandidateGraph(database.path)
     for index, requirement in enumerate(requirements, 1):
