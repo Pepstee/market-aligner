@@ -23,6 +23,7 @@ from testing_repository import historical_path
 
 
 INCIDENT_SHA256 = "3dd13ba9709c7679152f2fc938c4495e2631796712f724f56ab0c82bb34aa0d2"
+ROOT = Path(__file__).resolve().parent
 OPERATIONAL_STATE = historical_path(
     "/home/gutua/software-factory/.incoming/"
     "mac-jaa-assurance-20260805-e1bb35a/operational-state"
@@ -206,7 +207,7 @@ def test_malformed_encrypted_and_image_only_pdfs_block(
 
 
 def test_all_enumerated_browser_clicks_are_inside_guarded_executor_boundaries() -> None:
-    source_path = Path("career_automation/browser_executor.py")
+    source_path = ROOT / "career_automation/browser_executor.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     parents: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(tree):
@@ -234,7 +235,9 @@ def test_all_enumerated_browser_clicks_are_inside_guarded_executor_boundaries() 
 
 
 def test_release_authority_receipts_are_required_not_optional() -> None:
-    source = Path("career_automation/browser_executor.py").read_text(encoding="utf-8")
+    source = (ROOT / "career_automation/browser_executor.py").read_text(
+        encoding="utf-8"
+    )
     assert "document_assurance_receipts: tuple[" in source
     assert (
         "document_assurance_receipts: tuple[" in source
@@ -250,9 +253,7 @@ def test_release_authority_receipts_are_required_not_optional() -> None:
 
 
 def test_every_release_authority_constructor_supplies_semantic_receipt() -> None:
-    paths = tuple(Path(".").glob("*.py")) + tuple(
-        Path("career_automation").glob("*.py")
-    )
+    paths = tuple(ROOT.glob("*.py")) + tuple((ROOT / "career_automation").glob("*.py"))
     constructors = []
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -268,7 +269,9 @@ def test_every_release_authority_constructor_supplies_semantic_receipt() -> None
 
 
 def test_only_final_submit_click_has_immediate_semantic_reverification() -> None:
-    source = Path("career_automation/browser_executor.py").read_text(encoding="utf-8")
+    source = (ROOT / "career_automation/browser_executor.py").read_text(
+        encoding="utf-8"
+    )
     tree = ast.parse(source)
     submit = next(
         node

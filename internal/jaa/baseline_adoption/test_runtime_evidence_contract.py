@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -36,7 +35,9 @@ def test_tracked_identity_documents_are_credential_free_and_consistent() -> None
     )
     for path, text in texts.items():
         for pattern in credential_value_patterns:
-            assert re.search(pattern, text) is None, f"credential value pattern in {path.name}"
+            assert re.search(pattern, text) is None, (
+                f"credential value pattern in {path.name}"
+            )
 
     marker = json.loads(texts[marker_path])
     canonical = marker["canonical_repository"]
@@ -55,7 +56,9 @@ def test_tracked_identity_documents_are_credential_free_and_consistent() -> None
     baseline = texts[baseline_path]
     assert "neutral successor repository" in baseline
     assert "recoverable, unmodified, explicitly non-canonical source" in baseline
-    assert "Both known `giga-user/market-aligner` copies are historical only" in baseline
+    assert (
+        "Both known `giga-user/market-aligner` copies are historical only" in baseline
+    )
 
     evidence = _evidence_document(EVIDENCE)
     assert evidence["repository"]["label"] == "canonical-repository"
@@ -102,7 +105,8 @@ def _receipt(runtime_root: Path) -> Path:
 
 
 def _assert_v2_evidence_bindings(
-    evidence: dict[str, object], receipt_document: dict[str, object],
+    evidence: dict[str, object],
+    receipt_document: dict[str, object],
 ) -> None:
     """Independently compare every deterministic v2 publication binding."""
     content = receipt_document["content"]
@@ -134,8 +138,9 @@ def _assert_v2_evidence_bindings(
             "sha256": "bccc6c760d37c8467173d198efe26bbbb0566584fdeefd98079b483bbd903cd6",
         },
     }
-    assert {item["path"]: item for item in evidence["dependency_records"]} \
-        == expected_dependencies
+    assert {
+        item["path"]: item for item in evidence["dependency_records"]
+    } == expected_dependencies
     for name, database in content["databases"].items():
         snapshot = database["frozen_snapshot"]
         published = evidence["databases"][name]
@@ -159,7 +164,9 @@ def _assert_v2_evidence_bindings(
         "certification-binding",
     ),
 )
-def test_independent_checks_reject_every_v2_evidence_binding_mismatch(mismatch: str) -> None:
+def test_independent_checks_reject_every_v2_evidence_binding_mismatch(
+    mismatch: str,
+) -> None:
     """Independent assertions reject every required v2 evidence mismatch."""
     runtime = _runtime_root()
     receipt_document = json.loads(_receipt(runtime).read_text(encoding="utf-8"))
@@ -186,7 +193,8 @@ def test_independent_checks_reject_every_v2_evidence_binding_mismatch(mismatch: 
 
 
 def _public(
-    *arguments: str, cwd: Path = ROOT,
+    *arguments: str,
+    cwd: Path = ROOT,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     return subprocess.run(
@@ -206,10 +214,15 @@ def _clean_repository(destination: Path) -> Path:
             "clone",
             "-q",
             "--no-local",
+            "--single-branch",
+            "--depth",
+            "1",
             str(REPOSITORY_ROOT),
             str(destination),
         ],
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     return destination / "internal" / "jaa"
@@ -226,7 +239,10 @@ def _assert_no_sidecars_or_temporaries(root: Path) -> None:
         path.relative_to(root)
         for path in root.rglob("*")
         if path.is_file()
-        and (path.name.endswith(forbidden_suffixes) or path.name.startswith(forbidden_prefixes))
+        and (
+            path.name.endswith(forbidden_suffixes)
+            or path.name.startswith(forbidden_prefixes)
+        )
     ]
     assert not offenders
 
@@ -242,7 +258,12 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
     content = receipt_document["content"]
     before = _runtime_files(runtime)
     reconciled = _public(
-        "reconcile", "--receipt", str(receipt), "--data-root", str(runtime), cwd=repository,
+        "reconcile",
+        "--receipt",
+        str(receipt),
+        "--data-root",
+        str(runtime),
+        cwd=repository,
     )
     assert reconciled.returncode == 0, reconciled.stderr
     reconciliation = json.loads(reconciled.stdout)
@@ -250,7 +271,11 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
     # Run the public rollback-manifest command after reconciliation, exactly as its
     # precondition requires.  It must describe removal only; it must not remove data.
     manifest_result = _public(
-        "rollback-manifest", "--receipt", str(receipt), "--data-root", str(runtime),
+        "rollback-manifest",
+        "--receipt",
+        str(receipt),
+        "--data-root",
+        str(runtime),
         cwd=repository,
     )
     assert manifest_result.returncode == 0, manifest_result.stderr
@@ -258,9 +283,12 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
 
     review_result = _public(
         "independent-review",
-        "--receipt", str(receipt),
-        "--data-root", str(runtime),
-        "--repository", str(repository),
+        "--receipt",
+        str(receipt),
+        "--data-root",
+        str(runtime),
+        "--repository",
+        str(repository),
         cwd=repository,
     )
     # The frozen databases and their content-addressed receipt remain valid
@@ -299,8 +327,16 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
         assert tracked["source_label"] == record["source"]["label"]
         assert tracked["destination_label"] == record["destination"]["label"]
         assert tracked["snapshot_sha256"] == frozen["sha256"] == actual["sha256"]
-        assert tracked["schema_sha256"] == frozen["schema_sha256"] == actual["schema_sha256"]
-        assert tracked["schema_objects"] == frozen["schema_objects"] == actual["schema_objects"]
+        assert (
+            tracked["schema_sha256"]
+            == frozen["schema_sha256"]
+            == actual["schema_sha256"]
+        )
+        assert (
+            tracked["schema_objects"]
+            == frozen["schema_objects"]
+            == actual["schema_objects"]
+        )
         assert tracked["counts"] == frozen["table_counts"] == actual["table_counts"]
         assert actual["integrity_check"] == ["ok"]
         assert manifest_actions[database] == {
@@ -329,8 +365,14 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
     for database in evidence["databases"]:
         observed = content["databases"][database]["capture"]
         tracked = capture[database]
-        assert tracked["main_content_unchanged_during_capture"] == observed["main_content_unchanged"]
-        assert tracked["wal_content_unchanged_during_capture"] == observed["wal_content_unchanged"]
+        assert (
+            tracked["main_content_unchanged_during_capture"]
+            == observed["main_content_unchanged"]
+        )
+        assert (
+            tracked["wal_content_unchanged_during_capture"]
+            == observed["wal_content_unchanged"]
+        )
         assert tracked["drift_observed"] == observed["drift_observed"]
         assert tracked.get("changed_components", []) == observed["changed_components"]
         if "shm_comparison" in tracked:
@@ -345,7 +387,10 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
     assert evidence["rollback"] == {
         "precondition": "reconcile-must-pass-immediately-before-removal",
         "preserved_source_labels": ["source:raw_jobs", "source:career_pipeline"],
-        "removable_destination_labels": ["destination:raw_jobs", "destination:career_pipeline"],
+        "removable_destination_labels": [
+            "destination:raw_jobs",
+            "destination:career_pipeline",
+        ],
     }
     assert manifest["precondition"] == "reconcile must pass immediately before removal"
     assert _runtime_files(runtime) == before
@@ -354,11 +399,17 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
     # Tampering a receipt copy must be rejected by the same public verifier.
     tampered_receipt = tmp_path / receipt.name
     tampered_receipt.write_text(
-        receipt.read_text(encoding="utf-8").replace("canonical-repository", "forged-repository", 1),
+        receipt.read_text(encoding="utf-8").replace(
+            "canonical-repository", "forged-repository", 1
+        ),
         encoding="utf-8",
     )
     tampered = _public(
-        "reconcile", "--receipt", str(tampered_receipt), "--data-root", str(runtime),
+        "reconcile",
+        "--receipt",
+        str(tampered_receipt),
+        "--data-root",
+        str(runtime),
         cwd=repository,
     )
     assert tampered.returncode == 2
@@ -372,7 +423,11 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
     with sqlite3.connect(altered_database) as connection:
         connection.execute("PRAGMA user_version = 1")
     altered = _public(
-        "reconcile", "--receipt", str(receipt), "--data-root", str(altered_root),
+        "reconcile",
+        "--receipt",
+        str(receipt),
+        "--data-root",
+        str(altered_root),
         cwd=repository,
     )
     assert altered.returncode == 2
@@ -381,7 +436,9 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
     assert _runtime_files(runtime) == before
 
 
-def test_tracked_repository_excludes_runtime_data_personal_paths_and_environment_credentials() -> None:
+def test_tracked_repository_excludes_runtime_data_personal_paths_and_environment_credentials() -> (
+    None
+):
     runtime = _runtime_root()
     receipt = _receipt(runtime)
     tracked = subprocess.run(
@@ -392,23 +449,35 @@ def test_tracked_repository_excludes_runtime_data_personal_paths_and_environment
 
     database_suffixes = (".sqlite", ".sqlite3", ".db", "-wal", "-shm")
     jaa00_evidence_prefixes = ("baseline_adoption/", "runtime_evidence/JAA-00")
-    operational_data_prefixes = ("scraper/data/", "profiler/data/", "outputs/", "state/")
+    operational_data_prefixes = (
+        "scraper/data/",
+        "profiler/data/",
+        "outputs/",
+        "state/",
+    )
     assert not [
-        path for path in tracked_paths
+        path
+        for path in tracked_paths
         if path.startswith(operational_data_prefixes)
-        or (path.startswith(jaa00_evidence_prefixes) and path.endswith(database_suffixes))
+        or (
+            path.startswith(jaa00_evidence_prefixes)
+            and path.endswith(database_suffixes)
+        )
     ]
     tracked_text = b"\n".join(
-        (ROOT / path).read_bytes()
-        for path in tracked_paths
-        if (ROOT / path).is_file()
+        (ROOT / path).read_bytes() for path in tracked_paths if (ROOT / path).is_file()
     )
     assert str(runtime).encode() not in tracked_text
     assert str(receipt).encode() not in tracked_text
 
     # Only compare actual configured secret values; names and redaction examples are
     # legitimate source code and do not demonstrate a tracked credential.
-    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY"):
+    for name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+    ):
         value = os.environ.get(name)
         if value and len(value) >= 8:
             assert value.encode() not in tracked_text, name

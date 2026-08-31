@@ -307,6 +307,13 @@ def test_geometry_and_structure_negative_controls(tmp_path) -> None:
     )
     with pytest.raises(DocumentQualityError, match="minimum page margin"):
         _minimum_margin(bbox, (595.0, 842.0), 1)
+    bbox.write_text(
+        '<html><body><doc><page width="595" height="842">'
+        '<word xMin="35.5" yMin="40" xMax="100" yMax="60">text</word>'
+        "</page></doc></body></html>",
+        encoding="utf-8",
+    )
+    assert _minimum_margin(bbox, (595.0, 842.0), 1) == 36.0
     with pytest.raises(DocumentQualityError, match="font hierarchy"):
         _font_hierarchy(replace(artifact, pdf_bytes=b"%PDF-1.4\n/F1 10 Tf"))
 
