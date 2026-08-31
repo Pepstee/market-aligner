@@ -35,7 +35,11 @@ SOURCE_REVISION_EXCLUSIONS = (b"runtime_evidence/",)
 
 def _git(root: Path, *arguments: str) -> bytes:
     completed = subprocess.run(
-        ("git", *arguments), cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ("git", *arguments),
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
     return completed.stdout
@@ -76,18 +80,30 @@ def _live_connection(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=30)
 
 
-def _contract(name: str, source_root: Path, path: Path, *, counts: dict[str, int] | None = None,
-              schema: list[list[Any]] | None = None) -> dict[str, object]:
+def _contract(
+    name: str,
+    source_root: Path,
+    path: Path,
+    *,
+    counts: dict[str, int] | None = None,
+    schema: list[list[Any]] | None = None,
+) -> dict[str, object]:
     with _live_connection(path) as connection:
-        observed_schema = [list(row) for row in connection.execute(
-            "SELECT type,name,tbl_name,sql FROM sqlite_schema "
-            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
-        )]
+        observed_schema = [
+            list(row)
+            for row in connection.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+            )
+        ]
         observed_counts = {
-            row[1]: int(connection.execute(
-                'SELECT COUNT(*) FROM "' + row[1].replace('"', '""') + '"'
-            ).fetchone()[0])
-            for row in observed_schema if row[0] == "table"
+            row[1]: int(
+                connection.execute(
+                    'SELECT COUNT(*) FROM "' + row[1].replace('"', '""') + '"'
+                ).fetchone()[0]
+            )
+            for row in observed_schema
+            if row[0] == "table"
         }
     chosen_schema = observed_schema if schema is None else schema
     return {
@@ -98,15 +114,19 @@ def _contract(name: str, source_root: Path, path: Path, *, counts: dict[str, int
         # command must retain them as historical observations, not remeasurements.
         "size": path.stat().st_size,
         "sha256": _sha256(path),
-        "schema_sha256": hashlib.sha256(json.dumps(
-            chosen_schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode()).hexdigest(),
+        "schema_sha256": hashlib.sha256(
+            json.dumps(
+                chosen_schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
         "schema_objects": len(chosen_schema),
         "table_counts": observed_counts if counts is None else counts,
     }
 
 
-def _run(source_root: Path, evidence: Path, contract: list[dict[str, object]] | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    source_root: Path, evidence: Path, contract: list[dict[str, object]] | None = None
+) -> subprocess.CompletedProcess[str]:
     # The command certifies its own tracked source tree.  Run it from a fresh
     # clone so this test module's deliberately uncommitted edits cannot mask
     # the source-side behaviour being tested.
@@ -117,10 +137,15 @@ def _run(source_root: Path, evidence: Path, contract: list[dict[str, object]] | 
                 "git",
                 "clone",
                 "--no-local",
+                "--single-branch",
+                "--depth",
+                "1",
                 str(REPOSITORY_ROOT),
                 str(repository),
             ),
-            text=True, capture_output=True, check=False,
+            text=True,
+            capture_output=True,
+            check=False,
         )
         assert cloned.returncode == 0, cloned.stderr
     if contract is None:
@@ -134,8 +159,14 @@ raise SystemExit(cli.main(sys.argv[2:]))
 """
         command = [sys.executable, "-c", bootstrap, json.dumps(contract)]
     return subprocess.run(
-        [*command, "recertify-sources", "--source-root", str(source_root),
-         "--evidence-directory", str(evidence)],
+        [
+            *command,
+            "recertify-sources",
+            "--source-root",
+            str(source_root),
+            "--evidence-directory",
+            str(evidence),
+        ],
         cwd=repository / "internal" / "jaa",
         text=True,
         capture_output=True,
@@ -159,16 +190,19 @@ def _make_wal(path: Path, *, rows: int = 8) -> sqlite3.Connection:
     writer.execute("PRAGMA journal_mode=WAL")
     writer.execute("PRAGMA wal_autocheckpoint=0")
     writer.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
-    writer.executemany("INSERT INTO ledger(value) VALUES (?)", [(f"seed-{n}",) for n in range(rows)])
+    writer.executemany(
+        "INSERT INTO ledger(value) VALUES (?)", [(f"seed-{n}",) for n in range(rows)]
+    )
     assert Path(str(path) + "-wal").is_file()
     assert Path(str(path) + "-shm").is_file()
     return writer
 
 
 def _source_state(path: Path) -> dict[str, bytes | None]:
-    return {name: candidate.read_bytes() if candidate.exists() else None for name, candidate in {
-        "main": path, "wal": Path(str(path) + "-wal")
-    }.items()}
+    return {
+        name: candidate.read_bytes() if candidate.exists() else None
+        for name, candidate in {"main": path, "wal": Path(str(path) + "-wal")}.items()
+    }
 
 
 def _strings(value: object) -> list[str]:
@@ -181,7 +215,9 @@ def _strings(value: object) -> list[str]:
     return []
 
 
-def test_real_operator_sources_recertify_without_path_disclosure_or_source_mutation(tmp_path: Path) -> None:
+def test_real_operator_sources_recertify_without_path_disclosure_or_source_mutation(
+    tmp_path: Path,
+) -> None:
     """The real operator root is covered without copying it into the repository."""
     paths = {name: LIVE_ROOT / relative for name, relative in LIVE_RELATIVE.items()}
     assert all(path.is_file() and not path.is_symlink() for path in paths.values())
@@ -201,10 +237,14 @@ def test_real_operator_sources_recertify_without_path_disclosure_or_source_mutat
         assert record["open_semantics"]["negative_write_probe"]["rejected"] is True
         # The historical source contract is not silently updated to its live view.
         assert record["historical_observation"]["observed_table_counts"] != {}
-        assert record["historical_observation"]["observed_sha256"] != record["current_measurement"].get("sha256")
+        assert record["historical_observation"]["observed_sha256"] != record[
+            "current_measurement"
+        ].get("sha256")
 
 
-def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(tmp_path: Path) -> None:
+def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(
+    tmp_path: Path,
+) -> None:
     source_root = tmp_path / "source"
     raw_jobs = source_root / "inputs" / "raw_jobs.sqlite3"
     career_pipeline = source_root / "inputs" / "career_pipeline.sqlite3"
@@ -215,12 +255,20 @@ def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(tmp_pa
             _contract("raw_jobs", source_root, raw_jobs),
             _contract("career_pipeline", source_root, career_pipeline),
         ]
-        before = {"raw_jobs": _source_state(raw_jobs), "career_pipeline": _source_state(career_pipeline)}
+        before = {
+            "raw_jobs": _source_state(raw_jobs),
+            "career_pipeline": _source_state(career_pipeline),
+        }
         result = _run(source_root, tmp_path / "evidence", contract)
         receipt, document = _receipt(result)
         content = document["content"]
-        observed = datetime.fromisoformat(content["observed_at_utc"].replace("Z", "+00:00"))
-        assert observed.tzinfo is not None and observed.utcoffset() == timezone.utc.utcoffset(observed)
+        observed = datetime.fromisoformat(
+            content["observed_at_utc"].replace("Z", "+00:00")
+        )
+        assert (
+            observed.tzinfo is not None
+            and observed.utcoffset() == timezone.utc.utcoffset(observed)
+        )
         assert content["observed_at_utc"].endswith("Z")
         # JAA is an internal Market Aligner component.  Its certification digest
         # remains scoped to that component tree, while the checkout containing it
@@ -237,12 +285,22 @@ def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(tmp_pa
             "source_write_operations": "none-successful; transactional schema probes rejected",
             "adopted_product_databases": "not-opened-by-recertification",
         }
-        canonical_content = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        assert document["content_sha256"] == hashlib.sha256(canonical_content).hexdigest()
-        assert receipt.name == f"source-recertification-{document['content_sha256']}.json"
-        assert receipt.read_bytes() == json.dumps(
-            document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode() + b"\n"
+        canonical_content = json.dumps(
+            content, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+        assert (
+            document["content_sha256"] == hashlib.sha256(canonical_content).hexdigest()
+        )
+        assert (
+            receipt.name == f"source-recertification-{document['content_sha256']}.json"
+        )
+        assert (
+            receipt.read_bytes()
+            == json.dumps(
+                document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+            + b"\n"
+        )
         rendered = receipt.read_text(encoding="utf-8")
         assert str(source_root) not in rendered and str(tmp_path) not in rendered
         assert not any(text.startswith("/") for text in _strings(document))
@@ -253,26 +311,45 @@ def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(tmp_pa
                 "relative_location": f"inputs/{name}.sqlite3",
             }
             assert record["open_semantics"] == {
-                "sqlite_uri_mode": "ro", "query_only": True,
+                "sqlite_uri_mode": "ro",
+                "query_only": True,
                 "negative_write_probe": {
-                    "attempted": True, "operation": "transactional-main-schema-create",
-                    "rejected": True, "sqlite_primary_error": "SQLITE_READONLY",
+                    "attempted": True,
+                    "operation": "transactional-main-schema-create",
+                    "rejected": True,
+                    "sqlite_primary_error": "SQLITE_READONLY",
                 },
             }
-            assert record["current_measurement"]["row_counts"] == {"ledger": expected_rows}
+            assert record["current_measurement"]["row_counts"] == {
+                "ledger": expected_rows
+            }
             assert {"main", "wal", "shm"} == set(record["source_observations_start"])
-        assert {"raw_jobs": _source_state(raw_jobs), "career_pipeline": _source_state(career_pipeline)} == before
+        assert {
+            "raw_jobs": _source_state(raw_jobs),
+            "career_pipeline": _source_state(career_pipeline),
+        } == before
         assert raw_writer.execute("SELECT COUNT(*) FROM ledger").fetchone() == (8,)
-        assert pipeline_writer.execute("SELECT COUNT(*) FROM ledger").fetchone() == (11,)
+        assert pipeline_writer.execute("SELECT COUNT(*) FROM ledger").fetchone() == (
+            11,
+        )
         for writer in (raw_writer, pipeline_writer):
-            assert writer.execute("SELECT name FROM sqlite_schema WHERE name='__jaa_recertification_write_probe'").fetchone() is None
+            assert (
+                writer.execute(
+                    "SELECT name FROM sqlite_schema WHERE name='__jaa_recertification_write_probe'"
+                ).fetchone()
+                is None
+            )
     finally:
         raw_writer.close()
         pipeline_writer.close()
 
 
-@pytest.mark.parametrize("case", ["missing", "symlink", "corrupt", "schema", "regression"])
-def test_recertification_negative_source_controls_fail_closed(tmp_path: Path, case: str) -> None:
+@pytest.mark.parametrize(
+    "case", ["missing", "symlink", "corrupt", "schema", "regression"]
+)
+def test_recertification_negative_source_controls_fail_closed(
+    tmp_path: Path, case: str
+) -> None:
     source_root = tmp_path / "source"
     database = source_root / "inputs" / "source.sqlite3"
     writer = _make_wal(database, rows=3)
@@ -302,8 +379,10 @@ def test_recertification_negative_source_controls_fail_closed(tmp_path: Path, ca
 
         assert result.returncode == 2
         expected = {
-            "missing": "source does not exist", "symlink": "regular, non-symlink",
-            "corrupt": "schema write probe failed for a reason other than read-only", "schema": "schema mismatch",
+            "missing": "source does not exist",
+            "symlink": "regular, non-symlink",
+            "corrupt": "schema write probe failed for a reason other than read-only",
+            "schema": "schema mismatch",
             "regression": "row counts regressed",
         }[case]
         assert expected in result.stderr
@@ -313,7 +392,9 @@ def test_recertification_negative_source_controls_fail_closed(tmp_path: Path, ca
             writer.close()
 
 
-def test_recertification_rejects_a_real_before_after_wal_mutation_and_leaves_no_receipt(tmp_path: Path) -> None:
+def test_recertification_rejects_a_real_before_after_wal_mutation_and_leaves_no_receipt(
+    tmp_path: Path,
+) -> None:
     source_root = tmp_path / "source"
     database = source_root / "inputs" / "racing.sqlite3"
     writer = _make_wal(database, rows=150_000)
@@ -332,7 +413,9 @@ def test_recertification_rejects_a_real_before_after_wal_mutation_and_leaves_no_
             started.set()
             number = 0
             while not stop.is_set():
-                connection.execute("INSERT INTO ledger(value) VALUES (?)", (f"race-{number}",))
+                connection.execute(
+                    "INSERT INTO ledger(value) VALUES (?)", (f"race-{number}",)
+                )
                 number += 1
         except BaseException as exc:  # surfaced in the asserting thread
             write_errors.append(exc)
@@ -358,7 +441,9 @@ def test_recertification_rejects_a_real_before_after_wal_mutation_and_leaves_no_
     assert not list(evidence.glob("source-recertification-*.json"))
 
 
-def test_malformed_existing_evidence_is_never_overwritten_and_historical_contract_stays_historical(tmp_path: Path) -> None:
+def test_malformed_existing_evidence_is_never_overwritten_and_historical_contract_stays_historical(
+    tmp_path: Path,
+) -> None:
     source_root = tmp_path / "source"
     database = source_root / "inputs" / "stable.sqlite3"
     writer = _make_wal(database, rows=2)
@@ -372,7 +457,9 @@ def test_malformed_existing_evidence_is_never_overwritten_and_historical_contrac
         record = document["content"]["databases"]["stable"]
         assert record["historical_observation"]["observed_sha256"] == "f" * 64
         assert record["historical_observation"]["observed_bytes"] == 1
-        assert record["historical_observation"]["observed_table_counts"] == {"ledger": 1}
+        assert record["historical_observation"]["observed_table_counts"] == {
+            "ledger": 1
+        }
         assert record["current_measurement"]["row_counts"] == {"ledger": 2}
 
         receipt.write_text("{malformed evidence", encoding="utf-8")

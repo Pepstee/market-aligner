@@ -17,7 +17,6 @@ import os
 import re
 import sqlite3
 import stat
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -128,14 +127,10 @@ from .testing_sanity_review import fixture_pass_receipt
 
 REQUEST_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-request.v1"
 RESULT_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-worker-result.v1"
-COMPOSITE_SCHEMA_VERSION_V1 = (
-    "jaa10.network-witnessed-fixture-observation-receipt.v1"
-)
+COMPOSITE_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-observation-receipt.v1"
 REQUEST_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-request.v2"
 RESULT_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-worker-result.v2"
-COMPOSITE_SCHEMA_VERSION = (
-    "jaa10.network-witnessed-fixture-observation-receipt.v2"
-)
+COMPOSITE_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-observation-receipt.v2"
 POLICY_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-policy.v1"
 REQUEST_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-request-v1\0"
 REQUEST_DOMAIN = b"jaa10-network-witnessed-fixture-request-v2\0"
@@ -144,32 +139,22 @@ POLICY_DOMAIN = b"jaa10-network-witnessed-fixture-policy-v1\0"
 ENVIRONMENT_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-environment-v1\0"
 ENVIRONMENT_DOMAIN = b"jaa10-network-witnessed-fixture-environment-v2\0"
 EFFECTIVE_ARGV_DOMAIN = b"jaa10-network-witnessed-fixture-effective-argv-v1\0"
-WORKER_INVENTORY_DOMAIN_V1 = (
-    b"jaa10-network-witnessed-fixture-worker-inventory-v1\0"
-)
-WORKER_INVENTORY_DOMAIN = (
-    b"jaa10-network-witnessed-fixture-worker-inventory-v2\0"
-)
+WORKER_INVENTORY_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-worker-inventory-v1\0"
+WORKER_INVENTORY_DOMAIN = b"jaa10-network-witnessed-fixture-worker-inventory-v2\0"
 COMPOSITE_INVENTORY_DOMAIN_V1 = (
     b"jaa10-network-witnessed-fixture-composite-inventory-v1\0"
 )
-COMPOSITE_INVENTORY_DOMAIN = (
-    b"jaa10-network-witnessed-fixture-composite-inventory-v2\0"
-)
+COMPOSITE_INVENTORY_DOMAIN = b"jaa10-network-witnessed-fixture-composite-inventory-v2\0"
 COMPOSITE_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-composite-v1\0"
 COMPOSITE_DOMAIN = b"jaa10-network-witnessed-fixture-composite-v2\0"
-RECONSTRUCTION_DOMAIN_V1 = (
-    b"jaa10-network-witnessed-fixture-reconstruction-v1\0"
-)
+RECONSTRUCTION_DOMAIN_V1 = b"jaa10-network-witnessed-fixture-reconstruction-v1\0"
 RECONSTRUCTION_DOMAIN = b"jaa10-network-witnessed-fixture-reconstruction-v2\0"
 MAX_REQUEST_BYTES = 2_000_000
 MAX_WORKER_RESULT_BYTES = 4_000_000
 MAX_ARTIFACT_BYTES = 64_000_000
 NONCE = "fixture-review-nonce-00000001"
 FORM_TOKEN = "fixture-form-token-00000000001"
-DISCLOSURE = (
-    "deterministic approved fixture candidate projection; not a real person"
-)
+DISCLOSURE = "deterministic approved fixture candidate projection; not a real person"
 FIXED_CORPUS = Path(
     os.environ.get(
         "JAA_CERTIFIED_CORPUS_ROOT",
@@ -178,9 +163,7 @@ FIXED_CORPUS = Path(
         "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
     )
 )
-TRACKED_SEED_RELATIVE = Path(
-    "career_automation/fixtures/jaa04_admitted_queue.json"
-)
+TRACKED_SEED_RELATIVE = Path("career_automation/fixtures/jaa04_admitted_queue.json")
 POLICY_DIGEST = hashlib.sha256(b"jaa10-network-witnessed-fixture").hexdigest()
 MATCHING_POLICY = MatchingPolicy()
 REQUIRED_CHROMIUM_FLAGS = (
@@ -426,6 +409,7 @@ def _read_canonical(path: Path, *, maximum: int) -> tuple[dict[str, Any], bytes]
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
+
     def identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
         return (
             value.st_dev,
@@ -434,6 +418,7 @@ def _read_canonical(path: Path, *, maximum: int) -> tuple[dict[str, Any], bytes]
             value.st_size,
             value.st_mtime_ns,
         )
+
     if len(payload) != before.st_size or identity(before) != identity(after):
         raise NetworkWitnessedFixtureError("canonical input changed while read")
     try:
@@ -467,18 +452,16 @@ def _playwright_runtime_identity(
     python_executable: Path,
     chromium_executable: Path,
 ) -> dict[str, object]:
-    driver, cli = (Path(value).resolve(strict=True) for value in compute_driver_executable())
+    driver, cli = (
+        Path(value).resolve(strict=True) for value in compute_driver_executable()
+    )
     package_root = Path(
         importlib.metadata.distribution("playwright").locate_file("playwright")
     ).resolve(strict=True)
     browsers = package_root / "driver/package/browsers.json"
     registry = json.loads(browsers.read_text(encoding="utf-8"))
     chromium = next(
-        (
-            row
-            for row in registry["browsers"]
-            if row.get("name") == "chromium"
-        ),
+        (row for row in registry["browsers"] if row.get("name") == "chromium"),
         None,
     )
     if not isinstance(chromium, dict):
@@ -515,9 +498,7 @@ def _cooperative_policy() -> dict[str, object]:
             "submit",
         ],
         "required_chromium_flags": list(REQUIRED_CHROMIUM_FLAGS),
-        "forbidden_chromium_flag_prefixes": list(
-            FORBIDDEN_CHROMIUM_FLAG_PREFIXES
-        ),
+        "forbidden_chromium_flag_prefixes": list(FORBIDDEN_CHROMIUM_FLAG_PREFIXES),
         "sandbox_truth": "disabled_by_playwright_in_user_namespace",
         "service_workers": "block",
         "downloads": "accept_disabled",
@@ -569,9 +550,7 @@ def _request_document(
             "contract_sha256": FROZEN_SHADOW_CONTRACT.contract_sha256,
             "application_id": FROZEN_SHADOW_CONTRACT.application_id,
             "job_key": FROZEN_SHADOW_CONTRACT.job_key,
-            "corpus_inventory_sha256": (
-                FROZEN_SHADOW_CONTRACT.corpus_inventory_sha256
-            ),
+            "corpus_inventory_sha256": (FROZEN_SHADOW_CONTRACT.corpus_inventory_sha256),
             "official_response_sha256": (
                 FROZEN_SHADOW_CONTRACT.official_response_sha256
             ),
@@ -583,9 +562,7 @@ def _request_document(
             "worker_output": str(execution_root / "worker-output"),
             "integration_tmp": str(runtime_tmp_root),
             "network_evidence": str(execution_root / "network-evidence"),
-            "worker_result": str(
-                execution_root / "worker-output/worker-result.json"
-            ),
+            "worker_result": str(execution_root / "worker-output/worker-result.json"),
         },
         "maximums": {
             "worker_result_bytes": MAX_WORKER_RESULT_BYTES,
@@ -667,13 +644,11 @@ def _validate_request(
         raise NetworkWitnessedFixtureError("request paths are invalid")
     root = request_path.parent.resolve(strict=True)
     try:
-        runtime_tmp_root, derivation, socket_budget = (
-            derive_runtime_tmp_binding(source, root)
+        runtime_tmp_root, derivation, socket_budget = derive_runtime_tmp_binding(
+            source, root
         )
     except NetworkWitnessError as error:
-        raise NetworkWitnessedFixtureError(
-            "runtime-temp derivation differs"
-        ) from error
+        raise NetworkWitnessedFixtureError("runtime-temp derivation differs") from error
     expected_environment = {
         **COMMAND_ENVIRONMENT,
         "TMPDIR": str(runtime_tmp_root),
@@ -682,38 +657,30 @@ def _validate_request(
         anchor_status = runtime_tmp_root.parent.lstat()
         runtime_status = runtime_tmp_root.lstat()
     except OSError as error:
-        raise NetworkWitnessedFixtureError(
-            "runtime-temp root is missing"
-        ) from error
+        raise NetworkWitnessedFixtureError("runtime-temp root is missing") from error
     if (
         dict(environment) != expected_environment
         or document.get("runtime_tmp_root") != str(runtime_tmp_root)
         or document.get("runtime_tmp_root_derivation") != derivation
         or document.get("socket_budget") != socket_budget
-        or derivation.get("schema_version")
-        != RUNTIME_TMP_DERIVATION_SCHEMA_VERSION
+        or derivation.get("schema_version") != RUNTIME_TMP_DERIVATION_SCHEMA_VERSION
         or derivation.get("domain") != RUNTIME_TMP_PATH_DOMAIN.decode("ascii")
         or socket_budget.get("schema_version")
         != RUNTIME_TMP_SOCKET_BUDGET_SCHEMA_VERSION
-        or socket_budget.get("af_unix_path_capacity_bytes")
-        != AF_UNIX_PATH_CAPACITY
+        or socket_budget.get("af_unix_path_capacity_bytes") != AF_UNIX_PATH_CAPACITY
         or socket_budget.get("chromium_suffix_bytes")
         != CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES
-        or socket_budget.get("maximum_root_bytes")
-        != RUNTIME_TMP_ROOT_MAX_BYTES
+        or socket_budget.get("maximum_root_bytes") != RUNTIME_TMP_ROOT_MAX_BYTES
         or stat.S_ISLNK(anchor_status.st_mode)
         or not stat.S_ISDIR(anchor_status.st_mode)
-        or runtime_tmp_root.parent.resolve(strict=True)
-        != runtime_tmp_root.parent
+        or runtime_tmp_root.parent.resolve(strict=True) != runtime_tmp_root.parent
         or stat.S_ISLNK(runtime_status.st_mode)
         or not stat.S_ISDIR(runtime_status.st_mode)
         or stat.S_IMODE(runtime_status.st_mode) != 0o700
         or (root / "integration-tmp").exists()
         or (root / "integration-tmp").is_symlink()
     ):
-        raise NetworkWitnessedFixtureError(
-            "runtime-temp binding differs"
-        )
+        raise NetworkWitnessedFixtureError("runtime-temp binding differs")
     expected_paths = {
         "execution_root": str(root),
         "worker_output": str(root / "worker-output"),
@@ -728,12 +695,8 @@ def _validate_request(
         "contract_sha256": FROZEN_SHADOW_CONTRACT.contract_sha256,
         "application_id": FROZEN_SHADOW_CONTRACT.application_id,
         "job_key": FROZEN_SHADOW_CONTRACT.job_key,
-        "corpus_inventory_sha256": (
-            FROZEN_SHADOW_CONTRACT.corpus_inventory_sha256
-        ),
-        "official_response_sha256": (
-            FROZEN_SHADOW_CONTRACT.official_response_sha256
-        ),
+        "corpus_inventory_sha256": (FROZEN_SHADOW_CONTRACT.corpus_inventory_sha256),
+        "official_response_sha256": (FROZEN_SHADOW_CONTRACT.official_response_sha256),
         "dossier_sha256": FROZEN_SHADOW_CONTRACT.dossier_sha256,
         "workflow_sha256": FROZEN_SHADOW_CONTRACT.workflow_sha256,
     }:
@@ -889,7 +852,11 @@ def _fit_database(
         )
         for index, anchor in enumerate(authority.requirement_anchors, 1)
     )
-    today = date.today()
+    # This is a replay of a content-addressed frozen corpus.  Bind every
+    # downstream temporal decision to the corpus observation date so the
+    # synthetic acceptance fixture remains reproducible instead of expiring
+    # with the host wall clock.
+    today = datetime.fromisoformat(authority.observed_at.replace("Z", "+00:00")).date()
     valid_until = today.replace(year=today.year + 1).isoformat()
     graph = CandidateGraph(database.path)
     for index, requirement in enumerate(requirements, 1):
@@ -918,9 +885,7 @@ def _fit_database(
         )
         graph.add_claim(
             requirement.criterion,
-            statement=(
-                f"Fixture claim for {requirement.text}; {DISCLOSURE}."
-            ),
+            statement=(f"Fixture claim for {requirement.text}; {DISCLOSURE}."),
             claim_type=("capability", "project", "education")[(index - 1) % 3],
             state="evidence",
             source_identity=f"fixture:candidate-claim:{index}",
@@ -1365,18 +1330,10 @@ def _browser_process_evidence(
         row for row in rows if row["executable"] == str(chromium_executable)
     ]
     chromium_pids = {int(row["pid"]) for row in chromium_rows}
-    main = [
-        row
-        for row in chromium_rows
-        if int(row["parent_pid"]) not in chromium_pids
-    ]
+    main = [row for row in chromium_rows if int(row["parent_pid"]) not in chromium_pids]
     if len(main) != 1:
-        raise NetworkWitnessedFixtureError(
-            "unique main Chromium process was not found"
-        )
-    driver_rows = [
-        row for row in rows if row["executable"] == str(node_driver)
-    ]
+        raise NetworkWitnessedFixtureError("unique main Chromium process was not found")
+    driver_rows = [row for row in rows if row["executable"] == str(node_driver)]
     if len(driver_rows) != 1 or int(main[0]["parent_pid"]) != int(
         driver_rows[0]["pid"]
     ):
@@ -1384,22 +1341,17 @@ def _browser_process_evidence(
     argv = main[0]["argv"]
     if not isinstance(argv, list):
         raise NetworkWitnessedFixtureError("Chromium argv is invalid")
-    missing = [
-        flag for flag in REQUIRED_CHROMIUM_FLAGS if flag not in argv
-    ]
+    missing = [flag for flag in REQUIRED_CHROMIUM_FLAGS if flag not in argv]
     forbidden = [
         value
         for value in argv
         if any(
-            str(value).startswith(prefix)
-            for prefix in FORBIDDEN_CHROMIUM_FLAG_PREFIXES
+            str(value).startswith(prefix) for prefix in FORBIDDEN_CHROMIUM_FLAG_PREFIXES
         )
     ]
     if missing or forbidden:
         raise NetworkWitnessedFixtureError("Chromium launch policy differs")
-    environment_raw = Path(
-        f"/proc/{int(driver_rows[0]['pid'])}/environ"
-    ).read_bytes()
+    environment_raw = Path(f"/proc/{int(driver_rows[0]['pid'])}/environ").read_bytes()
     environment = {}
     for entry in environment_raw.split(b"\0"):
         if not entry or b"=" not in entry:
@@ -1416,9 +1368,7 @@ def _shared_memory_evidence() -> dict[str, object]:
     status = path.stat()
     values = os.statvfs(path)
     filesystem = "unknown"
-    for line in Path("/proc/self/mountinfo").read_text(
-        encoding="utf-8"
-    ).splitlines():
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
         before, separator, after = line.partition(" - ")
         if separator and before.split()[4] == "/dev/shm":
             filesystem = after.split()[0]
@@ -1444,14 +1394,10 @@ def _document_inventory(
     total = 0
     for path in sorted(root.rglob("*"), key=lambda value: value.as_posix()):
         relative = path.relative_to(root)
-        if (
-            path.resolve(strict=False) in excluded
-            or relative
-            in {
-                Path("workflow.sqlite3-wal"),
-                Path("workflow.sqlite3-shm"),
-            }
-        ):
+        if path.resolve(strict=False) in excluded or relative in {
+            Path("workflow.sqlite3-wal"),
+            Path("workflow.sqlite3-shm"),
+        }:
             continue
         if path.is_symlink():
             raise NetworkWitnessedFixtureError("artifact inventory found a symlink")
@@ -1495,14 +1441,8 @@ def _finalize_worker_database(path: Path) -> dict[str, object]:
                 "worker database finalization result is invalid"
             )
         journal_mode = str(journal_row[0]).lower()
-        busy, log_frames, checkpointed_frames = (
-            int(value) for value in checkpoint_row
-        )
-        if (
-            journal_mode != "wal"
-            or busy != 0
-            or log_frames != checkpointed_frames
-        ):
+        busy, log_frames, checkpointed_frames = (int(value) for value in checkpoint_row)
+        if journal_mode != "wal" or busy != 0 or log_frames != checkpointed_frames:
             raise NetworkWitnessedFixtureError(
                 "worker database finalization did not quiesce"
             )
@@ -1655,9 +1595,7 @@ def _execute_worker(
                         materialized_values=values,
                         release_authority=execution_authority,
                     )
-                    elapsed[action.step_id] = (
-                        perf_counter_ns() - started
-                    ) // 1_000_000
+                    elapsed[action.step_id] = (perf_counter_ns() - started) // 1_000_000
                     if completed is None:
                         raise NetworkWitnessedFixtureError(
                             "browser action did not complete"
@@ -1694,10 +1632,7 @@ def _execute_worker(
                     "exact_sequence_verified": True,
                 }
                 screenshot = page.screenshot(full_page=True)
-                if (
-                    _proc_start_ticks(int(chromium_main["pid"]))
-                    != chromium_start
-                ):
+                if _proc_start_ticks(int(chromium_main["pid"])) != chromium_start:
                     raise NetworkWitnessedFixtureError(
                         "Chromium process identity changed"
                     )
@@ -1783,8 +1718,7 @@ def _execute_worker(
     ):
         raise NetworkWitnessedFixtureError("browser process evidence is missing")
     if any(
-        row["executable"]
-        in {str(chromium_executable), str(node_driver)}
+        row["executable"] in {str(chromium_executable), str(node_driver)}
         for row in _process_rows()
     ):
         raise NetworkWitnessedFixtureError("browser or driver descendant survived")
@@ -1852,9 +1786,7 @@ def _execute_worker(
         "environment": request["environment"],
         "environment_sha256": request["environment_sha256"],
         "runtime_tmp_root": request["runtime_tmp_root"],
-        "runtime_tmp_root_derivation": request[
-            "runtime_tmp_root_derivation"
-        ],
+        "runtime_tmp_root_derivation": request["runtime_tmp_root_derivation"],
         "socket_budget": request["socket_budget"],
         "worker_database_finalization": worker_database_finalization,
         "shared_memory": _shared_memory_evidence(),
@@ -1915,18 +1847,15 @@ def validate_worker_result(
         raise NetworkWitnessedFixtureError("worker result field set differs")
     if (
         result.get("schema_version") != RESULT_SCHEMA_VERSION
-        or result.get("request_sha256")
-        != _domain_hash(REQUEST_DOMAIN, request_bytes)
+        or result.get("request_sha256") != _domain_hash(REQUEST_DOMAIN, request_bytes)
         or result.get("integration_nonce_sha256")
         != request.get("integration_nonce_sha256")
         or result.get("source") != request.get("source")
         or result.get("cooperative_policy_sha256")
         != request.get("cooperative_policy_sha256")
         or result.get("environment") != request.get("environment")
-        or result.get("environment_sha256")
-        != request.get("environment_sha256")
-        or result.get("runtime_tmp_root")
-        != request.get("runtime_tmp_root")
+        or result.get("environment_sha256") != request.get("environment_sha256")
+        or result.get("runtime_tmp_root") != request.get("runtime_tmp_root")
         or result.get("runtime_tmp_root_derivation")
         != request.get("runtime_tmp_root_derivation")
         or result.get("socket_budget") != request.get("socket_budget")
@@ -1954,12 +1883,9 @@ def validate_worker_result(
         or finalization.get("checkpoint_mode") != "truncate"
         or finalization.get("busy") != 0
         or not isinstance(finalization.get("log_frames"), int)
-        or finalization.get("log_frames")
-        != finalization.get("checkpointed_frames")
+        or finalization.get("log_frames") != finalization.get("checkpointed_frames")
     ):
-        raise NetworkWitnessedFixtureError(
-            "worker database finalization differs"
-        )
+        raise NetworkWitnessedFixtureError("worker database finalization differs")
     argv = result.get("chromium_effective_argv")
     if not isinstance(argv, list) or result.get(
         "chromium_effective_argv_sha256"
@@ -2037,14 +1963,11 @@ def _validate_chromium_request_audit(
         "inert_favicon_href",
         "exact_sequence_verified",
     }:
-        raise NetworkWitnessedFixtureError(
-            "Chromium request audit field set differs"
-        )
+        raise NetworkWitnessedFixtureError("Chromium request audit field set differs")
     records = document.get("records")
     expected = document.get("expected_requests")
     if (
-        document.get("schema_version")
-        != "jaa10.chromium-request-lifecycle-audit.v1"
+        document.get("schema_version") != "jaa10.chromium-request-lifecycle-audit.v1"
         or document.get("listener_mode") != "cdp_read_only"
         or document.get("protocol_errors") != []
         or document.get("inert_favicon_href") != FIXTURE_INERT_FAVICON_HREF
@@ -2054,9 +1977,7 @@ def _validate_chromium_request_audit(
         or len(records) != 3
         or len(expected) != 3
     ):
-        raise NetworkWitnessedFixtureError(
-            "Chromium request audit authority differs"
-        )
+        raise NetworkWitnessedFixtureError("Chromium request audit authority differs")
     expected_methods = ("GET", "POST", "POST")
     expected_suffixes = ("", "/review", "/submit")
     origin: tuple[str, str, int] | None = None
@@ -2093,9 +2014,7 @@ def _validate_chromium_request_audit(
             or expectation
             != {"method": method, "url": url, "resource_type": "Document"}
         ):
-            raise NetworkWitnessedFixtureError(
-                "Chromium request audit record differs"
-            )
+            raise NetworkWitnessedFixtureError("Chromium request audit record differs")
         request_ids.add(request_id)
         parsed = urlsplit(url)
         try:
@@ -2117,9 +2036,7 @@ def _validate_chromium_request_audit(
             != f"/applications/{application_id}{expected_suffixes[index]}"
             or (origin is not None and current_origin != origin)
         ):
-            raise NetworkWitnessedFixtureError(
-                "Chromium request audit route differs"
-            )
+            raise NetworkWitnessedFixtureError("Chromium request audit route differs")
         origin = current_origin
     return document
 
@@ -2204,7 +2121,9 @@ class NetworkWitnessedFixtureObservationReceipt:
         return str(self.document()["receipt_sha256"])
 
     @classmethod
-    def issue(cls, core: Mapping[str, Any]) -> "NetworkWitnessedFixtureObservationReceipt":
+    def issue(
+        cls, core: Mapping[str, Any]
+    ) -> "NetworkWitnessedFixtureObservationReceipt":
         document = dict(core)
         document["receipt_sha256"] = _domain_hash(
             COMPOSITE_DOMAIN,
@@ -2229,9 +2148,7 @@ def run_network_witnessed_fixture(
 
     root = Path(execution_root)
     if not root.is_absolute() or root.exists() or root.is_symlink():
-        raise NetworkWitnessedFixtureError(
-            "execution root must be a new absolute path"
-        )
+        raise NetworkWitnessedFixtureError("execution root must be a new absolute path")
     repository = Path(repository_root).resolve(strict=True)
     python = Path(python_executable).absolute()
     if not python.is_file():
@@ -2243,16 +2160,12 @@ def run_network_witnessed_fixture(
             derive_runtime_tmp_binding(source, root)
         )
     except NetworkWitnessError as error:
-        raise NetworkWitnessedFixtureError(
-            "runtime-temp derivation differs"
-        ) from error
+        raise NetworkWitnessedFixtureError("runtime-temp derivation differs") from error
     anchor = runtime_tmp_root.parent
     try:
         anchor_before = anchor.lstat()
     except OSError as error:
-        raise NetworkWitnessedFixtureError(
-            "runtime-temp anchor is missing"
-        ) from error
+        raise NetworkWitnessedFixtureError("runtime-temp anchor is missing") from error
     if (
         stat.S_ISLNK(anchor_before.st_mode)
         or not stat.S_ISDIR(anchor_before.st_mode)
@@ -2261,9 +2174,7 @@ def run_network_witnessed_fixture(
         or runtime_tmp_root.exists()
         or runtime_tmp_root.is_symlink()
     ):
-        raise NetworkWitnessedFixtureError(
-            "runtime-temp preflight differs"
-        )
+        raise NetworkWitnessedFixtureError("runtime-temp preflight differs")
     root.mkdir(mode=0o700)
     root_status = root.lstat()
     if (
@@ -2302,9 +2213,7 @@ def run_network_witnessed_fixture(
         or (root / "integration-tmp").exists()
         or (root / "integration-tmp").is_symlink()
     ):
-        raise NetworkWitnessedFixtureError(
-            "runtime-temp root identity differs"
-        )
+        raise NetworkWitnessedFixtureError("runtime-temp root identity differs")
     request_document = _request_document(
         source=source,
         execution_root=root,
@@ -2322,12 +2231,8 @@ def run_network_witnessed_fixture(
         request_path=request_path,
         request_sha256=request_sha256,
         result_path=result_path,
-        integration_nonce_sha256=str(
-            request_document["integration_nonce_sha256"]
-        ),
-        cooperative_policy_sha256=str(
-            request_document["cooperative_policy_sha256"]
-        ),
+        integration_nonce_sha256=str(request_document["integration_nonce_sha256"]),
+        cooperative_policy_sha256=str(request_document["cooperative_policy_sha256"]),
         expected_source=source,
         runtime_tmp_root=runtime_tmp_root,
         runtime_tmp_root_derivation=runtime_tmp_derivation,
@@ -2406,14 +2311,10 @@ def run_network_witnessed_fixture(
     receipt = NetworkWitnessedFixtureObservationReceipt.issue(
         {
             "schema_version": COMPOSITE_SCHEMA_VERSION,
-            "integration_status": (
-                "network_witnessed_local_fixture_single_execution"
-            ),
+            "integration_status": ("network_witnessed_local_fixture_single_execution"),
             "source": source.document(),
             "request_sha256": request_sha256,
-            "integration_nonce_sha256": (
-                request_document["integration_nonce_sha256"]
-            ),
+            "integration_nonce_sha256": (request_document["integration_nonce_sha256"]),
             "cooperative_policy_sha256": (
                 request_document["cooperative_policy_sha256"]
             ),
