@@ -778,10 +778,13 @@ def _fit_database(
 ) -> tuple[CareerDatabase, object, tuple[Requirement, ...]]:
     database = CareerDatabase(output_root / "workflow.sqlite3")
     # This is a replay of a content-addressed frozen corpus.  Bind every
-    # downstream temporal decision to the corpus observation date so the
+    # downstream temporal decision to the verified source capture date so the
     # synthetic acceptance fixture remains reproducible instead of expiring
     # with the host wall clock.
-    today = datetime.fromisoformat(authority.observed_at.replace("Z", "+00:00")).date()
+    source_document = authority.dossier["sources"][0]
+    today = datetime.fromisoformat(
+        str(source_document["captured_at"]).replace("Z", "+00:00")
+    ).date()
     payload = dict(authority.queue_payload)
     payload.update(
         {
