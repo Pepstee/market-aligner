@@ -894,9 +894,9 @@ class Collector:
                         )
                     if fetched % 25 == 0:
                         self.log(f"[fetch] {fetched}/{len(fetch_queue)} stored")
-                except Exception:
+                except Exception as exc:
                     errors += 1
-                    self.db.record_error(row.key, "fetch_error")
+                    self.db.record_error(row.key, str(exc))
                     self.log(f"[fetch] {row.key} failed: fetch_error")
         total = self.db.export_urls(self.urls_path)
         result = {

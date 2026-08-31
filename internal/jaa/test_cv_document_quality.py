@@ -11,6 +11,7 @@ from cv_generation import document_quality as quality
 from career_automation.rendering import (
     ApplicationArtifacts,
     EditableArtifacts,
+    PdfLineBox,
     RENDERER_POLICY_SHA256,
     _artifact,
 )
@@ -172,34 +173,52 @@ I would welcome the opportunity to discuss the engineering challenges.
         hashlib.sha256(letter_text.encode()).hexdigest(),
         hashlib.sha256(answers.encode()).hexdigest(),
     )
-    cv = _artifact(
-        "cv",
-        ((
-            "Alex Example",
-            "alex@example.test | +44 7700 900123 | London",
-            "Professional Summary",
-            "- Delivered reliable services with independently verified evidence.",
-            "Core Capabilities",
-            "- Designed deterministic workflow automation around bounded authority.",
-            "Projects",
-            "- Built an evidence-linked application composition pipeline.",
-        ),),
+
+    def box(
+        text: str, baseline: float, size: float, *, bold: bool = False
+    ) -> PdfLineBox:
+        return PdfLineBox(
+            text=text,
+            x=50.0,
+            baseline_y=baseline,
+            width=min(470.0, len(text) * size * 0.52),
+            font_size=size,
+            font_name="Helvetica-Bold" if bold else "Helvetica",
+            role="fixture",
+            color=(0.1, 0.12, 0.15),
+        )
+
+    cv_lines = tuple(line for line in cv_text.splitlines() if line)
+    cv_layout = (
+        tuple(
+            box(
+                line,
+                790.0 - (index * 24.0),
+                16.0
+                if index == 0
+                else 11.0
+                if line in {"Professional Summary", "Core Capabilities", "Projects"}
+                else 10.0,
+                bold=index == 0
+                or line in {"Professional Summary", "Core Capabilities", "Projects"},
+            )
+            for index, line in enumerate(cv_lines)
+        ),
     )
-    letter = _artifact(
-        "cover_letter",
-        ((
-            "Alex Example",
-            "alex@example.test",
-            "+44 7700 900123",
-            "London",
-            "Software Engineer",
-            "Example Ltd",
-            "I am applying because the role matches my tested automation work.",
-            "My project evidence demonstrates reliable delivery and careful validation.",
-            "Example Ltd's documented service focus makes the work particularly relevant.",
-            "I would welcome the opportunity to discuss the engineering challenges.",
-        ),),
+    letter_lines = tuple(line for line in letter_text.splitlines() if line)
+    letter_layout = (
+        tuple(
+            box(
+                line,
+                790.0 - (index * 24.0),
+                16.0 if index == 0 else 10.0,
+                bold=index == 0,
+            )
+            for index, line in enumerate(letter_lines)
+        ),
     )
+    cv = _artifact("cv", cv_layout)
+    letter = _artifact("cover_letter", letter_layout)
     source_id = "a" * 64
     artifact_set = hashlib.sha256(
         "\n".join(
@@ -219,7 +238,9 @@ I would welcome the opportunity to discuss the engineering challenges.
     return ApplicationArtifacts(source_id, editable, cv, letter, artifact_set)
 
 
-def _rehash_editable(artifacts: ApplicationArtifacts, editable: EditableArtifacts) -> ApplicationArtifacts:
+def _rehash_editable(
+    artifacts: ApplicationArtifacts, editable: EditableArtifacts
+) -> ApplicationArtifacts:
     artifact_set = hashlib.sha256(
         "\n".join(
             (
@@ -256,7 +277,10 @@ def test_missing_poppler_and_duplicate_prose_fail_closed(tmp_path) -> None:
         resolve_poppler_runtime(tmp_path)
 
     artifacts = _clean_artifacts()
-    duplicate = artifacts.editable.cv_text + "\n- Built an evidence-linked application composition pipeline.\n"
+    duplicate = (
+        artifacts.editable.cv_text
+        + "\n- Built an evidence-linked application composition pipeline.\n"
+    )
     editable = replace(
         artifacts.editable,
         cv_text=duplicate,

@@ -18,6 +18,9 @@ HISTORICAL_SOFTWARE_FACTORY_ROOT = Path("/home/gutua/software-factory")
 HISTORICAL_NATIVE_JAA_ROOT = HISTORICAL_SOFTWARE_FACTORY_ROOT / (
     ".worktrees/jaa-native-completion"
 )
+HISTORICAL_OPERATIONAL_STATE_ROOT = HISTORICAL_SOFTWARE_FACTORY_ROOT / (
+    ".incoming/mac-jaa-assurance-20260805-e1bb35a/operational-state"
+)
 
 
 class _HistoricalMappedPath(type(Path())):
@@ -146,9 +149,16 @@ def historical_path(value: str | Path) -> Path:
             str(Path(__file__).resolve().parent),
         )
     ).resolve()
+    operational_state_root = Path(
+        os.environ.get(
+            "JAA_HISTORICAL_OPERATIONAL_STATE_ROOT",
+            str(Path(__file__).resolve().parents[3]),
+        )
+    ).resolve()
     _HistoricalMappedPath._prefixes = (
         (HISTORICAL_OPERATOR_CONTROL_ROOT, control_root),
         (HISTORICAL_NATIVE_JAA_ROOT, native_jaa_root),
+        (HISTORICAL_OPERATIONAL_STATE_ROOT, operational_state_root),
         (HISTORICAL_SOFTWARE_FACTORY_ROOT, software_factory_root),
     )
     return _HistoricalMappedPath(str(value))
@@ -188,9 +198,16 @@ def rebind_historical_control_paths(
             str(Path(__file__).resolve().parent),
         )
     ).resolve()
+    operational_state_root = Path(
+        os.environ.get(
+            "JAA_HISTORICAL_OPERATIONAL_STATE_ROOT",
+            str(Path(__file__).resolve().parents[3]),
+        )
+    ).resolve()
     _HistoricalMappedPath._prefixes = (
         (HISTORICAL_OPERATOR_CONTROL_ROOT, resolved_root),
         (HISTORICAL_NATIVE_JAA_ROOT, native_jaa_root),
+        (HISTORICAL_OPERATIONAL_STATE_ROOT, operational_state_root),
         (HISTORICAL_SOFTWARE_FACTORY_ROOT, software_factory_root),
     )
     for name, value in tuple(vars(module).items()):
