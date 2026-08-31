@@ -18,7 +18,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "4b87d86f263c24b2aae6d7cb2dcbbc20baa953c5",
+        "current_git_blob": "b4832a75565751fd70be1cf9dc3139afca90091c",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -26,7 +26,7 @@
         "path": "career_automation/release_gate.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "99c962a202ea606be5079a777ed365718fe27fb9",
-        "current_git_blob": "aed4b5b9cd103458ab13402aaf23bfb8fceb2ef8",
+        "current_git_blob": "19f22ed8c1205632f8143ffa42e752147f4d4d9d",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -34,7 +34,7 @@
         "path": "test_jaa09_independent_acceptance.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "6e260955c84c3c3aba88ac76d7f5606abce6c8ea",
-        "current_git_blob": "2681ab31414e13eefb794920992d32bed6babd7d",
+        "current_git_blob": "7c689ba3250269f034b2ad3300c95809c10019ee",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -58,7 +58,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "4b87d86f263c24b2aae6d7cb2dcbbc20baa953c5",
+        "current_git_blob": "b4832a75565751fd70be1cf9dc3139afca90091c",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -74,7 +74,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "4b87d86f263c24b2aae6d7cb2dcbbc20baa953c5",
+        "current_git_blob": "b4832a75565751fd70be1cf9dc3139afca90091c",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -82,7 +82,7 @@
         "path": "career_automation/release_gate.py",
         "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
         "historical_git_blob": "99c962a202ea606be5079a777ed365718fe27fb9",
-        "current_git_blob": "aed4b5b9cd103458ab13402aaf23bfb8fceb2ef8",
+        "current_git_blob": "19f22ed8c1205632f8143ffa42e752147f4d4d9d",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -90,7 +90,7 @@
         "path": "career_automation/application_compiler.py",
         "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
         "historical_git_blob": "c46fae1c4a55d6fcdff6bdc4362dfd526ebc0f20",
-        "current_git_blob": "3ef01161d3b0c20eb471fa56f9e7193199f9e5fb",
+        "current_git_blob": "e015aa4eb598c61d4429baa43db71f4c9630f866",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -106,7 +106,7 @@
         "path": "career_automation/migrations.py",
         "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
         "historical_git_blob": "98d7232a53bcf8124721fd87e53e12159704ed8c",
-        "current_git_blob": "d81195b2de5a00e3d62a8b7459af6c98b96b5db3",
+        "current_git_blob": "f6b41d9d1adc91c27c5abca985168e24f3e2e886",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -130,7 +130,7 @@
         "path": "test_jaa09_real_vacancy_acceptance.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "3806b931bfbc8b14729e3e17917b69a6f1fdbd34",
-        "current_git_blob": "1633d2c38d7ff183dcb1d0bc999d66131f23d635",
+        "current_git_blob": "30352c914ccf5001af818dcf0e813299023d1ca0",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
