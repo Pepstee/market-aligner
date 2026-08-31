@@ -41,7 +41,8 @@ def test_acceptance_declaration_runs_directly_and_as_extracted_data(
 ) -> None:
     declaration = repository / "acceptance"
     records = [
-        line.strip() for line in declaration.read_text(encoding="utf-8").splitlines()
+        line.strip()
+        for line in declaration.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
     assert len(records) == 1
@@ -50,12 +51,20 @@ def test_acceptance_declaration_runs_directly_and_as_extracted_data(
     runner = repository / "scripts" / "run_acceptance_declaration.py"
     runner.write_text("raise SystemExit(0)\n", encoding="utf-8")
     direct = subprocess.run(
-        ("bash", str(declaration)), cwd=tmp_path, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ("bash", str(declaration)),
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
     assert direct.returncode == 0, direct.stderr
     extracted = subprocess.run(
-        ("/bin/sh", "-c", records[0]), cwd=repository, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ("/bin/sh", "-c", records[0]),
+        cwd=repository,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
     assert extracted.returncode == 0, extracted.stderr

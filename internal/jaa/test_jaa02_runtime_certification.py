@@ -21,32 +21,46 @@ EXPECTED_TOTALS = {"passed": 12, "failed": 0, "errors": 0, "skipped": 0}
 
 def _run(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        (sys.executable, *argv), cwd=root, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        (sys.executable, *argv),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 def _git(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ("git", *argv), cwd=root, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ("git", *argv),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 @pytest.fixture()
 def repository(tmp_path: Path) -> Path:
     clone = clone_jaa_repository(ROOT, tmp_path / "repository")
-    assert _git(clone, "config", "user.name", "JAA-02 certification test").returncode == 0
+    assert (
+        _git(clone, "config", "user.name", "JAA-02 certification test").returncode == 0
+    )
     assert _git(clone, "config", "user.email", "jaa02@example.test").returncode == 0
     tracked_receipts = [
-        line for line in _git(
+        line
+        for line in _git(
             clone, "ls-files", "runtime_evidence/jaa02/sha256-*.json"
-        ).stdout.splitlines() if line
+        ).stdout.splitlines()
+        if line
     ]
     if tracked_receipts:
         removed = _git(clone, "rm", "-f", "--", *tracked_receipts)
         assert removed.returncode == 0, removed.stderr
-        committed = _git(clone, "commit", "-m", "remove checked receipt for certifier test")
+        committed = _git(
+            clone, "commit", "-m", "remove checked receipt for certifier test"
+        )
         assert committed.returncode == 0, committed.stderr
     return clone
 
@@ -70,7 +84,8 @@ def _certify(root: Path) -> tuple[Path, dict[str, object]]:
 
 def _track_receipt(root: Path, receipt: Path) -> None:
     _commit(
-        root, receipt.relative_to(root).as_posix(),
+        root,
+        receipt.relative_to(root).as_posix(),
         message="track JAA-02 runtime receipt",
     )
 
@@ -81,13 +96,19 @@ def test_clean_certification_executes_real_commands_and_checked_validator_passes
     receipt, document = _certify(repository)
     assert document["format"] == "jaa02-runtime-certification/v1"
     assert document["source_content_revision"].startswith("sha256:")
-    assert document["source_content_revision_contract"]["exclusions"] == ["runtime_evidence/"]
+    assert document["source_content_revision_contract"]["exclusions"] == [
+        "runtime_evidence/"
+    ]
     commands = document["command_semantics"]
     assert [item["role"] for item in commands] == [
-        "acceptance_demo", "independent_negative_controls",
+        "acceptance_demo",
+        "independent_negative_controls",
     ]
     assert commands[0]["parsed_test_totals"] == {
-        "passed": 1, "failed": 0, "errors": 0, "skipped": 0,
+        "passed": 1,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
     }
     assert commands[1]["parsed_test_totals"] == EXPECTED_TOTALS
     assert all(item["exit_code"] == 0 for item in commands)
@@ -100,7 +121,9 @@ def test_clean_certification_executes_real_commands_and_checked_validator_passes
     assert json.loads(accepted.stdout)["status"] == "accepted"
 
 
-def test_certifier_rejects_symlinked_output_without_writing(repository: Path, tmp_path: Path) -> None:
+def test_certifier_rejects_symlinked_output_without_writing(
+    repository: Path, tmp_path: Path
+) -> None:
     actual = tmp_path / "actual"
     actual.mkdir()
     linked = tmp_path / "linked"
@@ -125,7 +148,11 @@ def test_certifier_refuses_conflicting_existing_receipt(repository: Path) -> Non
 def test_certifier_fails_closed_on_command_failure(repository: Path) -> None:
     demo = repository / "scripts" / "accept_jaa_02.py"
     demo.write_text("raise SystemExit(7)\n", encoding="utf-8")
-    _commit(repository, demo.relative_to(repository).as_posix(), message="force demo failure")
+    _commit(
+        repository,
+        demo.relative_to(repository).as_posix(),
+        message="force demo failure",
+    )
     completed = _run(repository, str(CERTIFIER))
     assert completed.returncode == 2
     assert "acceptance_demo command failed with exit code 7" in completed.stderr
@@ -172,9 +199,12 @@ def test_validator_rejects_rehashed_wrong_test_totals(repository: Path) -> None:
     receipt, document = _certify(repository)
     document["command_semantics"][1]["parsed_test_totals"]["passed"] = 11
     payload = (
-        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
     ).encode()
-    replacement = receipt.with_name(f"sha256-{hashlib.sha256(payload).hexdigest()}.json")
+    replacement = receipt.with_name(
+        f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
+    )
     receipt.unlink()
     replacement.write_bytes(payload)
     _track_receipt(repository, replacement)
@@ -191,7 +221,9 @@ def test_validator_rejects_rehashed_wrong_test_totals(repository: Path) -> None:
     ],
 )
 def test_validator_rejects_rehashed_reordered_or_omitted_acceptance_commands(
-    repository: Path, mutation, message: str,
+    repository: Path,
+    mutation,
+    message: str,
 ) -> None:
     """The receipt is an ordered, complete execution record—not a command set."""
     receipt, document = _certify(repository)
@@ -199,9 +231,12 @@ def test_validator_rejects_rehashed_reordered_or_omitted_acceptance_commands(
     assert isinstance(commands, list)
     mutation(commands)
     payload = (
-        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
     ).encode()
-    replacement = receipt.with_name(f"sha256-{hashlib.sha256(payload).hexdigest()}.json")
+    replacement = receipt.with_name(
+        f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
+    )
     receipt.unlink()
     replacement.write_bytes(payload)
     _track_receipt(repository, replacement)
@@ -211,7 +246,9 @@ def test_validator_rejects_rehashed_reordered_or_omitted_acceptance_commands(
     assert message in rejected.stderr
 
 
-def test_validator_rejects_absent_and_multiple_checked_receipts(repository: Path) -> None:
+def test_validator_rejects_absent_and_multiple_checked_receipts(
+    repository: Path,
+) -> None:
     absent = _run(repository, str(VALIDATOR))
     assert absent.returncode == 2
     assert "found 0" in absent.stderr

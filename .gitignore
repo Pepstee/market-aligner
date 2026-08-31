@@ -17,6 +17,9 @@ venv/
 graphify-out/
 .scrapling_cache/
 
+# Private operator evidence is runtime state, never product source.
+.control
+
 # Runtime state is never product source.
 .market-aligner-data/
 state/runtime/

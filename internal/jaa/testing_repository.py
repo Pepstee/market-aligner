@@ -29,7 +29,9 @@ def clone_jaa_repository(jaa_root: Path, destination: Path) -> Path:
     try:
         relative_jaa = resolved_jaa.relative_to(market_aligner_root)
     except ValueError as error:
-        raise RuntimeError("JAA is not inside the resolved Market Aligner repository") from error
+        raise RuntimeError(
+            "JAA is not inside the resolved Market Aligner repository"
+        ) from error
     if relative_jaa == Path("."):
         raise RuntimeError("JAA must be a subsystem, not a standalone repository")
 
@@ -54,5 +56,7 @@ def clone_jaa_repository(jaa_root: Path, destination: Path) -> Path:
 
     cloned_jaa = destination / relative_jaa
     if not cloned_jaa.is_dir():
-        raise RuntimeError(f"cloned Market Aligner is missing its JAA subsystem: {relative_jaa}")
+        raise RuntimeError(
+            f"cloned Market Aligner is missing its JAA subsystem: {relative_jaa}"
+        )
     return cloned_jaa
