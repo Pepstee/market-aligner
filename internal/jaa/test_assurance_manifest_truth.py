@@ -2837,9 +2837,7 @@ def test_unimplemented_slices_are_not_declared_complete() -> None:
         relative = accepted_path["path"]
         payload = _git("show", f"{phase_revision}:{relative}")
         assert hashlib.sha256(payload).hexdigest() == (accepted_path["sha256"])
-        assert _git("rev-parse", f"{phase_revision}:{relative}") == _git(
-            "rev-parse", f"HEAD:{_current_tree_path(relative)}"
-        )
+        _assert_historical_path_state("JAA-10", relative, phase_revision)
     prior_truth = phase_a["prior_truth_transition"]
     assert prior_truth["source_git_revision"] == (phase_a["implemented_source_parent"])
     assert (
