@@ -41,17 +41,41 @@ def _sha256(path: Path) -> str:
 
 def _receipt() -> tuple[Path, dict[str, Any]]:
     paths = sorted((ROOT / "runtime_evidence" / "jaa01").glob("sha256-*.json"))
-    assert len(paths) == 1
-    payload = paths[0].read_bytes()
-    assert paths[0].name == f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
-    return paths[0], json.loads(payload)
+    assert paths
+    documents: list[tuple[Path, bytes, dict[str, Any]]] = []
+    for path in paths:
+        payload = path.read_bytes()
+        assert path.name == f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
+        documents.append((path, payload, json.loads(payload)))
+
+    first_parent_lineage = {
+        revision.decode("ascii"): position
+        for position, revision in enumerate(
+            _git("rev-list", "--first-parent", "HEAD").splitlines()
+        )
+    }
+    current = sorted(
+        (
+            first_parent_lineage[document["source_git_revision"]],
+            path,
+            document,
+        )
+        for path, _payload, document in documents
+        if document.get("source_git_revision") in first_parent_lineage
+    )
+    assert current, "no JAA-01 receipt is bound to the current first-parent lineage"
+    _position, path, document = current[0]
+    return path, document
 
 
 def _git_at(root: Path, *arguments: str) -> bytes:
     import subprocess
 
     completed = subprocess.run(
-        ("git", *arguments), cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ("git", *arguments),
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
@@ -96,24 +120,42 @@ def _independent_revision_at(revision: str, root: Path = ROOT) -> str:
         and revision == revision.lower()
         and all(character in "0123456789abcdef" for character in revision)
     ), "historical source revision must be one exact lowercase SHA-1"
-    resolved = _git_at(
-        root, "rev-parse", "--verify", f"{revision}^{{commit}}"
-    ).strip()
+    resolved = _git_at(root, "rev-parse", "--verify", f"{revision}^{{commit}}").strip()
     assert resolved == revision.encode("ascii"), (
         "historical source revision must resolve to the exact recorded commit"
     )
     _git_at(root, "merge-base", "--is-ancestor", revision, "HEAD")
 
+    current_prefix = _git_at(root, "rev-parse", "--show-prefix").rstrip(b"\r\n")
+    prefixed_paths = set(
+        _git_at(
+            root,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "--full-tree",
+            revision,
+        ).splitlines()
+    )
+    prefix = (
+        current_prefix
+        if current_prefix + b"tracked_source_revision.py" in prefixed_paths
+        else b""
+    )
+
     entries: list[tuple[bytes, bytes, bytes]] = []
-    for record in _git_at(
-        root, "ls-tree", "-r", "-z", "--full-tree", revision
-    ).split(b"\0"):
+    for record in _git_at(root, "ls-tree", "-r", "-z", "--full-tree", revision).split(
+        b"\0"
+    ):
         if not record:
             continue
         metadata, tab, relative = record.partition(b"\t")
         mode, object_type, object_id = metadata.split()
         assert tab and object_type == b"blob"
         assert mode in {b"100644", b"100755", b"120000"}
+        if prefix and not relative.startswith(prefix):
+            continue
+        relative = relative[len(prefix) :]
         if not relative.startswith(EXCLUDED):
             entries.append(
                 (
@@ -135,8 +177,7 @@ def _assert_historical_receipt_binding(
     document: dict[str, Any], root: Path = ROOT
 ) -> str:
     assert (
-        document["source_content_revision_contract"]
-        == SOURCE_CONTENT_REVISION_CONTRACT
+        document["source_content_revision_contract"] == SOURCE_CONTENT_REVISION_CONTRACT
     )
     recomputed = _independent_revision_at(document["source_git_revision"], root)
     assert document["source_content_revision"] == recomputed
@@ -150,7 +191,8 @@ def _make_live_database(path: Path) -> sqlite3.Connection:
     writer.execute("PRAGMA wal_autocheckpoint=0")
     writer.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
     writer.executemany(
-        "INSERT INTO ledger(value) VALUES (?)", [(f"row-{number}",) for number in range(4)]
+        "INSERT INTO ledger(value) VALUES (?)",
+        [(f"row-{number}",) for number in range(4)],
     )
     assert Path(str(path) + "-wal").is_file()
     return writer
@@ -168,9 +210,11 @@ def _spec(name: str, source_root: Path, path: Path) -> core.BaselineSpec:
         destination_relative=f"databases/{name}.sqlite3",
         size=path.stat().st_size,
         sha256=_sha256(path),
-        schema_sha256=hashlib.sha256(json.dumps(
-            schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode()).hexdigest(),
+        schema_sha256=hashlib.sha256(
+            json.dumps(
+                schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
         schema_objects=len(schema),
         table_counts={"ledger": 4},
     )
@@ -187,20 +231,31 @@ def test_checked_in_jaa01_is_frozen_and_ignores_a_later_live_source_change(
     try:
         wal = Path(str(simulated_live) + "-wal")
         original_live_hashes = (_sha256(simulated_live), _sha256(wal))
-        writer.execute("INSERT INTO ledger(value) VALUES ('changed-after-certification')")
+        writer.execute(
+            "INSERT INTO ledger(value) VALUES ('changed-after-certification')"
+        )
         changed_live_hashes = (_sha256(simulated_live), _sha256(wal))
 
         assert changed_live_hashes != original_live_hashes
         assert evidence.read_bytes() == original_bytes
         historical_revision = _assert_historical_receipt_binding(document)
         assert historical_revision != _independent_revision()
-        assert document["hashes"]["baseline_sha256_before"] == document["hashes"][
-            "baseline_sha256_after"
-        ]
-        assert not any(value in rendered for value in (*original_live_hashes, *changed_live_hashes))
+        assert (
+            document["hashes"]["baseline_sha256_before"]
+            == document["hashes"]["baseline_sha256_after"]
+        )
+        assert not any(
+            value in rendered for value in (*original_live_hashes, *changed_live_hashes)
+        )
         forbidden = (
-            "source_root", "source_relative", "relative_location", "source_observations",
-            "current_measurement", "historical_observation", "live.sqlite", "operator",
+            "source_root",
+            "source_relative",
+            "relative_location",
+            "source_observations",
+            "current_measurement",
+            "historical_observation",
+            "live.sqlite",
+            "operator",
         )
         assert not any(token in rendered for token in forbidden)
         assert str(simulated_live) not in rendered
@@ -245,9 +300,7 @@ def test_historical_revision_binding_rejects_divergence_and_tampering(
     (repository / "divergent.txt").write_bytes(b"divergent\n")
     _git_at(repository, "add", "divergent.txt")
     _git_at(repository, "commit", "--quiet", "-m", "divergent")
-    divergent = _git_at(
-        repository, "rev-parse", "HEAD"
-    ).decode("ascii").strip()
+    divergent = _git_at(repository, "rev-parse", "HEAD").decode("ascii").strip()
 
     _git_at(repository, "checkout", "--quiet", "--detach", first)
     (repository / "current.txt").write_bytes(b"current\n")
@@ -271,20 +324,27 @@ def test_historical_revision_binding_rejects_divergence_and_tampering(
 
 
 def test_recertification_records_two_live_originals_with_utc_and_read_only_semantics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_root = tmp_path / "live"
     raw = source_root / "originals" / "raw.sqlite3"
     pipeline = source_root / "originals" / "pipeline.sqlite3"
     writers = [_make_live_database(raw), _make_live_database(pipeline)]
     monkeypatch.setattr(
-        core, "BASELINES",
-        (_spec("raw_jobs", source_root, raw), _spec("career_pipeline", source_root, pipeline)),
+        core,
+        "BASELINES",
+        (
+            _spec("raw_jobs", source_root, raw),
+            _spec("career_pipeline", source_root, pipeline),
+        ),
     )
     try:
         receipt = core.recertify_sources(source_root, tmp_path / "evidence")
         document = json.loads(receipt.read_text(encoding="utf-8"))["content"]
-        observed = datetime.fromisoformat(document["observed_at_utc"].replace("Z", "+00:00"))
+        observed = datetime.fromisoformat(
+            document["observed_at_utc"].replace("Z", "+00:00")
+        )
         assert observed.tzinfo is not None
         assert observed.utcoffset() == timezone.utc.utcoffset(observed)
         assert document["source_content_revision"] == _independent_revision()
@@ -295,7 +355,8 @@ def test_recertification_records_two_live_originals_with_utc_and_read_only_seman
         ):
             record = document["databases"][name]
             assert record["source"] == {
-                "label": f"source:{name}", "relative_location": relative,
+                "label": f"source:{name}",
+                "relative_location": relative,
             }
             assert record["open_semantics"]["sqlite_uri_mode"] == "ro"
             assert record["open_semantics"]["query_only"] is True
@@ -309,7 +370,9 @@ def test_recertification_records_two_live_originals_with_utc_and_read_only_seman
 
 @pytest.mark.parametrize("component", ["main", "wal"])
 def test_recertification_fails_closed_when_a_main_or_wal_read_drifts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, component: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
 ) -> None:
     source_root = tmp_path / "live"
     database = source_root / "originals" / "racing.sqlite3"
@@ -324,7 +387,9 @@ def test_recertification_fails_closed_when_a_main_or_wal_read_drifts(
         target = database if component == "main" else Path(str(database) + "-wal")
         if path == target and not injected:
             injected = True
-            writer.execute("INSERT INTO ledger(value) VALUES (?)", (f"{component}-drift",))
+            writer.execute(
+                "INSERT INTO ledger(value) VALUES (?)", (f"{component}-drift",)
+            )
             if component == "main":
                 writer.execute("PRAGMA wal_checkpoint(FULL)")
         return digest
