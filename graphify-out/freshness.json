@@ -1,11 +1,11 @@
 {
   "community_count": 1006,
-  "edge_count": 143898,
-  "node_count": 35882,
+  "edge_count": 143902,
+  "node_count": 35887,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
-    "GRAPH_REPORT.md": "2e89a4d334a99867c21c420b1c082bbdd8beea97f9f1750740ca980041a217d9",
-    "graph.json": "5c3f2869f3e6a237ed98d85dc9baeb48ede7db495e18e20501fc8b191e105b6a"
+    "GRAPH_REPORT.md": "b1e3f25ba3acd43eb43d82acf0e36db7d2d942f60a9d874fd806ff19d2e4c167",
+    "graph.json": "1341a1f9a3852096b07c57f004f81ab7bc4ff978c1f9e2be8404824ade23d163"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "416de4ac13ffb45768f9b1a893d0c199f7ac95e9",
+  "source_base_commit": "5e09b1931705420369f11c4ac36c5a01c93738be",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -30,7 +30,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "f7bf52d2e3d1eb245b0ea5bf0563418b945f0b70553b42356f373f2172ad9879",
     "docs/migration/capability-inventory.jsonl": "7675b7336b8ae0bdeb62b925021e3d5d39b638c34bb8a158fa5ef7f1f245fdab",
-    "docs/migration/ledger.jsonl": "af9f8543d2dc9f4de1569765c30a4c4cb89466a6bba438767df5aee96c25f796",
+    "docs/migration/ledger.jsonl": "febd47e4d62bd6ffede2088155fcb39de77a62700676f39c41577899c8f0c934",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
