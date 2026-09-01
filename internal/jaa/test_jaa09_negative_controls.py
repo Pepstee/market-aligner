@@ -48,7 +48,6 @@ from career_automation.browser_workflows import (
     SubmissionProof,
 )
 from career_automation.release_gate import ReleaseGateStore
-from career_automation.testing_sanity_review import fixture_pass_receipt
 from playwright.sync_api import sync_playwright
 from test_jaa09_independent_acceptance import (
     FORM_TOKEN,
@@ -155,9 +154,7 @@ def test_direct_submit_without_review_authority_produces_no_receipt() -> None:
         request = Request(
             fixture.application_url + "/submit",
             data=b"review_nonce=not-authorised",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded"
-            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
         with pytest.raises(HTTPError) as captured:
@@ -271,9 +268,7 @@ def test_upload_filename_paths_are_reduced_to_basename_before_hashing() -> None:
         "application_id": vacancy.application_id,
         "job_key": vacancy.job_key,
         "fields": {
-            key: value
-            for key, value in fields.items()
-            if key != "fixture_token"
+            key: value for key, value in fields.items() if key != "fixture_token"
         },
         "sponsorship_details": "",
         "uploads": {
@@ -347,18 +342,13 @@ def test_duplicate_submit_and_second_review_produce_no_second_receipt() -> None:
             review,
         )
         assert nonce is not None
-        data = (
-            f"review_nonce={nonce.group(1)}"
-            f"&fixture_token={FORM_TOKEN}"
-        ).encode()
+        data = (f"review_nonce={nonce.group(1)}&fixture_token={FORM_TOKEN}").encode()
 
         def submit() -> None:
             request = Request(
                 fixture.application_url + "/submit",
                 data=data,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
                 method="POST",
             )
             with urlopen(request, timeout=5):
@@ -518,9 +508,7 @@ def test_executor_detects_upload_mutation_before_browser_materialization(
                     approved_values=approvals,
                     materialized_values=values,
                 )
-            Path(values["evidence:EV_CV"].value).write_bytes(
-                b"%PDF-mutated"
-            )
+            Path(values["evidence:EV_CV"].value).write_bytes(b"%PDF-mutated")
             with pytest.raises(ValueError, match="approved bounded PDF"):
                 executor.execute_next(
                     page,
@@ -587,10 +575,7 @@ def test_click_action_cannot_disguise_final_submission(
                 )
             browser.close()
         assert fixture.receipt is None
-        assert (
-            store.run_snapshot(run_id)["checkpoint_count"]
-            == len(workflow.actions)
-        )
+        assert store.run_snapshot(run_id)["checkpoint_count"] == len(workflow.actions)
 
 
 def test_interruption_after_click_recovers_receipt_without_second_submit(
@@ -633,7 +618,11 @@ def test_interruption_after_click_recovers_receipt_without_second_submit(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: authority.consumed_at,
+        )
         original_complete = store.complete_step
         interrupted = False
 
@@ -680,6 +669,7 @@ def test_interruption_after_click_recovers_receipt_without_second_submit(
             resumed_executor = LocalBrowserExecutor(
                 store,
                 repository_root=ROOT,
+                clock=lambda: authority.consumed_at,
             )
             resumed_browser = playwright.chromium.launch(headless=True)
             resumed_page = resumed_browser.new_page()
@@ -697,10 +687,7 @@ def test_interruption_after_click_recovers_receipt_without_second_submit(
         assert fixture.receipt is first_receipt
         assert store.run_snapshot(run_id)["status"] == "completed"
         events = store.events(run_id)
-        assert sum(
-            row["event_type"] == "submit_click_started"
-            for row in events
-        ) == 1
+        assert sum(row["event_type"] == "submit_click_started" for row in events) == 1
 
 
 @pytest.mark.parametrize(
@@ -752,7 +739,11 @@ def test_preclick_interruption_replays_and_submits_exactly_once(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: authority.consumed_at,
+        )
         with sync_playwright() as playwright:
             first_browser = playwright.chromium.launch(headless=True)
             first_page = first_browser.new_page()
@@ -822,6 +813,7 @@ def test_preclick_interruption_replays_and_submits_exactly_once(
             completed = LocalBrowserExecutor(
                 store,
                 repository_root=ROOT,
+                clock=lambda: authority.consumed_at,
             ).execute_next(
                 resumed_page,
                 run_id=run_id,
@@ -835,10 +827,13 @@ def test_preclick_interruption_replays_and_submits_exactly_once(
         assert completed.action_kind is ActionKind.SUBMIT
         assert fixture.receipt is not None
         assert store.run_snapshot(run_id)["status"] == "completed"
-        assert sum(
-            row["event_type"] == "submit_click_started"
-            for row in store.events(run_id)
-        ) == 1
+        assert (
+            sum(
+                row["event_type"] == "submit_click_started"
+                for row in store.events(run_id)
+            )
+            == 1
+        )
 
 
 def test_executor_uses_canonical_trusted_clock_when_caller_time_differs(
@@ -889,7 +884,11 @@ def test_executor_uses_canonical_trusted_clock_when_caller_time_differs(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: trusted_consumed_at,
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -907,15 +906,16 @@ def test_executor_uses_canonical_trusted_clock_when_caller_time_differs(
         dispatch = store.submit_dispatch(run_id)
         assert dispatch is not None
         assert dispatch["state"] == "receipt_recorded"
-        assert dispatch["release_consumed_at"] == (
-            trusted_consumed_at.isoformat()
-        )
+        assert dispatch["release_consumed_at"] == (trusted_consumed_at.isoformat())
         assert authority.consumed_at != trusted_consumed_at
         assert fixture.receipt is not None
-        assert sum(
-            row["event_type"] == "submit_click_started"
-            for row in store.events(run_id)
-        ) == 1
+        assert (
+            sum(
+                row["event_type"] == "submit_click_started"
+                for row in store.events(run_id)
+            )
+            == 1
+        )
 
 
 def test_expected_fixture_payload_normalizes_cover_note_newlines(
@@ -1045,11 +1045,7 @@ def test_post_consumption_drift_blocks_submit_before_click(
             dispatch = store.submit_dispatch(run_id)
             assert dispatch is not None
             assert dispatch["state"] == "release_consumed"
-            target = (
-                authority.artifact_root
-                / publication.relative_directory
-                / "cv.pdf"
-            )
+            target = authority.artifact_root / publication.relative_directory / "cv.pdf"
             target.write_bytes(target.read_bytes() + b"drift-before-click")
             with pytest.raises(ValueError, match="differs from its receipt"):
                 executor.execute_next(
@@ -1066,8 +1062,7 @@ def test_post_consumption_drift_blocks_submit_before_click(
     assert dispatch is not None
     assert dispatch["state"] == "release_consumed"
     assert not any(
-        row["event_type"] == "submit_click_started"
-        for row in store.events(run_id)
+        row["event_type"] == "submit_click_started" for row in store.events(run_id)
     )
 
 
@@ -1083,14 +1078,19 @@ def test_release_authority_requires_archive_receipt_and_manifest_hash(
         source.company_name,
         source.answers[0].question,
     )
-    with LocalATSFixture(vacancy, nonce=lambda: NONCE, form_token=FORM_TOKEN) as fixture:
+    with LocalATSFixture(
+        vacancy, nonce=lambda: NONCE, form_token=FORM_TOKEN
+    ) as fixture:
         _, _, _, _, authority, _ = _released_browser_inputs(
             fixture, tmp_path, release_inputs
         )
     parameters = inspect.signature(ReleaseExecutionAuthority).parameters
     assert parameters["archive_receipt"].default is inspect.Parameter.empty
     assert parameters["archive_root"].default is inspect.Parameter.empty
-    assert authority.archive_receipt.manifest_sha256 in authority.archive_receipt.document().values()
+    assert (
+        authority.archive_receipt.manifest_sha256
+        in authority.archive_receipt.document().values()
+    )
     with pytest.raises(TypeError, match="archive receipt"):
         replace(authority, archive_receipt=None)
 
@@ -1107,9 +1107,11 @@ def test_archive_is_reverified_after_prefill_and_immediately_before_click(
         source.company_name,
         source.answers[0].question,
     )
-    with LocalATSFixture(vacancy, nonce=lambda: NONCE, form_token=FORM_TOKEN) as fixture:
-        database, workflow, approvals, values, authority, issued = _released_browser_inputs(
-            fixture, tmp_path, release_inputs
+    with LocalATSFixture(
+        vacancy, nonce=lambda: NONCE, form_token=FORM_TOKEN
+    ) as fixture:
+        database, workflow, approvals, values, authority, issued = (
+            _released_browser_inputs(fixture, tmp_path, release_inputs)
         )
         store = BrowserWorkflowStore(database.path)
         run_id = store.create_run(workflow)
@@ -1125,14 +1127,17 @@ def test_archive_is_reverified_after_prefill_and_immediately_before_click(
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
             for _action in workflow.actions[:-1]:
-                assert executor.execute_next(
-                    page,
-                    run_id=run_id,
-                    worker_id="local_worker",
-                    approved_values=approvals,
-                    materialized_values=values,
-                    release_authority=authority,
-                ) is not None
+                assert (
+                    executor.execute_next(
+                        page,
+                        run_id=run_id,
+                        worker_id="local_worker",
+                        approved_values=approvals,
+                        materialized_values=values,
+                        release_authority=authority,
+                    )
+                    is not None
+                )
             manifest = json.loads(
                 (
                     authority.archive_root
@@ -1142,7 +1147,9 @@ def test_archive_is_reverified_after_prefill_and_immediately_before_click(
             digest = manifest["selected"]["form.answers"]
             archived_answer = authority.archive_root / "objects" / digest[:2] / digest
             archived_answer.write_bytes(archived_answer.read_bytes() + b"tamper")
-            with pytest.raises(ApplicationArchiveError, match="hash or length mismatch"):
+            with pytest.raises(
+                ApplicationArchiveError, match="hash or length mismatch"
+            ):
                 executor.execute_next(
                     page,
                     run_id=run_id,
@@ -1154,8 +1161,7 @@ def test_archive_is_reverified_after_prefill_and_immediately_before_click(
             browser.close()
         assert fixture.receipt is None
         assert not any(
-            row["event_type"] == "submit_click_started"
-            for row in store.events(run_id)
+            row["event_type"] == "submit_click_started" for row in store.events(run_id)
         )
 
 
@@ -1196,9 +1202,7 @@ def test_invalid_jaa08_token_cannot_create_fixture_receipt(
             tmp_path,
             release_inputs,
         )
-        replacement = (
-            "0" if authority.release_token[-1] != "0" else "1"
-        )
+        replacement = "0" if authority.release_token[-1] != "0" else "1"
         invalid_token = authority.release_token[:-1] + replacement
         invalid_authority = replace(
             authority,
@@ -1319,7 +1323,11 @@ def test_self_consistent_wrong_payload_receipt_is_not_recorded(
             return forged
 
         fixture.state.submit = fabricate_receipt  # type: ignore[method-assign]
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: authority.consumed_at,
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -1394,7 +1402,11 @@ def test_store_rejects_rehashed_submit_event_without_durable_lineage(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: authority.consumed_at,
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()

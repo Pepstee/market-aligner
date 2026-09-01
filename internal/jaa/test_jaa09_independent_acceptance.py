@@ -94,10 +94,7 @@ def _multipart(
         chunks.extend(
             (
                 f"--{boundary}\r\n".encode(),
-                (
-                    f'Content-Disposition: form-data; name="{name}"'
-                    "\r\n\r\n"
-                ).encode(),
+                (f'Content-Disposition: form-data; name="{name}"\r\n\r\n').encode(),
                 value.encode(),
                 b"\r\n",
             )
@@ -274,9 +271,7 @@ def _released_browser_inputs(
             digest,
         )
 
-    artifact_directory = (
-        artifact_root / publication.relative_directory
-    )
+    artifact_directory = artifact_root / publication.relative_directory
     bind("evidence:EV_FULL_NAME", contact.full_name, None)
     bind("evidence:EV_EMAIL", contact.email, None)
     bind("evidence:EV_PHONE", contact.phone, None)
@@ -406,10 +401,7 @@ def test_local_fixture_exposes_accessible_common_and_conditional_fields() -> Non
         assert "<label " in html
         assert "Review application" in html
         assert "Local test fixture" in html
-        assert (
-            f'<link rel="icon" href="{FIXTURE_INERT_FAVICON_HREF}">'
-            in html
-        )
+        assert f'<link rel="icon" href="{FIXTURE_INERT_FAVICON_HREF}">' in html
         assert headers["Cache-Control"] == "no-store"
         assert "form-action 'self'" in headers["Content-Security-Policy"]
 
@@ -425,13 +417,8 @@ def test_review_then_submit_returns_one_content_addressed_official_receipt() -> 
         assert nonce is not None
         request = Request(
             fixture.application_url + "/submit",
-            data=(
-                f"review_nonce={nonce.group(1)}"
-                f"&fixture_token={FORM_TOKEN}"
-            ).encode(),
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded"
-            },
+            data=(f"review_nonce={nonce.group(1)}&fixture_token={FORM_TOKEN}").encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
         with urlopen(request, timeout=5) as response:
@@ -455,16 +442,11 @@ def test_fixture_receipt_identity_replays_exactly() -> None:
             review,
         )
         assert nonce is not None
-        body = (
-            f"review_nonce={nonce.group(1)}"
-            f"&fixture_token={FORM_TOKEN}"
-        ).encode()
+        body = (f"review_nonce={nonce.group(1)}&fixture_token={FORM_TOKEN}").encode()
         request = Request(
             fixture.application_url + "/submit",
             data=body,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded"
-            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
         with urlopen(request, timeout=5):
@@ -478,11 +460,7 @@ def test_fixture_receipt_identity_replays_exactly() -> None:
 
 
 def test_fixture_source_contains_no_external_asset_or_action_target() -> None:
-    source = (
-        ROOT
-        / "career_automation"
-        / "ats_fixture.py"
-    ).read_text(encoding="utf-8")
+    source = (ROOT / "career_automation" / "ats_fixture.py").read_text(encoding="utf-8")
     for forbidden in (
         "requests.",
         "playwright",
@@ -587,7 +565,11 @@ def test_real_browser_consumes_jaa08_token_and_records_official_receipt(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: authority.consumed_at,
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -625,13 +607,9 @@ def test_real_browser_consumes_jaa08_token_and_records_official_receipt(
             run_id=run_id,
             workflow_sha256=workflow.content_hash,
             step_id="submit",
-            release_manifest_sha256=(
-                issued.manifest.release_manifest_sha256
-            ),
+            release_manifest_sha256=(issued.manifest.release_manifest_sha256),
             receipt_id=str(outputs["receipt_id"]),
-            receipt_payload_sha256=str(
-                outputs["receipt_payload_sha256"]
-            ),
+            receipt_payload_sha256=str(outputs["receipt_payload_sha256"]),
             screenshot_sha256=str(outputs["screenshot_sha256"]),
             field_map_sha256=str(outputs["field_map_sha256"]),
         )
@@ -698,6 +676,7 @@ def test_fresh_browser_replays_checkpointed_form_without_second_submit(
             first_executor = LocalBrowserExecutor(
                 store,
                 repository_root=ROOT,
+                clock=lambda: authority.consumed_at,
             )
             for _action in workflow.actions[:-1]:
                 first_executor.execute_next(
@@ -717,6 +696,7 @@ def test_fresh_browser_replays_checkpointed_form_without_second_submit(
             resumed = LocalBrowserExecutor(
                 store,
                 repository_root=ROOT,
+                clock=lambda: authority.consumed_at,
             ).execute_next(
                 resumed_page,
                 run_id=run_id,
@@ -734,10 +714,11 @@ def test_fresh_browser_replays_checkpointed_form_without_second_submit(
             resumed_browser.close()
         assert fixture.receipt is not None
         assert store.run_snapshot(run_id)["status"] == "completed"
-        assert store.run_snapshot(run_id)["checkpoint_count"] == len(
-            workflow.actions
+        assert store.run_snapshot(run_id)["checkpoint_count"] == len(workflow.actions)
+        assert (
+            sum(
+                row["event_type"] == "submit_click_started"
+                for row in store.events(run_id)
+            )
+            == 1
         )
-        assert sum(
-            row["event_type"] == "submit_click_started"
-            for row in store.events(run_id)
-        ) == 1
