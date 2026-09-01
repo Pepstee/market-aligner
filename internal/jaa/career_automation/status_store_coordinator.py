@@ -31,8 +31,7 @@ from career_automation.status_ingestion import (
 
 
 COORDINATOR_POLICY_SHA256 = (
-    "1c3874eaea9df15413984923f871aa135"
-    "5a46b4fa5e0263b8c41f0d42b6383bd"
+    "f857c98219b18f2768b58091b25226fc9fb91906700377307a8a3ee07f89e2c7"
 )
 COORDINATOR_SCHEMA_VERSION = "jaa12.status-store-coordinator-policy.v1"
 PIPELINE_ORDER = (
@@ -66,30 +65,32 @@ class _FrozenMapping(Mapping[str, object]):
         return len(self.items)
 
 
-COORDINATOR_POLICY: Mapping[str, object] = _FrozenMapping((
-    ("schema_version", COORDINATOR_SCHEMA_VERSION),
+COORDINATOR_POLICY: Mapping[str, object] = _FrozenMapping(
     (
-        "contract_sha256",
-        FROZEN_LOCAL_EXPORT_STATUS_CONTRACT.contract_sha256,
-    ),
-    ("pipeline_order", PIPELINE_ORDER),
-    ("partial_progress", "truthful_receipted_steps"),
-    ("atomicity_across_steps", "absent"),
-    ("durable_read_api", "absent"),
-    (
-        "follow_up_reference_hashes",
-        "caller_supplied_structural_references",
-    ),
-    ("connector_authority", "withheld"),
-    ("mailbox_access", "withheld"),
-    ("portal_access", "withheld"),
-    ("send_authority", "withheld"),
-    ("objective_satisfied", False),
-    ("dependency_satisfied", False),
-    ("production_certification", "withheld"),
-    ("certifies_slice", False),
-    ("external_action_capability", False),
-))
+        ("schema_version", COORDINATOR_SCHEMA_VERSION),
+        (
+            "contract_sha256",
+            FROZEN_LOCAL_EXPORT_STATUS_CONTRACT.contract_sha256,
+        ),
+        ("pipeline_order", PIPELINE_ORDER),
+        ("partial_progress", "truthful_receipted_steps"),
+        ("atomicity_across_steps", "absent"),
+        ("durable_read_api", "absent"),
+        (
+            "follow_up_reference_hashes",
+            "caller_supplied_structural_references",
+        ),
+        ("connector_authority", "withheld"),
+        ("mailbox_access", "withheld"),
+        ("portal_access", "withheld"),
+        ("send_authority", "withheld"),
+        ("objective_satisfied", False),
+        ("dependency_satisfied", False),
+        ("production_certification", "withheld"),
+        ("certifies_slice", False),
+        ("external_action_capability", False),
+    )
+)
 
 
 def status_store_coordinator_policy() -> dict[str, object]:
@@ -123,9 +124,7 @@ def _receipt_document(
         or document.get("connector_authority") != "withheld"
         or document.get("message_send_authority") != "withheld"
     ):
-        raise ValueError(
-            "coordinator receipt differs from the durable store contract"
-        )
+        raise ValueError("coordinator receipt differs from the durable store contract")
     return document, payload
 
 
@@ -160,9 +159,7 @@ class LocalExportIngestionResult:
     partial_progress: str = "truthful_receipted_steps"
     atomicity_across_steps: str = "absent"
     durable_read_api: str = "absent"
-    follow_up_reference_hashes: str = (
-        "caller_supplied_structural_references"
-    )
+    follow_up_reference_hashes: str = "caller_supplied_structural_references"
     connector_authority: str = "withheld"
     send_authority: str = "withheld"
     objective_satisfied: bool = False
@@ -188,9 +185,7 @@ class LocalExportIngestionResult:
             or self.timeline.contract_sha256
             != FROZEN_LOCAL_EXPORT_STATUS_CONTRACT.contract_sha256
         ):
-            raise ValueError(
-                "coordinator result typed values do not form one pipeline"
-            )
+            raise ValueError("coordinator result typed values do not form one pipeline")
 
         archive_document, archive_payload = _receipt_document(
             self.archive_receipt,
@@ -206,14 +201,11 @@ class LocalExportIngestionResult:
         )
         if (
             archive_payload.get("evidence_id") != self.evidence.evidence_id
-            or archive_payload.get("source_sha256")
-            != self.evidence.source_sha256
+            or archive_payload.get("source_sha256") != self.evidence.source_sha256
             or observation_payload.get("observation_id")
             != self.observation.observation_id
-            or observation_payload.get("raw_evidence_id")
-            != self.evidence.evidence_id
-            or timeline_payload.get("timeline_id")
-            != self.timeline.timeline_id
+            or observation_payload.get("raw_evidence_id") != self.evidence.evidence_id
+            or timeline_payload.get("timeline_id") != self.timeline.timeline_id
             or not (
                 archive_document["sequence"]
                 < observation_document["sequence"]
@@ -225,9 +217,7 @@ class LocalExportIngestionResult:
             )
 
         if (self.intent is None) != (self.intent_receipt is None):
-            raise ValueError(
-                "coordinator intent and receipt presence must agree"
-            )
+            raise ValueError("coordinator intent and receipt presence must agree")
         if self.intent is not None:
             if (
                 not isinstance(self.intent, FollowUpIntent)
@@ -242,14 +232,10 @@ class LocalExportIngestionResult:
                 "register_follow_up_intent",
             )
             if (
-                intent_payload.get("timeline_id")
-                != self.timeline.timeline_id
-                or intent_payload.get("idempotency_key")
-                != self.intent.idempotency_key
-                or intent_payload.get("intent_sha256")
-                != self.intent.intent_sha256
-                or timeline_document["sequence"]
-                >= intent_document["sequence"]
+                intent_payload.get("timeline_id") != self.timeline.timeline_id
+                or intent_payload.get("idempotency_key") != self.intent.idempotency_key
+                or intent_payload.get("intent_sha256") != self.intent.intent_sha256
+                or timeline_document["sequence"] >= intent_document["sequence"]
             ):
                 raise ValueError(
                     "coordinator intent receipt differs from exact content"
@@ -285,27 +271,19 @@ def _verify_typed_history(
     if not isinstance(prior_observations, tuple) or not all(
         isinstance(row, StatusObservation) for row in prior_observations
     ):
-        raise TypeError(
-            "coordinator prior observations must be a typed tuple"
-        )
+        raise TypeError("coordinator prior observations must be a typed tuple")
     if not isinstance(censored_silence, tuple) or not all(
         isinstance(row, CensoredSilence) for row in censored_silence
     ):
-        raise TypeError(
-            "coordinator censored silence must be a typed tuple"
-        )
+        raise TypeError("coordinator censored silence must be a typed tuple")
     for row in prior_observations:
         row.verify()
         if row.application_id != application_id or row.job_key != job_key:
-            raise ValueError(
-                "prior observation belongs to a different application"
-            )
+            raise ValueError("prior observation belongs to a different application")
     for row in censored_silence:
         row.__post_init__()
         if row.application_id != application_id or row.job_key != job_key:
-            raise ValueError(
-                "censored silence belongs to a different application"
-            )
+            raise ValueError("censored silence belongs to a different application")
 
 
 def ingest_local_export(
@@ -328,9 +306,7 @@ def ingest_local_export(
     never hides or compensates for a successfully receipted prefix.
     """
     if not isinstance(store, StatusEvidenceStore):
-        raise TypeError(
-            "local export ingestion requires StatusEvidenceStore"
-        )
+        raise TypeError("local export ingestion requires StatusEvidenceStore")
     if (
         store.identity.contract_sha256
         != FROZEN_LOCAL_EXPORT_STATUS_CONTRACT.contract_sha256
@@ -342,9 +318,7 @@ def ingest_local_export(
         follow_up,
         FollowUpRegistrationRequest,
     ):
-        raise TypeError(
-            "follow-up registration requires a typed request"
-        )
+        raise TypeError("follow-up registration requires a typed request")
     _verify_typed_history(
         application_id=application_id,
         job_key=job_key,
@@ -387,9 +361,7 @@ def ingest_local_export(
         intent = compile_follow_up_intent(
             contract,
             timeline,
-            released_application_sha256=(
-                follow_up.released_application_sha256
-            ),
+            released_application_sha256=(follow_up.released_application_sha256),
             draft_sha256=follow_up.draft_sha256,
         )
         intent_receipt = store.register_follow_up_intent(intent)
