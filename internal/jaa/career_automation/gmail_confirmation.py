@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 from .production_ats_executor import GmailConfirmationEvidence
 from .evidence_matching import canonical_json
-from .provider_observation_capture import exact_clean_head
+from .provider_observation_capture import exact_committed_source_identity
 
 
 COLLECTOR_IDENTITY = "jaa.gmail-api-metadata-reconciler.v1"
@@ -95,14 +95,10 @@ def _vacancy_matches(
     subject_words = _words(subject)
     return (
         _POSITIVE_CONFIRMATION.search(subject) is not None
-        and
-        bool(company_words)
+        and bool(company_words)
         and company_words.issubset(subject_words)
         and bool(role_words)
-        and (
-            application_id in normalized
-            or role_words.issubset(subject_words)
-        )
+        and (application_id in normalized or role_words.issubset(subject_words))
     )
 
 
@@ -134,8 +130,12 @@ class GmailAPIConfirmationChecker:
         return self._assert_collector_identity()
 
     def _assert_collector_identity(self) -> str:
-        head = exact_clean_head(self.repository_root)
-        committed = _source_at(self.repository_root, head, COLLECTOR_SOURCE_PATH)
+        identity = exact_committed_source_identity(self.repository_root)
+        committed = _source_at(
+            identity.repository_root,
+            identity.head,
+            f"{identity.repository_prefix}{COLLECTOR_SOURCE_PATH}",
+        )
         if committed != Path(__file__).read_bytes():
             raise ValueError("running Gmail reconciler differs from exact clean HEAD")
         return hashlib.sha256(committed).hexdigest()

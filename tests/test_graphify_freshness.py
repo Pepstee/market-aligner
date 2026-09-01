@@ -71,3 +71,36 @@ def test_gate_rejects_tampered_graph(tmp_path: Path) -> None:
     (root / "graphify-out/graph.json").write_text('{"nodes": [], "edges": []}', encoding="utf-8")
     with pytest.raises(MODULE.FreshnessError, match="output hash mismatch"):
         MODULE.verify(root)
+
+
+def test_write_receipt_binds_current_tracked_tree(tmp_path: Path) -> None:
+    root = _fixture(tmp_path)
+    (root / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+    receipt = MODULE.write_receipt(root)
+    assert receipt["sources"] == {"source.py": _sha256(root / "source.py")}
+    assert receipt["release_authority"] is False
+    assert MODULE.verify(root) == receipt
+
+
+def test_canonicalize_graph_collapses_duplicates_and_dangling_edges(tmp_path: Path) -> None:
+    root = _fixture(tmp_path)
+    graph_path = root / "graphify-out/graph.json"
+    graph = {
+        "nodes": [
+            {"id": "value", "label": "old"},
+            {"id": "value", "label": "current"},
+            {"id": "target"},
+        ],
+        "links": [
+            {"source": "value", "target": "target", "relation": "old"},
+            {"source": "value", "target": "missing", "relation": "dangling"},
+            {"source": "value", "target": "target", "relation": "current"},
+        ],
+    }
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    assert MODULE.canonicalize_graph(root) == (2, 1)
+    canonical = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert canonical["nodes"][0]["label"] == "current"
+    assert canonical["links"] == [
+        {"source": "value", "target": "target", "relation": "current"}
+    ]

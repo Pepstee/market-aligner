@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import os
+import platform
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -24,9 +26,12 @@ from career_automation.corpus_publication import sha256_file, validate_inventory
 from career_automation.opportunity1 import reassess_opportunity1  # noqa: E402
 from career_automation.public_access import PublicAccessPolicy  # noqa: E402
 from scripts.capture_jaa_04 import load_admitted_input  # noqa: E402
-from tracked_source_revision import source_content_revision  # noqa: E402
+from tracked_source_revision import (  # noqa: E402
+    source_content_revision,
+    source_content_revision_contract,
+)
 
-FORMAT = "jaa04-revision-certification/v4"
+FORMAT = "jaa04-revision-certification/v5"
 
 
 def canonical(value: object) -> bytes:
@@ -50,7 +55,36 @@ def _external(path: Path, *, label: str) -> Path:
 def revision() -> str:
     result = subprocess.run(("git", "rev-parse", "HEAD^{commit}"), cwd=ROOT,
                             text=True, capture_output=True, check=True)
-    return result.stdout.strip()
+    value = result.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", value):
+        raise ValueError("source revision is missing or invalid")
+    return value
+
+
+def _source_identity() -> tuple[str, str]:
+    return revision(), source_content_revision(ROOT)
+
+
+def _require_unchanged_source(initial: tuple[str, str]) -> tuple[str, str]:
+    current = _source_identity()
+    if current != initial:
+        raise ValueError("source identity changed during certification")
+    return current
+
+
+def _certification_provenance(
+    source_revision: str,
+    source_content: str,
+) -> dict[str, object]:
+    return {
+        "source_revision": source_revision,
+        "source_content_revision": source_content,
+        "source_content_revision_contract": source_content_revision_contract(),
+        "runtime": {
+            "python_implementation": platform.python_implementation(),
+            "python_version": platform.python_version(),
+        },
+    }
 
 
 def _load_access_policy(capture: Path, path: Path) -> PublicAccessPolicy:
@@ -115,6 +149,9 @@ def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:
     if (receipt.get("manifest_sha256") != sha(manifest_path)
             or receipt.get("dossiers_sha256") != sha(dossiers_path)):
         raise ValueError("capture metadata or dossier bytes were modified")
+    # Establish committed-source authority immediately before the expensive
+    # semantic replay, after cheap malformed-input controls have failed.
+    initial_revision, initial_content_revision = _source_identity()
     inventory_path = capture / "corpus_inventory.json"
     validate_inventory(capture)
     if receipt.get("inventory_sha256") != sha256_file(inventory_path):
@@ -186,14 +223,13 @@ def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:
     raw_hash = raw_evidence_hash(capture)
     if raw_hash != receipt.get("raw_corpus_sha256"):
         raise ValueError("raw authority cache was modified")
-    current_revision = revision()
-    current_content_revision = source_content_revision(ROOT)
-    if (receipt.get("source_revision") != current_revision
-            or receipt.get("source_content_revision") != current_content_revision):
+    if (receipt.get("source_revision") != initial_revision
+            or receipt.get("source_content_revision") != initial_content_revision):
         raise ValueError("capture is not bound to the current source revision")
+    _require_unchanged_source((initial_revision, initial_content_revision))
     certificate = canonical({
-        "format": FORMAT, "status": "SUCCESS", "source_revision": current_revision,
-        "source_content_revision": current_content_revision,
+        "format": FORMAT, "status": "SUCCESS",
+        **_certification_provenance(initial_revision, initial_content_revision),
         "capture_receipt_sha256": sha(receipt_path),
         "manifest_sha256": sha(manifest_path), "dossiers_sha256": sha(dossiers_path),
         "queue_snapshot_sha256": admission["snapshot_sha256"],
@@ -206,9 +242,17 @@ def certify(capture: Path, destination: Path, access_policy_path: Path) -> Path:
     if destination.exists() and destination.read_bytes() != certificate:
         raise ValueError("existing certification receipt conflicts with validated bytes")
     if not destination.exists():
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_bytes(certificate)
-        os.replace(temporary, destination)
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(certificate)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
     return destination
 
 

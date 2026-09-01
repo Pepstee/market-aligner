@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from market_aligner.assessment.geography import selection_sort_key
 from market_aligner.assessment.scoring import ScoreResult
 from market_aligner.domain.contracts import Vacancy
 from market_aligner.profiler.schema import validate_profile_id
@@ -26,6 +27,30 @@ class RankedVacancy:
     def __post_init__(self) -> None:
         if self.vacancy.key != self.score.job_key:
             raise ValueError("vacancy and score job keys differ")
+        if (
+            isinstance(self.preference_rank, bool)
+            or not isinstance(self.preference_rank, int)
+            or self.preference_rank < 0
+        ):
+            raise ValueError("preference rank must be a non-negative integer")
+
+
+def _ranked_vacancy_sort_key(item: RankedVacancy) -> tuple[int, float, float, str]:
+    if item.preference_rank in range(5):
+        return selection_sort_key(
+            item.preference_rank + 1,
+            item.score.final,
+            item.score.opportunity,
+            item.vacancy.key,
+        )
+    # Unknown geography remains inspectable but always follows every supported
+    # bucket; preserve the recovered score/opportunity/identity tie-breaks.
+    return (
+        item.preference_rank + 1,
+        -item.score.final,
+        -item.score.opportunity,
+        item.vacancy.key,
+    )
 
 
 @dataclass(frozen=True)
@@ -103,7 +128,7 @@ def write_reports(
     )
     ranked = sorted(
         rows,
-        key=lambda item: (item.preference_rank, -item.score.final, item.vacancy.key),
+        key=_ranked_vacancy_sort_key,
     )
     _write_jobs(ranked, paths.jobs_csv)
     _write_ranked_json(profile_id, ranked, paths.ranked_json)

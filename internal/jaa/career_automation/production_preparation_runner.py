@@ -8,6 +8,7 @@ non-release and grants no browser or submission authority.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -581,7 +582,12 @@ def _require_compatible_admitted_producer(
         raise ProductionPreparationDeploymentError("producer commit identity is malformed")
     if admitted_producer_commit == current_commit:
         return
-    repository = f"/proc/self/fd/{repository_descriptor}"
+    try:
+        repository = _descriptor_directory_path(repository_descriptor)
+    except OSError as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer repository lease is unavailable on this host"
+        ) from exc
     try:
         ancestor = subprocess.run(
             [
@@ -623,6 +629,51 @@ def _require_compatible_admitted_producer(
         raise ProductionPreparationDeploymentError(
             "handoff authority changed after the admitted producer commit"
         )
+    try:
+        _require_descriptor_path_identity(repository_descriptor, repository)
+    except OSError as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer repository lease changed during verification"
+        ) from exc
+
+
+def _normalized_device(value: int) -> int:
+    return value & ((1 << 64) - 1)
+
+
+def _require_descriptor_path_identity(descriptor: int, path: str) -> None:
+    descriptor_metadata = os.fstat(descriptor)
+    path_descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        path_metadata = os.fstat(path_descriptor)
+    finally:
+        os.close(path_descriptor)
+    if (
+        not stat.S_ISDIR(descriptor_metadata.st_mode)
+        or not stat.S_ISDIR(path_metadata.st_mode)
+        or descriptor_metadata.st_ino != path_metadata.st_ino
+        or _normalized_device(descriptor_metadata.st_dev)
+        != _normalized_device(path_metadata.st_dev)
+    ):
+        raise OSError("descriptor directory identity differs")
+
+
+def _descriptor_directory_path(descriptor: int) -> str:
+    proc_path = f"/proc/self/fd/{descriptor}"
+    if os.path.isdir(proc_path):
+        _require_descriptor_path_identity(descriptor, proc_path)
+        return proc_path
+    if not hasattr(fcntl, "F_GETPATH"):
+        raise OSError("host cannot resolve a directory descriptor")
+    raw = fcntl.fcntl(descriptor, fcntl.F_GETPATH, b"\0" * 1024)
+    path = os.fsdecode(raw.split(b"\0", 1)[0])
+    if not path:
+        raise OSError("directory descriptor has no host path")
+    _require_descriptor_path_identity(descriptor, path)
+    return path
 
 
 def _open_admission_database(data_descriptor: int) -> tuple[int, int]:
@@ -729,7 +780,7 @@ def _verify_preparation_output(
                 )
         expected_files = {"cover-letter.pdf", "cv.pdf", "receipt.json"}
         actual_files: set[str] = set()
-        with os.scandir(f"/proc/self/fd/{chain[-1]}") as entries:
+        with os.scandir(chain[-1]) as entries:
             for entry in entries:
                 if entry.name == "objects":
                     continue
@@ -755,7 +806,7 @@ def _verify_preparation_output(
                 raise ProductionPreparationDeploymentError(
                     "production preparation object directory differs"
                 )
-            with os.scandir(f"/proc/self/fd/{objects_descriptor}") as entries:
+            with os.scandir(objects_descriptor) as entries:
                 object_names = tuple(entry.name for entry in entries)
             if not object_names:
                 raise ProductionPreparationDeploymentError(

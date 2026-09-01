@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
@@ -16,12 +17,20 @@ from playwright.sync_api import sync_playwright
 
 from .application_archive import VacancyArchiveIdentity
 from .application_artifacts import publish_application_artifacts
+from .application_quality import (
+    ApplicationQualityInput,
+    build_deterministic_preflight_quality_review,
+    run_pinned_editorial_skill_reviews,
+)
+from .application_quality_contracts import QualityReviewDisposition
 from .application_sanity_review import (
     ApplicationSanityReviewError,
+    build_vacancy_review_material,
     package_from_application,
     review_application_package,
 )
 from .browser_executor import GreenhouseSuccessEvidence
+from .ats_application_authority import build_ats_application_authority
 from cv_generation.service import CandidateApplicationPackage
 from .candidate_contact_authority import load_candidate_contact_authority
 from .candidate_release_gate import (
@@ -47,9 +56,11 @@ from .external_document_assurance import (
 )
 from .gmail_confirmation import ACCESS_TOKEN_ENV, GmailAPIConfirmationChecker
 from .live_vacancy_discovery import verify_vacancy_body_equivalence
-from .production_attempt import ProductionIdentity
+from .production_attempt import GreenhouseAttemptRecorder, ProductionIdentity
 from .production_ats_executor import ProductionATSBoundaryError
+from .production_ats_executor import compile_greenhouse_ats_plans
 from .production_ats_executor import collect_greenhouse_form_inventory
+from .production_ats_executor import greenhouse_ats_inventory_from_capture
 from .production_ats_executor import is_greenhouse_auxiliary_field
 from form_filling.service import approved_authority_values
 from .production_queue import LiveVacancy, QueueItem
@@ -621,6 +632,8 @@ class GutuaGreenhouseSession:
         package: CandidateApplicationPackage,
         *,
         artifact_directory: Path,
+        recorder: GreenhouseAttemptRecorder | None = None,
+        inventory_bytes: bytes | None = None,
     ) -> tuple[
         tuple[str, ...],
         tuple[tuple[str, str], ...],
@@ -628,7 +641,11 @@ class GutuaGreenhouseSession:
         tuple[tuple[str, bool | str], ...],
         dict[str, Path],
     ]:
-        inventory = json.loads(collect_greenhouse_form_inventory(page))
+        inventory = json.loads(
+            inventory_bytes
+            if inventory_bytes is not None
+            else collect_greenhouse_form_inventory(page)
+        )
         fields = inventory["form_state"]["fields"]
         if not isinstance(fields, list):
             raise ProductionATSBoundaryError("Greenhouse form inventory is malformed")
@@ -692,6 +709,43 @@ class GutuaGreenhouseSession:
                 filename = "cv.pdf" if role == "cv" else "cover-letter.pdf"
                 path = artifact_directory / filename
                 locator.set_input_files(str(path))
+                browser_file = locator.evaluate(
+                    """element => {
+                        const file = element.files && element.files[0];
+                        return file ? {name: file.name, size: file.size, type: file.type} : null;
+                    }"""
+                )
+                if (
+                    not isinstance(browser_file, Mapping)
+                    or browser_file.get("name") != path.name
+                    or browser_file.get("size") != path.stat().st_size
+                ):
+                    raise ProductionATSBoundaryError(
+                        "browser upload readback differs from the selected document"
+                    )
+                if recorder is not None:
+                    content_sha256 = _file_sha256(path)
+                    recorder.record_field_action(
+                        event_kind="file_uploaded",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=(),
+                        provenance=f"document.{role}.final_pdf",
+                        readback=_json_bytes(
+                            {
+                                "browser_file": dict(browser_file),
+                                "source_path": str(path),
+                                "source_sha256": content_sha256,
+                            }
+                        ),
+                        document_role=role,
+                        source_path=path,
+                        content_sha256=content_sha256,
+                        file_name=str(browser_file["name"]),
+                        file_size=int(browser_file["size"]),
+                        mime_type=str(browser_file.get("type") or "application/pdf"),
+                    )
                 uploads[role] = (identity, path)
                 continue
             if field_type == "radio":
@@ -709,6 +763,33 @@ class GutuaGreenhouseSession:
                     )
                 expected = bool(required and consent)
                 locator.check() if expected else locator.uncheck()
+                if locator.is_checked() is not expected:
+                    raise ProductionATSBoundaryError(
+                        "checkbox readback differs from the approved consent"
+                    )
+                if recorder is not None:
+                    recorder.record_field_action(
+                        event_kind="click",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=("false", "true"),
+                        provenance="consent.required" if expected else "blank.optional",
+                        readback=None,
+                        checked=expected,
+                        selected=expected,
+                    )
+                    recorder.record_field_action(
+                        event_kind="field_selected",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=("false", "true"),
+                        provenance="consent.required" if expected else "blank.optional",
+                        readback=(b"true" if expected else b"false"),
+                        checked=expected,
+                        selected=expected,
+                    )
                 consents.append((identity, expected))
                 continue
             authority = self._field_authority(field)
@@ -726,8 +807,10 @@ class GutuaGreenhouseSession:
                 authority = "blank.optional"
             value = approved[authority]
             tag = str(field.get("tag", "")).casefold()
+            clicked = False
             if tag == "select":
                 locator.select_option(label=value)
+                readback = locator.locator("option:checked").inner_text()
             elif identity in select_inventories and value:
                 option_values = {
                     str(row.get("text"))
@@ -745,9 +828,54 @@ class GutuaGreenhouseSession:
                     identity=identity,
                     value=value,
                 )
+                clicked = True
+                readback = locator.input_value()
             else:
                 locator.fill(value)
+                readback = locator.input_value()
+            if readback != value:
+                raise ProductionATSBoundaryError(
+                    "field readback differs from the approved answer"
+                )
+            if recorder is not None:
+                option_rows = select_inventories.get(identity, {}).get("options", [])
+                option_labels = tuple(
+                    str(row.get("text"))
+                    for row in option_rows
+                    if isinstance(row, Mapping) and row.get("text") is not None
+                )
+                if clicked:
+                    recorder.record_field_action(
+                        event_kind="click",
+                        field_id=identity,
+                        field_type=field_type,
+                        required=required,
+                        options=option_labels,
+                        provenance=authority,
+                        readback=None,
+                        selected=True,
+                    )
+                recorder.record_field_action(
+                    event_kind=(
+                        "field_selected"
+                        if tag == "select" or identity in select_inventories
+                        else "field_filled"
+                    ),
+                    field_id=identity,
+                    field_type=field_type,
+                    required=required,
+                    options=option_labels,
+                    provenance=authority,
+                    readback=readback.encode("utf-8"),
+                    selected=(
+                        True
+                        if tag == "select" or identity in select_inventories
+                        else None
+                    ),
+                )
             field_authorities.append((identity, authority))
+        if recorder is not None:
+            recorder.record_postfill(page)
         if "cv" not in uploads:
             raise ProductionATSBoundaryError("Greenhouse form lacks one CV upload")
         attached_roles = tuple(
@@ -780,9 +908,23 @@ class GutuaGreenhouseSession:
             source_body,
             page.content().encode("utf-8"),
         )
+        vacancy_review_material = build_vacancy_review_material(
+            raw_listing_bytes=source_body,
+            visible_listing_text_bytes=page.locator("body")
+            .inner_text()
+            .encode("utf-8"),
+            expected_raw_listing_sha256=vacancy.vacancy_sha256,
+        )
         recorder.add_revision(
             role="vacancy.destination_reverification",
             value=_json_bytes(equivalence),
+            media_type="application/json",
+            prior_sha256=None,
+            approved=True,
+        )
+        recorder.add_revision(
+            role="vacancy.review_material",
+            value=_json_bytes(vacancy_review_material.document()),
             media_type="application/json",
             prior_sha256=None,
             approved=True,
@@ -851,7 +993,11 @@ class GutuaGreenhouseSession:
             required_visible_markers=(marker,),
         )
         client = LLMClient.from_config(
+            cache_enabled=False,
             cache_dir=self.archive_root / "review-cache",
+            max_retries=1,
+            temperature=0,
+            transport_archive_dir=self.archive_root / "provider-exchanges",
             usage_log=self.archive_root / "review-usage.jsonl",
         )
         try:
@@ -861,6 +1007,7 @@ class GutuaGreenhouseSession:
                     artifacts=package.artifacts,
                     questions=None,
                     vacancy_requirements=package.vacancy_requirements,
+                    vacancy_review_material=vacancy_review_material,
                 ),
                 client=client,
             )
@@ -903,6 +1050,18 @@ class GutuaGreenhouseSession:
         )
         # Employer-visible page mutation is admitted only after every local,
         # provider, semantic, and one-use release authority has passed.
+        observed_capture = collect_greenhouse_form_inventory(page)
+        observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        observed_inventory = greenhouse_ats_inventory_from_capture(
+            observed_capture,
+            captured_at=observed_at,
+            page_snapshot_sha256=hashlib.sha256(
+                page.content().encode("utf-8")
+            ).hexdigest(),
+            screenshot_sha256=hashlib.sha256(
+                page.screenshot(full_page=True)
+            ).hexdigest(),
+        )
         (
             attached_roles,
             upload_field_names,
@@ -910,8 +1069,72 @@ class GutuaGreenhouseSession:
             consent_states,
             upload_paths,
         ) = self._fill_supported_form(
-            page, package, artifact_directory=artifact_directory
+            page,
+            package,
+            artifact_directory=artifact_directory,
+            recorder=recorder,
+            inventory_bytes=observed_capture,
         )
+        reviewed_capture = collect_greenhouse_form_inventory(page)
+        reviewed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        uploaded_sha256_by_field = {
+            field_name: (
+                package.artifacts.cv_pdf.pdf_sha256
+                if role == "cv"
+                else package.artifacts.cover_letter_pdf.pdf_sha256
+            )
+            for role, field_name in upload_field_names
+        }
+        reviewed_inventory = greenhouse_ats_inventory_from_capture(
+            reviewed_capture,
+            captured_at=reviewed_at,
+            page_snapshot_sha256=hashlib.sha256(
+                page.content().encode("utf-8")
+            ).hexdigest(),
+            screenshot_sha256=hashlib.sha256(
+                page.screenshot(full_page=True)
+            ).hexdigest(),
+            uploaded_sha256_by_field=uploaded_sha256_by_field,
+        )
+        plans = compile_greenhouse_ats_plans(
+            observed_inventory,
+            field_authority_names=dict(field_authority_names),
+            consent_states=dict(consent_states),
+            upload_roles_by_field={
+                field_name: role for role, field_name in upload_field_names
+            },
+        )
+        candidate_authority_sha256 = _file_sha256(self.eligibility_path)
+        ats_authority = build_ats_application_authority(
+            reviewed_at=max(reviewed_at, reviewed_inventory.captured_at),
+            candidate_authority_sha256=candidate_authority_sha256,
+            source=package.source,
+            artifacts=package.artifacts,
+            publication_receipt=publication,
+            inventory=observed_inventory,
+            reviewed_inventory=reviewed_inventory,
+            plans=plans,
+        )
+        quality_input = ApplicationQualityInput(
+            reviewed_at=max(reviewed_at, reviewed_inventory.captured_at),
+            candidate_authority_sha256=candidate_authority_sha256,
+            source=package.source,
+            artifacts=package.artifacts,
+            publication_receipt=publication,
+            field_answers_bytes=ats_authority.answer_bytes,
+            form_inventory_bytes=ats_authority.inventory_bytes,
+            ats_application_authority=ats_authority,
+        )
+        quality_input = run_pinned_editorial_skill_reviews(
+            quality_input,
+            client=client,
+        )
+        quality_review = build_deterministic_preflight_quality_review(quality_input)
+        if quality_review.disposition is not QualityReviewDisposition.ACCEPTED:
+            raise ProductionATSBoundaryError(
+                "deterministic application quality review refused release: "
+                + ", ".join(issue.code for issue in quality_review.issues)
+            )
         head = exact_clean_head(self.repository_root)
         return PreparedGreenhouseRelease(
             source=package.source,
@@ -920,6 +1143,9 @@ class GutuaGreenhouseSession:
             questions=None,
             document_assurance_receipts=document_receipts,
             sanity_review_receipt=sanity_receipt,
+            ats_application_authority=ats_authority,
+            quality_input=quality_input,
+            quality_review=quality_review,
             production_identity=ProductionIdentity(
                 code_revision=head,
                 policy_identity=POLICY_SHA256,
@@ -950,6 +1176,7 @@ class GutuaGreenhouseSession:
             jurisdiction="GB",
             contract_type="employee",
             consumed_at=issued.issued_at,
+            vacancy_review_material=vacancy_review_material,
             vacancy_requirements=package.vacancy_requirements,
         )
 

@@ -20,7 +20,10 @@ from playwright.sync_api import Page
 
 from .application_archive import ApplicationArchive
 from .application_compiler import ApplicationSource, CandidateContact
-from .application_sanity_review import SanityReviewReceipt
+from .application_sanity_review import SanityReviewReceipt, VacancyReviewMaterial
+from .application_quality import ApplicationQualityInput
+from .application_quality_contracts import ApplicationPreflightQualityReview
+from .ats_application_authority import AtsApplicationAuthority
 from .browser_executor import (
     GreenhouseSuccessEvidence,
 )
@@ -484,6 +487,9 @@ class PreparedGreenhouseRelease:
         ExternalDocumentAssuranceReceipt,
     ]
     sanity_review_receipt: SanityReviewReceipt
+    ats_application_authority: AtsApplicationAuthority
+    quality_input: ApplicationQualityInput
+    quality_review: ApplicationPreflightQualityReview
     production_identity: ProductionIdentity
     generation_authority: SinkBoundGenerationAuthority
     attached_roles: tuple[str, ...]
@@ -502,6 +508,7 @@ class PreparedGreenhouseRelease:
     jurisdiction: str
     contract_type: str
     consumed_at: datetime
+    vacancy_review_material: VacancyReviewMaterial
     vacancy_requirements: tuple[str, ...] = ()
     submit_button_name: str = "Submit Application"
     timeout_ms: int = 20_000
@@ -643,7 +650,6 @@ class GreenhouseProductionRunner:
                 item.vacancy.vacancy.vacancy_sha256,
             )
         ]
-        navigation = open_vacancy(item, page)
         recorder = (
             GreenhouseAttemptRecorder.resume(
                 archive_root=self.archive.root,
@@ -660,6 +666,18 @@ class GreenhouseProductionRunner:
                 assessment={**candidate.assessment, "queue_rank": item.queue_rank},
             )
         )
+        recorder.attach_page_evidence(page)
+        try:
+            navigation = open_vacancy(item, page)
+            recorder.record_navigation(navigation)
+        except Exception as exc:
+            recorder.finalize_preintent_failure(
+                page,
+                reason_code="navigation_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise
         boundary_signals = self.executor.boundary_signals(page)
         if boundary_signals:
             observed_network = list(candidate.network_evidence)
@@ -703,6 +721,9 @@ class GreenhouseProductionRunner:
             artifacts=prepared.artifacts,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             production_identity=prepared.production_identity,
             attached_roles=prepared.attached_roles,
             upload_field_names=prepared.upload_field_names,
@@ -720,6 +741,9 @@ class GreenhouseProductionRunner:
             questions=prepared.questions,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             archive_receipt=archive_receipt,
             archive_root=self.archive.root,
             artifact_root=prepared.artifact_root,
@@ -737,6 +761,7 @@ class GreenhouseProductionRunner:
             receipt_url=prepared.receipt_url,
             application_id=prepared.application_id,
             job_key=prepared.source.job_key,
+            vacancy_review_material=prepared.vacancy_review_material,
             vacancy_requirements=prepared.vacancy_requirements,
         )
         return self.executor.execute(

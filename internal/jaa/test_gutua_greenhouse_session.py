@@ -40,17 +40,35 @@ from career_automation.production_ats_executor import ProductionATSBoundaryError
 from career_automation.testing_sanity_review import fixture_pass_receipt
 
 
-PRODUCTION_DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
-    "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
+PRODUCTION_ARCHIVE_ROOT = (
+    Path(__file__).resolve().parents[2] / ".market-aligner-data" / "authority-inputs"
 )
-PRODUCTION_ARCHIVE_ROOT = Path("/home/gutua/software-factory/application-artifacts")
+PRODUCTION_DISCOVERY_PATH = (
+    PRODUCTION_ARCHIVE_ROOT
+    / "objects"
+    / "39"
+    / ("39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47")
+)
 TEST_CONTACT_PRIVATE_KEY = Ed25519PrivateKey.generate()
 TEST_CONTACT_PUBLIC_RAW = TEST_CONTACT_PRIVATE_KEY.public_key().public_bytes(
     encoding=serialization.Encoding.Raw,
     format=serialization.PublicFormat.Raw,
 )
 TEST_CONTACT_PUBLIC_SHA256 = hashlib.sha256(TEST_CONTACT_PUBLIC_RAW).hexdigest()
+
+
+def _require_private_candidate_fixture() -> None:
+    authority = (
+        PRODUCTION_ARCHIVE_ROOT
+        / "candidate-authorities"
+        / "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
+    )
+    if not PRODUCTION_DISCOVERY_PATH.is_file() or not authority.is_file():
+        pytest.skip(
+            "requires the exact private Gigabyte candidate-authority and "
+            "discovery artifacts; synthetic substitution would not test the "
+            "certified binding"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -364,6 +382,7 @@ def test_session_loads_materialized_receipts_and_ignores_legacy_fit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     discovery = json.loads(PRODUCTION_DISCOVERY_PATH.read_bytes())
     for observation in discovery["observations"]:
         for name in ("body_sha256", "network_evidence_sha256"):
@@ -421,6 +440,7 @@ def test_session_rejects_stale_duplicate_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     authority = materialize_candidate_authority(
         discovery_path=PRODUCTION_DISCOVERY_PATH,
         archive_root=tmp_path,
@@ -442,6 +462,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     authority = json.loads(
         (
             PRODUCTION_ARCHIVE_ROOT
@@ -591,6 +612,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             questions=None,
             state_root=tmp_path,
             vacancy_requirements=package.vacancy_requirements,
+            vacancy_review_material=package.vacancy_review_material,
         ),
     )
     from playwright.sync_api import sync_playwright
@@ -606,6 +628,9 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             ),
         )
         page.goto(application_url)
+        recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": application_url}
+        )
         recorder.record_prefill(page)
         sink = GeneratedRevisionSink(recorder)
         prepared = session.prepare_release(item, recorder, page, sink)
@@ -623,10 +648,33 @@ def test_repository_session_prepares_sink_bound_fixture_release(
         assert prepared.sanity_review_receipt.vacancy_requirements_sha256 == (
             content_hash(list(expected_requirements))
         )
+        assert prepared.vacancy_review_material.raw_listing_bytes == html.encode()
+        assert (
+            prepared.sanity_review_receipt.package_hashes["review_text_sha256"]
+            == prepared.vacancy_review_material.review_text_sha256
+        )
         assert page.locator('input[name="email"]').input_value() == (
             "jordan.smith@proton.me"
         )
         assert page.locator('input[name="consent"]').is_checked()
+        from career_automation.application_archive import load_complete_attempt_view
+
+        view = load_complete_attempt_view(
+            recorder.attempt.attempt_id,
+            root=recorder.attempt.archive.root,
+            repository_root=recorder.attempt.archive.repository_root,
+        )
+        event_kinds = {row["payload"]["event_kind"] for row in view["evidence_events"]}
+        assert {
+            "navigation",
+            "preflight",
+            "field_filled",
+            "field_selected",
+            "file_uploaded",
+            "screenshot",
+        } <= event_kinds
+        assert view["gaps"]["action_timeline"] is False
+        assert "jordan.smith@proton.me" not in json.dumps(view, sort_keys=True)
         browser.close()
 
 
@@ -741,8 +789,38 @@ def test_graphcore_recurring_fields_use_only_stable_candidate_authority(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content(html)
+        vacancy_bytes = page.content().encode("utf-8")
+        vacancy = VacancyArchiveIdentity(
+            job_key="greenhouse:fixture:graphcore",
+            vacancy_sha256=hashlib.sha256(vacancy_bytes).hexdigest(),
+            role_title="Synthetic engineer",
+            company_name="Fixture company",
+            source_url="https://job-boards.greenhouse.io/fixture/jobs/1234567",
+        )
+        recorder = GreenhouseAttemptRecorder.create(
+            archive_root=tmp_path / "archive",
+            repository_root=Path.cwd(),
+            vacancy=vacancy,
+            complete_vacancy=vacancy_bytes,
+            structured_vacancy={"job_key": vacancy.job_key},
+            assessment={"eligible": True, "fixture_only": True},
+        )
+        recorder.add_revision(
+            role="document.cv.final_pdf",
+            value=b"%PDF-fixture",
+            media_type="application/pdf",
+            prior_sha256=None,
+            approved=True,
+        )
+        recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": vacancy.source_url}
+        )
+        recorder.record_prefill(page)
         _, _, authorities, consents, _ = session._fill_supported_form(
-            page, package, artifact_directory=artifact_directory
+            page,
+            package,
+            artifact_directory=artifact_directory,
+            recorder=recorder,
         )
         assert dict(authorities) == {
             "first_name": "contact.given_name",
@@ -759,6 +837,25 @@ def test_graphcore_recurring_fields_use_only_stable_candidate_authority(
         assert page.locator("#question_3").input_value() == "EU Settled Status"
         assert page.locator("#gender").input_value() == "I don't wish to answer"
         assert dict(consents) == {"gdpr_demographic_data_consent_given": True}
+        from career_automation.application_archive import load_complete_attempt_view
+
+        view = load_complete_attempt_view(
+            recorder.attempt.attempt_id,
+            root=recorder.attempt.archive.root,
+            repository_root=recorder.attempt.archive.repository_root,
+        )
+        kinds = {row["payload"]["event_kind"] for row in view["evidence_events"]}
+        assert {
+            "navigation",
+            "preflight",
+            "field_filled",
+            "field_selected",
+            "file_uploaded",
+            "click",
+            "screenshot",
+        } <= kinds
+        assert view["gaps"]["action_timeline"] is False
+        assert "Alex Example" not in json.dumps(view, sort_keys=True)
         browser.close()
 
 

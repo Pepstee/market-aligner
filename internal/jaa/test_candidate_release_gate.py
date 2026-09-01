@@ -16,6 +16,10 @@ from career_automation.browser_executor import ReleaseExecutionAuthority
 from career_automation.candidate_release_authority import (
     CandidateReleaseExecutionAuthority,
 )
+from career_automation.application_quality_contracts import QualityReviewDisposition
+from career_automation.application_sanity_review import (
+    build_vacancy_review_material,
+)
 from career_automation.candidate_application_factory import (
     materialize_candidate_application_source,
 )
@@ -54,9 +58,7 @@ def _workable_binding(**changes: object) -> WorkableReleaseBinding:
         "cover_letter_pdf_sha256": "7" * 64,
         "cv_assurance_receipt_sha256": "8" * 64,
         "cover_letter_assurance_receipt_sha256": "9" * 64,
-        "upload_bindings": (
-            WorkableUploadBinding("resume", "cv", "6" * 64, "8" * 64),
-        ),
+        "upload_bindings": (WorkableUploadBinding("resume", "cv", "6" * 64, "8" * 64),),
     }
     values.update(changes)
     return WorkableReleaseBinding(**values)
@@ -81,9 +83,7 @@ def test_non_synthetic_workable_gate_requires_market_materialization_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     gate, _arguments, _url = _gate_inputs(tmp_path, monkeypatch)
-    with pytest.raises(
-        ValueError, match="requires market decision materialization"
-    ):
+    with pytest.raises(ValueError, match="requires market decision materialization"):
         CandidateAuthorityReleaseGate(
             tmp_path / "workable-gate.sqlite3",
             repository_root=gate.repository_root,
@@ -96,13 +96,9 @@ def test_non_synthetic_workable_gate_requires_market_materialization_pair(
     synthetic_binding = _workable_binding(
         tenant="synthetic",
         source_url="https://apply.workable.com/synthetic/j/847CFBC5F4",
-        application_url=(
-            "https://apply.workable.com/synthetic/j/847CFBC5F4/apply/"
-        ),
+        application_url=("https://apply.workable.com/synthetic/j/847CFBC5F4/apply/"),
     )
-    with pytest.raises(
-        ValueError, match="requires market decision materialization"
-    ):
+    with pytest.raises(ValueError, match="requires market decision materialization"):
         CandidateAuthorityReleaseGate(
             tmp_path / "synthetic-non-loopback-gate.sqlite3",
             repository_root=gate.repository_root,
@@ -120,17 +116,60 @@ def test_candidate_execution_authority_requires_exact_workable_upload_mapping(
         vacancy_requirements = ("requirement",)
 
     monkeypatch.setattr(authority_module, "CandidateAuthorityReleaseGate", FakeGate)
+    monkeypatch.setattr(ReleaseExecutionAuthority, "__post_init__", lambda _self: None)
     monkeypatch.setattr(
-        ReleaseExecutionAuthority, "__post_init__", lambda _self: None
+        authority_module,
+        "verify_ats_application_authority",
+        lambda *_args, **_kwargs: None,
     )
     binding = _workable_binding()
+    ats_authority = SimpleNamespace(
+        document=lambda: {},
+        inventory_sha256="a" * 64,
+        answer_sha256="b" * 64,
+    )
+    quality_review = SimpleNamespace(
+        disposition=QualityReviewDisposition.ACCEPTED,
+        to_dict=lambda: {},
+    )
+    quality_input = SimpleNamespace(
+        ats_application_authority=ats_authority,
+        candidate_authority_sha256="c" * 64,
+        publication_receipt=object(),
+        editorial_skill_reviews=(),
+    )
+    monkeypatch.setattr(
+        authority_module,
+        "build_deterministic_preflight_quality_review",
+        lambda _quality_input: quality_review,
+    )
+    selected = {
+        "assurance.ats_application_authority": hashlib.sha256(b"{}\n").hexdigest(),
+        "assurance.ats_inventory": ats_authority.inventory_sha256,
+        "assurance.ats_answers": ats_authority.answer_sha256,
+        "assurance.application_quality": hashlib.sha256(b"{}\n").hexdigest(),
+    }
+    monkeypatch.setattr(
+        authority_module, "selected_archive_hashes", lambda *_args, **_kwargs: selected
+    )
+    raw_listing = b"vacancy"
+    vacancy_sha256 = hashlib.sha256(raw_listing).hexdigest()
+    vacancy_review_material = build_vacancy_review_material(
+        raw_listing_bytes=raw_listing,
+        visible_listing_text_bytes=b"Synthetic vacancy",
+        expected_raw_listing_sha256=vacancy_sha256,
+    )
     authority = object.__new__(CandidateReleaseExecutionAuthority)
     values = {
         "gate": FakeGate(),
         "vacancy_requirements": ("requirement",),
         "ats_provider": "workable",
+        "ats_application_authority": ats_authority,
+        "quality_input": quality_input,
+        "quality_review": quality_review,
         "workable_release_binding": binding,
         "application_url": binding.application_url,
+        "source": SimpleNamespace(vacancy_sha256=vacancy_sha256),
         "artifacts": SimpleNamespace(
             cv_pdf=SimpleNamespace(pdf_sha256=binding.cv_pdf_sha256),
             cover_letter_pdf=SimpleNamespace(
@@ -145,6 +184,10 @@ def test_candidate_execution_authority_requires_exact_workable_upload_mapping(
         ),
         "attached_roles": ("cv",),
         "upload_field_names": (("cv", "resume"),),
+        "archive_receipt": object(),
+        "archive_root": Path("/synthetic/archive"),
+        "repository_root": Path("/synthetic/repository"),
+        "vacancy_review_material": vacancy_review_material,
     }
     for name, value in values.items():
         object.__setattr__(authority, name, value)
@@ -180,7 +223,9 @@ def test_candidate_gate_accepts_exact_cogna_market_materialization(
     )
     authority_document = json.loads(AUTHORITY_PATH.read_bytes())
     monkeypatch.setattr(
-        gate_module, "build_candidate_authority_document", lambda **_kwargs: authority_document
+        gate_module,
+        "build_candidate_authority_document",
+        lambda **_kwargs: authority_document,
     )
     monkeypatch.setattr(
         gate_module,
@@ -208,7 +253,10 @@ def test_candidate_gate_accepts_exact_cogna_market_materialization(
         required_environment="synthetic",
     )
     assert verified["market_decision_authority_sha256"] == market.authority_sha256
-    assert verified["materialization_receipt_sha256"] == materialized.receipt.receipt_sha256
+    assert (
+        verified["materialization_receipt_sha256"]
+        == materialized.receipt.receipt_sha256
+    )
 
     with pytest.raises(ValueError):
         replace(
@@ -262,9 +310,7 @@ def _gate_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     values = _compilation_inputs(tmp_path)
     _, _, contact, questions, source, artifacts, artifact_root, _ = values
     application_id = "1234567"
-    application_url = (
-        f"https://job-boards.greenhouse.io/example/jobs/{application_id}"
-    )
+    application_url = f"https://job-boards.greenhouse.io/example/jobs/{application_id}"
     source = source.__class__(
         source.source_id,
         source.strategy_id,
@@ -313,9 +359,7 @@ def _gate_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     directory = artifact_root / artifacts.artifact_set_sha256
     directory.mkdir(parents=True)
     (directory / "cv.pdf").write_bytes(artifacts.cv_pdf.pdf_bytes)
-    (directory / "cover-letter.pdf").write_bytes(
-        artifacts.cover_letter_pdf.pdf_bytes
-    )
+    (directory / "cover-letter.pdf").write_bytes(artifacts.cover_letter_pdf.pdf_bytes)
     monkeypatch.setattr(gate_module, "exact_clean_head", lambda _root: "a" * 40)
     authority = {
         "job_key": source.job_key,
@@ -483,9 +527,7 @@ def test_candidate_gate_issues_consumes_and_reverifies_exact_inputs(
     gate, arguments, application_url = _gate_inputs(tmp_path, monkeypatch)
     issued = gate.issue(**arguments, application_url=application_url)
     _row, manifest = gate._stored(issued.release_token)
-    assert manifest["vacancy_requirements"] == [
-        "essential: approved requirement"
-    ]
+    assert manifest["vacancy_requirements"] == ["essential: approved requirement"]
     gate.verify_token_official_route(
         release_token=issued.release_token,
         adapter_id="greenhouse.production",

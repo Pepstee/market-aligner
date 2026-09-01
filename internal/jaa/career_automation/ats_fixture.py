@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlsplit
 _APPLICATION_ID = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 1024 * 1024
+FIXTURE_INERT_FAVICON_HREF = "data:image/x-icon;base64,AA=="
 _REQUIRED_TEXT = (
     "full_name",
     "email",
@@ -268,6 +269,7 @@ def _page(title: str, body: str) -> bytes:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="{FIXTURE_INERT_FAVICON_HREF}">
   <title>{escape(title)}</title>
   <style>
     :root {{

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -17,18 +18,32 @@ from market_aligner.llm.codex_gateway import (
     SYNTHETIC_CANARY_MARKER,
     synthetic_extraction_canary,
 )
-from market_aligner.llm.contracts import LLMReceipt, SemanticVacancyExtraction
-from market_aligner.llm.pipeline import accept_extraction
+from market_aligner.llm.contracts import (
+    LLMReceipt,
+    SemanticVacancyExtraction,
+    canonical_hash,
+)
+from market_aligner.llm.pipeline import accept_alignment, accept_extraction
+from market_aligner.llm.structured import (
+    PROJECTION_FIELDS,
+    align_approved_evidence,
+    extract_structured_vacancy,
+)
+from market_aligner.profiler.schema import EvidenceItem
 
 
 class FakeCodexRunner:
-    def __init__(self, responses: list[dict[str, Any]], *, tool_item: str | None = None) -> None:
+    def __init__(
+        self, responses: list[dict[str, Any]], *, tool_item: str | None = None
+    ) -> None:
         self.responses = list(responses)
         self.tool_item = tool_item
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self.schemas: list[dict[str, Any]] = []
 
-    def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, command: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append((command, kwargs))
         schema = Path(command[command.index("--output-schema") + 1])
         self.schemas.append(json.loads(schema.read_text(encoding="utf-8")))
@@ -90,6 +105,175 @@ def _alignment_payload() -> dict[str, Any]:
 
 
 class LLMPipelineTests(unittest.TestCase):
+    @staticmethod
+    def _structured_listing() -> tuple[RawPosting, dict[str, str]]:
+        values = {
+            "company": "Example Ltd",
+            "contract_type": "permanent",
+            "description": "Build Python automation and operate reliable services.",
+            "expires_at": "2026-09-30T00:00:00Z",
+            "location": {
+                "country_code": "GB",
+                "locality": "London",
+                "raw_text": "London, United Kingdom (hybrid)",
+                "region": "England",
+                "work_mode": "hybrid",
+            },
+            "minimum_years_experience": 2,
+            "posted_at": "2026-08-30T00:00:00Z",
+            "preferred_qualifications": [],
+            "preferred_skills": ["Kubernetes"],
+            "required_qualifications": ["Production engineering experience"],
+            "required_residence": "GB",
+            "required_skills": ["Python"],
+            "requirements": ["Python", "Kubernetes"],
+            "responsibilities": ["Build automation"],
+            "seniority": "junior",
+            "sponsorship_available": False,
+            "title": "Automation Engineer",
+            "work_authorisation": ["GB"],
+        }
+        exact = json.dumps({"job": values}, separators=(",", ":")).encode()
+        digest = hashlib.sha256(exact).hexdigest()
+        raw = RawPosting(
+            "greenhouse",
+            "structured-1",
+            "https://example.test/jobs/structured-1",
+            "2026-08-31T00:00:00Z",
+            content_type="application/json",
+            content_sha256=digest,
+            public_content_base64=base64.b64encode(exact).decode(),
+        )
+        pointers = {name: f"/job/{name}" for name in PROJECTION_FIELDS}
+        return raw, pointers
+
+    def test_deterministic_structured_extraction_and_alignment_are_receipt_bound(
+        self,
+    ) -> None:
+        raw, pointers = self._structured_listing()
+        facts = extract_structured_vacancy(
+            raw,
+            pointers,
+            receipt_inputs={"content_sha256": raw.content_sha256},
+        )
+        vacancy = accept_extraction(raw, facts.extraction, facts.extraction_receipt)
+        self.assertEqual(
+            canonical_hash(
+                {
+                    "caller_inputs": {"content_sha256": raw.content_sha256},
+                    "pointers": {
+                        name: pointers[name] for name in sorted(PROJECTION_FIELDS)
+                    },
+                    "source_content_sha256": raw.content_sha256,
+                    "source_url": raw.url,
+                }
+            ),
+            facts.extraction_receipt.input_sha256,
+        )
+        self.assertEqual("GB", facts.location.country_code)
+        self.assertEqual("hybrid", vacancy.remote_policy)
+        self.assertEqual(2.0, facts.minimum_years_experience)
+        self.assertEqual(("GB",), vacancy.work_authorisation)
+
+        evidence = {
+            "ev-python": EvidenceItem(
+                evidence_id="ev-python",
+                kind="project",
+                claim="Built Python automation for production systems.",
+                source_ref="portfolio:automation",
+                status="verified",
+                confidence=0.9,
+                content_sha256="a" * 64,
+            )
+        }
+        alignment, receipt = align_approved_evidence(
+            profile_id="prf_" + "b" * 32,
+            profile_version="profile-v1",
+            job_key=raw.key,
+            requirements=facts.requirements,
+            evidence=evidence,
+            selected_evidence_ids=("ev-python",),
+            receipt_inputs={"evidence_ids": ["ev-python"]},
+            created_at="2026-08-31T00:00:00Z",
+        )
+        accepted = accept_alignment(alignment, evidence, receipt)
+        self.assertEqual(
+            canonical_hash(
+                {
+                    "caller_inputs": {"evidence_ids": ["ev-python"]},
+                    "job_key": raw.key,
+                    "profile_id": "prf_" + "b" * 32,
+                    "profile_version": "profile-v1",
+                    "requirements": list(facts.requirements),
+                    "selected_evidence": [asdict(evidence["ev-python"])],
+                }
+            ),
+            receipt.input_sha256,
+        )
+        self.assertEqual(("Kubernetes",), accepted.missing_requirements)
+        self.assertEqual(("ev-python",), accepted.matches[0].evidence_ids)
+        self.assertEqual(0.5, accepted.evidence_match)
+
+    def test_structured_extraction_rejects_digest_and_json_ambiguity(self) -> None:
+        raw, pointers = self._structured_listing()
+        bad_digest = RawPosting(**{**asdict(raw), "content_sha256": "0" * 64})
+        with self.assertRaisesRegex(ValueError, "digest differs"):
+            extract_structured_vacancy(
+                bad_digest,
+                pointers,
+                receipt_inputs={"content_sha256": bad_digest.content_sha256},
+            )
+
+        duplicate = b'{"job":{},"job":{}}'
+        ambiguous = RawPosting(
+            raw.board,
+            raw.job_id,
+            raw.url,
+            raw.fetched_at,
+            content_sha256=hashlib.sha256(duplicate).hexdigest(),
+            public_content_base64=base64.b64encode(duplicate).decode(),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate public-listing JSON key"):
+            extract_structured_vacancy(
+                ambiguous,
+                pointers,
+                receipt_inputs={"content_sha256": ambiguous.content_sha256},
+            )
+
+    def test_structured_alignment_rejects_unknown_or_duplicate_evidence_selection(
+        self,
+    ) -> None:
+        evidence = {
+            "ev-python": EvidenceItem(
+                evidence_id="ev-python",
+                kind="project",
+                claim="Python",
+                source_ref="portfolio:automation",
+                status="verified",
+                confidence=1.0,
+                content_sha256="b" * 64,
+            )
+        }
+        arguments = {
+            "profile_id": "prf_" + "c" * 32,
+            "profile_version": "profile-v1",
+            "job_key": "greenhouse:structured-1",
+            "requirements": ("Python",),
+            "evidence": evidence,
+            "receipt_inputs": {"evidence_ids": ["ev-python"]},
+            "created_at": "2026-08-31T00:00:00Z",
+        }
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            align_approved_evidence(
+                **arguments,
+                selected_evidence_ids=("ev-missing",),
+            )
+        with self.assertRaisesRegex(ValueError, "unique"):
+            align_approved_evidence(
+                **arguments,
+                selected_evidence_ids=("ev-python", "ev-python"),
+            )
+
     def test_extraction_requires_matching_raw_and_output_hash_receipts(self) -> None:
         digest = hashlib.sha256(b"raw vacancy").hexdigest()
         raw = RawPosting(
@@ -128,11 +312,15 @@ class LLMPipelineTests(unittest.TestCase):
         )
         vacancy = accept_extraction(raw, extraction, receipt)
         self.assertEqual("Python", vacancy.required_skills[0])
-        bad = LLMReceipt(**{**asdict(receipt), "output_sha256": hashlib.sha256(b"bad").hexdigest()})
+        bad = LLMReceipt(
+            **{**asdict(receipt), "output_sha256": hashlib.sha256(b"bad").hexdigest()}
+        )
         with self.assertRaisesRegex(ValueError, "output hash"):
             accept_extraction(raw, extraction, bad)
 
-    def test_detached_codex_gateway_is_schema_and_transport_bound_without_ambient_context(self) -> None:
+    def test_detached_codex_gateway_is_schema_and_transport_bound_without_ambient_context(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             binary = root / "codex"
@@ -185,7 +373,9 @@ class LLMPipelineTests(unittest.TestCase):
             )
             self.assertEqual(
                 hashlib.sha256(
-                    json.dumps(asdict(alignment), sort_keys=True, separators=(",", ":")).encode()
+                    json.dumps(
+                        asdict(alignment), sort_keys=True, separators=(",", ":")
+                    ).encode()
                 ).hexdigest(),
                 alignment_receipt.output_sha256,
             )
@@ -198,7 +388,10 @@ class LLMPipelineTests(unittest.TestCase):
                 self.assertIsNotNone(receipt.transport)
                 assert receipt.transport is not None
                 self.assertEqual(1, receipt.transport.invocation_count)
-                self.assertEqual(hashlib.sha256(binary.read_bytes()).hexdigest(), receipt.transport.binary_sha256)
+                self.assertEqual(
+                    hashlib.sha256(binary.read_bytes()).hexdigest(),
+                    receipt.transport.binary_sha256,
+                )
                 self.assertEqual(64, len(receipt.transport.transport_sha256))
                 self.assertEqual(receipt.receipt_id, receipt.transport.receipt_sha256)
             self.assertEqual(2, len(runner.calls))
@@ -209,11 +402,17 @@ class LLMPipelineTests(unittest.TestCase):
                 self.assertIn("project_doc_max_bytes=0", command)
                 self.assertIn("project_doc_fallback_filenames=[]", command)
                 self.assertIn("--output-schema", command)
-                self.assertEqual("gpt-test-explicit", command[command.index("--model") + 1])
+                self.assertEqual(
+                    "gpt-test-explicit", command[command.index("--model") + 1]
+                )
                 self.assertNotIn("SECRET_TEST_VALUE", call["env"])
-                self.assertTrue(Path(call["cwd"]).name.startswith("market-aligner-codex-request-"))
+                self.assertTrue(
+                    Path(call["cwd"]).name.startswith("market-aligner-codex-request-")
+                )
 
-    def test_alignment_rejects_realistic_model_authority_echo_after_one_call(self) -> None:
+    def test_alignment_rejects_realistic_model_authority_echo_after_one_call(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "codex"
             binary.write_bytes(b"synthetic codex binary")
@@ -239,7 +438,9 @@ class LLMPipelineTests(unittest.TestCase):
                 "track": "automation",
                 "vacancy": {"board": "workable", "job_id": "real-job"},
             }
-            with self.assertRaisesRegex(CodexGatewayError, "forbidden authority fields"):
+            with self.assertRaisesRegex(
+                CodexGatewayError, "forbidden authority fields"
+            ):
                 gateway.align_evidence(context)
             self.assertEqual(1, len(runner.calls))
 
@@ -248,7 +449,9 @@ class LLMPipelineTests(unittest.TestCase):
             binary = Path(temporary) / "codex"
             binary.write_bytes(b"synthetic codex binary")
             digest = hashlib.sha256(b"synthetic vacancy").hexdigest()
-            runner = FakeCodexRunner([_extraction_payload(digest)], tool_item="command_execution")
+            runner = FakeCodexRunner(
+                [_extraction_payload(digest)], tool_item="command_execution"
+            )
             gateway = CodexSemanticGateway(
                 model="gpt-test-explicit",
                 codex_binary=str(binary),
@@ -256,7 +459,9 @@ class LLMPipelineTests(unittest.TestCase):
                 runner=runner,
             )
             with self.assertRaisesRegex(CodexGatewayError, "forbidden tool item"):
-                gateway.extract_vacancy({"content_sha256": digest, "raw_text": "synthetic vacancy"})
+                gateway.extract_vacancy(
+                    {"content_sha256": digest, "raw_text": "synthetic vacancy"}
+                )
 
     def test_synthetic_canary_is_explicitly_marked_and_offline_in_test(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -266,7 +471,9 @@ class LLMPipelineTests(unittest.TestCase):
                 f"{SYNTHETIC_CANARY_MARKER}\nSynthetic Example Ltd seeks a junior automation "
                 "engineer to build Python tests. Permanent remote role with mentorship and training."
             )
-            runner = FakeCodexRunner([_extraction_payload(hashlib.sha256(text.encode()).hexdigest())])
+            runner = FakeCodexRunner(
+                [_extraction_payload(hashlib.sha256(text.encode()).hexdigest())]
+            )
             extraction, receipt = synthetic_extraction_canary(
                 CodexSemanticGateway(
                     model="gpt-test-explicit",
@@ -277,7 +484,9 @@ class LLMPipelineTests(unittest.TestCase):
             )
             self.assertEqual("Junior Automation Engineer", extraction.title)
             self.assertIn(SYNTHETIC_CANARY_MARKER, runner.calls[0][1]["input"])
-            self.assertIn('"synthetic_non_candidate_canary":true', runner.calls[0][1]["input"])
+            self.assertIn(
+                '"synthetic_non_candidate_canary":true', runner.calls[0][1]["input"]
+            )
             self.assertIsNotNone(receipt.transport)
 
     @unittest.skipUnless(
@@ -287,7 +496,9 @@ class LLMPipelineTests(unittest.TestCase):
     def test_live_synthetic_codex_canary(self) -> None:
         model = os.environ.get("MARKET_ALIGNER_CANARY_MODEL", "").strip()
         self.assertTrue(model, "MARKET_ALIGNER_CANARY_MODEL is required")
-        extraction, receipt = synthetic_extraction_canary(CodexSemanticGateway(model=model))
+        extraction, receipt = synthetic_extraction_canary(
+            CodexSemanticGateway(model=model)
+        )
         self.assertIn("Automation", extraction.title)
         self.assertEqual(SYNTHETIC_CANARY_MARKER, SYNTHETIC_CANARY_MARKER)
         self.assertIsNotNone(receipt.transport)

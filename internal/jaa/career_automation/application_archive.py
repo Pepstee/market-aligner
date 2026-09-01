@@ -35,10 +35,70 @@ DEFAULT_ARCHIVE_ROOT = Path(
 ARCHIVE_SCHEMA_VERSION = "jaa.application-archive.v1"
 RECEIPT_SCHEMA_VERSION = "jaa.application-archive-receipt.v1"
 EVENT_SCHEMA_VERSION = "jaa.application-archive-event.v1"
+EVIDENCE_VIEW_SCHEMA_VERSION = "jaa.application-evidence-view.v1"
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 ATTEMPT_ID = re.compile(r"^jaa-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$")
 ROLE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 MEDIA_TYPE = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
+EVIDENCE_EVENT_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+EVIDENCE_EVENT_KINDS = frozenset(
+    {
+        "preflight",
+        "navigation",
+        "field_observed",
+        "field_filled",
+        "field_selected",
+        "file_uploaded",
+        "click",
+        "request",
+        "response",
+        "request_failed",
+        "console_error",
+        "screenshot",
+        "release",
+        "terminal",
+    }
+)
+EVIDENCE_EVENT_RESULTS = frozenset(
+    {
+        "observed",
+        "completed",
+        "blocked",
+        "refused",
+        "indeterminate",
+        "failed",
+        "skipped",
+        "unavailable",
+    }
+)
+EVIDENCE_DETAIL_KEYS = frozenset(
+    {
+        "field_id",
+        "field_type",
+        "required",
+        "options",
+        "provenance",
+        "document_role",
+        "source_path_sha256",
+        "content_sha256",
+        "extracted_text_sha256",
+        "interaction_counts",
+        "url_sha256",
+        "method",
+        "status",
+        "resource_type",
+        "error_code",
+        "value_sha256",
+        "value_byte_length",
+        "readback_sha256",
+        "readback_byte_length",
+        "file_name_sha256",
+        "file_size",
+        "mime_type",
+        "checked",
+        "selected",
+    }
+)
 
 RELEASE_REQUIRED_ROLES = frozenset(
     {
@@ -1289,6 +1349,116 @@ class AttemptArchive:
             str(event["event_sha256"]),
         )
 
+    def next_evidence_event_id(self, event_kind: str) -> str:
+        """Return the next append-only event ID for this exact attempt."""
+        if event_kind not in EVIDENCE_EVENT_KINDS:
+            raise ApplicationArchiveError("evidence event kind is invalid")
+        count = sum(
+            event.get("event_type") == "evidence_recorded"
+            for event in self._events()
+        )
+        return f"{event_kind}.{count + 1:04d}"
+
+    def record_evidence_event(
+        self,
+        *,
+        event_id: str,
+        event_kind: str,
+        occurred_at: str,
+        result: str,
+        member_sha256s: Mapping[str, str] | None = None,
+        details: Mapping[str, object] | None = None,
+        private_value: bytes | None = None,
+        private_media_type: str = "application/octet-stream",
+    ) -> str:
+        """Append or exactly recover one closed, hash-only application action event."""
+        if not EVIDENCE_EVENT_ID.fullmatch(event_id):
+            raise ApplicationArchiveError("evidence event ID is invalid")
+        if event_kind not in EVIDENCE_EVENT_KINDS:
+            raise ApplicationArchiveError("evidence event kind is invalid")
+        if result not in EVIDENCE_EVENT_RESULTS:
+            raise ApplicationArchiveError("evidence event result is invalid")
+        if not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{6})?Z",
+            occurred_at,
+        ):
+            raise ApplicationArchiveError("evidence event time must be canonical UTC Z")
+        try:
+            parsed = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ApplicationArchiveError("evidence event time is invalid") from exc
+        if parsed.utcoffset() != timedelta(0):
+            raise ApplicationArchiveError("evidence event time must be UTC")
+        clean_details = dict(details or {})
+        if set(clean_details) - EVIDENCE_DETAIL_KEYS:
+            raise ApplicationArchiveError("evidence event detail keys are invalid")
+        _no_secret_metadata(clean_details)
+        members = dict(member_sha256s or {})
+        for label, digest in members.items():
+            if not ROLE.fullmatch(label):
+                raise ApplicationArchiveError("evidence member role is invalid")
+            _digest(digest, "evidence member hash")
+        value_role = f"evidence.private.{event_id}"
+        if private_value is not None:
+            if not isinstance(private_value, bytes):
+                raise TypeError("private evidence requires exact bytes")
+            _scan_secret_bytes(private_value, private_media_type)
+            digest = _sha256(private_value)
+            existing = [
+                row
+                for row in self._objects(self._events())
+                if row.role == value_role
+            ]
+            if existing:
+                if len(existing) != 1 or existing[0].sha256 != digest:
+                    raise ApplicationArchiveError("private evidence event bytes drifted")
+                if _regular_file_bytes(
+                    _safe_archive_path(self.archive.root, existing[0].relative_path)
+                ) != private_value:
+                    raise ApplicationArchiveError("private evidence object differs")
+            else:
+                self.add_artifact(
+                    value_role,
+                    private_value,
+                    media_type=private_media_type,
+                    disposition="observed",
+                    metadata={"privacy_class": "private", "event_id": event_id},
+                    created_at=occurred_at,
+                )
+            members[value_role] = digest
+        object_hashes = {row.sha256 for row in self._objects(self._events())}
+        if not set(members.values()) <= object_hashes:
+            raise ApplicationArchiveError("evidence event cites an unavailable member")
+        payload: dict[str, object] = {
+            "event_id": event_id,
+            "event_kind": event_kind,
+            "result": result,
+            "member_sha256s": dict(sorted(members.items())),
+            "details": clean_details,
+        }
+        prior = [
+            event
+            for event in self._events()
+            if event.get("event_type") == "evidence_recorded"
+            and isinstance(event.get("payload"), Mapping)
+            and event["payload"].get("event_id") == event_id
+        ]
+        if prior:
+            if (
+                len(prior) != 1
+                or prior[0].get("payload") != payload
+                or prior[0].get("occurred_at") != occurred_at
+            ):
+                raise ApplicationArchiveError("evidence event replay differs")
+            return str(prior[0]["event_sha256"])
+        if (self.path / "terminal-manifest.json").exists():
+            raise ApplicationArchiveError("terminal attempt archive is immutable")
+        return str(
+            self._append_event(
+                "evidence_recorded", payload, occurred_at=occurred_at
+            )["event_sha256"]
+        )
+
     def _objects(
         self, events: Iterable[Mapping[str, object]]
     ) -> tuple[ArchivedObject, ...]:
@@ -1734,6 +1904,123 @@ def verify_complete_attempt(
         "terminal_manifest_sha256": _sha256(terminal_raw),
         "outcome": terminal["outcome"],
     }
+
+
+def load_complete_attempt_view(
+    attempt_id: str,
+    *,
+    root: str | Path | None,
+    repository_root: str | Path,
+) -> dict[str, object]:
+    """Return a verified, hash-only view without exposing archived private bytes."""
+    archive = ApplicationArchive(root, repository_root=repository_root, create=False)
+    attempt = archive.open_attempt(attempt_id)
+    if (attempt.path / "terminal-manifest.json").is_file() or (
+        attempt.path / "release-receipt.json"
+    ).is_file():
+        verification = verify_complete_attempt(
+            attempt_id, root=archive.root, repository_root=repository_root
+        )
+    else:
+        verification = {
+            "attempt_id": attempt_id,
+            "phase": "open",
+            "verified": True,
+            "release_manifest_sha256": None,
+            "terminal_manifest_sha256": None,
+            "outcome": None,
+        }
+    events = attempt._events()
+    objects = attempt._objects(events)
+    evidence_events = []
+    for event in events:
+        if event.get("event_type") != "evidence_recorded":
+            continue
+        evidence_events.append(
+            {
+                "sequence": event["sequence"],
+                "occurred_at": event["occurred_at"],
+                "event_sha256": event["event_sha256"],
+                "payload": event["payload"],
+            }
+        )
+    object_rows = [
+        {
+            "role": row.role,
+            "sha256": row.sha256,
+            "media_type": row.media_type,
+            "byte_length": row.byte_length,
+            "created_at": row.created_at,
+            "disposition": row.disposition,
+            "metadata_sha256": _sha256(_json_bytes(dict(row.metadata))),
+        }
+        for row in objects
+    ]
+    roles = {row.role for row in objects}
+    kinds = {
+        str(event["payload"]["event_kind"])
+        for event in evidence_events
+        if isinstance(event.get("payload"), Mapping)
+    }
+    gaps = {
+        "form_inventory": not any(role.startswith("form.") for role in roles),
+        "entered_values": "form.answers" not in roles,
+        "documents": not {
+            "document.cv.final_pdf",
+            "document.cover_letter.final_pdf",
+        }.issubset(roles),
+        "action_timeline": not {
+            "field_filled",
+            "file_uploaded",
+            "navigation",
+        }.issubset(kinds),
+        "network_evidence": not any(
+            "network" in role or "http_evidence" in role for role in roles
+        ),
+        "console_errors": "console_error" not in kinds,
+        "terminal_state": verification["phase"] != "terminal",
+    }
+    return {
+        "schema_version": EVIDENCE_VIEW_SCHEMA_VERSION,
+        "attempt_id": attempt_id,
+        "vacancy": attempt.vacancy.document(),
+        "verification": verification,
+        "event_count": len(events),
+        "event_head_sha256": events[-1]["event_sha256"],
+        "evidence_events": evidence_events,
+        "objects": object_rows,
+        "gaps": gaps,
+    }
+
+
+def render_complete_attempt_view(
+    attempt_id: str,
+    *,
+    root: str | Path | None,
+    repository_root: str | Path,
+) -> str:
+    """Render verified machine data without raw values, paths, or document bytes."""
+    view = load_complete_attempt_view(
+        attempt_id, root=root, repository_root=repository_root
+    )
+    vacancy = view["vacancy"]
+    verification = view["verification"]
+    lines = [
+        f"Application attempt: {view['attempt_id']}",
+        f"Vacancy: {vacancy['role_title']} at {vacancy['company_name']}",
+        f"Job key: {vacancy['job_key']}",
+        f"Outcome: {verification['outcome'] or 'not-terminal'}",
+        f"Events: {view['event_count']}",
+        "Evidence objects:",
+    ]
+    for row in view["objects"]:
+        lines.append(
+            f"- {row['role']} {row['sha256']} ({row['byte_length']} bytes)"
+        )
+    lines.append("Evidence gaps:")
+    for name, missing in sorted(view["gaps"].items()):
+        lines.append(f"- {name}: {'MISSING' if missing else 'PRESENT'}")
+    return "\n".join(lines) + "\n"
 
 
 def export_application_packet(

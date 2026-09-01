@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 
 ROOT = Path(__file__).resolve().parent
 VALIDATOR = Path("scripts/accept_jaa02_receipt.py")
@@ -17,27 +19,34 @@ VALIDATOR = Path("scripts/accept_jaa02_receipt.py")
 
 def _git(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ("git", *argv), cwd=root, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ("git", *argv),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 def _canonical(document: object) -> bytes:
     return (
-        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
     ).encode()
 
 
 @pytest.fixture()
 def certified_repository(tmp_path: Path) -> Path:
-    clone = tmp_path / "certified"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    clone = clone_jaa_repository(ROOT, tmp_path / "certified")
+    assert (
+        _git(
+            clone, "config", "user.name", "independent JAA-02 receipt tester"
+        ).returncode
+        == 0
     )
-    assert copied.returncode == 0, copied.stderr
-    assert _git(clone, "config", "user.name", "independent JAA-02 receipt tester").returncode == 0
-    assert _git(clone, "config", "user.email", "jaa02-tester@example.test").returncode == 0
+    assert (
+        _git(clone, "config", "user.email", "jaa02-tester@example.test").returncode == 0
+    )
     return clone
 
 
@@ -59,11 +68,23 @@ def test_jaa02_rehashed_command_omission_and_reordering_fail_closed(
     replacement = evidence / f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
     receipt.unlink()
     replacement.write_bytes(payload)
-    assert _git(certified_repository, "add", "-A", "--", "runtime_evidence/jaa02").returncode == 0
-    assert _git(certified_repository, "commit", "-m", "tamper JAA-02 receipt").returncode == 0
+    assert (
+        _git(
+            certified_repository, "add", "-A", "--", "runtime_evidence/jaa02"
+        ).returncode
+        == 0
+    )
+    assert (
+        _git(certified_repository, "commit", "-m", "tamper JAA-02 receipt").returncode
+        == 0
+    )
 
     rejected = subprocess.run(
-        (sys.executable, str(VALIDATOR)), cwd=certified_repository, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        (sys.executable, str(VALIDATOR)),
+        cwd=certified_repository,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
     assert rejected.returncode != 0

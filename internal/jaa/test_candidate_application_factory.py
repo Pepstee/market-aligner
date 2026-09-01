@@ -29,17 +29,31 @@ from cv_generation.editorial_composition import (
 )
 
 
-AUTHORITY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/candidate-authorities/"
+PRIVATE_AUTHORITY_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / ".market-aligner-data"
+    / "authority-inputs"
+)
+AUTHORITY_PATH = PRIVATE_AUTHORITY_ROOT / "candidate-authorities" / (
     "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
 )
-DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
+DISCOVERY_PATH = PRIVATE_AUTHORITY_ROOT / "objects" / "39" / (
     "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
 )
 
+PRIVATE_FIXTURE_REASON = (
+    "requires the exact private Gigabyte candidate-authority and discovery "
+    "artifacts; synthetic substitution would not test the certified binding"
+)
+
+
+def require_private_candidate_fixture() -> None:
+    if not AUTHORITY_PATH.is_file() or not DISCOVERY_PATH.is_file():
+        pytest.skip(PRIVATE_FIXTURE_REASON)
+
 
 def _inputs() -> dict[str, object]:
+    require_private_candidate_fixture()
     authority = json.loads(AUTHORITY_PATH.read_bytes())
     discovery = json.loads(DISCOVERY_PATH.read_bytes())
     decision = next(
@@ -525,6 +539,7 @@ def test_materializes_exact_authority_bound_source_without_pdf(
 def test_materialization_rejects_authority_and_unsupported_packet_substitution(
     tmp_path: Path,
 ) -> None:
+    require_private_candidate_fixture()
     substituted_authority = tmp_path / "authority.json"
     substituted_authority.write_bytes(AUTHORITY_PATH.read_bytes() + b" ")
     with pytest.raises(ValueError, match="authority file hash differs"):

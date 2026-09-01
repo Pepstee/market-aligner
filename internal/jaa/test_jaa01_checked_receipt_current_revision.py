@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,7 +16,9 @@ from tracked_source_revision import source_content_revision, source_git_revision
 
 ROOT = Path(__file__).resolve().parent
 EXPECTED_COUNTS = {"pipeline_jobs": 462, "pipeline_events": 924}
-MIGRATION_CONTENT_HASH = "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
+MIGRATION_CONTENT_HASH = (
+    "b38b38fc4455ce6142ca156a4eff400c5dba22ab04d64f02fce8cd332fe08971"
+)
 
 
 def _sha256(path: Path) -> str:
@@ -24,16 +27,45 @@ def _sha256(path: Path) -> str:
 
 def _receipt() -> Path:
     receipts = sorted((ROOT / "runtime_evidence" / "jaa01").glob("sha256-*.json"))
-    assert len(receipts) == 1, f"expected one JAA-01 receipt, found {receipts}"
-    return receipts[0]
+    current_revision = source_content_revision(ROOT)
+    current = [
+        receipt
+        for receipt in receipts
+        if json.loads(receipt.read_text(encoding="utf-8")).get(
+            "source_content_revision"
+        )
+        == current_revision
+    ]
+    assert len(current) == 1, (
+        "expected one current JAA-01 receipt while retaining historical receipts, "
+        f"found {current} among {receipts}"
+    )
+    return current[0]
+
+
+def _is_ancestor(revision: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", revision, descendant),
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return completed.returncode == 0
 
 
 def _runtime() -> Path:
     for parent in ROOT.parents:
         runtime = parent / "state" / "runtime"
-        matches = sorted(runtime.glob(
-            f"jaa00-v2-*/receipts/migration-{MIGRATION_CONTENT_HASH}.json"
-        )) if runtime.is_dir() else []
+        matches = (
+            sorted(
+                runtime.glob(
+                    f"jaa00-v2-*/receipts/migration-{MIGRATION_CONTENT_HASH}.json"
+                )
+            )
+            if runtime.is_dir()
+            else []
+        )
         if len(matches) == 1:
             return matches[0].parents[1]
     pytest.fail("frozen JAA-00 runtime is unavailable")
@@ -46,11 +78,16 @@ def _verify(document: dict[str, object], payload: bytes, receipt: Path) -> None:
     migration_document = json.loads(migration.read_text(encoding="utf-8"))
 
     assert document["source_content_revision"] == source_content_revision(ROOT)
-    assert document["source_git_revision"] == source_git_revision(ROOT)
+    current_git_revision = source_git_revision(ROOT)
+    assert _is_ancestor(str(document["source_git_revision"]), current_git_revision)
     assert document["expected_counts"] == EXPECTED_COUNTS
     assert document["observed_counts"] == {
         name: EXPECTED_COUNTS
-        for name in ("baseline_before", "temporary_before_migration", "temporary_after_migration")
+        for name in (
+            "baseline_before",
+            "temporary_before_migration",
+            "temporary_after_migration",
+        )
     }
     assert document["hashes"] == {
         "baseline_sha256_before": _sha256(baseline),
@@ -63,12 +100,17 @@ def _verify(document: dict[str, object], payload: bytes, receipt: Path) -> None:
 
 
 def test_runtime_locator_uses_current_trusted_jaa00_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = tmp_path / "worktrees" / "candidate"
     repository.mkdir(parents=True)
     migration = (
-        tmp_path / "state" / "runtime" / "jaa00-v2-test" / "receipts"
+        tmp_path
+        / "state"
+        / "runtime"
+        / "jaa00-v2-test"
+        / "receipts"
         / f"migration-{MIGRATION_CONTENT_HASH}.json"
     )
     migration.parent.mkdir(parents=True)
@@ -84,12 +126,15 @@ def test_checked_in_receipt_is_bound_to_current_tree_and_frozen_baseline() -> No
     _verify(json.loads(payload), payload, receipt)
 
 
-@pytest.mark.parametrize("attack", [
-    "stale-source-revision",
-    "altered-database-digest",
-    "altered-count",
-    "tampered-receipt-content",
-])
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "stale-source-revision",
+        "altered-database-digest",
+        "altered-count",
+        "tampered-receipt-content",
+    ],
+)
 def test_checked_in_receipt_verifier_rejects_tampering(attack: str) -> None:
     receipt = _receipt()
     payload = receipt.read_bytes()

@@ -7,8 +7,6 @@ that a caller must never supply.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
 import os
@@ -23,6 +21,7 @@ from market_aligner.applications.production_handoff import (
     PRODUCTION_HANDOFF_TRUST_ROOT_ID,
     _git_commit,
 )
+from market_aligner.state.atomic_publish import publish_noreplace
 
 from .current_time import (
     AuthenticatedCurrentTimeWitness,
@@ -536,31 +535,10 @@ def _create_or_exact(parent_descriptor: int, name: str, value: bytes) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = libc.renameat2
-        renameat2.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        renameat2.restype = ctypes.c_int
-        result = renameat2(
-            parent_descriptor,
-            os.fsencode(temporary_name),
-            parent_descriptor,
-            os.fsencode(name),
-            1,
-        )
-        if result != 0:
-            error = ctypes.get_errno()
-            if error != errno.EEXIST:
-                raise OSError(error, os.strerror(error))
-            if not existing_exact():
-                raise ProductionHandoffAdmissionError(
-                    "operation receipt publication raced"
-                )
+        if not publish_noreplace(parent_descriptor, temporary_name, name) and not existing_exact():
+            raise ProductionHandoffAdmissionError(
+                "operation receipt publication raced"
+            )
         os.fsync(parent_descriptor)
     finally:
         try:

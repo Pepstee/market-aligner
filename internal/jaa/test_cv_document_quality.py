@@ -11,6 +11,8 @@ from cv_generation import document_quality as quality
 from career_automation.rendering import (
     ApplicationArtifacts,
     EditableArtifacts,
+    PdfLineBox,
+    RENDERER_POLICY_SHA256,
     _artifact,
 )
 from cv_generation.document_quality import (
@@ -103,6 +105,35 @@ def test_pinned_poppler_rejects_library_hash_substitution(
             os.close(descriptor)
 
 
+def test_poppler_failure_output_never_echoes_protected_content(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = "PROTECTED-CANDIDATE-CANARY-641dd08ace"
+    runtime = quality.PopplerRuntime(
+        version="pdftoppm version test",
+        tool_paths=tuple((tool, f"/test/{tool}") for tool in quality.POPPLER_TOOLS),
+        tool_sha256=tuple((tool, "a" * 64) for tool in quality.POPPLER_TOOLS),
+        runtime_sha256="b" * 64,
+    )
+    monkeypatch.setattr(
+        quality.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=canary,
+            stderr=canary,
+        ),
+    )
+
+    with pytest.raises(DocumentQualityError, match="Poppler pdfinfo failed") as raised:
+        quality._run(runtime, "pdfinfo", "/private/candidate/cv.pdf")
+
+    captured = capsys.readouterr()
+    assert canary not in str(raised.value)
+    assert canary not in captured.out
+    assert canary not in captured.err
+
+
 def _clean_artifacts() -> ApplicationArtifacts:
     cv_text = """Alex Example
 alex@example.test
@@ -142,39 +173,58 @@ I would welcome the opportunity to discuss the engineering challenges.
         hashlib.sha256(letter_text.encode()).hexdigest(),
         hashlib.sha256(answers.encode()).hexdigest(),
     )
-    cv = _artifact(
-        "cv",
-        ((
-            "Alex Example",
-            "alex@example.test | +44 7700 900123 | London",
-            "Professional Summary",
-            "- Delivered reliable services with independently verified evidence.",
-            "Core Capabilities",
-            "- Designed deterministic workflow automation around bounded authority.",
-            "Projects",
-            "- Built an evidence-linked application composition pipeline.",
-        ),),
+
+    def box(
+        text: str, baseline: float, size: float, *, bold: bool = False
+    ) -> PdfLineBox:
+        return PdfLineBox(
+            text=text,
+            x=50.0,
+            baseline_y=baseline,
+            width=min(470.0, len(text) * size * 0.52),
+            font_size=size,
+            font_name="Helvetica-Bold" if bold else "Helvetica",
+            role="fixture",
+            color=(0.1, 0.12, 0.15),
+        )
+
+    cv_lines = tuple(line for line in cv_text.splitlines() if line)
+    cv_layout = (
+        tuple(
+            box(
+                line,
+                790.0 - (index * 24.0),
+                16.0
+                if index == 0
+                else 11.0
+                if line in {"Professional Summary", "Core Capabilities", "Projects"}
+                else 10.0,
+                bold=index == 0
+                or line in {"Professional Summary", "Core Capabilities", "Projects"},
+            )
+            for index, line in enumerate(cv_lines)
+        ),
     )
-    letter = _artifact(
-        "cover_letter",
-        ((
-            "Alex Example",
-            "alex@example.test",
-            "+44 7700 900123",
-            "London",
-            "Software Engineer",
-            "Example Ltd",
-            "I am applying because the role matches my tested automation work.",
-            "My project evidence demonstrates reliable delivery and careful validation.",
-            "Example Ltd's documented service focus makes the work particularly relevant.",
-            "I would welcome the opportunity to discuss the engineering challenges.",
-        ),),
+    letter_lines = tuple(line for line in letter_text.splitlines() if line)
+    letter_layout = (
+        tuple(
+            box(
+                line,
+                790.0 - (index * 24.0),
+                16.0 if index == 0 else 10.0,
+                bold=index == 0,
+            )
+            for index, line in enumerate(letter_lines)
+        ),
     )
+    cv = _artifact("cv", cv_layout)
+    letter = _artifact("cover_letter", letter_layout)
     source_id = "a" * 64
     artifact_set = hashlib.sha256(
         "\n".join(
             (
                 source_id,
+                RENDERER_POLICY_SHA256,
                 editable.cv_sha256,
                 editable.cover_letter_sha256,
                 editable.answers_sha256,
@@ -188,11 +238,14 @@ I would welcome the opportunity to discuss the engineering challenges.
     return ApplicationArtifacts(source_id, editable, cv, letter, artifact_set)
 
 
-def _rehash_editable(artifacts: ApplicationArtifacts, editable: EditableArtifacts) -> ApplicationArtifacts:
+def _rehash_editable(
+    artifacts: ApplicationArtifacts, editable: EditableArtifacts
+) -> ApplicationArtifacts:
     artifact_set = hashlib.sha256(
         "\n".join(
             (
                 artifacts.source_id,
+                RENDERER_POLICY_SHA256,
                 editable.cv_sha256,
                 editable.cover_letter_sha256,
                 editable.answers_sha256,
@@ -224,7 +277,10 @@ def test_missing_poppler_and_duplicate_prose_fail_closed(tmp_path) -> None:
         resolve_poppler_runtime(tmp_path)
 
     artifacts = _clean_artifacts()
-    duplicate = artifacts.editable.cv_text + "\n- Built an evidence-linked application composition pipeline.\n"
+    duplicate = (
+        artifacts.editable.cv_text
+        + "\n- Built an evidence-linked application composition pipeline.\n"
+    )
     editable = replace(
         artifacts.editable,
         cv_text=duplicate,
@@ -251,6 +307,13 @@ def test_geometry_and_structure_negative_controls(tmp_path) -> None:
     )
     with pytest.raises(DocumentQualityError, match="minimum page margin"):
         _minimum_margin(bbox, (595.0, 842.0), 1)
+    bbox.write_text(
+        '<html><body><doc><page width="595" height="842">'
+        '<word xMin="35.5" yMin="40" xMax="100" yMax="60">text</word>'
+        "</page></doc></body></html>",
+        encoding="utf-8",
+    )
+    assert _minimum_margin(bbox, (595.0, 842.0), 1) == 36.0
     with pytest.raises(DocumentQualityError, match="font hierarchy"):
         _font_hierarchy(replace(artifact, pdf_bytes=b"%PDF-1.4\n/F1 10 Tf"))
 

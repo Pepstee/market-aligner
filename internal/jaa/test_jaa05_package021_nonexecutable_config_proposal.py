@@ -1,4 +1,5 @@
 """Package 021 non-executable config-v4 proposal controls."""
+
 from __future__ import annotations
 
 import copy
@@ -12,17 +13,18 @@ import yaml
 
 from career_automation.holdout_firewall import load_quarantine_bundle
 from career_automation.official_cohort import build
+from testing_repository import (
+    historical_path,
+    operator_control_path,
+    rebind_historical_control_paths,
+)
 
 
 ROOT = Path(__file__).resolve().parent
-CONTROL = Path(
-    "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/"
-    "jaa/jaa05-next-cycle"
-)
+CONTROL = operator_control_path("resumed-dual-lane-20260728", "jaa", "jaa05-next-cycle")
 SCRIPT = CONTROL / "package-021-build-nonexecutable-config-v4.py"
 PROPOSAL = (
-    CONTROL
-    / "package-021-authorized-production-config-v4-proposal.yaml.proposal"
+    CONTROL / "package-021-authorized-production-config-v4-proposal.yaml.proposal"
 )
 REPORT = CONTROL / "package-020-preserved-supply-exhaustion-audit.json"
 PACKAGE020_SCRIPT = CONTROL / "package-020-audit-preserved-supply.py"
@@ -48,7 +50,7 @@ def _load_module(name: str, path: Path) -> ModuleType:
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    return rebind_historical_control_paths(module)
 
 
 @pytest.fixture(scope="module")
@@ -183,9 +185,7 @@ def test_resolved_counts_and_historical_capacity_are_honest(
 
 
 def test_source_documents_and_quarantine_are_hash_bound(proposal: dict) -> None:
-    sources = proposal["offline_capacity_assessment"][
-        "historical_source_documents"
-    ]
+    sources = proposal["offline_capacity_assessment"]["historical_source_documents"]
     assert sources == [
         {
             "path": (
@@ -209,7 +209,7 @@ def test_source_documents_and_quarantine_are_hash_bound(proposal: dict) -> None:
         },
     ]
     for source in sources:
-        assert _sha256(Path(source["path"])) == source["sha256"]
+        assert _sha256(historical_path(source["path"])) == source["sha256"]
     quarantine = proposal["quarantine_crosscheck"]
     assert quarantine["eligible_candidate_overlap_count"] == 0
     assert quarantine["union_counts"] == {
@@ -385,8 +385,12 @@ def test_actual_builder_has_no_network_primitive_import(
 def test_runtime_builder_refuses_proposal_before_journal_or_access(
     proposal: dict,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert proposal["proposal_only"] is True
+    import skeleton.configuration as configuration
+
+    monkeypatch.setattr(configuration, "Path", type(historical_path("/")))
     controller = SimpleNamespace(
         policy=SimpleNamespace(policy_sha256="1" * 64),
     )

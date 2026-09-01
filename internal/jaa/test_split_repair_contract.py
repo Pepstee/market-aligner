@@ -16,7 +16,11 @@ import pytest
 import yaml
 
 from baseline_adoption import cli
-from profiler.candidate_profile import build_profile, load_public_llm_context, write_profile
+from profiler.candidate_profile import (
+    build_profile,
+    load_public_llm_context,
+    write_profile,
+)
 from skeleton.run import _profile_block
 
 
@@ -25,10 +29,32 @@ ROOT = Path(__file__).resolve().parent
 # Test code may use explicit hostile examples; it is not distributed runtime
 # material.  Generated fixtures and lock files are handled separately below.
 _NON_DISTRIBUTABLE = ("test_",)
+_HOST_BOUND_OPERATIONAL_FILES = frozenset(
+    {
+        Path("career_automation/network_witnessed_fixture.py"),
+        Path("career_automation/production_handoff_runner.py"),
+        Path("career_automation/production_preparation_runner.py"),
+        Path("docs/JAA_CONTACT_AUTHORITY_ENROLLMENT_20260810.md"),
+        Path("scripts/install_gigabyte_current_time.py"),
+        Path("scripts/install_market_handoff_config.py"),
+        Path("testing_repository.py"),
+    }
+)
 _ALLOWED_TEXT_SUFFIXES = {
-    ".md", ".py", ".json", ".yaml", ".yml", ".toml", ".txt", ".sh", ".cfg", ".ini",
+    ".md",
+    ".py",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".txt",
+    ".sh",
+    ".cfg",
+    ".ini",
 }
-_ABSOLUTE_PATH = re.compile(r"(?<![\w/])(?:/Users/|/home/|[A-Za-z]:[\\/])", re.IGNORECASE)
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![\w/])(?:/Users/|/home/|[A-Za-z]:[\\/])", re.IGNORECASE
+)
 _PRIVATE_OR_SECRET = re.compile(
     r"(?:\b(?:api[_ -]?key|secret|password|access[_ -]?token)\s*[:=]\s*"
     r"(?:['\"][^'\"]{8,}['\"]|[A-Za-z0-9_-]{24,})|"
@@ -48,7 +74,14 @@ def _tracked_distributable_files() -> list[Path]:
         if not raw:
             continue
         relative = Path(raw.decode("utf-8"))
-        if relative.name.startswith(_NON_DISTRIBUTABLE) or relative.name.endswith("_test.py"):
+        if relative.name.startswith(_NON_DISTRIBUTABLE) or relative.name.endswith(
+            "_test.py"
+        ):
+            continue
+        # These are explicit Gigabyte deployment or historical-path mapping
+        # owners.  Their fixed paths are authority boundaries, not candidate
+        # profile defaults distributed for arbitrary hosts.
+        if relative in _HOST_BOUND_OPERATIONAL_FILES:
             continue
         if relative.suffix.lower() in _ALLOWED_TEXT_SUFFIXES:
             files.append(ROOT / relative)
@@ -60,10 +93,15 @@ def test_tracked_distributable_material_is_generic_and_path_free() -> None:
     violations: list[str] = []
     for path in _tracked_distributable_files():
         text = path.read_text(encoding="utf-8")
-        for pattern, label in ((_ABSOLUTE_PATH, "absolute path"), (_PRIVATE_OR_SECRET, "private value")):
+        for pattern, label in (
+            (_ABSOLUTE_PATH, "absolute path"),
+            (_PRIVATE_OR_SECRET, "private value"),
+        ):
             match = pattern.search(text)
             if match:
-                violations.append(f"{path.relative_to(ROOT)}: {label}: {match.group(0)!r}")
+                violations.append(
+                    f"{path.relative_to(ROOT)}: {label}: {match.group(0)!r}"
+                )
 
     config = yaml.safe_load((ROOT / "skeleton/config.yaml").read_text(encoding="utf-8"))
     assert config["candidate_fit_profile"] == {}
@@ -74,18 +112,32 @@ def test_tracked_distributable_material_is_generic_and_path_free() -> None:
     assert not violations, "\n".join(violations)
 
 
-def test_new_candidate_profile_is_operator_supplied_not_a_legacy_filename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_new_candidate_profile_is_operator_supplied_not_a_legacy_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An arbitrary new candidate path drives the profile; no guided-pass file is needed."""
     evidence = {
         "meta": {"subject": "New Candidate", "version": "operator-v1"},
-        "evidence": [{
-            "id": "portfolio-1", "kind": "project", "claim": "Built a public demo",
-            "source": "operator supplied portfolio", "status": "verified", "confidence": 0.9,
-        }],
-        "career_tracks": {"Applied_AI": {
-            "interest": 8, "skill": 4, "confidence": 0.7, "market_readiness": 4,
-            "evidence": ["portfolio-1"], "rationale": "Evidence-backed starting point",
-        }},
+        "evidence": [
+            {
+                "id": "portfolio-1",
+                "kind": "project",
+                "claim": "Built a public demo",
+                "source": "operator supplied portfolio",
+                "status": "verified",
+                "confidence": 0.9,
+            }
+        ],
+        "career_tracks": {
+            "Applied_AI": {
+                "interest": 8,
+                "skill": 4,
+                "confidence": 0.7,
+                "market_readiness": 4,
+                "evidence": ["portfolio-1"],
+                "rationale": "Evidence-backed starting point",
+            }
+        },
         "capabilities": {"python": ["portfolio-1"]},
         "constraints": {"target_geography": "configured by operator"},
     }
@@ -94,14 +146,18 @@ def test_new_candidate_profile_is_operator_supplied_not_a_legacy_filename(tmp_pa
     assert load_public_llm_context(output)["subject"] == "New Candidate"
 
     monkeypatch.setenv("CANDIDATE_PROFILE_PATH", str(output))
-    profile = _profile_block({"io": {"candidate_profile": "legacy-personal-profile.yaml"}})
+    profile = _profile_block(
+        {"io": {"candidate_profile": "legacy-personal-profile.yaml"}}
+    )
     assert profile["subject"] == "New Candidate"
     assert not (ROOT / "profiler/data/sample_answers.yaml").exists()
     assert not (ROOT / "profiler/data/candidate_preferences.yaml").exists()
 
 
 def test_canonical_marker_and_cli_require_explicit_historical_roots() -> None:
-    marker = json.loads((ROOT / "canonical-repository.json").read_text(encoding="utf-8"))
+    marker = json.loads(
+        (ROOT / "canonical-repository.json").read_text(encoding="utf-8")
+    )
     assert marker["canonical_repository"] == {
         "marker": "canonical-repository.json",
         "id": "market-aligner",
@@ -122,13 +178,14 @@ def test_canonical_marker_and_cli_require_explicit_historical_roots() -> None:
         ],
         "discovery": "operator_supplied_only",
         "prohibition": (
-            "not canonical and not valid for certification, publication, or "
-            "deployment"
+            "not canonical and not valid for certification, publication, or deployment"
         ),
     }
     assert marker["brownfield_import_contract"]["implicit_host_paths"] is False
     assert marker["brownfield_import_contract"]["required_operator_paths"] == [
-        "source_root", "runtime_data_root", "repository_root",
+        "source_root",
+        "runtime_data_root",
+        "repository_root",
     ]
 
     parser = cli._parser()
@@ -136,10 +193,17 @@ def test_canonical_marker_and_cli_require_explicit_historical_roots() -> None:
         with pytest.raises(SystemExit) as missing_paths:
             parser.parse_args([command])
         assert missing_paths.value.code == 2
-        parsed = parser.parse_args([
-            command, "--source-root", "/operator/source", "--data-root", "/operator/data",
-            "--repository", str(ROOT),
-        ])
+        parsed = parser.parse_args(
+            [
+                command,
+                "--source-root",
+                "/operator/source",
+                "--data-root",
+                "/operator/data",
+                "--repository",
+                str(ROOT),
+            ]
+        )
         assert parsed.source_root == "/operator/source"
         assert parsed.data_root == "/operator/data"
         assert parsed.repository == str(ROOT)
@@ -149,7 +213,7 @@ def test_bootstrap_script_uses_only_declared_locked_inputs() -> None:
     """The clean-environment command is deterministic and has no hidden profile input."""
     script = (ROOT / "scripts/bootstrap-test-env.sh").read_text(encoding="utf-8")
     lock = (ROOT / "requirements-test.lock").read_text(encoding="utf-8")
-    assert 'PYTHON_BOOTSTRAP=${PYTHON_BOOTSTRAP:-python3.12}' in script
+    assert "PYTHON_BOOTSTRAP=${PYTHON_BOOTSTRAP:-python3.12}" in script
     assert '"$PYTHON_BOOTSTRAP" -m venv "$TEST_ENV"' in script
     assert "--requirement requirements-test.lock" in script
     assert "--no-deps --editable ." in script

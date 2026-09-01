@@ -13,15 +13,19 @@ from pathlib import Path
 
 import pytest
 
+from career_automation import rendering as rendering_module
 from career_automation.application_compiler import (
     CandidateContact,
     FactualSentence,
     ModelReceipt,
+    ProfileFactAuthority,
     ProductionApplicationCompiler,
     StyleProposal,
     StyleSlot,
+    approved_candidate_outward_text,
     apply_style_proposal,
     compile_application_source,
+    resolve_authenticated_outward_rewrite,
     verify_application_source,
 )
 from career_automation.application_artifacts import (
@@ -29,13 +33,18 @@ from career_automation.application_artifacts import (
     publish_application_artifacts,
 )
 from career_automation.application_strategy import ApplicationStrategyStore
+from career_automation import candidate_authority as candidate_authority_module
 from career_automation.candidate_graph import CandidateGraph
 from career_automation.evidence_matching import canonical_json, content_hash
 from career_automation.rendering import (
+    ApplicationArtifacts,
     PDF_FORBIDDEN,
     PdfArtifact,
+    RENDERER_POLICY_SHA256,
     render_pdf_artifacts,
     validate_pdf_artifact,
+    validate_pdf_geometry,
+    verify_application_artifacts,
 )
 from test_jaa07_independent_acceptance import (
     DIGEST,
@@ -52,6 +61,125 @@ def test_factual_sentence_cannot_paraphrase_or_add_an_unsupported_metric() -> No
     fact = source.facts[0]
     with pytest.raises(ValueError, match="equal its approved"):
         replace(fact, text=f"{fact.text} Improved availability by 40%.")
+
+
+def _install_approved_evidence(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    evidence_id: str,
+    statement: str,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "id": evidence_id,
+        "statement": statement,
+        "proof_class": "portfolio_artifact",
+    }
+    value = json.dumps({"statements": [evidence]}).encode()
+    path = tmp_path / "approved-evidence.json"
+    path.write_bytes(value)
+    monkeypatch.setattr(candidate_authority_module, "APPROVED_EVIDENCE_PATH", path)
+    monkeypatch.setitem(
+        candidate_authority_module.APPROVED_CANDIDATE_SOURCE_HASHES,
+        "approved_evidence",
+        hashlib.sha256(value).hexdigest(),
+    )
+    return evidence
+
+
+@pytest.mark.parametrize(
+    ("evidence_id", "approved_source", "expected_prefix"),
+    (
+        ("E-011", "Synthetic exact-allowlist source.", "I led"),
+        ("E-007", "I sold a synthetic service.", "Sold"),
+    ),
+)
+def test_outward_rewrite_requires_current_authenticated_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    evidence_id: str,
+    approved_source: str,
+    expected_prefix: str,
+) -> None:
+    evidence = _install_approved_evidence(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        evidence_id=evidence_id,
+        statement=approved_source,
+    )
+    source = str(evidence["statement"])
+    outward = approved_candidate_outward_text(
+        evidence_id,
+        source,
+        document_kind="cv",
+    )
+    assert outward.startswith(expected_prefix)
+    receipt = resolve_authenticated_outward_rewrite(
+        candidate_evidence_id=evidence_id,
+        approved_source_text=source,
+        outward_text=outward,
+        document_kind="cv",
+    )
+    authority = ProfileFactAuthority(
+        candidate_profile_hash="a" * 64,
+        candidate_claim_id=f"approved-claim:{evidence_id}",
+        candidate_claim_version=1,
+        candidate_evidence_id=evidence_id,
+        candidate_evidence_version=1,
+        candidate_evidence_sha256=hashlib.sha256(source.encode()).hexdigest(),
+        proof_class=str(evidence["proof_class"]),
+        rewrite_authority=receipt,
+    )
+    sentence = FactualSentence(
+        content_hash({"evidence_id": evidence_id, "outward": outward}),
+        outward,
+        source,
+        "candidate",
+        "cv",
+        authority,
+    )
+    assert sentence.authority.outward_text_sha256 == hashlib.sha256(
+        outward.encode()
+    ).hexdigest()
+    assert sentence.document()["authority"]["rewrite_authority"] == receipt.document()
+
+    forged = replace(receipt, issuer_identity="caller-forged")
+    with pytest.raises(ValueError, match="authentic"):
+        replace(sentence, authority=replace(authority, rewrite_authority=forged))
+
+
+def test_outward_rewrite_receipt_is_deterministic_and_rejects_wrong_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    evidence = _install_approved_evidence(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        evidence_id="E-007",
+        statement="I sold a synthetic service.",
+    )
+    source = str(evidence["statement"])
+    outward = approved_candidate_outward_text("E-007", source, document_kind="cv")
+    first = resolve_authenticated_outward_rewrite(
+        candidate_evidence_id="E-007",
+        approved_source_text=source,
+        outward_text=outward,
+        document_kind="cv",
+    )
+    second = resolve_authenticated_outward_rewrite(
+        candidate_evidence_id="E-007",
+        approved_source_text=source,
+        outward_text=outward,
+        document_kind="cv",
+    )
+    assert first == second
+    with pytest.raises(ValueError, match="not approved"):
+        resolve_authenticated_outward_rewrite(
+            candidate_evidence_id="E-007",
+            approved_source_text=source,
+            outward_text=f"{outward} Added claim.",
+            document_kind="cv",
+        )
 
 
 @pytest.mark.parametrize(
@@ -302,6 +430,92 @@ def test_pdf_rich_or_hidden_feature_markers_fail_closed() -> None:
             expected_page_count=1,
             required_values=("Example Ltd",),
         )
+
+
+def test_pdf_geometry_rejects_clipping_overlap_and_page_budget() -> None:
+    source, _ = _source()
+    artifacts = render_pdf_artifacts(source)
+    first_page = artifacts.cv_pdf.layout_boxes[0]
+    clipped = replace(first_page[0], x=594.0)
+    with pytest.raises(ValueError, match="clips"):
+        validate_pdf_geometry(((clipped, *first_page[1:]),))
+    overlapping = replace(first_page[1], baseline_y=first_page[0].baseline_y)
+    with pytest.raises(ValueError, match="overlap"):
+        validate_pdf_geometry(((first_page[0], overlapping, *first_page[2:]),))
+
+    blocks = tuple(
+        (
+            rendering_module._LineSpec(
+                f"Synthetic evidence line {index}",
+                "body",
+                rendering_module._BODY,
+            ),
+        )
+        for index in range(80)
+    )
+    layout = rendering_module._layout_blocks(blocks, max_pages=2)
+    assert len(layout) == 2
+    validate_pdf_geometry(layout)
+    with pytest.raises(ValueError, match="page budget"):
+        rendering_module._layout_blocks(blocks, max_pages=1)
+
+
+def test_coherently_rehashed_pdf_from_another_source_fails_exact_rerender() -> None:
+    source, _ = _source()
+    original = render_pdf_artifacts(source)
+    slot = source.style_slots[0]
+    proposed = "Evidence relevant to this role"
+    receipt = ModelReceipt(
+        "provider",
+        "critic",
+        DIGEST,
+        DIGEST,
+        hashlib.sha256(slot.text.encode()).hexdigest(),
+        hashlib.sha256(proposed.encode()).hexdigest(),
+    )
+    proposal = StyleProposal(
+        content_hash(
+            {
+                "contract": "jaa07.style-proposal.v1",
+                "input_sha256": receipt.input_sha256,
+                "model": receipt.model,
+                "output_sha256": receipt.output_sha256,
+                "policy_sha256": receipt.policy_sha256,
+                "prompt_sha256": receipt.prompt_sha256,
+                "provider": receipt.provider,
+                "slot_id": slot.slot_id,
+            }
+        ),
+        slot.slot_id,
+        slot.text,
+        proposed,
+        receipt,
+    )
+    other = render_pdf_artifacts(apply_style_proposal(source, proposal))
+    tampered_hash = hashlib.sha256(
+        "\n".join(
+            (
+                original.source_id,
+                RENDERER_POLICY_SHA256,
+                original.editable.cv_sha256,
+                original.editable.cover_letter_sha256,
+                original.editable.answers_sha256,
+                other.cv_pdf.pdf_sha256,
+                other.cv_pdf.extracted_text_sha256,
+                original.cover_letter_pdf.pdf_sha256,
+                original.cover_letter_pdf.extracted_text_sha256,
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    tampered = ApplicationArtifacts(
+        source_id=original.source_id,
+        editable=original.editable,
+        cv_pdf=other.cv_pdf,
+        cover_letter_pdf=original.cover_letter_pdf,
+        artifact_set_sha256=tampered_hash,
+    )
+    with pytest.raises(ValueError, match="exact source rerender"):
+        verify_application_artifacts(tampered, source)
 
 
 def test_artifact_publication_rejects_repository_and_symlink_roots(
