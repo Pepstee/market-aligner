@@ -7555,8 +7555,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/ASSURANCE_MANIFEST.json": {
-    "mtime": 1788225676.2434123,
-    "ast_hash": "349a48697b4d68934f98d5dcff7798f5",
+    "mtime": 1788227577.0881605,
+    "ast_hash": "cbda80be84669b977e5496117e5d2969",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/acceptance": {
@@ -9465,8 +9465,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/test_assurance_manifest_truth.py": {
-    "mtime": 1788215766.4961486,
-    "ast_hash": "dd63e6b9c215c7d162ec1022a7a40c25",
+    "mtime": 1788227786.5036383,
+    "ast_hash": "e29a94bc4941700085b91478de4438cc",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/test_ats_application_authority.py": {
@@ -10040,8 +10040,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/test_jaa10_shadow_observation_ledger_negative_controls.py": {
-    "mtime": 1788142533.2249527,
-    "ast_hash": "261c31d9128798e25ffb6e3eec62fb70",
+    "mtime": 1788227559.787366,
+    "ast_hash": "ffe7a316f7dbbcf7b0b504621a8f91d2",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/test_jaa10_three_anchor_cohort_recorder.py": {
@@ -11030,8 +11030,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/tests/test_ingest_cli.py": {
-    "mtime": 1788142533.264226,
-    "ast_hash": "cd61b92ab35203a1354a31b30eda73ae",
+    "mtime": 1788227444.816884,
+    "ast_hash": "7ec4dc85781c0e89f39bd8b6a66a1c70",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/tests/test_jaa_bridge.py": {
@@ -11462,6 +11462,11 @@
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/runtime_evidence/clean_document_canary/axiom-data-scientist/cv.pdf": {
     "mtime": 1788142533.1737077,
     "ast_hash": "c664697eee96fe2bdf2366ac26d64b0a",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/runtime_evidence/jaa01/sha256-78e3cc56548875efea8a51f1533399a6333a08205e8604cf71ae87363d22eea5.json": {
+    "mtime": 1788227983.8164043,
+    "ast_hash": "1fc7728718ff567b41c769e17654b59d",
     "semantic_hash": ""
   }
 }
