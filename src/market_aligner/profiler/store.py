@@ -53,6 +53,7 @@ MAX_EVIDENCE_ROWS = 10_000  # exactly 10,000 reaches parsing; 10,001 refuses
 MAX_MANIFEST_BYTES = 4_096
 
 _CANONICAL_NAMES = (PROFILE_NAME, EVIDENCE_NAME, MANIFEST_NAME)
+_CANONICAL_NAME_SET = frozenset(_CANONICAL_NAMES)
 
 
 def _create_or_verify_text(path: Path, content: str) -> None:
@@ -1126,6 +1127,10 @@ class ProfileStore:
         # Pre-mutation capture: directory identity plus exact present/absent
         # name-entry identities for the three canonical names.
         pre_dir_identity = directory.identity
+        pre_names = frozenset(os.listdir(directory.fd))
+        if not pre_names.issubset(_CANONICAL_NAME_SET):
+            _close_chain(levels)
+            raise ValueError("profile directory contains an unrelated entry")
         prior_manifest_bytes = b""
         prior_manifest_identity: tuple | None = None
         pre_entries: dict[str, tuple | None] = {}
@@ -1181,9 +1186,6 @@ class ProfileStore:
                 raise
             prior_leaf_captures.update(
                 {name: (payload[0], payload[1]) for name, payload in prior_leaves.items()}
-            )
-            newly_created = sum(
-                1 for name in _CANONICAL_NAMES if pre_entries[name] is None
             )
             global _SAVE_LOCK_INTERCEPT
             if _SAVE_LOCK_INTERCEPT is not None:
@@ -1297,12 +1299,10 @@ class ProfileStore:
             # Step 6: committed-name durability barrier; success only here.
             os.fsync(directory.fd)
             _maybe_fault("after_final_dirfsync")
-            final = _identity(os.fstat(directory.fd))
-            if final[4] - pre_dir_identity[4] != newly_created:
+            final_names = frozenset(os.listdir(directory.fd))
+            if final_names != _CANONICAL_NAME_SET:
                 raise ValueError(
-                    "profile directory gained unexpected entries during save "
-                    f"(nlink {pre_dir_identity[4]} -> {final[4]}, "
-                    f"own new names {newly_created})"
+                    "profile directory entries differ from the exact canonical set"
                 )
             self._verify_manifest_entry(directory.fd, committed, cident)
             self._reopen_and_verify_leaf(directory.fd, PROFILE_NAME, profile_bytes)
