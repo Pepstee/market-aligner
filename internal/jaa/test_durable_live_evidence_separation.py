@@ -39,7 +39,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _receipt() -> tuple[Path, dict[str, Any]]:
+def _historical_receipt() -> tuple[Path, dict[str, Any]]:
     paths = sorted((ROOT / "runtime_evidence" / "jaa01").glob("sha256-*.json"))
     assert paths
     documents: list[tuple[Path, bytes, dict[str, Any]]] = []
@@ -54,7 +54,8 @@ def _receipt() -> tuple[Path, dict[str, Any]]:
             _git("rev-list", "--first-parent", "HEAD").splitlines()
         )
     }
-    current = sorted(
+    current_revision = _independent_revision()
+    historical = sorted(
         (
             first_parent_lineage[document["source_git_revision"]],
             path,
@@ -62,9 +63,10 @@ def _receipt() -> tuple[Path, dict[str, Any]]:
         )
         for path, _payload, document in documents
         if document.get("source_git_revision") in first_parent_lineage
+        and document.get("source_content_revision") != current_revision
     )
-    assert current, "no JAA-01 receipt is bound to the current first-parent lineage"
-    _position, path, document = current[0]
+    assert historical, "no historical JAA-01 receipt is bound to this lineage"
+    _position, path, document = historical[0]
     return path, document
 
 
@@ -223,7 +225,7 @@ def _spec(name: str, source_root: Path, path: Path) -> core.BaselineSpec:
 def test_checked_in_jaa01_is_frozen_and_ignores_a_later_live_source_change(
     tmp_path: Path,
 ) -> None:
-    evidence, document = _receipt()
+    evidence, document = _historical_receipt()
     original_bytes = evidence.read_bytes()
     rendered = original_bytes.decode("utf-8")
     simulated_live = tmp_path / "operator" / "mutable.sqlite3"
@@ -311,7 +313,7 @@ def test_historical_revision_binding_rejects_divergence_and_tampering(
     with pytest.raises(AssertionError):
         _independent_revision_at(divergent, repository)
 
-    _, document = _receipt()
+    _, document = _historical_receipt()
     tampered_content = copy.deepcopy(document)
     tampered_content["source_content_revision"] = "sha256:" + ("0" * 64)
     with pytest.raises(AssertionError):
