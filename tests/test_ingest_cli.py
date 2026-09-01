@@ -897,7 +897,13 @@ class IngestCliTests(unittest.TestCase):
                 "SELECT fetch_status, fetch_error FROM postings WHERE key='fixtureboard:2'"
             ).fetchone()
         self.assertEqual("error", status)
-        self.assertIn("provider refused 2", error)
+        self.assertEqual("fetch_error", error)
+        self.assertNotIn(
+            "provider refused 2",
+            (self.root / "state" / "vacancies.sqlite3").read_bytes().decode(
+                "utf-8", errors="ignore"
+            ),
+        )
         self.assertTrue((self.root / "raw" / "vacancies" / "fixtureboard" / "1.json").is_file())
         self.assertFalse((self.root / "raw" / "vacancies" / "fixtureboard" / "2.json").exists())
 

@@ -252,6 +252,14 @@
         "historical_git_blob": "15baa07fe87857246fb04ae2c791335715603dbe",
         "current_git_blob": "4cc0f75dc52c689f2ca5022300467f346aaae9ef",
         "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "test_jaa10_shadow_observation_ledger_negative_controls.py",
+        "historical_source_git_revision": "68f0f245b58a3ad0180f4d49ecb086d29ee0e99f",
+        "historical_git_blob": "fdc0d3ceff67d667524186728ae92d5844831882",
+        "current_git_blob": "7ac7ea85d8304645b5bcab553da48d6777f2e345",
+        "reason": "current_source_differs_from_historical_authority"
       }
     ]
   },
