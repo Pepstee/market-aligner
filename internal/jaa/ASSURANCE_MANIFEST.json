@@ -34,7 +34,7 @@
         "path": "test_jaa09_independent_acceptance.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "6e260955c84c3c3aba88ac76d7f5606abce6c8ea",
-        "current_git_blob": "7c689ba3250269f034b2ad3300c95809c10019ee",
+        "current_git_blob": "46c9c7590ca778a7d5cd410dc160ebec46828f7e",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -42,7 +42,7 @@
         "path": "test_jaa09_negative_controls.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "415a1168e2b22108ab1c596a489647a7cec40577",
-        "current_git_blob": "8a5cab1d4eee87bce3caf71eebda2b7195c231af",
+        "current_git_blob": "68fc10b3f174f7fbf7f25b1d371e667cc5901060",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -50,7 +50,7 @@
         "path": "career_automation/hard_metrics_evaluation.py",
         "historical_source_git_revision": "fc2476442aafbd9f378669d3f54b68ea7dc9f1c8",
         "historical_git_blob": "660d60d2b5496bc937be08cad25fbfe1ad90b4b5",
-        "current_git_blob": "e07136c3470129261a8331b061a3d67303713fa8",
+        "current_git_blob": "77f6b1c5c91d1088876d2c69faf50f9f5bc3b895",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -66,7 +66,7 @@
         "path": "test_jaa09_negative_controls.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "415a1168e2b22108ab1c596a489647a7cec40577",
-        "current_git_blob": "8a5cab1d4eee87bce3caf71eebda2b7195c231af",
+        "current_git_blob": "68fc10b3f174f7fbf7f25b1d371e667cc5901060",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -114,7 +114,7 @@
         "path": "test_durable_live_evidence_separation.py",
         "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
         "historical_git_blob": "af0617a8dfab9f9a68fb49c243f19aa29636916a",
-        "current_git_blob": "d0648f7784210ef0a37df74ab3d82d849ed9c5e1",
+        "current_git_blob": "6e8c9dcefe1b73890eeb24f175df8b22323e4230",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -122,7 +122,7 @@
         "path": "test_jaa01_checked_receipt_current_revision.py",
         "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
         "historical_git_blob": "78dbabb72c27abc414d2bf3cf1b32efc68f22a40",
-        "current_git_blob": "8b382d69ecf2df772a087e1178faf57e42143891",
+        "current_git_blob": "6d8d9fbfbdc35a3bb70c67fd5e903a977b64e139",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -211,6 +211,46 @@
         "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
         "historical_git_blob": "2275b75c98708bf508ee36fd5f13eb02ff0f0fbf",
         "current_git_blob": "7e8f8dd071cdd6d1c367088682905bc10d514e7e",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "career_automation/shadow_certification.py",
+        "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+        "historical_git_blob": "89b379096e3dcdb72bbff93c628efac8c9cb4c15",
+        "current_git_blob": "33d1062083aa5dd5fde241ff6267ed42251ff205",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "test_jaa10_independent_acceptance.py",
+        "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+        "historical_git_blob": "cbf9ec4917009114d6ff32bce995f9a2fede821d",
+        "current_git_blob": "99f2136d5a7b3efa75bc98e5dd27bc908888666f",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-11",
+        "path": "test_jaa11_durable_integration.py",
+        "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "historical_git_blob": "46068ea8c914e315d7ff87d235f0c33d3ae0a842",
+        "current_git_blob": "eef7e0f60a3371ca0ce48e0fa1ffacae58895d38",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-11",
+        "path": "test_jaa11_independent_acceptance.py",
+        "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "historical_git_blob": "77fbf0e95e818f63d450d8b3fa7706ce680e5561",
+        "current_git_blob": "5434aa8c2697400ad14694310e2f04a7ebfd535e",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-12",
+        "path": "career_automation/status_store_coordinator.py",
+        "historical_source_git_revision": "d5f2f99f8165aabf53132eb3e6451a8b7a5eab79",
+        "historical_git_blob": "15baa07fe87857246fb04ae2c791335715603dbe",
+        "current_git_blob": "4cc0f75dc52c689f2ca5022300467f346aaae9ef",
         "reason": "current_source_differs_from_historical_authority"
       }
     ]
