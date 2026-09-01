@@ -21,6 +21,9 @@ HISTORICAL_NATIVE_JAA_ROOT = HISTORICAL_SOFTWARE_FACTORY_ROOT / (
 HISTORICAL_OPERATIONAL_STATE_ROOT = HISTORICAL_SOFTWARE_FACTORY_ROOT / (
     ".incoming/mac-jaa-assurance-20260805-e1bb35a/operational-state"
 )
+LOCAL_OPERATIONAL_STATE_MARKER = Path(
+    "job-application-automation-gutua-20260803-evidence"
+)
 
 
 class _HistoricalMappedPath(type(Path())):
@@ -134,6 +137,15 @@ def _map_historical_value(value: Any) -> Any:
     return value
 
 
+def _default_operational_state_root() -> Path:
+    """Locate the retained private operational-state mirror without copying it."""
+    fallback = Path(__file__).resolve().parents[3]
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / LOCAL_OPERATIONAL_STATE_MARKER).is_dir():
+            return candidate
+    return fallback
+
+
 def historical_path(value: str | Path) -> Path:
     """Return one lexical historical path backed by the configured mirror."""
     control_root = operator_control_root().resolve()
@@ -152,7 +164,7 @@ def historical_path(value: str | Path) -> Path:
     operational_state_root = Path(
         os.environ.get(
             "JAA_HISTORICAL_OPERATIONAL_STATE_ROOT",
-            str(Path(__file__).resolve().parents[3]),
+            str(_default_operational_state_root()),
         )
     ).resolve()
     _HistoricalMappedPath._prefixes = (
@@ -201,7 +213,7 @@ def rebind_historical_control_paths(
     operational_state_root = Path(
         os.environ.get(
             "JAA_HISTORICAL_OPERATIONAL_STATE_ROOT",
-            str(Path(__file__).resolve().parents[3]),
+            str(_default_operational_state_root()),
         )
     ).resolve()
     _HistoricalMappedPath._prefixes = (
