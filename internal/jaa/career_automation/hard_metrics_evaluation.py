@@ -21,10 +21,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Mapping
 
-from career_automation.shadow_certification import (
-    FROZEN_SHADOW_CONTRACT,
-    HARD_QUALITY_TARGETS,
-)
+from career_automation.shadow_certification import HARD_QUALITY_TARGETS
 from career_automation.shadow_mutation_runtime import (
     REQUIRED_OUTCOME_KIND,
     RUNTIME_CONTROL_IDS,
@@ -59,6 +56,33 @@ _REPLAY_IDENTITY = {
     "source_tree": "cd8866e519d3d0d55ebb482be371843920c05047",
     "source_content_revision": "sha256:0fa45f68150decc7b99e2ae92759850bf690805de33f89cbfaa9f5f330ac4ab7",
 }
+_REPLAY_SHADOW_AUTHORITY = MappingProxyType(
+    {
+        "contract_sha256": (
+            "a3af7433808ec9adb787d76b3d29ce0be0cd263f53cee34cbdf5cee426f9c01b"
+        ),
+        "workflow_sha256": (
+            "0577bae68e8d8372e2cb42caa42394439dac286a92e63ef95bb84e40245ed100"
+        ),
+        "application_id": "graphcore-build-engineer",
+        "job_key": "greenhouse:graphcore:8420314002",
+        "receipt_id": (
+            "96d907b1f9b181c291da12bf7910279bcc307182b5b4ce3c4de6ed717ba2514d"
+        ),
+        "receipt_payload_sha256": (
+            "184df396f3aac7f641adca129353d8eef8b29072bd805c0e447964c65e636b9f"
+        ),
+        "field_map_sha256": (
+            "952eb9e97ca170dd45b333c4589130a29726d46e977fd4dfffe6df06c3c1141e"
+        ),
+        "screenshot_sha256": (
+            "4aeea8f2b0dd2fd4e02b35a5b0eab2427da9658e57fba092b6bc9bedc6b2715c"
+        ),
+        "normalized_submit_event_sha256": (
+            "592a8c32edd909ff7a1fd114c34d356a39184543ad18cb511374b54a67e2af85"
+        ),
+    }
+)
 _REPLAY_EEI_SHA256 = "5cd96b3cb1ca8baeb87559d89df11670114d795282188ae893a549daf7bab5f1"
 _REPLAY_PAIR_RECEIPT_SHA256 = (
     "0c6830ebe0a6bd0018eee869a32ab1d9dabbfe2ed9b78663c376feb040970cba"
@@ -901,12 +925,15 @@ def _validate_replay_observation(document: object) -> dict[str, object]:
     if observed.tzinfo is None:
         raise EvidenceRegistryError("replay observation time differs")
     golden = {
-        "workflow_sha256": FROZEN_SHADOW_CONTRACT.workflow_sha256,
-        "receipt_id": FROZEN_SHADOW_CONTRACT.receipt_id,
-        "receipt_payload_sha256": FROZEN_SHADOW_CONTRACT.receipt_payload_sha256,
-        "field_map_sha256": FROZEN_SHADOW_CONTRACT.field_map_sha256,
-        "screenshot_sha256": FROZEN_SHADOW_CONTRACT.screenshot_sha256,
-        "normalized_submit_event_sha256": FROZEN_SHADOW_CONTRACT.submit_event_sha256,
+        key: _REPLAY_SHADOW_AUTHORITY[key]
+        for key in (
+            "workflow_sha256",
+            "receipt_id",
+            "receipt_payload_sha256",
+            "field_map_sha256",
+            "screenshot_sha256",
+            "normalized_submit_event_sha256",
+        )
     }
     if any(document[key] != value for key, value in golden.items()):
         raise EvidenceRegistryError("replay observation golden field differs")
@@ -927,8 +954,8 @@ def _validate_replay_observation(document: object) -> dict[str, object]:
             "schema_version": "jaa09.fixture-receipt.v1",
             "receipt_id": document["receipt_id"],
             "payload_sha256": document["receipt_payload_sha256"],
-            "application_id": FROZEN_SHADOW_CONTRACT.application_id,
-            "job_key": FROZEN_SHADOW_CONTRACT.job_key,
+            "application_id": _REPLAY_SHADOW_AUTHORITY["application_id"],
+            "job_key": _REPLAY_SHADOW_AUTHORITY["job_key"],
             "certifies_slice": False,
         }
     ):
@@ -958,7 +985,7 @@ def _derive_replay_pair(document: Mapping[str, object]) -> int:
         raise EvidenceRegistryError("replay pair inventory differs")
     withheld = {
         "schema_version": REPLAY_PAIR_SCHEMA_VERSION,
-        "contract_sha256": FROZEN_SHADOW_CONTRACT.contract_sha256,
+        "contract_sha256": _REPLAY_SHADOW_AUTHORITY["contract_sha256"],
         "stable_projection_version": STABLE_PROJECTION_VERSION,
         "replay_execution_identity": _REPLAY_IDENTITY,
         "execution_environment_sha256": _REPLAY_EEI_SHA256,
