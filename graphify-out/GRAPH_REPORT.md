@@ -4881,3 +4881,11 @@ _Questions this graph is uniquely positioned to answer:_
 ## 2026-09-10 deterministic repair refresh
 
 Re-extracted profiler/store.py and test_process_one.py after the portable directory-name check and orphan-temp recovery repair. Earlier analysis sections describe the prior baseline. No semantic model calls were used for this code-only delta.
+
+
+## 2026-09-10 capability decision refresh
+
+Rebuilt migration inventory, disposition and ledger nodes directly from their structured records, replacing prior nodes for those four documents. 153 exact child-parent decisions were added; 1,644 records remain unresolved. The edges express recorded decisions, not independent runtime or completeness proof. No semantic model calls were used.
+
+
+Coverage correction: source deletion filtering was applied to the predecessor before adding regenerated nodes. All six changed code/document sources are present; every disposition has a structured feature relationship.
