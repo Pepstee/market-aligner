@@ -4876,3 +4876,8 @@ _Questions this graph is uniquely positioned to answer:_
   _`JobUrl` has 449 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 398 inferred relationships involving `Adapter` (e.g. with `AdzunaAdapter` and `ArbeitnowAdapter`) actually correct?**
   _`Adapter` has 398 INFERRED edges - model-reasoned connections that need verification._
+
+
+## 2026-09-10 deterministic repair refresh
+
+Re-extracted profiler/store.py and test_process_one.py after the portable directory-name check and orphan-temp recovery repair. Earlier analysis sections describe the prior baseline. No semantic model calls were used for this code-only delta.

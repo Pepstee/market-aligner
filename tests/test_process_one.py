@@ -491,8 +491,13 @@ class OpenExistingSeamTests(TempRootTestCase):
         with self.assertRaises(ValueError):
             bad = pathlib.Path(self.root) / "strict-bad"
             bad.mkdir(mode=0o755)
+            # mkdir modes are reduced by the process umask (0077 under the
+            # cooperating private-umask protocol); chmod pins the intended
+            # non-0700 authority mode explicitly so the test is umask-truthful.
+            os.chmod(bad, 0o755)
             deep = bad / "deep"
             deep.mkdir(mode=0o700)
+            os.chmod(deep, 0o700)
             try:
                 config_module._walk_from_filesystem_root(
                     deep, authority_root=bad, create=False
@@ -688,6 +693,10 @@ class OpenExistingSeamTests(TempRootTestCase):
         self.assertTrue(state["chmodded"])
         self.assertEqual(0o700, os.stat(root).st_mode & 0o777)
 
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "fd-injection targets the Darwin-only /private trusted mount seam",
+    )
     def test_injected_private_open_failure_leaks_no_fds(self) -> None:
         import unittest.mock as mock
 
@@ -717,6 +726,10 @@ class OpenExistingSeamTests(TempRootTestCase):
         )
         self.assertEqual(baseline, sorted(os.listdir("/dev/fd")))
 
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "fd-injection targets the Darwin-only /private trusted mount seam",
+    )
     def test_injected_hop_open_failure_leaks_no_fds(self) -> None:
         import unittest.mock as mock
 
@@ -746,6 +759,10 @@ class OpenExistingSeamTests(TempRootTestCase):
         )
         self.assertEqual(baseline, sorted(os.listdir("/dev/fd")))
 
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "fd-injection targets the Darwin-only /private trusted mount seam",
+    )
     def test_injected_private_bind_failure_leaks_no_fds(self) -> None:
         import unittest.mock as mock
 
@@ -775,6 +792,10 @@ class OpenExistingSeamTests(TempRootTestCase):
         self.assertEqual(1, calls["n"])
         self.assertEqual(baseline, sorted(os.listdir("/dev/fd")))
 
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "fd-injection targets the Darwin-only /private trusted mount seam",
+    )
     def test_injected_hop_bind_failure_leaks_no_fds(self) -> None:
         import unittest.mock as mock
 
@@ -1660,6 +1681,62 @@ class RollbackHookTests(TempRootTestCase):
         self.assertIs(synthetic, caught.exception)
         for leftover in self._leftover_temps():
             os.unlink(self.directory / leftover)
+
+
+# ---------------------------------------------------------------------------
+# Crash-recovery retry: orphaned writer temps are recovered, not refused
+# ---------------------------------------------------------------------------
+
+
+class OrphanTempRecoveryTests(TempRootTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = _new_store(self.root)
+        self.store.save(_profile(version="base"), [])
+        self.directory = self.store.directory(PID)
+
+    def test_retry_save_recovers_orphan_temp_and_admits(self) -> None:
+        orphan = self.directory / ".tmp-prof.999999.0123456789ab"
+        orphan.write_bytes(b"orphaned by a killed writer")
+        os.chmod(orphan, 0o600)
+        self.store.save(_profile(version="retry"), [])
+        self.assertFalse(orphan.exists())
+        self.assertEqual(
+            {"profile.yaml", "evidence.jsonl", "generation.json"},
+            set(os.listdir(self.directory)),
+        )
+        snapshot = self.store.coherent_snapshot(PID)
+        try:
+            self.assertEqual("retry", snapshot.profile.version)
+        finally:
+            snapshot.close()
+
+    def test_unrelated_entry_still_refuses_without_mutation(self) -> None:
+        foreign = self.directory / "foreign.txt"
+        foreign.write_bytes(b"external")
+        before = {
+            name: os.stat(self.directory / name).st_ino
+            for name in os.listdir(self.directory)
+        }
+        with self.assertRaises(ValueError) as caught:
+            self.store.save(_profile(version="next"), [])
+        self.assertIn("unrelated entry", str(caught.exception))
+        self.assertTrue(foreign.exists())
+        after = {
+            name: os.stat(self.directory / name).st_ino
+            for name in os.listdir(self.directory)
+        }
+        self.assertEqual(before, after)
+
+    def test_temp_grammar_symlink_still_refuses(self) -> None:
+        outside = pathlib.Path(self.root) / "outside-target"
+        outside.write_bytes(b"target")
+        link = self.directory / ".tmp-gen.999999.0123456789ab"
+        os.symlink(outside, link)
+        with self.assertRaises(ValueError) as caught:
+            self.store.save(_profile(version="next"), [])
+        self.assertIn("unrelated entry", str(caught.exception))
+        self.assertTrue(link.is_symlink())
 
 
 # ---------------------------------------------------------------------------
