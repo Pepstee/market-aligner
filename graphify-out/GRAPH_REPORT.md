@@ -4889,3 +4889,8 @@ Rebuilt migration inventory, disposition and ledger nodes directly from their st
 
 
 Coverage correction: source deletion filtering was applied to the predecessor before adding regenerated nodes. All six changed code/document sources are present; every disposition has a structured feature relationship.
+
+
+## Python 3.12 parent-proof increment
+
+311 additional exact child decisions are represented by updated feature status nodes and explicit decision-to-feature and decision-to-ledger edges. All 311 relationships were checked in the resulting graph. 1,333 inventory records remain unresolved; no runtime completeness is inferred.
