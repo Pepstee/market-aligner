@@ -4914,3 +4914,8 @@ ma-0124 refreshes cached feature statuses and line references, adds11 explicit n
 ## Opt-in runtime compatibility recovery
 
 ma-0125 restores the absent compatibility owner and its donor test suite. Both are AST-extracted, with a structured ledger edge. No semantic calls, private inputs or browser launch. No production caller wiring is claimed; donor inventory refresh remains pending. Graph: 67331 nodes and 148612 edges.
+
+
+## Runtime compatibility accounting
+
+ma-0126 refreshes the two restored runtime/test owners using canonical Python3.12 AST identities and cached provenance.53 records accounted for,8 explicit nonexact decisions,25 previously missing code records closed. Global queue1300. Structured statuses/line references and decision edges refreshed deterministically; no semantic calls/private inputs. Current graph: 67344 nodes, 148628 edges.
