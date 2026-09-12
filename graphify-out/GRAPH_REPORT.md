@@ -4894,3 +4894,8 @@ Coverage correction: source deletion filtering was applied to the predecessor be
 ## Python 3.12 parent-proof increment
 
 311 additional exact child decisions are represented by updated feature status nodes and explicit decision-to-feature and decision-to-ledger edges. All 311 relationships were checked in the resulting graph. 1,333 inventory records remain unresolved; no runtime completeness is inferred.
+
+
+## 2026-09-13 receipt recovery increment
+
+Deterministically re-extracted application_artifacts.py and its negative-control test module, replacing their prior AST nodes and incident edges. Added ma-0122 from the structured ledger. Prior community analysis remains historical; no semantic model calls or private inputs were used. Whole-module capability decisions remain open. Current graph: 67268 nodes, 148469 edges.

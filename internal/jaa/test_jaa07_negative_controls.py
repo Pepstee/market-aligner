@@ -807,3 +807,35 @@ def test_locked_pack_truth_and_expected_outputs_cannot_be_rehashed(
     )
     assert completed.returncode == 2
     assert expected in completed.stderr
+
+
+@pytest.mark.parametrize("variant", ("valid", "unknown_schema", "extra_file"))
+def test_publication_inventory_and_schema_are_closed(tmp_path: Path, variant: str) -> None:
+    from career_automation.application_artifacts import (
+        ARTIFACT_FILENAMES, ArtifactFileReceipt, PublishedArtifactReceipt,
+    )
+
+    root = tmp_path / "artifacts"
+    directory = root / ("a" * 64)
+    directory.mkdir(parents=True)
+    rows = []
+    for filename in ARTIFACT_FILENAMES:
+        value = b"synthetic publication receipt test"
+        (directory / filename).write_bytes(value)
+        rows.append(ArtifactFileReceipt(filename, hashlib.sha256(value).hexdigest(), len(value)))
+    receipt = PublishedArtifactReceipt("a" * 64, "b" * 64, "a" * 64, tuple(rows), "0" * 64)
+    document = receipt.document(include_receipt_hash=False)
+    if variant == "unknown_schema":
+        with pytest.raises(ValueError, match="schema"):
+            replace(receipt, schema_version="unknown.v999")
+        document["schema_version"] = "unknown.v999"
+    document["receipt_sha256"] = hashlib.sha256(canonical_json(document).encode()).hexdigest()
+    (directory / "receipt.json").write_text(canonical_json(document), encoding="utf-8")
+    if variant == "extra_file":
+        (directory / "unreceipted.txt").write_bytes(b"synthetic extra entry")
+    if variant == "valid":
+        actual = load_published_artifacts("a" * 64, root=root, repository_root=ROOT)
+        assert actual.receipt_sha256 == document["receipt_sha256"]
+    else:
+        with pytest.raises(ValueError, match="invalid" if variant == "unknown_schema" else "unreceipted"):
+            load_published_artifacts("a" * 64, root=root, repository_root=ROOT)

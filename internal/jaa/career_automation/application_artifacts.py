@@ -60,6 +60,8 @@ class PublishedArtifactReceipt:
     certifies_slice: bool = False
 
     def __post_init__(self) -> None:
+        if self.schema_version != "jaa07.artifact-publication.v1":
+            raise ValueError("unsupported artifact publication receipt schema")
         for value, label in (
             (self.artifact_set_sha256, "artifact-set hash"),
             (self.source_id, "source ID"),
@@ -256,6 +258,11 @@ def _read_receipt(directory: Path) -> PublishedArtifactReceipt:
             or hashlib.sha256(value).hexdigest() != row.sha256
         ):
             raise ValueError("published application artifact differs from its receipt")
+    if any(
+        entry.name not in ARTIFACT_FILENAMES and entry.name != "receipt.json"
+        for entry in directory.iterdir()
+    ):
+        raise ValueError("artifact publication contains unreceipted content")
     return receipt
 
 
