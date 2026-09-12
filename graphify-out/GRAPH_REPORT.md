@@ -4904,3 +4904,8 @@ Deterministically re-extracted application_artifacts.py and its negative-control
 ## Exact source publication recovery
 
 Re-extracted the two changed Python owners for ma-0123 and added its structured ledger relationship. The publication boundary now compares artifacts with the canonical source renderer. No semantic calls or private inputs. Earlier community analysis remains historical. Current graph: 67269 nodes and 148469 edges. Broader inventory accounting remains open.
+
+
+## Artifact owner accounting
+
+ma-0124 refreshes cached feature statuses and line references, adds11 explicit nonexact retention decisions and their ledger edges, and adds3 new current canonical feature identities. All37 artifact-publication records are accounted for. Global queue:1325 unresolved. No semantic calls or private inputs. Other owners remain unreviewed by this increment. Current graph: 67284 nodes, 148491 edges.
