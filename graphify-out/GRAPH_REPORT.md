@@ -4909,3 +4909,8 @@ Re-extracted the two changed Python owners for ma-0123 and added its structured 
 ## Artifact owner accounting
 
 ma-0124 refreshes cached feature statuses and line references, adds11 explicit nonexact retention decisions and their ledger edges, and adds3 new current canonical feature identities. All37 artifact-publication records are accounted for. Global queue:1325 unresolved. No semantic calls or private inputs. Other owners remain unreviewed by this increment. Current graph: 67284 nodes, 148491 edges.
+
+
+## Opt-in runtime compatibility recovery
+
+ma-0125 restores the absent compatibility owner and its donor test suite. Both are AST-extracted, with a structured ledger edge. No semantic calls, private inputs or browser launch. No production caller wiring is claimed; donor inventory refresh remains pending. Graph: 67331 nodes and 148612 edges.
