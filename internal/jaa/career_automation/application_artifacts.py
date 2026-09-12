@@ -15,6 +15,7 @@ from .application_compiler import ApplicationSource, verify_application_source
 from .evidence_matching import canonical_json
 from .rendering import (
     ApplicationArtifacts,
+    render_pdf_artifacts,
     validate_pdf_artifact,
     verify_application_artifacts,
 )
@@ -132,6 +133,8 @@ def _artifact_payloads(
     if artifacts.source_id != source.source_id:
         raise ValueError("rendered artifacts cite a different application source")
     verify_application_artifacts(artifacts)
+    if artifacts != render_pdf_artifacts(source):
+        raise ValueError("application artifacts differ from an exact source rerender")
     cv_facts = tuple(row.text for row in source.facts if row.document_kind == "cv")
     letter_facts = tuple(
         row.text for row in source.facts if row.document_kind == "cover_letter"

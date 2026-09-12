@@ -1,11 +1,11 @@
 {
   "community_count": 998,
   "edge_count": 148469,
-  "node_count": 67268,
+  "node_count": 67269,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
-    "GRAPH_REPORT.md": "504b07771d9e9706fdd45bba0cac519c1455ec8f031e0181c8fb4c67a4975b17",
-    "graph.json": "7f5e12bca5072735ae1922879c8659d5f6a1e0409d808623d43054fe8e83a7f2"
+    "GRAPH_REPORT.md": "4c34e5092e7fddba3a1177e1f416a5b327e73cf0197710acd0aedd89ccfdc2bc",
+    "graph.json": "b1cad0717f9de4f801a7c38981b2dcbf8e8a4650039808dfd4f9015278bd82b5"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "1ca0fadd2cac2eb283ffce005a477116b6ff5233",
+  "source_base_commit": "bcfbe7db29497bb2570dea142bdaf35e5c59783d",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -30,7 +30,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "ef05cf5df00fa32485d58d7656db7d8a41e8dd375440a0a285ce256118347cf1",
     "docs/migration/capability-inventory.jsonl": "b32e7e8029545eced8658a8af930275a391aeb895699bf7855ea6d804ff0c0bc",
-    "docs/migration/ledger.jsonl": "57745d1ac8e18a37a6eca76c0604509cf453c6ed95dd67cf114759fa02dfc32e",
+    "docs/migration/ledger.jsonl": "a4d4bc17791f7263958bf1def95637fb41dc8ba9cee33def6b9cf3e373c21262",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -64,7 +64,7 @@
     "internal/jaa/career_automation/adversarial_recruiter_archive.py": "3a82e756f530db3f479a5bfa7ac9605ca4c56e9215d97e0bef4c397a1db82557",
     "internal/jaa/career_automation/adversarial_recruiter_runtime.py": "38f1ac03445e3468cdfabfa94c75b3f6e09ee64dc4e95a894160584d6c65d317",
     "internal/jaa/career_automation/application_archive.py": "f492a95dab0a29b03e53b308bd46d92922b13773b802ea229290ca7d58e4243f",
-    "internal/jaa/career_automation/application_artifacts.py": "4cdd6e73db3dc9143cd512d7823b5477bd19e749bf0279ea2a4c5644a6d8376a",
+    "internal/jaa/career_automation/application_artifacts.py": "8c4fb656b882396af857c58ea6eeb5f8c7706169b67624ee2715d78fdac44c2d",
     "internal/jaa/career_automation/application_compiler.py": "58ddda06848958462ab4ea3d25af238b5754f6189e1def6deccabce45ffa7673",
     "internal/jaa/career_automation/application_preview.py": "f1d85977ab8adf914ca365ba44082ee8d33f12917d8a7e3c8198dee856499309",
     "internal/jaa/career_automation/application_quality.py": "290ffa0d41c9bf78eb66066e99ec758a35f7bc1721655b060ac5378ca306a360",
@@ -553,7 +553,7 @@
     "internal/jaa/test_jaa06_independent_acceptance.py": "0278369ab31533af8a0115e7fa63c001f53c935fd78098170d3fb8405f546692",
     "internal/jaa/test_jaa06_negative_controls.py": "e2ff4e91293183b2d268a458516b2d9e6c1667f599a18f0e2da99ad49d26c371",
     "internal/jaa/test_jaa07_independent_acceptance.py": "fbd6734fc23f7e337bfa9950128dabfd67c893f358eb271ae4b5d452b4baf530",
-    "internal/jaa/test_jaa07_negative_controls.py": "6ea70901ad106a815db8fa56c2566161a81184bb15c8e87c62df4a1be71d84e0",
+    "internal/jaa/test_jaa07_negative_controls.py": "5971abea7332440bdf5976aa69cac33bc5eab5821619174b88cc3a1065bed33c",
     "internal/jaa/test_jaa08_independent_acceptance.py": "188bc3a202a197a8bbc5761f282b74941ec86dff27a7dd91415537322d7b8576",
     "internal/jaa/test_jaa08_negative_controls.py": "a842370703f4f218f10539f80ba8663d4922ba90e8185459ab679fad26a8d41d",
     "internal/jaa/test_jaa09_independent_acceptance.py": "f7ab90d544b19b71d7cf50e1512329c98bfdf6853795f354191258a3049231a6",

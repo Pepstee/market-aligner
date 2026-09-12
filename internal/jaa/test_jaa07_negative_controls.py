@@ -460,7 +460,10 @@ def test_pdf_geometry_rejects_clipping_overlap_and_page_budget() -> None:
         rendering_module._layout_blocks(blocks, max_pages=1)
 
 
-def test_coherently_rehashed_pdf_from_another_source_fails_exact_rerender() -> None:
+@pytest.mark.parametrize("entrypoint", ("verifier", "publication"))
+def test_coherently_rehashed_pdf_from_another_source_fails_exact_rerender(
+    tmp_path: Path, entrypoint: str,
+) -> None:
     source, _ = _source()
     original = render_pdf_artifacts(source)
     slot = source.style_slots[0]
@@ -515,7 +518,12 @@ def test_coherently_rehashed_pdf_from_another_source_fails_exact_rerender() -> N
         artifact_set_sha256=tampered_hash,
     )
     with pytest.raises(ValueError, match="exact source rerender"):
-        verify_application_artifacts(tampered, source)
+        if entrypoint == "verifier":
+            verify_application_artifacts(tampered, source)
+        else:
+            publish_application_artifacts(
+                source, tampered, root=tmp_path / "artifacts", repository_root=ROOT,
+            )
 
 
 def test_artifact_publication_rejects_repository_and_symlink_roots(

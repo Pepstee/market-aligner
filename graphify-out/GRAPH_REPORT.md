@@ -4899,3 +4899,8 @@ Coverage correction: source deletion filtering was applied to the predecessor be
 ## 2026-09-13 receipt recovery increment
 
 Deterministically re-extracted application_artifacts.py and its negative-control test module, replacing their prior AST nodes and incident edges. Added ma-0122 from the structured ledger. Prior community analysis remains historical; no semantic model calls or private inputs were used. Whole-module capability decisions remain open. Current graph: 67268 nodes, 148469 edges.
+
+
+## Exact source publication recovery
+
+Re-extracted the two changed Python owners for ma-0123 and added its structured ledger relationship. The publication boundary now compares artifacts with the canonical source renderer. No semantic calls or private inputs. Earlier community analysis remains historical. Current graph: 67269 nodes and 148469 edges. Broader inventory accounting remains open.
