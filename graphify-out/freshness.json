@@ -1,11 +1,11 @@
 {
   "community_count": 998,
   "edge_count": 145270,
-  "node_count": 67387,
+  "node_count": 67388,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "83503fafe4ca17d579654b10249444a03dbd2c05dd7dabe879175a14bd8fd3db"
+    "graph.json": "c6442fc22742c25300f7871d73ffdee4dfd8b838f70c18dc294b78124ea85d83"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "594481b4a21edfc1882138abbfeb51e53dafa804",
+  "source_base_commit": "359433319875969d0bf7482cd85a259ff9042043",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -30,7 +30,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "812ba324559df1ed9a5672c8eebcc62c83eeadfc3050cc8094438af7cbc6919f",
     "docs/migration/capability-inventory.jsonl": "d499bd41b74a7f2f7106d4d77dc1a80ef39dbc7484cd373c3d565f7fd94a0e1c",
-    "docs/migration/ledger.jsonl": "2e60c61a74f2f658d8baebe7abb12af904dd88ae0b5ef2c1838bbf7d7c501493",
+    "docs/migration/ledger.jsonl": "333e1229d8c71b40c4eccad5fe6c179b9da3681a14594462b6046469b4acabfe",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
