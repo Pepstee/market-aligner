@@ -30,6 +30,7 @@ from market_aligner.applications.producer import (
 )
 from market_aligner.assessment.geography import GeographyMatch, SelectionDecision
 from market_aligner.assessment.scoring import ScoringParams
+from market_aligner.collectors.evidence import public_listing_bytes
 from market_aligner.profiler.intent import serialize_candidate_intent
 from market_aligner.research.models import (
     ClaimSupport,
@@ -1134,6 +1135,25 @@ def _research_evidence(
     return metadata_raw, object_raw, receipt_raw, observed
 
 
+def _retained_raw_listing(jobs: JobDatabase, job_key: str, posting: Mapping[str, Any]) -> bytes:
+    """Preserve both collector source representations without reserialising captures."""
+    try:
+        raw = jobs.load_raw_snapshot(job_key, str(posting["content_hash"]))
+        if raw.public_content_base64 is not None:
+            material = public_listing_bytes(raw)
+        else:
+            material = ((raw.raw_text or "") + (
+                json.dumps(raw.raw_json, ensure_ascii=False) if raw.raw_json is not None else ""
+            )).encode("utf-8")
+        if not material or _sha(material) != posting["content_hash"]:
+            raise ValueError("retained collector source digest differs")
+        return material
+    except (KeyError, ValueError) as exc:
+        raise ProductionHandoffError(
+            "vacancy_hash", "retained collector source is unavailable or differs"
+        ) from exc
+
+
 def _logical_job_key(adapter: str, canonical_url: str, source_job_id: str) -> str:
     return "job_" + _sha(
         _canonical(
@@ -1381,12 +1401,7 @@ def _build_production_handoff_from_authenticated_time(
         raise ProductionHandoffError(
             "vacancy_state", "current fetched processing row is absent"
         )
-    # This is the collector's persisted content identity from
-    # VacancyStore.store_raw.  Keep the two components explicit here so a
-    # reviewer can verify both their order and their individual boundaries.
-    raw_text_bytes = str(posting["raw_text"] or "").encode("utf-8")
-    raw_json_bytes = str(posting["raw_json"] or "").encode("utf-8")
-    raw_material = raw_text_bytes + raw_json_bytes
+    raw_material = _retained_raw_listing(service.jobs, source_job_key, posting)
     if (
         not raw_material
         or _sha(raw_material) != posting["content_hash"]

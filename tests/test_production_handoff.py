@@ -1158,3 +1158,29 @@ def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
             reopened._record_published_handoff(handoff.exact_bytes, exact({**basis, **changes}))
     with reopened.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM published_application_handoffs").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("exact_capture", [False, True])
+def test_producer_reopens_collector_source_representation(tmp_path, exact_capture):
+    import base64
+    from market_aligner.domain.contracts import JobUrl, RawPosting
+    from market_aligner.state.vacancies import JobDatabase
+    from market_aligner.applications.production_handoff import _retained_raw_listing
+
+    jobs = JobDatabase(tmp_path / "state" / "vacancies.sqlite3")
+    job = JobUrl("greenhouse", "synthetic:representation", "https://example.test/job")
+    jobs.upsert_discovered(job)
+    exact = b"<html><body>Exact original vacancy</body></html>"
+    row = RawPosting(
+        board=job.board, job_id=job.job_id, url=job.url,
+        fetched_at="2026-09-13T15:00:00Z", raw_text="Extracted vacancy", raw_json={"title": "Engineer"},
+        public_content_base64=base64.b64encode(exact).decode() if exact_capture else None,
+    )
+    jobs.store_raw(row)
+    with jobs.connect() as connection:
+        connection.row_factory = __import__("sqlite3").Row
+        posting = connection.execute("SELECT * FROM postings WHERE key=?", (job.key,)).fetchone()
+    expected = exact if exact_capture else b'Extracted vacancy{"title": "Engineer"}'
+    assert _retained_raw_listing(jobs, job.key, posting) == expected
+    with pytest.raises(ProductionHandoffError, match="vacancy_hash"):
+        _retained_raw_listing(jobs, job.key, {**dict(posting), "content_hash": "0" * 64})
