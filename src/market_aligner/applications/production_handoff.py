@@ -16,7 +16,7 @@ import secrets
 import sqlite3
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -1569,9 +1569,15 @@ def _build_production_handoff_from_authenticated_time(
     finally:
         eligibility_connection.close()
 
+    from market_aligner.assessment.eligibility import EligibilityDecision
+    detailed_receipt = json.loads(detailed_eligibility_bytes)
+    detailed_checks = EligibilityDecision(
+        detailed_receipt["decision"], tuple(detailed_receipt["reasons"]),
+        tuple(detailed_receipt["unknowns"])).checks
     eligibility_sources = {
         "detailed_eligibility": {"decision": "include",
-                                 "receipt": json.loads(detailed_eligibility_bytes)},
+                                 "receipt": detailed_receipt,
+                                 "checks": [asdict(check) for check in detailed_checks]},
         "first_job_scope": result.get("first_job_scope"),
         "vacancy_viability": result.get("viability"),
     }

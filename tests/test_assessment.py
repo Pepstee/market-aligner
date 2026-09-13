@@ -699,3 +699,35 @@ class EligibilityContractMatrixTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_eligibility_check_projection_preserves_route_semantics():
+    from dataclasses import asdict
+    from itertools import product
+    import pytest
+    for jurisdiction, authorised, needs, available in product(
+        (None, "GB"), (None, frozenset(), frozenset({"GB"}), frozenset({"NL"})),
+        (None, False, True), (None, False, True),
+    ):
+        decision = assess_eligibility(
+            EligibilityInput(work_jurisdiction=jurisdiction, sponsorship_available=available),
+            EligibilityPolicy(authorised_jurisdictions=authorised, requires_sponsorship=needs))
+        checks = {check.code: check.outcome for check in decision.checks}
+        assert checks["work_authorisation"] == {
+            "pass": "pass", "reject": "fail", "review": "unknown"
+        }[decision.decision]
+        assert all(checks[code] == "pass" for code in (
+            "contract_type", "experience_requirement", "residence_requirement"))
+        assert set(asdict(decision)) == {"decision", "reasons", "unknowns"}
+    decision = assess_eligibility(
+        EligibilityInput(work_jurisdiction="GB", required_residence="GB",
+                         minimum_years_experience=4, contract_type="temporary"),
+        EligibilityPolicy(authorised_jurisdictions=frozenset({"GB"}), current_residence="NL",
+                          maximum_years_required=2, excluded_contract_types=None))
+    assert {check.code: check.outcome for check in decision.checks} == {
+        "work_authorisation": "pass", "residence_requirement": "fail",
+        "experience_requirement": "fail", "contract_type": "unknown"}
+    with pytest.raises(ValueError, match="unrecognised"):
+        EligibilityDecision("reject", ("future_reason",), ()).checks
+    with pytest.raises(ValueError, match="disagrees"):
+        EligibilityDecision("pass", ("work_authorisation_mismatch",), ()).checks

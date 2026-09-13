@@ -45,10 +45,50 @@ class EligibilityInput:
 
 
 @dataclass(frozen=True)
+class EligibilityCheck:
+    code: str
+    outcome: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.code, str) or not self.code or self.code != self.code.strip():
+            raise ValueError("eligibility check code must be a non-empty canonical string")
+        if self.outcome not in {"pass", "fail", "unknown"}:
+            raise ValueError("eligibility check outcome must be pass, fail, or unknown")
+
+
+@dataclass(frozen=True)
 class EligibilityDecision:
     decision: str
     reasons: tuple[str, ...]
     unknowns: tuple[str, ...]
+
+    @property
+    def checks(self) -> tuple[EligibilityCheck, ...]:
+        """Explain the accepted decision without running another policy.
+
+        Sponsorship belongs to the same authorisation route under T2. These
+        checks derive from the sealed reasons, preserving the receipt schema.
+        Unknown future tokens refuse explanation rather than imply a pass.
+        """
+        dimensions = {
+            "work_authorisation": {
+                "work_jurisdiction_unknown", "work_authorisation_mismatch",
+                "authorised_jurisdictions_unknown", "sponsorship_requirement_unknown",
+                "sponsorship_unavailable", "sponsorship_availability_unknown",
+            },
+            "residence_requirement": {"residence_requirement_mismatch", "candidate_residence_unknown"},
+            "experience_requirement": {"experience_requirement_exceeds_policy", "maximum_experience_ceiling_unknown"},
+            "contract_type": {"excluded_contract_type", "excluded_contract_types_unknown"},
+        }
+        reasons, unknowns = set(self.reasons), set(self.unknowns)
+        if (reasons | unknowns) - set().union(*dimensions.values()):
+            raise ValueError("unrecognised eligibility reason cannot be explained")
+        expected = "reject" if reasons else "review" if unknowns else "pass"
+        if self.decision != expected:
+            raise ValueError("eligibility decision disagrees with its reasons")
+        return tuple(EligibilityCheck(
+            code, "fail" if reasons & tokens else "unknown" if unknowns & tokens else "pass"
+        ) for code, tokens in sorted(dimensions.items()))
 
 
 def assess_eligibility(facts: EligibilityInput, policy: EligibilityPolicy) -> EligibilityDecision:
