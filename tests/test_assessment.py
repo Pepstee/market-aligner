@@ -793,3 +793,32 @@ def test_scoring_validation_preserves_numeric_api_and_receipt_identity():
     for p, epsilon in ((float("nan"), 0.05), (0, 0), (1e-10, 0)):
         with pytest.raises(ValueError):
             power_mean([0, 0.8], [1, 1], p, epsilon)
+
+
+def test_score_result_freezes_subscores_without_changing_serialisation():
+    from dataclasses import asdict, replace
+    from market_aligner.research.store import canonical_score_payload
+    import json
+    import pytest
+
+    result = score(profile(), "board:1", "applied", AssessmentAxes(8, 8, 9, 2, 8))
+    supplied = {"interest": 1}
+    copied = replace(result, fit_subscores=supplied)
+    expected = asdict(result)
+    expected["fit_subscores"] = {"interest": 1}
+    payload, digest = canonical_score_payload(copied)
+    assert payload == json.dumps(expected, ensure_ascii=False, sort_keys=True, default=str)
+    supplied["interest"] = 0
+    assert copied.fit_subscores["interest"] == 1
+    with pytest.raises(TypeError):
+        copied.fit_subscores["interest"] = 0
+    assert canonical_score_payload(copied) == (payload, digest)
+    for changed in (
+        {"fit": float("nan")}, {"final": 101}, {"opportunity": True},
+        {"profile_id": ""}, {"parameters_hash": "bad"},
+        {"fit_status": "uncalibrated"}, {"fit_subscores": {}},
+        {"fit_subscores": {"interest": True}},
+        {"opportunity_subscores": {"market_demand": 2}},
+    ):
+        with pytest.raises(ValueError):
+            replace(result, **changed)

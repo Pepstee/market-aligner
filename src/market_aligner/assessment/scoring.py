@@ -10,6 +10,9 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Mapping, Sequence
 
+from market_aligner.applications.canonical import (
+    ContractValidationError, deep_freeze_json, require_sha256,
+)
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile
 
 
@@ -130,8 +133,49 @@ class ScoreResult:
     final: float
     fit_status: FitStatus
     parameters_hash: str
-    fit_subscores: dict[str, float]
-    opportunity_subscores: dict[str, float]
+    fit_subscores: Mapping[str, float]
+    opportunity_subscores: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        for name in ("profile_id", "job_key", "track"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ContractValidationError(f"score {name} must be a non-empty string")
+        for name, low, high in (
+            ("fit", 0.0, 1.0),
+            ("opportunity", 0.0, 1.0),
+            ("final", 0.0, 100.0),
+        ):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not low <= value <= high
+                or not math.isfinite(value)
+            ):
+                raise ContractValidationError(f"score {name} must be finite and in [{low},{high}]")
+        if not isinstance(self.fit_status, FitStatus):
+            raise ContractValidationError("score fit_status must be a FitStatus")
+        require_sha256(self.parameters_hash, "score parameters_hash")
+        for name in ("fit_subscores", "opportunity_subscores"):
+            mapping = getattr(self, name)
+            if not isinstance(mapping, Mapping) or not mapping:
+                raise ContractValidationError(f"score {name} must be a non-empty mapping")
+            copied: dict[str, float] = {}
+            for key, value in mapping.items():
+                if not isinstance(key, str) or not key.strip():
+                    raise ContractValidationError(f"score {name} keys must be non-empty strings")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not 0.0 <= value <= 1.0
+                    or not math.isfinite(value)
+                ):
+                    raise ContractValidationError(
+                        f"score {name}.{key} must be finite and in [0,1]"
+                    )
+                copied[key] = value
+            object.__setattr__(self, name, deep_freeze_json(dict(sorted(copied.items()))))
 
 
 def _normalise_weights(weights: Mapping[str, float]) -> dict[str, float]:

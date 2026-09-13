@@ -9415,8 +9415,13 @@ class StageDPart3C1AssessmentCasTests(TempRootTestCase):
                 "growth_potential": 0.0,
             },
         }
-        node.update(overrides)
-        return ScoreResult(**node)
+        result = ScoreResult(**node)
+        # These are storage-boundary fault injections. Construct a valid result
+        # first, then corrupt it so constructor validation cannot mask the
+        # independent projection checks under test.
+        for field, value in overrides.items():
+            object.__setattr__(result, field, value)
+        return result
 
     def _seed_row(self, conn, key=None, **column_overrides):
         from market_aligner.assessment.scoring import FitStatus
@@ -10763,9 +10768,7 @@ class StageDPart3C1AssessmentCasTests(TempRootTestCase):
                 type(self).touched = True
                 raise AssertionError("first SELECT reached")
 
-        bad_result = dataclasses.replace(
-            self._result(), fit_status="uncalibrated"
-        )
+        bad_result = self._result(fit_status="uncalibrated")
         connection = Exploding()
         self._refused_projection(
             lambda: research_store_module.cas_accepted_score(
