@@ -328,7 +328,19 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
         *(first.path / "metadata").iterdir(),
     ):
         assert file_path.stat().st_mode & 0o777 == 0o600
-    adapter = ProtectedLocalOutbox(
+    class SubjectCheckingOutbox(ProtectedLocalOutbox):
+        def resolve(self, request):
+            from dataclasses import replace
+
+            supplied_subject = dict(request.expected_subject)
+            copied_request = replace(request, expected_subject=supplied_subject)
+            supplied_subject["unexpected"] = "caller mutation"
+            assert dict(copied_request.expected_subject) == dict(request.expected_subject)
+            with pytest.raises(TypeError):
+                request.expected_subject["unexpected"] = "resolver mutation"
+            return super().resolve(request)
+
+    adapter = SubjectCheckingOutbox(
         first.path,
         repository_root=Path(__file__).resolve().parents[1],
         expected_source_record_sha256=first.source_record_sha256,

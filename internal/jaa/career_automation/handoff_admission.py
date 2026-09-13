@@ -16,6 +16,7 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
 from .current_time import (
@@ -231,6 +232,12 @@ class ReferenceRequest:
     expected_subject: Mapping[str, str]
     handoff_created_at: str
     evaluated_at: str
+
+    def __post_init__(self) -> None:
+        """Keep the expected subject stable while configured resolvers run."""
+        object.__setattr__(
+            self, "expected_subject", MappingProxyType(dict(self.expected_subject))
+        )
 
 
 @dataclass(frozen=True)
