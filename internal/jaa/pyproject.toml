@@ -50,4 +50,4 @@ packages = [
 skeleton = ["config.yaml", "config.additional.yaml", "config.lever.yaml", "config.overnight.yaml", "fixtures/jobs_20.jsonl"]
 scraper = ["fixtures/*.json", "fixtures/*/*.json"]
 llm = ["prompts/*.txt", "schemas/*.json"]
-career_automation = ["fixtures/*.json", "fixtures/provider-observation-capture-objects/*.json"]
+career_automation = ["fixtures/*.json", "fixtures/provider-observation-capture-objects/*.json", "fixtures/jaa04_authority_canaries/ashby.json", "fixtures/jaa04_authority_canaries/greenhouse.json", "fixtures/jaa04_authority_canaries/workable.json"]
