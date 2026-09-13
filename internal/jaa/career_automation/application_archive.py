@@ -1491,6 +1491,29 @@ class AttemptArchive:
                 raise ApplicationArchiveError("artifact event is malformed") from exc
         return tuple(rows)
 
+    def read_artifact(self, artifact: ArchivedObject) -> bytes:
+        """Reopen one exact journalled artifact before or after finalisation.
+
+        The caller pins the complete artifact record, including its event identity.
+        This verifies retention, not release approval or source authenticity.
+        """
+        if not isinstance(artifact, ArchivedObject):
+            raise TypeError("archive reads require an exact ArchivedObject record")
+        matches = [
+            row for row in self._objects(self._events())
+            if row.event_sha256 == artifact.event_sha256
+        ]
+        if len(matches) != 1 or matches[0].document() != artifact.document():
+            raise ApplicationArchiveError("artifact differs from its recorded event")
+        row = matches[0]
+        expected_path = f"objects/{row.sha256[:2]}/{row.sha256}"
+        if row.relative_path != expected_path:
+            raise ApplicationArchiveError("artifact content-addressed path differs")
+        raw = _regular_file_bytes(_safe_archive_path(self.archive.root, expected_path))
+        if len(raw) != row.byte_length or _sha256(raw) != row.sha256:
+            raise ApplicationArchiveError("archived artifact bytes differ")
+        return raw
+
     def _validate_selection(
         self,
         objects: Sequence[ArchivedObject],

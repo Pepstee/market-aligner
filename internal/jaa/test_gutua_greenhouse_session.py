@@ -1024,7 +1024,7 @@ def test_original_visible_listing_is_archived_before_contact_authority(tmp_path,
         captured = [obj for obj in objects if obj.role == "vacancy.visible_listing_capture"]
         assert len(captured) == 1
         obj = captured[0]
-        assert (recorder.attempt.archive.root / obj.relative_path).read_bytes() == original
+        assert recorder.attempt.archive.open_attempt(recorder.attempt.attempt_id).read_artifact(obj) == original
         assert obj.sha256 == hashlib.sha256(original).hexdigest()
         assert obj.lineage == (vacancy.vacancy_sha256,)
         assert obj.disposition == "observed"

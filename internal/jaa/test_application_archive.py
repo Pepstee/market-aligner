@@ -973,3 +973,24 @@ def test_private_evidence_event_rejects_secret_bytes(tmp_path: Path) -> None:
             private_value=b"Authorization: Bearer secret-secret",
             private_media_type="text/plain",
         )
+
+
+def test_exact_artifact_read_survives_reopen_and_refuses_substitution(tmp_path):
+    from dataclasses import replace
+
+    repository, root = _roots(tmp_path)
+    archive = ApplicationArchive(root, repository_root=repository)
+    attempt = archive.create_attempt(_vacancy(), attempt_id=ATTEMPT_ID)
+    original = attempt.add_artifact("vacancy.visible_listing_capture", b"original", media_type="text/plain")
+    attempt.add_artifact("vacancy.visible_listing_capture", b"newer", media_type="text/plain")
+    reopened = archive.open_attempt(ATTEMPT_ID)
+    assert reopened.read_artifact(original) == b"original"
+    for changed in (replace(original, role="vacancy.capture"), replace(original, lineage=("a" * 64,)), replace(original, event_sha256="b" * 64)):
+        with pytest.raises(ApplicationArchiveError, match="recorded event"):
+            reopened.read_artifact(changed)
+    other = archive.create_attempt(_vacancy("other"))
+    with pytest.raises(ApplicationArchiveError, match="recorded event"):
+        other.read_artifact(original)
+    (root / original.relative_path).write_bytes(b"tampered")
+    with pytest.raises(ApplicationArchiveError, match="bytes differ"):
+        reopened.read_artifact(original)
