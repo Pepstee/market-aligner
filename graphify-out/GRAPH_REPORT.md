@@ -4944,3 +4944,7 @@ Deterministic current AST inventory refresh, preserved historical source binding
 ## CV service export ma-0132
 
 Scoped deterministic AST refresh of cv_generation/service.py after restoring the donor public export. Other graph communities remain historical. Incident edges replaced by scoped extraction; no full semantic join or sensitive-source scan claimed.
+
+## CV service owner accounting ma-0133
+
+Deterministic43-feature owner inventory refresh, nine preserved donor variants,29 explicit dispositions and current inventory line locations. Source graph remains ma-0132 extraction. No model graph enrichment or sensitive-source scan.
