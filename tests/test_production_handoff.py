@@ -179,6 +179,44 @@ def _promote_fixture_assessment(store, *, profile_id, job_key, track, source_sha
     return promotion_sha
 
 
+def _canonical_research_plan(*, source, raw_text, profile_id, job_key, company, title, url, source_sha, snapshot_sha, promotion_sha):
+    start = source.body.index(raw_text.encode())
+    return PublicResearchPlan(
+        profile_id,
+        job_key,
+        company,
+        title,
+        (
+            PlannedCitation(
+                "official_job",
+                url,
+                "Canonical collector vacancy",
+                _sha(source.body),
+                url,
+                "canonical_vacancy",
+            ),
+        ),
+        (
+            PlannedClaim(
+                raw_text,
+                ("official_job",),
+                1.0,
+                (
+                    PlannedSupport(
+                        "official_job",
+                        f"bytes:{start}-{start + len(raw_text.encode())}",
+                        raw_text,
+                    ),
+                ),
+            ),
+        ),
+        source_sha,
+        snapshot_sha,
+        promotion_sha,
+        (),
+    )
+
+
 def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     raw_text = "Build agentic software systems."
     database_relative = Path("scraper/data_overnight/jobs.sqlite3")
@@ -239,41 +277,11 @@ def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     assert task is not None
     initial_loader = CanonicalCollectorVacancyLoader(database.path)
     initial_source = initial_loader(task)
-    start = initial_source.body.index(raw_text.encode())
-    plan = PublicResearchPlan(
-        PROFILE_ID,
-        JOB_KEY,
-        "Cogna",
-        "Software Engineer",
-        (
-            PlannedCitation(
-                "official_job",
-                url,
-                "Canonical collector vacancy",
-                _sha(initial_source.body),
-                url,
-                "canonical_vacancy",
-            ),
-        ),
-        (
-            PlannedClaim(
-                raw_text,
-                ("official_job",),
-                1.0,
-                (
-                    PlannedSupport(
-                        "official_job",
-                        f"bytes:{start}-{start + len(raw_text.encode())}",
-                        raw_text,
-                    ),
-                ),
-            ),
-        ),
-        source_sha,
-        task.vacancy_snapshot_sha256,
-        promotion_sha,
-        (),
-    )
+    plan = _canonical_research_plan(
+        source=initial_source, raw_text=raw_text, profile_id=PROFILE_ID,
+        job_key=JOB_KEY, company="Cogna", title="Software Engineer", url=url,
+        source_sha=source_sha, snapshot_sha=task.vacancy_snapshot_sha256,
+        promotion_sha=promotion_sha)
     repository = tmp_path / "repo"
     repository.mkdir()
     initial_provider = SourceBoundResearchProvider(
@@ -339,41 +347,11 @@ def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
         data_home=tmp_path, collection_config_path=config
     )
     refresh_source = refresh_loader(refresh_task)
-    start = refresh_source.body.index(raw_text.encode())
-    refresh_plan = PublicResearchPlan(
-        PROFILE_ID,
-        JOB_KEY,
-        "Cogna",
-        "Software Engineer",
-        (
-            PlannedCitation(
-                "official_job",
-                url,
-                "Canonical collector vacancy",
-                _sha(refresh_source.body),
-                url,
-                "canonical_vacancy",
-            ),
-        ),
-        (
-            PlannedClaim(
-                raw_text,
-                ("official_job",),
-                1.0,
-                (
-                    PlannedSupport(
-                        "official_job",
-                        f"bytes:{start}-{start + len(raw_text.encode())}",
-                        raw_text,
-                    ),
-                ),
-            ),
-        ),
-        source_sha,
-        refresh_task.vacancy_snapshot_sha256,
-        promotion_sha,
-        (),
-    )
+    refresh_plan = _canonical_research_plan(
+        source=refresh_source, raw_text=raw_text, profile_id=PROFILE_ID,
+        job_key=JOB_KEY, company="Cogna", title="Software Engineer", url=url,
+        source_sha=source_sha, snapshot_sha=refresh_task.vacancy_snapshot_sha256,
+        promotion_sha=promotion_sha)
     refresh_provider = SourceBoundResearchProvider(
         plan=refresh_plan,
         repository_root=repository,
@@ -1029,7 +1007,7 @@ def test_handoff_eligibility_retains_verified_promotion_and_rejects_drift(tmp_pa
             connection.execute("RELEASE mutation")
 
 
-def test_real_processing_opportunity_enrichment_retains_eligibility(tmp_path):
+def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z"):
     import sqlite3
     from test_process_one import EligibilityFixture, EligibilityEndToEndTests
     from market_aligner.llm.contracts import SemanticVacancyExtraction, EvidenceAlignment, LLMReceipt
@@ -1038,20 +1016,26 @@ def test_real_processing_opportunity_enrichment_retains_eligibility(tmp_path):
     from market_aligner.profiler.store import ProfileStore
     from market_aligner.applications.production_handoff import _require_detailed_eligibility
 
-    fixture = EligibilityFixture(tmp_path, extraction_overrides={
+    from market_aligner.domain.contracts import JobUrl
+    fixture = EligibilityFixture(tmp_path, job=JobUrl("workable", "cogna:847CFBC5F4", FLAT_URL),
+        fetched_at=fetched_at, raw_text="Build software in London. At least one year experience.", extraction_overrides={
         "title": "Software Engineer", "seniority": "junior",
         "location": "London, United Kingdom", "remote_policy": "remote",
         "description": "Build software. At least one year experience.",
         "required_qualifications": ["At least one year experience."],
+        "work_authorisation": ["GB"],
     })
     harness = EligibilityEndToEndTests()
     harness.fx = fixture
     candidate = fixture.candidate_facts()
-    candidate["authorised_jurisdictions"]["value"][0]["value"] = "NL"
-    candidate["current_residence"]["value"] = "NL"
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = "GB"
+    candidate["current_residence"]["value"] = "GB"
     candidate["maximum_years_required"]["value"] = 5.0
     candidate["requires_sponsorship"]["value"] = False
-    harness.run_one(fixture, candidate_overrides=candidate)
+    vacancy_facts = fixture.vacancy_facts()
+    vacancy_facts["work_jurisdiction"]["value"] = "GB"
+    vacancy_facts["required_residence"]["value"] = "GB"
+    harness.run_one(fixture, candidate_overrides=candidate, vacancy_overrides=vacancy_facts)
 
     class Worker:
         def extract_vacancy(self, context):
@@ -1102,3 +1086,30 @@ def test_real_processing_opportunity_enrichment_retains_eligibility(tmp_path):
                 _require_detailed_eligibility(connection, **inputs, current_profile=profile)
             connection.execute("ROLLBACK TO mutation")
             connection.execute("RELEASE mutation")
+
+    task = service.assessments.claim_research("enrichment-preview", _preview_without_lease=True)
+    assert task is not None
+    loader = CanonicalCollectorVacancyLoader(fixture.vacancy_db)
+    source = loader(task)
+    promotion = service.assessments.processing_promotion(profile.profile_id, fixture.job.key)
+    plan = _canonical_research_plan(
+        source=source, raw_text=fixture.raw_text, profile_id=profile.profile_id,
+        job_key=fixture.job.key, company=fixture.extraction_output["company"],
+        title=fixture.extraction_output["title"], url=fixture.job.url,
+        source_sha=fixture.content_hash, snapshot_sha=task.vacancy_snapshot_sha256,
+        promotion_sha=promotion["receipt_sha256"])
+    provider = SourceBoundResearchProvider(
+        plan=plan, repository_root=Path(__file__).resolve().parents[1],
+        archive_root=fixture.root / "state/public-employer-research-v2",
+        canonical_vacancy_loader=loader)
+    research = ResearchWorker(service.assessments, provider, "enrichment-research").run_one()
+    assert research.status == "completed", research.error
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        assert connection.execute("SELECT state FROM assessments").fetchone()[0] == "employer_researched"
+        assert _require_detailed_eligibility(connection, **inputs, current_profile=profile) == raw
+    return fixture, service, config, profile
+
+
+def test_real_processing_opportunity_enrichment_retains_eligibility(tmp_path):
+    _real_processing_enrichment(tmp_path)

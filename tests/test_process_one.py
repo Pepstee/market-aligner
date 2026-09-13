@@ -16130,7 +16130,7 @@ class EligibilityEndToEndTests(unittest.TestCase):
             supplied_fit_operation_id=payload["fit_operation_id"],
             supplied_config_path=fx.resolved_config_path,
             supplied_profile_id=_PROFILE_ID,
-            supplied_job_key="board:42",
+            supplied_job_key=fx.job.key,
             supplied_track="backend"), payload
 
     def _handoff_eligibility_inputs(self, connection):
@@ -16141,7 +16141,7 @@ class EligibilityEndToEndTests(unittest.TestCase):
         normalized = read_normalized_job(connection, key=receipt["job_key"])
         return raw, dict(
             profile_id=receipt["profile_id"], profile_version="gen-1",
-            track="backend", job_key="board:42",
+            track="backend", job_key=self.fx.job.key,
             source_content_sha256=self.fx.content_hash,
             profile_file_sha256=_sha((profile / "profile.yaml").read_bytes()),
             evidence_file_sha256=_sha((profile / "evidence.jsonl").read_bytes()),
