@@ -1137,6 +1137,11 @@ def _research_evidence(
 
 def _retained_raw_listing(jobs: JobDatabase, job_key: str, posting: Mapping[str, Any]) -> bytes:
     """Preserve both collector source representations without reserialising captures."""
+    legacy = (str(posting["raw_text"] or "") + str(posting["raw_json"] or "")).encode("utf-8")
+    # Older admitted rows predate immutable snapshots. Preserve their existing
+    # exact-byte contract when it already proves the requested content identity.
+    if legacy and _sha(legacy) == posting["content_hash"]:
+        return legacy
     try:
         raw = jobs.load_raw_snapshot(job_key, str(posting["content_hash"]))
         if raw.public_content_base64 is not None:
