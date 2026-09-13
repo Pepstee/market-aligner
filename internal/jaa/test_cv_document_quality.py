@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from career_automation.form_answers import form_answers_bytes
+
 import hashlib
 import os
 from dataclasses import replace
@@ -171,7 +173,7 @@ I would welcome the opportunity to discuss the engineering challenges.
         answers,
         hashlib.sha256(cv_text.encode()).hexdigest(),
         hashlib.sha256(letter_text.encode()).hexdigest(),
-        hashlib.sha256(answers.encode()).hexdigest(),
+        hashlib.sha256(form_answers_bytes((), allow_empty=True)).hexdigest(),
     )
 
     def box(

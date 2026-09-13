@@ -13,6 +13,7 @@ from .application_compiler import (
     ApplicationSource,
     verify_application_source,
 )
+from .form_answers import embedded_source_form_answers, form_answers_bytes as canonical_form_answers_bytes
 from .evidence_matching import content_hash
 from .external_document_assurance import (
     IntendedVacancy,
@@ -55,7 +56,7 @@ BOTTOM_MARGIN = 47.0
 CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
 
 RENDERER_POLICY = {
-    "schema_version": "jaa.ats-pdf-renderer-policy.v4",
+    "schema_version": "jaa.ats-pdf-renderer-policy.v5",
     "page": {"width": PAGE_WIDTH, "height": PAGE_HEIGHT},
     "margins": {
         "left": LEFT_MARGIN,
@@ -73,7 +74,7 @@ RENDERER_POLICY = {
         "heading": {"font": "Helvetica-Bold", "size": 11.0},
         "body": {"font": "Helvetica", "size": 10.0},
     },
-    "answers": "immutable-application-source-ordered-utf8-display-v1",
+    "answers": "jaa.form-answers.v1",
     "cv_pages": [1, 2],
     "cover_letter_pages": [1],
 }
@@ -279,11 +280,13 @@ class EditableArtifacts:
     cv_sha256: str
     cover_letter_sha256: str
     answers_sha256: str
+    form_answers: tuple[tuple[str, str, str], ...] = ()
+
     @property
     def form_answers_bytes(self) -> bytes:
         """Exact canonical answer bytes owned by the current source renderer."""
 
-        return self.answers_text.encode("utf-8")
+        return canonical_form_answers_bytes(self.form_answers, allow_empty=True)
 
     @property
     def answers_display_text(self) -> str:
@@ -534,13 +537,15 @@ def render_editable_text(source: ApplicationSource) -> EditableArtifacts:
     assert_employer_facing_text(letter, document_kind="cover_letter")
     if answer_display.strip():
         assert_employer_facing_text(answer_display, document_kind="answer")
+    answer_rows = embedded_source_form_answers(source)
     return EditableArtifacts(
         cv_text=cv,
         cover_letter_text=letter,
         answers_text=answer_display,
         cv_sha256=hashlib.sha256(cv.encode("utf-8")).hexdigest(),
         cover_letter_sha256=hashlib.sha256(letter.encode("utf-8")).hexdigest(),
-        answers_sha256=hashlib.sha256(answer_display.encode("utf-8")).hexdigest(),
+        answers_sha256=hashlib.sha256(canonical_form_answers_bytes(answer_rows, allow_empty=True)).hexdigest(),
+        form_answers=answer_rows,
     )
 
 
@@ -1078,6 +1083,14 @@ def verify_application_artifacts(
 
     artifacts.__post_init__()
     editable = artifacts.editable
+    expected_display = "\n\n".join(
+        "\n".join((question, answer))
+        for _, question, answer in editable.form_answers
+    )
+    if expected_display:
+        expected_display += "\n"
+    if editable.answers_text != expected_display:
+        raise ValueError("editable answer display differs from structured answers")
     expected_answer_bytes = editable.form_answers_bytes
     if editable.answers_sha256 != hashlib.sha256(expected_answer_bytes).hexdigest():
         raise ValueError("editable answers differ from canonical form-answer bytes")

@@ -609,7 +609,7 @@ def test_retained_form_answers_preserve_source_ids_and_exact_inventory() -> None
         source_form_answers,
     )
 
-    source = _quality_source()
+    source, _ = _source()
     rows = embedded_source_form_answers(source)
     inventory = {
         str(index): (answer.question_id, answer.question)
@@ -621,6 +621,15 @@ def test_retained_form_answers_preserve_source_ids_and_exact_inventory() -> None
     )
     assert rows
     encoded = form_answers_bytes(rows)
+    from career_automation.rendering import verify_application_artifacts
+    artifacts = render_pdf_artifacts(source)
+    assert artifacts.editable.form_answers_bytes == encoded
+    assert artifacts.editable.answers_sha256 == hashlib.sha256(encoded).hexdigest()
+    verify_application_artifacts(artifacts)
+    forged = replace(artifacts, editable=replace(artifacts.editable, answers_text="Changed"))
+    with pytest.raises(ValueError, match="display differs"):
+        verify_application_artifacts(forged)
+
     assert encoded == form_answers_bytes(source_form_answers(source, inventory))
     changed = ((rows[0][0] + '-different', *rows[0][1:]), *rows[1:])
     assert form_answers_bytes(changed) != encoded
