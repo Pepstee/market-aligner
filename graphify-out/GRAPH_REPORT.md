@@ -4924,3 +4924,7 @@ ma-0126 refreshes the two restored runtime/test owners using canonical Python3.1
 ## Review input limit recovery
 
 ma-0127 restores donor byte/row/field limits in the existing sanity-review owner. Both changed code/test sources re-extracted; structured ledger edge added. No semantic calls or private inputs. Metadata/time field accounting remains open. Current graph: 67244 nodes, 147600 edges.
+
+## Review limit accounting ma-0128
+
+Deterministic update of four inventory statuses and their disposition/ledger edges. Production source is unchanged from ddb6e51. Remaining 24 donor review fields are unresolved. No semantic enrichment or sensitive inputs were processed.
