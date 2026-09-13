@@ -8,14 +8,14 @@ exclusively beneath `internal/jaa`; donor copies never gain runtime authority.
 
 ## Status counts
 
-- `adopted_adapted`: 280
-- `canonical`: 20353
-- `canonical_relocated_exact`: 989
+- `adopted_adapted`: 261
+- `canonical`: 20534
+- `canonical_relocated_exact`: 953
 - `conflicting_variant_review`: 813
-- `integration_required`: 425
+- `integration_required`: 407
 - `quarantined`: 327
-- `retained_evidence`: 2503
-- `superseded`: 2592
+- `retained_evidence`: 2448
+- `superseded`: 2549
 
 `integration_required` and `conflicting_variant_review` are fail-closed work
 queues, not evidence of safe mergeability. `retained_evidence` remains

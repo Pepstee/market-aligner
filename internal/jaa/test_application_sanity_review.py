@@ -202,7 +202,7 @@ def test_review_listing_projection_is_exact_utf8_nfc_lf_and_source_bound() -> No
             visible_listing_text_bytes=b"Build services",
             expected_raw_listing_sha256=hashlib.sha256(b"vacancy").hexdigest(),
         )
-    for rejected in (b"\xef\xbb\xbflisting", b"listing\x00", b"\xff"):
+    for rejected in (b"\xef\xbb\xbflisting", b"listing\xef\xbb\xbftext", b"listing\x00", b"\xff"):
         with pytest.raises(ValueError):
             build_vacancy_review_material(
                 raw_listing_bytes=b"vacancy",

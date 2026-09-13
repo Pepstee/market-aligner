@@ -4952,3 +4952,7 @@ Deterministic43-feature owner inventory refresh, nine preserved donor variants,2
 ## Published handoff validation ma-0134
 
 Scoped deterministic AST refresh of production_handoff_admission_runner.py for shared read-only validation. Other communities remain historical; incident edges replaced by scoped extraction. No full semantic join or sensitive-source scan.
+
+## Admitted review material recovery ma-0140
+
+Deterministic AST extraction refreshed five recovered or changed review and synthetic test sources. Inventory now records exact restored source presence, with historical variants preserved. Current model-review integration remains incomplete. Incident edges of changed sources were replaced; cross-source semantic edges were not re-enriched. No private inputs or model extraction.

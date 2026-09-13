@@ -11,7 +11,6 @@ import hashlib
 import io
 import json
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -178,26 +177,10 @@ class ApplicationSanityReviewError(ValueError):
 
 
 def _project_visible_listing_text(value: bytes) -> bytes:
-    """Apply the recovered exact UTF-8/NFC/LF employer-review projection."""
-    if not isinstance(value, bytes) or not value:
-        raise ValueError("visible vacancy listing must be exact non-empty bytes")
-    if len(value) > MAX_REVIEW_TEXT_BYTES:
-        raise ValueError("visible vacancy listing exceeds 500000 bytes")
-    try:
-        text = value.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("visible vacancy listing is not UTF-8") from exc
-    if text.startswith("\ufeff"):
-        raise ValueError("visible vacancy listing contains a BOM")
-    if "\x00" in text:
-        raise ValueError("visible vacancy listing contains NUL")
-    projected = unicodedata.normalize(
-        "NFC", text.replace("\r\n", "\n").replace("\r", "\n")
-    )
-    projected_bytes = projected.encode("utf-8")
-    if not projected_bytes or len(projected_bytes) > MAX_REVIEW_TEXT_BYTES:
-        raise ValueError("projected vacancy listing is invalid")
-    return projected_bytes
+    """Reuse the admitted-material UTF-8/NFC/LF projection and scalar checks."""
+    from .review_material import _project_visible_text
+
+    return _project_visible_text(value)[0]
 
 
 @dataclass(frozen=True)
