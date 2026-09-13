@@ -121,6 +121,64 @@ def _private_tree(root: Path) -> None:
         os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
 
+def _promote_fixture_assessment(store, *, profile_id, job_key, track, source_sha):
+    with store.connection() as connection:
+        current = connection.execute(
+            "SELECT * FROM assessments WHERE profile_id=? AND job_key=?",
+            (profile_id, job_key),
+        ).fetchone()
+    assert current is not None
+    authority_sha = "c" * 64
+    config_sha = "d" * 64
+    processing_receipt_sha = "e" * 64
+    processing_result_sha = "f" * 64
+    policy = {"name": "fixture-promotion", "version": 1}
+    policy_sha = _sha(canonical_json_bytes(policy))
+    binding = {
+        "evidence_authority_sha256": authority_sha,
+        "processing_config_sha256": config_sha,
+        "processing_receipt_sha256": processing_receipt_sha,
+        "processing_result_sha256": processing_result_sha,
+        "source_content_sha256": source_sha,
+        "track": track,
+    }
+    promotion_body = {
+        "binding": binding,
+        "binding_sha256": _sha(canonical_json_bytes(binding)),
+        "decision": "pass",
+        "job_key": job_key,
+        "policy": policy,
+        "policy_sha256": policy_sha,
+        "profile_id": profile_id,
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        "score_payload_hash": current["score_payload_hash"],
+    }
+    promotion_sha = _sha(canonical_json_bytes(promotion_body))
+    promotion_bytes = canonical_json_bytes(
+        {**promotion_body, "receipt_sha256": promotion_sha}
+    )
+    store.promote_processing_gate(
+        profile_id=profile_id,
+        job_key=job_key,
+        score={
+            "fit": current["fit"],
+            "opportunity": current["opportunity"],
+            "final": current["final_score"],
+            "fit_status": current["fit_status"],
+        },
+        policy_hash=policy_sha,
+        processing_receipt_sha256=processing_receipt_sha,
+        processing_result_sha256=processing_result_sha,
+        source_content_sha256=source_sha,
+        authority_sha256=authority_sha,
+        processing_config_sha256=config_sha,
+        track=track,
+        receipt_bytes=promotion_bytes,
+        receipt_sha256=promotion_sha,
+    )
+    return promotion_sha
+
+
 def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     raw_text = "Build agentic software systems."
     database_relative = Path("scraper/data_overnight/jobs.sqlite3")
@@ -174,60 +232,9 @@ def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     )
     apply_gate(store, PROFILE_ID, JOB_KEY)
     _job, source_sha, _ = database.fetched_posting(JOB_KEY)
-    with store.connection() as connection:
-        current = connection.execute(
-            "SELECT * FROM assessments WHERE profile_id=? AND job_key=?",
-            (PROFILE_ID, JOB_KEY),
-        ).fetchone()
-    assert current is not None
-    authority_sha = "c" * 64
-    config_sha = "d" * 64
-    processing_receipt_sha = "e" * 64
-    processing_result_sha = "f" * 64
-    policy = {"name": "fixture-promotion", "version": 1}
-    policy_sha = _sha(canonical_json_bytes(policy))
-    binding = {
-        "evidence_authority_sha256": authority_sha,
-        "processing_config_sha256": config_sha,
-        "processing_receipt_sha256": processing_receipt_sha,
-        "processing_result_sha256": processing_result_sha,
-        "source_content_sha256": source_sha,
-        "track": "track",
-    }
-    promotion_body = {
-        "binding": binding,
-        "binding_sha256": _sha(canonical_json_bytes(binding)),
-        "decision": "pass",
-        "job_key": JOB_KEY,
-        "policy": policy,
-        "policy_sha256": policy_sha,
-        "profile_id": PROFILE_ID,
-        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
-        "score_payload_hash": current["score_payload_hash"],
-    }
-    promotion_sha = _sha(canonical_json_bytes(promotion_body))
-    promotion_bytes = canonical_json_bytes(
-        {**promotion_body, "receipt_sha256": promotion_sha}
-    )
-    store.promote_processing_gate(
-        profile_id=PROFILE_ID,
-        job_key=JOB_KEY,
-        score={
-            "fit": current["fit"],
-            "opportunity": current["opportunity"],
-            "final": current["final_score"],
-            "fit_status": current["fit_status"],
-        },
-        policy_hash=policy_sha,
-        processing_receipt_sha256=processing_receipt_sha,
-        processing_result_sha256=processing_result_sha,
-        source_content_sha256=source_sha,
-        authority_sha256=authority_sha,
-        processing_config_sha256=config_sha,
-        track="track",
-        receipt_bytes=promotion_bytes,
-        receipt_sha256=promotion_sha,
-    )
+    promotion_sha = _promote_fixture_assessment(
+        store, profile_id=PROFILE_ID, job_key=JOB_KEY, track="track",
+        source_sha=source_sha)
     task = store.claim_research("initial-preview", _preview_without_lease=True)
     assert task is not None
     initial_loader = CanonicalCollectorVacancyLoader(database.path)
@@ -975,3 +982,48 @@ def test_producer_identity_requires_exact_clean_executing_head(
     (repository / "untracked-authority.txt").write_text("not allowed")
     with pytest.raises(ProductionHandoffError, match="producer_dirty"):
         _git_commit(repository)
+
+
+def test_handoff_eligibility_retains_verified_promotion_and_rejects_drift(tmp_path):
+    import sqlite3
+    from test_process_one import EligibilityFixture, EligibilityEndToEndTests
+    from market_aligner.applications.production_handoff import _require_detailed_eligibility
+
+    fixture = EligibilityFixture(tmp_path)
+    harness = EligibilityEndToEndTests()
+    harness.fx = fixture
+    candidate = fixture.candidate_facts()
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = "NL"
+    candidate["current_residence"]["value"] = "NL"
+    candidate["maximum_years_required"]["value"] = 5.0
+    candidate["requires_sponsorship"]["value"] = False
+    harness.run_one(fixture, candidate_overrides=candidate)
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        raw, inputs = harness._handoff_eligibility_inputs(connection)
+        assert _require_detailed_eligibility(connection, **inputs) == raw
+    _promote_fixture_assessment(
+        AssessmentStore(fixture.assessments_path), profile_id=inputs["profile_id"],
+        job_key=fixture.job.key, track="backend", source_sha=fixture.content_hash)
+    from market_aligner.processing import ProcessingRefused
+    with pytest.raises(ProcessingRefused):
+        harness.run_one(fixture, operation_id="op-eligible-after-promotion",
+                        candidate_overrides=candidate)
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        assert _require_detailed_eligibility(connection, **inputs) == raw
+        for mutation in (
+            "UPDATE assessment_events SET payload_json='{}' WHERE event_type='processing_assessment_promoted'",
+            "UPDATE assessments SET score_payload_hash='changed'",
+            "UPDATE assessment_promotions SET receipt_bytes=x'7b7d'",
+            "UPDATE assessments SET opportunity_decision='reject'",
+            "UPDATE assessment_promotions SET processing_result_sha256='changed'",
+            "UPDATE assessments SET state='employer_researched'",
+            "UPDATE vacancy.postings SET raw_text='changed'",
+        ):
+            connection.execute("SAVEPOINT mutation")
+            connection.execute(mutation)
+            with pytest.raises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs)
+            connection.execute("ROLLBACK TO mutation")
+            connection.execute("RELEASE mutation")

@@ -8611,9 +8611,93 @@ def _fit_row_present_or_refuse(connection: sqlite3.Connection,
                                 ok_detail)
 
 
+def _matches_promoted_fit_projection(
+    connection: sqlite3.Connection, parsed: dict[str, Any], score_row: tuple,
+) -> bool:
+    """Recognise recorded downstream progress of the SAME admitted FIT score.
+
+    This is only a reader rule. Initial admission and recovery still require
+    the exact scored projection. A changed score requires separate evidence
+    and is deliberately not accepted here.
+    """
+    projection = parsed["assessment_projection"]
+    if (tuple(score_row[:3]) != (parsed["profile_id"], parsed["job_key"],
+                               projection["score_payload_hash"])
+            or score_row[3] not in {"opportunity_promoted", "employer_researched"}
+            or score_row[4] != projection["created_at"]):
+        return False
+    row = connection.execute(
+        "SELECT receipt_bytes,receipt_sha256,score_payload_hash,policy_hash,"
+        "track,source_content_sha256,processing_receipt_sha256,processing_result_sha256,"
+        "authority_sha256,processing_config_sha256 FROM assessment_promotions "
+        "WHERE profile_id=? AND job_key=?",
+        (parsed["profile_id"], parsed["job_key"])).fetchone()
+    if row is None:
+        return False
+    receipt = strict_json_loads(bytes(row[0]).decode("utf-8"))
+    if not isinstance(receipt, dict):
+        return False
+    body = dict(receipt)
+    claimed = body.pop("receipt_sha256", None)
+    binding = receipt.get("binding")
+    policy = receipt.get("policy")
+    if (canonical_json(receipt).encode("utf-8") != bytes(row[0])
+            or claimed != row[1] or sha256_hex(canonical_json(body).encode("utf-8")) != row[1]
+            or receipt.get("schema_version") != "market-aligner.assessment-promotion-receipt.v1"
+            or receipt.get("decision") != "pass"
+            or receipt.get("profile_id") != parsed["profile_id"]
+            or receipt.get("job_key") != parsed["job_key"]
+            or receipt.get("score_payload_hash") != projection["score_payload_hash"]
+            or row[2] != projection["score_payload_hash"]
+            or row[4] != parsed["track"]
+            or row[5] != parsed["raw"]["source_content_sha256"]
+            or not isinstance(binding, dict) or not isinstance(policy, dict)
+            or sha256_hex(canonical_json(binding).encode("utf-8")) != receipt.get("binding_sha256")
+            or sha256_hex(canonical_json(policy).encode("utf-8")) != row[3]
+            or receipt.get("policy_sha256") != row[3]
+            or binding.get("source_content_sha256") != row[5]
+            or binding.get("track") != parsed["track"]
+            or tuple(binding.get(key) for key in ("processing_receipt_sha256",
+                "processing_result_sha256", "evidence_authority_sha256",
+                "processing_config_sha256")) != tuple(row[6:10])):
+        return False
+    current = connection.execute(
+        "SELECT opportunity_decision,policy_hash,opportunity_reason FROM assessments "
+        "WHERE profile_id=? AND job_key=?",
+        (parsed["profile_id"], parsed["job_key"])).fetchone()
+    if tuple(current) != ("pass", row[3], f"processing-promotion:{row[1]}"):
+        return False
+    events = connection.execute(
+        "SELECT event_type,actor_kind,payload_json FROM assessment_events "
+        "WHERE profile_id=? AND job_key=? AND idempotency_key=?",
+        (parsed["profile_id"], parsed["job_key"],
+         f"processing-promotion:{parsed['profile_id']}:{parsed['job_key']}:{row[1]}"),
+    ).fetchall()
+    expected_event = {
+        "policy_hash": row[3],
+        "processing_receipt_sha256": binding.get("processing_receipt_sha256"),
+        "processing_result_sha256": binding.get("processing_result_sha256"),
+        "receipt_sha256": row[1],
+    }
+    if (len(events) != 1
+            or tuple(events[0][:2]) != ("processing_assessment_promoted", "deterministic")
+            or strict_json_loads(events[0][2]) != expected_event):
+        return False
+    if score_row[3] == "employer_researched":
+        evidence = connection.execute(
+            "SELECT e.promotion_receipt_sha256,e.source_content_sha256 "
+            "FROM employer_research_evidence e JOIN employer_dossiers d "
+            "ON e.profile_id=d.profile_id AND e.job_key=d.job_key "
+            "AND e.dossier_hash=d.dossier_hash WHERE e.profile_id=? AND e.job_key=?",
+            (parsed["profile_id"], parsed["job_key"])).fetchone()
+        if evidence is None or tuple(evidence) != (row[1], row[5]):
+            return False
+    return True
+
+
 def bind_fit_authority(
     connection: sqlite3.Connection, facts: EligibilityEnvelopeFacts,
-    payload: dict[str, Any],
+    payload: dict[str, Any], *, allow_assessment_progression: bool = False,
 ) -> dict[str, Any]:
     """S4/S5: parse and FULLY self-validate the referenced FIT receipt.
 
@@ -8777,7 +8861,9 @@ def bind_fit_authority(
                           "scored",
                           assessment_projection["created_at"],
                           assessment_projection["updated_at"])
-    if tuple(score_row) != expected_score_row:
+    if (tuple(score_row) != expected_score_row
+            and not (allow_assessment_progression
+                     and _matches_promoted_fit_projection(connection, parsed, score_row))):
         raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
                                 "the assessment row disagrees with the FIT "
                                 "projection")
@@ -9023,7 +9109,8 @@ def read_current_eligibility_receipt(
             or build_eligibility_binding(facts, payload)[1] != binding_sha256):
         raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
                                 "reconstructed eligibility binding differs")
-    fit = bind_fit_authority(connection, facts, payload)
+    fit = bind_fit_authority(
+        connection, facts, payload, allow_assessment_progression=True)
     _validate_current_raw_against_fit(connection, fit)
     view = reconstruct_decision_view(facts, fit)
     for key in ("decision", "reasons", "unknowns", "decision_input",
