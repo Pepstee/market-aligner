@@ -567,6 +567,48 @@ def _open_profile_chain(
         raise
 
 
+def _parse_profile_content(
+    profile_id: str, profile_bytes: bytes, evidence_bytes: bytes
+) -> tuple[CandidateProfile, dict[str, EvidenceItem], list[EvidenceItem]]:
+    payload = yaml.safe_load(profile_bytes.decode("utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("profile.yaml root must be a mapping")
+    if payload.get("profile_id") != profile_id:
+        raise ValueError("profile.yaml binds a different profile_id")
+    payload["tracks"] = {
+        name: TrackProfile(
+            **{
+                **track,
+                "evidence_ids": tuple(track.get("evidence_ids") or ()),
+                "gaps": tuple(track.get("gaps") or ()),
+            }
+        )
+        for name, track in (payload.get("tracks") or {}).items()
+    }
+    for key in ("blind_spots", "unknowns", "exclusions"):
+        payload[key] = tuple(payload.get(key) or ())
+    profile = CandidateProfile(**payload)
+    evidence: dict[str, EvidenceItem] = {}
+    evidence_ledger: list[EvidenceItem] = []
+    framed_rows = _split_evidence_rows(evidence_bytes)
+    # Count BEFORE constructing any EvidenceItem: exactly 10,000 reaches
+    # parsing; 10,001 refuses.
+    if len(framed_rows) > MAX_EVIDENCE_ROWS:
+        raise ValueError(
+            f"evidence.jsonl carries {len(framed_rows)} nonblank rows; "
+            f"at most {MAX_EVIDENCE_ROWS} reach parsing"
+        )
+    for row in framed_rows:
+        item = EvidenceItem(**_strict_json_loads(row))
+        _validate_item_strings(item)
+        if item.evidence_id in evidence:
+            raise ValueError(f"duplicate evidence_id: {item.evidence_id}")
+        evidence[item.evidence_id] = item
+        evidence_ledger.append(item)
+    profile.validate_evidence(evidence)
+    return profile, evidence, evidence_ledger
+
+
 class CoherentProfileSnapshot:
     """Shared-lock retained-byte view of one coherent generation.
 
@@ -655,42 +697,9 @@ class CoherentProfileSnapshot:
             raise
 
     def _parse(self) -> None:
-        payload = yaml.safe_load(self._bytes[PROFILE_NAME].decode("utf-8")) or {}
-        if not isinstance(payload, dict):
-            raise ValueError("profile.yaml root must be a mapping")
-        if payload.get("profile_id") != self.profile_id:
-            raise ValueError("profile.yaml binds a different profile_id")
-        payload["tracks"] = {
-            name: TrackProfile(
-                **{
-                    **track,
-                    "evidence_ids": tuple(track.get("evidence_ids") or ()),
-                    "gaps": tuple(track.get("gaps") or ()),
-                }
-            )
-            for name, track in (payload.get("tracks") or {}).items()
-        }
-        for key in ("blind_spots", "unknowns", "exclusions"):
-            payload[key] = tuple(payload.get(key) or ())
-        self.profile = CandidateProfile(**payload)
-        evidence: dict[str, EvidenceItem] = {}
-        self.evidence_ledger: list[EvidenceItem] = []
-        framed_rows = _split_evidence_rows(self._bytes[EVIDENCE_NAME])
-        # Count BEFORE constructing any EvidenceItem: exactly 10,000 reaches
-        # parsing; 10,001 refuses.
-        if len(framed_rows) > MAX_EVIDENCE_ROWS:
-            raise ValueError(
-                f"evidence.jsonl carries {len(framed_rows)} nonblank rows; "
-                f"at most {MAX_EVIDENCE_ROWS} reach parsing"
-            )
-        for row in framed_rows:
-            item = EvidenceItem(**_strict_json_loads(row))
-            _validate_item_strings(item)
-            if item.evidence_id in evidence:
-                raise ValueError(f"duplicate evidence_id: {item.evidence_id}")
-            evidence[item.evidence_id] = item
-            self.evidence_ledger.append(item)
-        self.profile.validate_evidence(evidence)
+        self.profile, evidence, self.evidence_ledger = _parse_profile_content(
+            self.profile_id, self._bytes[PROFILE_NAME], self._bytes[EVIDENCE_NAME]
+        )
         self.evidence = evidence
         self.context = self.profile.llm_context(evidence)
         self.hashes = {
@@ -890,6 +899,60 @@ class ProfileStore:
             return snapshot.profile, snapshot.evidence
         finally:
             snapshot.close()
+
+    def load_revision(
+        self, profile_id: str, profile_version: str
+    ) -> tuple[CandidateProfile, dict[str, EvidenceItem]]:
+        """Read a retained historical revision without following current.json.
+
+        This imports the donor revision format read-only. It does not select a
+        current generation or imply that ordinary saves archive older versions.
+        """
+        if not isinstance(profile_version, str) or not profile_version.strip():
+            raise ValueError("profile revision version must be nonempty")
+        key = hashlib.sha256(profile_version.encode("utf-8")).hexdigest()
+        levels = None
+        children: list[_RetainedDirectory] = []
+        try:
+            levels = _open_profile_chain(
+                self, profile_id, exclusive=False, wait=True, create=False
+            )
+            parent = levels[-1]
+            for name in ("revisions", key):
+                child = _RetainedDirectory(
+                    parent_fd=parent.fd, name=name, path_label="profile revision"
+                )
+                children.append(child)
+                child.initial_proof()
+                parent = child
+            manifest_bytes, _ = _read_leaf_bounded(parent.fd, "manifest.json", MAX_MANIFEST_BYTES)
+            manifest = _strict_json_loads(manifest_bytes)
+            if not isinstance(manifest, dict) or manifest_bytes != _canonical_json(manifest).encode("utf-8"):
+                raise ValueError("profile revision manifest is not canonical")
+            profile_bytes, _ = _read_leaf_bounded(parent.fd, PROFILE_NAME, MAX_PROFILE_BYTES)
+            evidence_bytes, _ = _read_leaf_bounded(parent.fd, EVIDENCE_NAME, MAX_EVIDENCE_BYTES)
+            expected = {
+                "schema_version": "market-aligner.profile-current.v1",
+                "profile_version": profile_version,
+                "version_key": key,
+                "profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+                "evidence_ledger_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+            }
+            if manifest != expected:
+                raise ValueError("profile revision manifest or content differs")
+            profile, evidence, _ = _parse_profile_content(profile_id, profile_bytes, evidence_bytes)
+            if profile.version != profile_version:
+                raise ValueError("profile revision version differs")
+            for level in (*levels, *children):
+                level.revalidate()
+            return profile, evidence
+        except FileNotFoundError as exc:
+            raise KeyError((profile_id, profile_version)) from exc
+        finally:
+            for child in reversed(children):
+                child.close()
+            if levels is not None:
+                _close_chain(levels)
 
     def list_profile_ids(self) -> list[str]:
         return sorted(

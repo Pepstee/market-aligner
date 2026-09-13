@@ -334,3 +334,50 @@ class ProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_retained_profile_revision_is_exact_and_ignores_current_pointer(tmp_path):
+    from dataclasses import asdict, replace
+    import pytest
+
+    store = ProfileStore(tmp_path / "data")
+    old = CandidateProfile(profile_id=new_profile_id(), version="v1", tracks={
+        "synthetic": TrackProfile(0, 0, 0, 0, evidence_ids=(), rationale="Synthetic fixture")
+    })
+    store.save(replace(old, version="v2"), [])
+    directory = store.directory(old.profile_id)
+    key = hashlib.sha256(old.version.encode()).hexdigest()
+    revisions = directory / "revisions"
+    revisions.mkdir(mode=0o700)
+    revision = revisions / key
+    revision.mkdir(mode=0o700)
+    profile_bytes = yaml.safe_dump(asdict(old), sort_keys=False, allow_unicode=True, width=100).encode()
+    evidence_bytes = b""
+    manifest = {
+        "schema_version": "market-aligner.profile-current.v1",
+        "profile_version": old.version, "version_key": key,
+        "profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+        "evidence_ledger_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+    }
+    for name, raw in {"profile.yaml": profile_bytes, "evidence.jsonl": evidence_bytes,
+                      "manifest.json": json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()}.items():
+        path = revision / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    (directory / "current.json").write_text("invalid pointer must not be consulted")
+    assert store.load_revision(old.profile_id, old.version) == (old, {})
+    assert store.load(old.profile_id)[0].version == "v2"
+    with pytest.raises(KeyError):
+        store.load_revision(old.profile_id, "missing")
+    path = revision / "profile.yaml"
+    path.write_bytes(profile_bytes.replace(b"version: v1", b"version: v9"))
+    with pytest.raises(ValueError, match="manifest or content differs"):
+        store.load_revision(old.profile_id, old.version)
+    path.unlink()
+    path.symlink_to(directory / "profile.yaml")
+    with pytest.raises((OSError, ValueError)):
+        store.load_revision(old.profile_id, old.version)
+    path.unlink()
+    path.write_bytes(profile_bytes)
+    path.chmod(0o600)
+    assert store.load_revision(old.profile_id, old.version) == (old, {})
