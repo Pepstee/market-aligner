@@ -4972,3 +4972,7 @@ Thirteen declaration/schema/digest records accounted from exact source compariso
 ## Explicit review issuer policy ma-0144
 
 Scoped deterministic AST extraction of review_material.py and its accessor contract tests after restoring issuer allowlist validation.88 affected tests pass. Exact relocated declaration statuses prove syntax presence only, not behaviour of unrelated event resolvers. Inventory/ledger links refreshed. Incident edges replaced; cross-source semantic re-enrichment not performed. No private input or model extraction.
+
+## Review reference adaptation ma-0145
+
+Six request/projection/reference/environment roles mapped to tested canonical owners. Inventory statuses and explicit ledger/disposition links refreshed. Product/test source unchanged; ma-0144 AST extraction remains current. Full material persistence and evaluation-time representation remain open. No model graph enrichment or sensitive inputs.
