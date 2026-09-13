@@ -4936,3 +4936,7 @@ Deterministic update of three inventory dispositions and ledger links. Productio
 ## Exact review input identity ma-0130
 
 Deterministic AST refresh of application_sanity_review.py and its synthetic tests; added source-bound ledger node. Incident edges for changed sources were replaced by scoped extraction; cross-source semantic enrichment is not claimed. Historical communities elsewhere remain. No private sources or model extraction.
+
+## Current review owner accounting ma-0131
+
+Deterministic current AST inventory refresh, preserved historical source bindings, six explicit disposition links and current inventory line locations. Production code graph remains the ma-0130 extraction; no extra semantic or sensitive-source scan.
