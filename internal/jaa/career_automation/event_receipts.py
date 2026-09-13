@@ -6,7 +6,9 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
+
+from market_aligner.applications.events import EventBindingContext, VerifiedEventReference
 
 from market_aligner.applications.canonical import (
     ContractValidationError,
@@ -22,6 +24,9 @@ STATE_TYPE_ID = "provider_state_receipt"
 OUTCOME_TYPE_ID = "application_outcome_receipt"
 STATE_SCHEMA = "jaa.provider-state-receipt.v1"
 OUTCOME_SCHEMA = "jaa.application-outcome-receipt.v1"
+PACKAGE_REFERENCE_KEY = "event.package_chain_validation"
+PACKAGE_TYPE_ID = "jaa_package_chain_validation_receipt"
+PACKAGE_SCHEMA = "market-aligner.jaa-package-chain-validation.v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_ID = re.compile(r"^evt_[0-9a-f]{64}$")
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -220,6 +225,16 @@ def _validate_registry_binding_fields(
         )
 
 
+def _receipt_spec(kind: str) -> tuple[str, str, str]:
+    if kind == "state":
+        return STATE_REFERENCE_KEY, STATE_TYPE_ID, STATE_SCHEMA
+    if kind == "outcome":
+        return OUTCOME_REFERENCE_KEY, OUTCOME_TYPE_ID, OUTCOME_SCHEMA
+    if kind == "package":
+        return PACKAGE_REFERENCE_KEY, PACKAGE_TYPE_ID, PACKAGE_SCHEMA
+    raise EventReceiptError("receipt_kind", "event receipt kind is invalid")
+
+
 def validate_event_receipt(
     evidence: EventReceiptEvidence,
     *,
@@ -230,20 +245,7 @@ def validate_event_receipt(
 ) -> ValidatedEventReceipt:
     """Validate exact registry metadata and configured trust before persistence."""
 
-    if kind == "state":
-        reference_key, type_id, schema_version = (
-            STATE_REFERENCE_KEY,
-            STATE_TYPE_ID,
-            STATE_SCHEMA,
-        )
-    elif kind == "outcome":
-        reference_key, type_id, schema_version = (
-            OUTCOME_REFERENCE_KEY,
-            OUTCOME_TYPE_ID,
-            OUTCOME_SCHEMA,
-        )
-    else:
-        raise EventReceiptError("receipt_kind", "event receipt kind is invalid")
+    reference_key, type_id, schema_version = _receipt_spec(kind)
     if not isinstance(expected_subject, dict):
         raise EventReceiptError(
             "receipt_subject", "expected event receipt subject must be a dict"
@@ -454,20 +456,7 @@ def build_event_receipt_metadata(
 ) -> bytes:
     """Canonical synthetic/provider helper; authentication remains adapter-owned."""
 
-    if kind == "state":
-        reference_key, type_id, schema_version = (
-            STATE_REFERENCE_KEY,
-            STATE_TYPE_ID,
-            STATE_SCHEMA,
-        )
-    elif kind == "outcome":
-        reference_key, type_id, schema_version = (
-            OUTCOME_REFERENCE_KEY,
-            OUTCOME_TYPE_ID,
-            OUTCOME_SCHEMA,
-        )
-    else:
-        raise EventReceiptError("receipt_kind", "event receipt kind is invalid")
+    reference_key, type_id, schema_version = _receipt_spec(kind)
     return canonical_json_bytes(
         {
             "issued_at": issued_at,
@@ -484,7 +473,103 @@ def build_event_receipt_metadata(
     )
 
 
+_PACKAGE_BOUND_EVENTS = frozenset(
+    {
+        "artifacts_ready",
+        "release_ready",
+        "submission_authorized",
+        "submission_attempted",
+        "receipt_captured",
+        "status_changed",
+        "outcome_recorded",
+    }
+)
+
+
+class TrustedJAAEventResolver(EventReceiptAuthenticator, Protocol):
+    def resolve(self, *, reference_key: str, object_sha256: str,
+                expected_subject: Mapping[str, str], evaluated_at: str) -> EventReceiptEvidence: ...
+
+
+class AdditionalEventChainValidator(EventReceiptAuthenticator, Protocol):
+    def validate(self, *, event_type: str, detail: Mapping[str, Any],
+                 expected: EventBindingContext, occurred_at: str) -> EventReceiptEvidence | None: ...
+
+
+class JAAEventReceiptBindingResolver:
+    """Bridge Market event subjects to the canonical JAA receipt validator.
+
+    Configured adapters authenticate exact evidence. No default adapter or
+    trust inference is provided by this bridge.
+    """
+
+    def __init__(self, resolver: TrustedJAAEventResolver, *,
+                 additional_validator: AdditionalEventChainValidator) -> None:
+        if resolver is None or additional_validator is None:
+            raise TypeError("event binding requires receipt and package-chain adapters")
+        self.resolver = resolver
+        self.additional_validator = additional_validator
+
+    @staticmethod
+    def _chain(expected: EventBindingContext) -> dict[str, str]:
+        required = {
+            "application_id": expected.application_id,
+            "attempt_id": expected.attempt_id,
+            "external_receipt_sha256": expected.external_receipt_sha256,
+            "grant_sha256": expected.grant_sha256,
+            "handoff_root_sha256": expected.handoff_root_sha256,
+        }
+        missing = sorted(key for key, value in required.items() if value is None)
+        if missing:
+            raise ContractValidationError(
+                f"reverse JAA receipt is missing prior chain values: {missing}"
+            )
+        return {key: str(value) for key, value in required.items()}
+
+    def validate(self, *, event_type: str, detail: Mapping[str, Any],
+                 expected: EventBindingContext, occurred_at: str) -> tuple[VerifiedEventReference, ...]:
+        package = self.additional_validator.validate(
+            event_type=event_type, detail=detail, expected=expected, occurred_at=occurred_at)
+        references = []
+        if event_type in _PACKAGE_BOUND_EVENTS:
+            answers = (detail.get("answers_sha256") if event_type in {"artifacts_ready", "release_ready"}
+                       else expected.answers_sha256)
+            if answers is None or package is None:
+                raise EventReceiptError("receipt_package", "package-bound event needs authenticated form-answer evidence")
+            subject = {"application_id": expected.application_id, "event_type": event_type,
+                       "form_answers_sha256": answers, "handoff_root_sha256": expected.handoff_root_sha256}
+            validated = validate_event_receipt(package, kind="package", expected_subject=subject,
+                occurred_at=occurred_at, authenticator=self.additional_validator)
+            references.append(VerifiedEventReference(validated.reference_key,
+                package.exact_bytes, parse_canonical_json(package.metadata_bytes)))
+        elif package is not None:
+            raise EventReceiptError("receipt_package", "pre-package event must not add package-chain evidence")
+        if event_type == "status_changed":
+            kind, key = "state", STATE_REFERENCE_KEY
+            digest = str(detail["state_receipt_sha256"])
+            subject = {**self._chain(expected), "new_state": str(detail["new_state"]),
+                       "previous_state": str(detail["previous_state"])}
+        elif event_type == "outcome_recorded":
+            kind, key = "outcome", OUTCOME_REFERENCE_KEY
+            digest = str(detail["outcome_receipt_sha256"])
+            subject = {**self._chain(expected), "outcome_code": str(detail["outcome_code"])}
+        else:
+            return tuple(references)
+        evidence = self.resolver.resolve(reference_key=key, object_sha256=digest,
+                                         expected_subject=subject, evaluated_at=occurred_at)
+        if evidence.object_sha256 != digest:
+            raise EventReceiptError("receipt_substitution", "resolved receipt differs from event digest")
+        validated = validate_event_receipt(evidence, kind=kind, expected_subject=subject,
+                                          occurred_at=occurred_at, authenticator=self.resolver)
+        references.append(VerifiedEventReference(validated.reference_key,
+            evidence.exact_bytes, parse_canonical_json(evidence.metadata_bytes)))
+        return tuple(references)
+
+
 __all__ = [
+    "JAAEventReceiptBindingResolver",
+    "TrustedJAAEventResolver",
+    "AdditionalEventChainValidator",
     "EventReceiptAuthenticator",
     "EventReceiptError",
     "EventReceiptEvidence",

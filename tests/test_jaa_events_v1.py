@@ -436,3 +436,116 @@ def test_durable_receiver_keeps_application_roots_separate(tmp_path):
         consumer.state(first.application_id)
     with store.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM v1_event_inbox").fetchone()[0] == 3
+
+
+class _SyntheticJAAReceiptAdapter:
+    """Test-only evidence provider and authenticator, explicitly non-production."""
+
+    event_resolver_identity_sha256 = _digest("bridge-test-resolver")
+
+    def __init__(self, *, fail_auth=False, swap_package=False, omit_package=False):
+        self.fail_auth = fail_auth
+        self.swap_package = swap_package
+        self.omit_package = omit_package
+        self.authenticated = []
+
+    def _evidence(self, kind, subject, occurred_at, exact):
+        from career_automation.event_receipts import EventReceiptEvidence, build_event_receipt_metadata
+        return EventReceiptEvidence(exact, build_event_receipt_metadata(
+            exact_bytes=exact, kind=kind, subject=subject, issued_at=occurred_at,
+            issuer_id="synthetic", trust_root_id="synthetic",
+            trust_proof_sha256=_digest("bridge-test-proof")),
+            "synthetic", self.event_resolver_identity_sha256)
+
+    def validate(self, *, event_type, detail, expected, occurred_at):
+        if event_type in {"strategy_started", "release_blocked"} or self.omit_package:
+            return None
+        answers = (detail["answers_sha256"] if event_type in {"artifacts_ready", "release_ready"}
+                   else expected.answers_sha256)
+        subject = {"application_id": expected.application_id, "event_type": event_type,
+                   "form_answers_sha256": _digest("swapped") if self.swap_package else answers,
+                   "handoff_root_sha256": expected.handoff_root_sha256}
+        return self._evidence("package", subject, occurred_at,
+                              canonical_json_bytes({"synthetic-package": subject}))
+
+    def resolve(self, *, reference_key, object_sha256, expected_subject, evaluated_at):
+        kind = "state" if reference_key == "event.state_receipt" else "outcome"
+        return self._evidence(kind, expected_subject, evaluated_at, f"{kind}-receipt".encode())
+
+    def authenticate_event_receipt(self, **values):
+        if self.fail_auth:
+            raise ValueError("synthetic untrusted proof")
+        self.authenticated.append(values)
+
+
+def test_jaa_binding_bridge_authenticates_package_and_reverse_receipts(tmp_path):
+    from career_automation.event_receipts import JAAEventReceiptBindingResolver, EventReceiptError
+    from market_aligner.research.store import AssessmentStore
+    from market_aligner.service.event_consumer import DurableEventConsumer
+
+    handoff = _handoff()
+    events = _successful_events(handoff)
+    adapter = _SyntheticJAAReceiptAdapter()
+    store = AssessmentStore(tmp_path / "assessments.sqlite3")
+    _register_synthetic_handoff(store, handoff)
+    consumer = DurableEventConsumer(store, JAAEventReceiptBindingResolver(
+        adapter, additional_validator=adapter))
+    for event in events:
+        consumer.consume(event.exact_bytes, event.exact_detail_bytes)
+    assert consumer.state(handoff.application_id).outcome_code == "offer"
+    assert len(adapter.authenticated) == 9
+    with store.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM v1_event_references").fetchone()[0] == 9
+    for options, code in [({"omit_package": True}, "receipt_package"),
+                          ({"swap_package": True}, "receipt_substitution"),
+                          ({"fail_auth": True}, "receipt_authentication")]:
+        isolated = AssessmentStore(tmp_path / (code + ".sqlite3"))
+        _register_synthetic_handoff(isolated, handoff)
+        failed = _SyntheticJAAReceiptAdapter(**options)
+        receiver = DurableEventConsumer(isolated, JAAEventReceiptBindingResolver(
+            failed, additional_validator=failed))
+        receiver.consume(events[0].exact_bytes, events[0].exact_detail_bytes)
+        with pytest.raises(EventReceiptError, match=code):
+            receiver.consume(events[1].exact_bytes, events[1].exact_detail_bytes)
+        assert receiver.state(handoff.application_id).last_sequence == 1
+        with isolated.connection() as connection:
+            assert connection.execute("SELECT COUNT(*) FROM v1_event_inbox").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("mode", ["wrong_digest", "wrong_subject", "future"])
+def test_jaa_binding_bridge_rejects_reverse_receipt_substitution(tmp_path, mode):
+    from dataclasses import replace
+    from datetime import datetime, timedelta
+    from career_automation.event_receipts import JAAEventReceiptBindingResolver, EventReceiptError
+    from market_aligner.research.store import AssessmentStore
+    from market_aligner.service.event_consumer import DurableEventConsumer
+
+    class Adapter(_SyntheticJAAReceiptAdapter):
+        def resolve(self, **kwargs):
+            evidence = super().resolve(**kwargs)
+            if mode == "wrong_digest":
+                return replace(evidence, exact_bytes=b"substituted")
+            metadata = json.loads(evidence.metadata_bytes)
+            if mode == "wrong_subject":
+                metadata["subject"]["grant_sha256"] = _digest("wrong-grant")
+            else:
+                metadata["issued_at"] = (
+                    datetime.fromisoformat(metadata["issued_at"].replace("Z", "+00:00"))
+                    + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            return replace(evidence, metadata_bytes=canonical_json_bytes(metadata))
+
+    handoff = _handoff()
+    events = _successful_events(handoff)
+    store = AssessmentStore(tmp_path / "assessments.sqlite3")
+    _register_synthetic_handoff(store, handoff)
+    adapter = Adapter()
+    consumer = DurableEventConsumer(store, JAAEventReceiptBindingResolver(
+        adapter, additional_validator=adapter))
+    for event in events[:6]:
+        consumer.consume(event.exact_bytes, event.exact_detail_bytes)
+    with pytest.raises(EventReceiptError):
+        consumer.consume(events[6].exact_bytes, events[6].exact_detail_bytes)
+    assert consumer.state(handoff.application_id).last_sequence == 6
+    with store.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM v1_event_inbox").fetchone()[0] == 6
+        assert connection.execute("SELECT COUNT(*) FROM v1_event_references").fetchone()[0] == 5
