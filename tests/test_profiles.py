@@ -457,3 +457,18 @@ def test_revision_format_write_replay_conflict_and_pointer_recovery(tmp_path, mo
     with pytest.raises(ValueError, match="cannot mix"):
         modern.save_revision(v2, [])
     assert modern.load(v1.profile_id) == (v1, {})
+
+
+def test_retained_profile_scalar_validation_rejects_coercion() -> None:
+    import pytest
+    from market_aligner.profiler.schema import _number, validate_profile_id
+
+    profile_id = 'prf_' + 'a' * 32
+    assert validate_profile_id(profile_id) == profile_id
+    assert _number(0.5, 0, 1, 'confidence') == 0.5
+    for value in (True, '0.5', None, float('nan'), float('inf')):
+        with pytest.raises(ValueError):
+            _number(value, 0, 1, 'confidence')
+    for value in (' ' + profile_id, profile_id + ' ', None):
+        with pytest.raises(ValueError):
+            validate_profile_id(value)
