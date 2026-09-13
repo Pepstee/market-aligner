@@ -33,6 +33,7 @@ from market_aligner.config import (
     owner_private_umask,
 )
 from market_aligner.llm.contracts import canonical_hash
+from market_aligner.state.atomic_publish import publish_noreplace
 
 from .schema import (
     CandidateProfile,
@@ -609,6 +610,30 @@ def _parse_profile_content(
     return profile, evidence, evidence_ledger
 
 
+def _read_revision_content(
+    directory_fd: int, profile_id: str, profile_version: str
+) -> tuple[CandidateProfile, dict[str, EvidenceItem], bytes]:
+    manifest_bytes, _ = _read_leaf_bounded(directory_fd, "manifest.json", MAX_MANIFEST_BYTES)
+    manifest = _strict_json_loads(manifest_bytes)
+    if not isinstance(manifest, dict) or manifest_bytes != _canonical_json(manifest).encode("utf-8"):
+        raise ValueError("profile revision manifest is not canonical")
+    profile_bytes, _ = _read_leaf_bounded(directory_fd, PROFILE_NAME, MAX_PROFILE_BYTES)
+    evidence_bytes, _ = _read_leaf_bounded(directory_fd, EVIDENCE_NAME, MAX_EVIDENCE_BYTES)
+    expected = {
+        "schema_version": "market-aligner.profile-current.v1",
+        "profile_version": profile_version,
+        "version_key": hashlib.sha256(profile_version.encode("utf-8")).hexdigest(),
+        "profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+        "evidence_ledger_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+    }
+    if manifest != expected:
+        raise ValueError("profile revision manifest or content differs")
+    profile, evidence, _ = _parse_profile_content(profile_id, profile_bytes, evidence_bytes)
+    if profile.version != profile_version:
+        raise ValueError("profile revision version differs")
+    return profile, evidence, manifest_bytes
+
+
 class CoherentProfileSnapshot:
     """Shared-lock retained-byte view of one coherent generation.
 
@@ -928,10 +953,10 @@ class ProfileStore:
                 children.append(child)
                 child.initial_proof()
                 parent = child
-            retained, _ = _read_leaf_bounded(parent.fd, "manifest.json", MAX_MANIFEST_BYTES)
+            profile, evidence, retained = _read_revision_content(parent.fd, profile_id, version)
             if current != retained:
                 raise ValueError("legacy current pointer differs from revision manifest")
-            result = self.load_revision(profile_id, version)
+            result = (profile, evidence)
             reread, current_identity = _read_leaf_bounded(directory.fd, "current.json", MAX_MANIFEST_BYTES)
             if reread != current or current_identity != identity or _entry_exists(directory.fd, MANIFEST_NAME):
                 raise ValueError("legacy current pointer changed during load")
@@ -968,24 +993,7 @@ class ProfileStore:
                 children.append(child)
                 child.initial_proof()
                 parent = child
-            manifest_bytes, _ = _read_leaf_bounded(parent.fd, "manifest.json", MAX_MANIFEST_BYTES)
-            manifest = _strict_json_loads(manifest_bytes)
-            if not isinstance(manifest, dict) or manifest_bytes != _canonical_json(manifest).encode("utf-8"):
-                raise ValueError("profile revision manifest is not canonical")
-            profile_bytes, _ = _read_leaf_bounded(parent.fd, PROFILE_NAME, MAX_PROFILE_BYTES)
-            evidence_bytes, _ = _read_leaf_bounded(parent.fd, EVIDENCE_NAME, MAX_EVIDENCE_BYTES)
-            expected = {
-                "schema_version": "market-aligner.profile-current.v1",
-                "profile_version": profile_version,
-                "version_key": key,
-                "profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
-                "evidence_ledger_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
-            }
-            if manifest != expected:
-                raise ValueError("profile revision manifest or content differs")
-            profile, evidence, _ = _parse_profile_content(profile_id, profile_bytes, evidence_bytes)
-            if profile.version != profile_version:
-                raise ValueError("profile revision version differs")
+            profile, evidence, _ = _read_revision_content(parent.fd, profile_id, profile_version)
             for level in (*levels, *children):
                 level.revalidate()
             return profile, evidence
@@ -1178,6 +1186,133 @@ class ProfileStore:
         if data != expected_bytes:
             raise ValueError("generation manifest bytes drifted")
 
+    def _persist_revision_leaf(self, directory_fd: int, name: str, payload: bytes) -> None:
+        if _entry_exists(directory_fd, name):
+            self._reopen_and_verify_leaf(directory_fd, name, payload)
+            return
+        temporary, _ = self._make_temp(directory_fd, "gen", payload, boundary_prefix="revision_object")
+        try:
+            publish_noreplace(directory_fd, temporary, name)
+        finally:
+            if _entry_exists(directory_fd, temporary):
+                os.unlink(temporary, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        self._reopen_and_verify_leaf(directory_fd, name, payload)
+
+    def save_revision(self, profile: CandidateProfile, evidence: list[EvidenceItem]) -> None:
+        """Create or update the retained revision format, with one current pointer.
+
+        Immutable revision files may survive a failed attempt. They never imply
+        currency. Active generation-format stores are refused without conversion.
+        """
+        if len(evidence) > MAX_EVIDENCE_ROWS:
+            raise ValueError("profile revision evidence row bound exceeded")
+        profile_bytes = yaml.safe_dump(asdict(profile), sort_keys=False, allow_unicode=True, width=100).encode("utf-8")
+        ledger_bytes = "".join(json.dumps(asdict(item), ensure_ascii=False, sort_keys=True) + "\n" for item in sorted(evidence, key=lambda item: item.evidence_id)).encode("utf-8")
+        if len(profile_bytes) > MAX_PROFILE_BYTES or len(ledger_bytes) > MAX_EVIDENCE_BYTES:
+            raise ValueError("profile revision byte bound exceeded")
+        _parse_profile_content(profile.profile_id, profile_bytes, ledger_bytes)
+        key = hashlib.sha256(profile.version.encode("utf-8")).hexdigest()
+        manifest = _canonical_json({
+            "schema_version": "market-aligner.profile-current.v1",
+            "profile_version": profile.version, "version_key": key,
+            "profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+            "evidence_ledger_sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+        }).encode("utf-8")
+        if len(manifest) > MAX_MANIFEST_BYTES:
+            raise ValueError("profile revision manifest bound exceeded")
+        levels = _open_profile_chain(self, profile.profile_id, exclusive=True, wait=True, create=True)
+        children: list[_RetainedDirectory] = []
+        pointer_started = False
+        temporary = None
+        try:
+            directory = levels[-1]
+            if any(_entry_exists(directory.fd, name) for name in _CANONICAL_NAMES):
+                raise ValueError("revision format cannot mix with active generation files")
+            unexpected = set(os.listdir(directory.fd)) - {"current.json", "revisions"}
+            if any(_TEMP_NAME_PATTERN.fullmatch(name) is None for name in unexpected):
+                raise ValueError("revision profile contains an unrelated entry")
+            for name in unexpected:
+                _require_private_file_info(os.stat(name, dir_fd=directory.fd, follow_symlinks=False), name)
+                os.unlink(name, dir_fd=directory.fd)
+            os.fsync(directory.fd)
+            os.fsync(levels[2].fd)
+            directory.recapture()
+            parent = directory
+            for name in ("revisions", key):
+                parent.revalidate()
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent.fd)
+                except FileExistsError:
+                    pass
+                else:
+                    parent.recapture()
+                os.fsync(parent.fd)
+                child = _RetainedDirectory(parent_fd=parent.fd, name=name, path_label="profile revision")
+                children.append(child)
+                child.initial_proof()
+                parent = child
+            if _entry_exists(directory.fd, "current.json"):
+                current, _ = _read_leaf_bounded(directory.fd, "current.json", MAX_MANIFEST_BYTES)
+                current_doc = _strict_json_loads(current)
+                version = current_doc.get("profile_version") if isinstance(current_doc, dict) else None
+                if not isinstance(version, str) or not version.strip():
+                    raise ValueError("current revision version is invalid")
+                old = _RetainedDirectory(parent_fd=children[0].fd, name=hashlib.sha256(version.encode("utf-8")).hexdigest(), path_label="previous revision")
+                try:
+                    old.initial_proof()
+                    _, _, retained = _read_revision_content(old.fd, profile.profile_id, version)
+                    if retained != current:
+                        raise ValueError("current revision pointer differs")
+                    old.revalidate()
+                finally:
+                    old.close()
+            revision_names = set(os.listdir(parent.fd))
+            materials = {PROFILE_NAME: profile_bytes, EVIDENCE_NAME: ledger_bytes, "manifest.json": manifest}
+            for name, payload in materials.items():
+                if _entry_exists(parent.fd, name):
+                    self._reopen_and_verify_leaf(parent.fd, name, payload)
+            for name, payload in materials.items():
+                self._persist_revision_leaf(parent.fd, name, payload)
+            os.fsync(parent.fd)
+            _, _, retained = _read_revision_content(parent.fd, profile.profile_id, profile.version)
+            if retained != manifest:
+                raise ValueError("published revision differs")
+            if set(os.listdir(parent.fd)) != revision_names | set(materials) or _identity(os.fstat(parent.fd))[:4] != parent.identity[:4]:
+                raise ValueError("revision directory changed outside publication")
+            parent.recapture()
+            parent.initial_proof()
+            for level in (*levels, *children):
+                level.revalidate()
+            profile_names = set(os.listdir(directory.fd))
+            temporary, identity = self._make_temp(directory.fd, "gen", manifest, boundary_prefix="revision_pointer")
+            pointer_started = True
+            self._rename_temp(directory.fd, temporary, "current.json", identity, MAX_MANIFEST_BYTES)
+            temporary = None
+            os.fsync(directory.fd)
+            self._reopen_and_verify_leaf(directory.fd, "current.json", manifest)
+            if set(os.listdir(directory.fd)) != profile_names | {"current.json"} or _identity(os.fstat(directory.fd))[:4] != directory.identity[:4]:
+                raise ValueError("current directory changed outside publication")
+            directory.recapture()
+            directory.initial_proof()
+            for level in (*levels, *children):
+                level.revalidate()
+        except BaseException as exc:
+            if pointer_started:
+                raise ProfileGenerationOutcomeUnknown("revision current publication outcome is unproved") from exc
+            raise
+        finally:
+            try:
+                if temporary is not None and _entry_exists(levels[-1].fd, temporary):
+                    os.unlink(temporary, dir_fd=levels[-1].fd)
+                    os.fsync(levels[-1].fd)
+            except BaseException as exc:
+                raise ProfileGenerationOutcomeUnknown("revision temporary cleanup is unproved") from exc
+            finally:
+                for child in reversed(children):
+                    child.close()
+                _close_chain(levels)
+
     def save(self, profile: CandidateProfile, evidence: list[EvidenceItem]) -> None:
         """Publish one sealed generation; returns None only after the final
             committed durability barrier and exact revalidation.
@@ -1195,6 +1330,9 @@ class ProfileStore:
         durable-in-progress, otherwise unknown. Success returns only after
         the final durability barrier and exact revalidation.
         """
+        directory = self.directory(profile.profile_id)
+        if (directory / "current.json").exists() or (directory / "revisions").is_dir():
+            return self.save_revision(profile, evidence)
         if len(evidence) > MAX_EVIDENCE_ROWS:
             raise ValueError(
                 f"at most {MAX_EVIDENCE_ROWS} evidence rows reach validation; got "

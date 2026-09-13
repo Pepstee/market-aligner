@@ -400,3 +400,60 @@ def test_retained_profile_revision_is_exact_and_ignores_current_pointer(tmp_path
     (directory / "generation.json").chmod(0o600)
     with pytest.raises((ValueError, FileNotFoundError)):
         store.load(old.profile_id)
+
+
+def test_revision_format_write_replay_conflict_and_pointer_recovery(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import pytest
+    from market_aligner.profiler.store import ProfileGenerationOutcomeUnknown
+
+    store = ProfileStore(tmp_path / "data")
+    v1 = CandidateProfile(profile_id=new_profile_id(), version="v1", tracks={
+        "synthetic": TrackProfile(0, 0, 0, 0, evidence_ids=(), rationale="Synthetic history")
+    })
+    store.save_revision(v1, [])
+    v2 = replace(v1, version="v2")
+    store.save(v2, [])
+    directory = store.directory(v1.profile_id)
+    def bytes_now():
+        return {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    before = bytes_now()
+    store.save(v2, [])
+    assert bytes_now() == before
+    assert store.load(v1.profile_id) == (v2, {})
+    assert store.load_revision(v1.profile_id, "v1") == (v1, {})
+    with pytest.raises(ValueError, match="content does not match"):
+        store.save(replace(v1, unknowns=("Changed bytes for same version",)), [])
+    assert bytes_now() == before
+    v3 = replace(v1, version="v3")
+    def fail_pointer(*args, **kwargs):
+        raise OSError("synthetic failure before pointer rename")
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_rename_temp", fail_pointer)
+        with pytest.raises(ProfileGenerationOutcomeUnknown):
+            store.save(v3, [])
+    assert store.load(v1.profile_id) == (v2, {})
+    assert store.load_revision(v1.profile_id, "v3") == (v3, {})
+    store.save(v3, [])
+    assert store.load(v1.profile_id) == (v3, {})
+    v4 = replace(v1, version="v4")
+    persist = store._persist_revision_leaf
+    def fail_ledger(fd, name, payload):
+        if name == "evidence.jsonl":
+            raise OSError("synthetic partial revision")
+        return persist(fd, name, payload)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_persist_revision_leaf", fail_ledger)
+        with pytest.raises(OSError):
+            store.save(v4, [])
+    assert store.load(v1.profile_id) == (v3, {})
+    with pytest.raises(KeyError):
+        store.load_revision(v1.profile_id, "v4")
+    store.save(v4, [])
+    assert store.load_revision(v1.profile_id, "v4") == (v4, {})
+    assert store.load(v1.profile_id) == (v4, {})
+    modern = ProfileStore(tmp_path / "modern")
+    modern.save(v1, [])
+    with pytest.raises(ValueError, match="cannot mix"):
+        modern.save_revision(v2, [])
+    assert modern.load(v1.profile_id) == (v1, {})
