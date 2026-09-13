@@ -1221,6 +1221,61 @@ def _deterministic_handoff_issuance(
     return handoff_issued_at, vacancy_valid_until, dossier_valid_until
 
 
+def _require_detailed_eligibility(
+    connection: sqlite3.Connection, *, profile_id: str, profile_version: str,
+    track: str, job_key: str, source_content_sha256: str,
+    profile_file_sha256: str, evidence_file_sha256: str,
+    normalized_json_sha256: str,
+) -> bytes:
+    """Require current, matching eligibility evidence; never grant release."""
+    from market_aligner.processing import (
+        ProcessingRefused, parse_eligibility_receipt,
+        read_current_eligibility_receipt,
+    )
+
+    try:
+        rows = connection.execute(
+            "SELECT operation_id,binding_sha256 FROM eligibility_receipts "
+            "WHERE profile_id=? AND job_key=? AND track=?",
+            (profile_id, job_key, track),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ProductionHandoffError("eligibility_state", "one detailed eligibility receipt is required")
+        raw = read_current_eligibility_receipt(
+            connection, operation_id=rows[0][0], binding_sha256=rows[0][1])
+        if raw is None:
+            raise ProductionHandoffError("eligibility_state", "detailed eligibility disappeared")
+        receipt = parse_eligibility_receipt(raw)
+        if (receipt["profile_id"], receipt["profile_version"], receipt["job_key"], receipt["track"]) != (
+            profile_id, profile_version, job_key, track
+        ):
+            raise ProductionHandoffError("eligibility_binding", "eligibility subject differs")
+        fit = receipt["fit_receipt"]
+        if (fit["raw"]["source_content_sha256"] != source_content_sha256
+                or fit["profile"]["profile_file_sha256"] != profile_file_sha256
+                or fit["profile"]["evidence_file_sha256"] != evidence_file_sha256
+                or fit["normalised_projection"]["normalized_json_sha256"] != normalized_json_sha256):
+            raise ProductionHandoffError("eligibility_binding", "eligibility product input differs")
+        actual = {row[1]: str(Path(row[2]).resolve())
+                  for row in connection.execute("PRAGMA database_list") if row[1] != "temp"}
+        for alias, name in (("main", "assessments"), ("vacancy", "vacancy")):
+            declared = receipt["databases"][name]
+            if actual.get(alias) != declared["path"]:
+                raise ProductionHandoffError("eligibility_binding", "eligibility database path differs")
+            info = os.stat(actual[alias], follow_symlinks=False)
+            observed = (info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode), info.st_nlink)
+            expected = tuple(declared[key] for key in ("dev", "ino", "uid", "mode", "nlink"))
+            if observed != expected:
+                raise ProductionHandoffError("eligibility_binding", "eligibility database identity differs")
+        if receipt["decision"] != "pass" or receipt["eligibility_authority"] is not True:
+            raise ProductionHandoffError("eligibility_state", "detailed eligibility did not pass")
+        return raw
+    except ProductionHandoffError:
+        raise
+    except (ProcessingRefused, ValueError, sqlite3.Error, OSError) as exc:
+        raise ProductionHandoffError("eligibility_state", "detailed eligibility evidence refused") from exc
+
+
 def _build_production_handoff_from_authenticated_time(
     *,
     deployment: _ProductionHandoffDeployment,
@@ -1497,7 +1552,25 @@ def _build_production_handoff_from_authenticated_time(
         "vacancy_snapshot_sha256": vacancy_snapshot_sha,
     }
 
+    eligibility_connection = service.assessments.connect()
+    try:
+        eligibility_connection.row_factory = None
+        eligibility_connection.execute("ATTACH DATABASE ? AS vacancy", (str(service.jobs.path),))
+        eligibility_connection.execute("PRAGMA query_only=ON")
+        eligibility_connection.execute("BEGIN")
+        detailed_eligibility_bytes = _require_detailed_eligibility(
+            eligibility_connection, profile_id=profile_id, profile_version=profile.version,
+            track=track, job_key=source_job_key,
+            source_content_sha256=str(posting["content_hash"]),
+            profile_file_sha256=_sha(_profile_bytes), evidence_file_sha256=_sha(evidence_bytes),
+            normalized_json_sha256=_sha(_canonical(vacancy)),
+        )
+    finally:
+        eligibility_connection.close()
+
     eligibility_sources = {
+        "detailed_eligibility": {"decision": "include",
+                                 "receipt": json.loads(detailed_eligibility_bytes)},
         "first_job_scope": result.get("first_job_scope"),
         "vacancy_viability": result.get("viability"),
     }

@@ -16127,6 +16127,70 @@ class EligibilityEndToEndTests(unittest.TestCase):
             supplied_job_key="board:42",
             supplied_track="backend"), payload
 
+    def _handoff_eligibility_inputs(self, connection):
+        from market_aligner.processing import read_normalized_job
+        raw = connection.execute("SELECT receipt_bytes FROM eligibility_receipts").fetchone()[0]
+        receipt = parse_eligibility_receipt(raw)
+        profile = Path(self.fx.root) / "profiles" / receipt["profile_id"]
+        normalized = read_normalized_job(connection, key=receipt["job_key"])
+        return raw, dict(
+            profile_id=receipt["profile_id"], profile_version="gen-1",
+            track="backend", job_key="board:42",
+            source_content_sha256=self.fx.content_hash,
+            profile_file_sha256=_sha((profile / "profile.yaml").read_bytes()),
+            evidence_file_sha256=_sha((profile / "evidence.jsonl").read_bytes()),
+            normalized_json_sha256=_sha(normalized[0]),
+        )
+
+    def test_handoff_requires_current_matching_detailed_eligibility(self):
+        from market_aligner.applications.production_handoff import (
+            ProductionHandoffError, _require_detailed_eligibility)
+        self.test_pass_decision_sets_authority_true()
+        with _sq.connect(self.fx.assessments_path) as connection:
+            connection.execute("ATTACH DATABASE ? AS vacancy", (str(self.fx.vacancy_db),))
+            connection.execute("PRAGMA query_only=ON")
+            raw, inputs = self._handoff_eligibility_inputs(connection)
+            self.assertEqual(raw, _require_detailed_eligibility(connection, **inputs))
+            for key in ("source_content_sha256", "profile_file_sha256",
+                        "evidence_file_sha256", "normalized_json_sha256"):
+                with self.subTest(key=key), self.assertRaises(ProductionHandoffError) as caught:
+                    _require_detailed_eligibility(connection, **{**inputs, key: "0" * 64})
+                self.assertEqual("eligibility_binding", caught.exception.code)
+            with self.assertRaises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **{**inputs, "job_key": "board:absent"})
+            self.assertEqual(0, connection.total_changes)
+            connection.execute("PRAGMA query_only=OFF")
+            connection.execute("UPDATE vacancy.postings SET raw_text='changed' WHERE key='board:42'")
+            with self.assertRaises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs)
+
+    def test_handoff_refuses_detailed_rejection(self):
+        from market_aligner.applications.production_handoff import (
+            ProductionHandoffError, _require_detailed_eligibility)
+        self.run_one(self.fx)
+        with _sq.connect(self.fx.assessments_path) as connection:
+            connection.execute("ATTACH DATABASE ? AS vacancy", (str(self.fx.vacancy_db),))
+            _, inputs = self._handoff_eligibility_inputs(connection)
+            with self.assertRaises(ProductionHandoffError) as caught:
+                _require_detailed_eligibility(connection, **inputs)
+            self.assertEqual("eligibility_state", caught.exception.code)
+
+    def test_handoff_refuses_unresolved_detailed_eligibility(self):
+        from market_aligner.applications.production_handoff import (
+            ProductionHandoffError, _require_detailed_eligibility)
+        candidate = self.fx.candidate_facts()
+        candidate["authorised_jurisdictions"] = None
+        candidate["requires_sponsorship"] = None
+        candidate["current_residence"]["value"] = "NL"
+        candidate["maximum_years_required"]["value"] = 5.0
+        raw, _ = self.run_one(self.fx, candidate_overrides=candidate)
+        self.assertEqual("review", parse_eligibility_receipt(raw)["decision"])
+        with _sq.connect(self.fx.assessments_path) as connection:
+            connection.execute("ATTACH DATABASE ? AS vacancy", (str(self.fx.vacancy_db),))
+            _, inputs = self._handoff_eligibility_inputs(connection)
+            with self.assertRaises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs)
+
     def test_read_receipt_reuses_durable_verifier_without_writes(self):
         from market_aligner.processing import ProcessingRefused, read_eligibility_receipt
 

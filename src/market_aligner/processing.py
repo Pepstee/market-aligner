@@ -8998,6 +8998,38 @@ def read_eligibility_receipt(
     return stored_bytes
 
 
+def read_current_eligibility_receipt(
+    connection: sqlite3.Connection, *, operation_id: str, binding_sha256: str,
+) -> bytes | None:
+    """Recheck stored eligibility against its FIT graph and current raw posting.
+
+    The caller owns this connection and its vacancy attachment, must bind the
+    current profile and product inputs, and must separately require a pass.
+    """
+    raw = read_eligibility_receipt(
+        connection, operation_id=operation_id, binding_sha256=binding_sha256)
+    if raw is None:
+        return None
+    parsed = parse_eligibility_receipt(raw)
+    payload = reconstruct_eligibility_envelope(parsed)
+    facts = compose_eligibility_envelope_facts(
+        payload, envelope_file_sha256=parsed["envelope_file_sha256"],
+        expected_assessments_path=None, expected_vacancy_path=None)
+    if (facts.envelope_semantic_sha256 != parsed["envelope_semantic_sha256"]
+            or build_eligibility_binding(facts, payload)[1] != binding_sha256):
+        raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
+                                "reconstructed eligibility binding differs")
+    fit = bind_fit_authority(connection, facts, payload)
+    _validate_current_raw_against_fit(connection, fit)
+    view = reconstruct_decision_view(facts, fit)
+    for key in ("decision", "reasons", "unknowns", "decision_input",
+                "decision_input_sha256"):
+        if view[key] != parsed[key]:
+            raise ProcessingRefused(ELIGIBILITY_REASON_DECISION_RECONSTRUCTION,
+                                    "stored eligibility decision differs")
+    return raw
+
+
 def _classify_own_receipt(
     connection: sqlite3.Connection, facts: EligibilityEnvelopeFacts,
     binding_sha256: str,
@@ -9438,6 +9470,27 @@ def recover_eligibility_durable_truth(
     return classification
 
 
+def reconstruct_eligibility_envelope(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct the original closed envelope from a verified receipt."""
+    return {
+        "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
+        "eligibility_operation_id": parsed["operation_id"],
+        "fit_operation_id": parsed["fit_operation_id"],
+        "job_key": parsed["job_key"],
+        "profile_id": parsed["profile_id"],
+        "profile_version": parsed["profile_version"],
+        "track": parsed["track"],
+        "fit_receipt_self_hash": parsed["fit_receipt_self_hash"],
+        "fit_receipt_file_sha256": parsed["fit_receipt_file_sha256"],
+        "decision_policy": {"decision_policy_sha256":
+                            parsed["decision_policy_sha256"]},
+        "config": parsed["config"],
+        "databases": parsed["databases"],
+        "candidate_facts": parsed["candidate_facts"],
+        "vacancy_facts": parsed["vacancy_facts"],
+    }
+
+
 def classify_eligibility_durable_graph(
     connection: sqlite3.Connection, plan: EligibilityProspectivePlan,
 ) -> RecoveredTransactionClassification:
@@ -9518,23 +9571,7 @@ def classify_eligibility_durable_graph(
         return incoherent("embedded FIT receipt does not match its stored row")
     # Full immutable-graph revalidation through the sole owners, using a
     # payload reconstructed EXACTLY from the sealed eligibility receipt.
-    reconstructed_payload = {
-        "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
-        "eligibility_operation_id": parsed["operation_id"],
-        "fit_operation_id": parsed["fit_operation_id"],
-        "job_key": parsed["job_key"],
-        "profile_id": parsed["profile_id"],
-        "profile_version": parsed["profile_version"],
-        "track": parsed["track"],
-        "fit_receipt_self_hash": parsed["fit_receipt_self_hash"],
-        "fit_receipt_file_sha256": parsed["fit_receipt_file_sha256"],
-        "decision_policy": {"decision_policy_sha256":
-                            parsed["decision_policy_sha256"]},
-        "config": parsed["config"],
-        "databases": parsed["databases"],
-        "candidate_facts": parsed["candidate_facts"],
-        "vacancy_facts": parsed["vacancy_facts"],
-    }
+    reconstructed_payload = reconstruct_eligibility_envelope(parsed)
     try:
         store_state = _inspect_eligibility_store(
             connection, parsed["fit_operation_id"], parsed["operation_id"])
