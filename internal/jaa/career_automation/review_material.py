@@ -171,6 +171,7 @@ class AssembledReviewMaterial:
     request_sha256: str
     vacancy_snapshot_bytes: bytes
     raw_listing_bytes: bytes
+    visible_listing_text_bytes: bytes
     projected_text_bytes: bytes
     review_text_sha256: str
     projection_bytes: bytes
@@ -981,6 +982,7 @@ class ReviewMaterialAssembler:
             request_sha256=request_sha256,
             vacancy_snapshot_bytes=resolution.vacancy_snapshot_bytes,
             raw_listing_bytes=resolution.raw_listing_bytes,
+            visible_listing_text_bytes=resolution.visible_listing_text_bytes,
             projected_text_bytes=projected_text_bytes,
             review_text_sha256=review_text_sha256,
             projection_bytes=projection_bytes,
@@ -1023,7 +1025,8 @@ class ReviewMaterialAssembler:
         )
         byte_fields = (
             "evaluation_time_receipt_bytes", "request_bytes",
-            "vacancy_snapshot_bytes", "raw_listing_bytes", "projected_text_bytes",
+            "vacancy_snapshot_bytes", "raw_listing_bytes",
+            "visible_listing_text_bytes", "projected_text_bytes",
             "projection_bytes", "vacancy_snapshot_metadata_bytes",
             "raw_listing_metadata_bytes", "projection_metadata_bytes",
             "review_input_bytes", "verification_receipt_bytes",
@@ -1034,7 +1037,7 @@ class ReviewMaterialAssembler:
             objects[name] = archive.add_artifact(
                 "review.material." + name,
                 value,
-                media_type=("text/plain" if name in {"raw_listing_bytes", "projected_text_bytes"}
+                media_type=("text/plain" if name in {"raw_listing_bytes", "visible_listing_text_bytes", "projected_text_bytes"}
                             else "application/json"),
                 created_at=material.evaluated_at,
             )

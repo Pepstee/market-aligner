@@ -727,7 +727,8 @@ def test_absent_or_replayed_time_proof_blocks_before_new_resolution(tmp_path, pe
 
     if persisted:
         objects = archive._objects(archive._events())
-        assert len(objects) == 12
+        assert len(objects) == 13
+        assert sum(obj.role == "review.material.visible_listing_text_bytes" for obj in objects) == 1
         assert sum(obj.role == "review.material.manifest" for obj in objects) == 1
 
 
@@ -990,6 +991,9 @@ def test_persisted_review_reopens_every_exact_material_byte_and_completion_link(
         application_package_bytes=_application_package(),
         archive=attempt,
     )
+    assert result.material.visible_listing_text_bytes == VISIBLE_TEXT
+    assert result.material.projected_text_bytes == PROJECTED_TEXT
+    assert VISIBLE_TEXT != PROJECTED_TEXT
     reopened = ApplicationArchive(
         attempt.archive.root, repository_root=Path(__file__).parent, create=False
     ).open_attempt(result.attempt_id)
