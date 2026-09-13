@@ -271,15 +271,26 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
     references = {}
     for row in document["reference_bundle"]["value"]["entries"]:
         metadata = row["metadata"]
+        original_bytes = base64.b64decode(row["object_base64"], validate=True)
+        supplied_bytes = bytearray(original_bytes)
+        supplied_subject = dict(metadata["subject"])
         references[metadata["reference_key"]] = HandoffReference(
-            exact_bytes=base64.b64decode(row["object_base64"], validate=True),
+            exact_bytes=supplied_bytes,
             type_id=metadata["type_id"],
             schema_version=metadata["schema_version"],
-            subject=metadata["subject"],
+            subject=supplied_subject,
             issued_at=metadata["issued_at"],
             valid_until=metadata["valid_until"],
             issuer_id=metadata["issuer_id"],
         )
+        supplied_bytes[:] = b"changed after reference construction"
+        supplied_subject["unexpected"] = "changed after reference construction"
+        reference = references[metadata["reference_key"]]
+        assert reference.exact_bytes == original_bytes
+        assert dict(reference.subject) == metadata["subject"]
+        with pytest.raises(TypeError):
+            reference.subject["unexpected"] = "mutation"
+
     output_root = tmp_path / "external-data-home"
     first = write_protected_handoff_bundle(
         output_root,
