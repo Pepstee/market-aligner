@@ -506,3 +506,35 @@ class LLMPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetainedContractValidationTests(unittest.TestCase):
+    def test_extraction_and_receipt_reject_donor_invalid_values(self) -> None:
+        from dataclasses import replace
+        from market_aligner.llm.contracts import _unit
+
+        payload = _extraction_payload('a' * 64)
+        for key, value in tuple(payload.items()):
+            if isinstance(value, list):
+                payload[key] = tuple(value)
+        value = SemanticVacancyExtraction(**payload)
+        for changes in (
+            {'extraction_confidence': True},
+            {'extraction_confidence': '0.5'},
+            {'source_content_sha256': 'Z' * 64},
+            {'required_skills': ['Python']},
+            {'work_authorisation': ('gb',)},
+        ):
+            with self.subTest(changes=changes), self.assertRaises((TypeError, ValueError)):
+                replace(value, **changes)
+        for bad in (float('nan'), float('inf'), -0.1, 1.1):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                _unit(bad, 'confidence')
+        receipt = LLMReceipt.bind(
+            receipt_id='synthetic', task='extraction', model='fixture-model',
+            prompt_version='v1', inputs={'source': 'synthetic'},
+            output=value, created_at='2026-09-14T00:00:00Z',
+        )
+        for changes in ({'model': ''}, {'input_sha256': 'x' * 64}, {'contract_version': 'invalid'}):
+            with self.subTest(changes=changes), self.assertRaises((TypeError, ValueError)):
+                replace(receipt, **changes)
