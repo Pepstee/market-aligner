@@ -1,11 +1,11 @@
 {
   "community_count": 998,
-  "edge_count": 146418,
-  "node_count": 67273,
+  "edge_count": 146224,
+  "node_count": 67243,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
-    "GRAPH_REPORT.md": "e711af48aafc5670d7609bfbe32c62242d0b81fadd4ad4f35446f64d2c9285c4",
-    "graph.json": "49d187f21389d4b2004228b88701e1d7115c44959d2ec29dcadf39cad5431af7"
+    "GRAPH_REPORT.md": "a318a8cfba50bbb5a3dac7ea0d8b90bc0e3306b492589b8109550eefb1ae60e9",
+    "graph.json": "407b927c0e8cacb61af1575f0453c7d14b9947d127fa6373aba62a090e1a0613"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "b1a015175425a9a79005020eb124643cd1a5ba32",
+  "source_base_commit": "c42962df9a3decc639199da7362776d5e7b210eb",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -30,7 +30,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "d6dfe54ca165bc23a2c6881a1a10292bf889e194971af12446958f84a5620dfe",
     "docs/migration/capability-inventory.jsonl": "ec288a155f0eb1c16f44e1c03dc973f99577cc5dd85ff93fdb960042a14db567",
-    "docs/migration/ledger.jsonl": "54e6f3a3275260bb2a574c1eca081b8ca08b993e699e9f615ddcf65915ea8e20",
+    "docs/migration/ledger.jsonl": "20a06c791afe674c220608a9d1cf90916d8657be371943f6d86c0d5a35319e59",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -166,7 +166,7 @@
     "internal/jaa/career_automation/production_ats_executor.py": "d975b06e6bae84493fe22e85313010433813d0e2ec78686e49562794eb87f748",
     "internal/jaa/career_automation/production_attempt.py": "bfe0deedc1567622976c4a6f9db104470fe84265d57e2cff1a9e39ad87cca2c7",
     "internal/jaa/career_automation/production_form_binding.py": "e7b78a0290b8cb137a8c9394cf6af98ecfea7adba1041739ccccc528ced13206",
-    "internal/jaa/career_automation/production_handoff_admission_runner.py": "d2b7cc790ba9411ae8d555dbb6ece5c522ec34641a452adecb08c74dafe38b37",
+    "internal/jaa/career_automation/production_handoff_admission_runner.py": "d77970f37a9870147f57d38379ac2c123e7b2610b5cacdacac5f69c093822d11",
     "internal/jaa/career_automation/production_handoff_runner.py": "b04a5680eb0dfc38943ba8ef66c19a6c9455daedc8040c6d7f0538873c327e64",
     "internal/jaa/career_automation/production_preparation_runner.py": "cc4efc3f1b09affa61e4a6ad4ba16fbd4600519bbf44ba87675a567d61931b17",
     "internal/jaa/career_automation/production_queue.py": "d4c386919d49c9cb48561b9d2fd1dca63412e2988b0c4adee9762b3668a5671c",

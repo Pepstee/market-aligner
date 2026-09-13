@@ -573,25 +573,18 @@ def _prepare_database(parent_descriptor: int) -> None:
         os.close(descriptor)
 
 
-def _run_production_handoff_admission_pinned(
+def _read_published_handoff_pinned(
     *,
     execution_receipt_path: str | Path,
     deployment: _ProductionAdmissionDeployment,
-    witness: AuthenticatedCurrentTimeWitness,
     paths: _PinnedProductionPaths,
     commit_resolver: Callable[[Path, int], str],
-) -> ProductionHandoffAdmissionReceipt:
-    if (
-        deployment.execution_receipt_root != deployment.outbox_root / "receipts"
-        or deployment.admission_root
-        != deployment.data_home / "state" / "jaa-production-admissions"
-    ):
-        raise ProductionHandoffAdmissionError("production deployment roots differ")
-    if (
-        type(witness) is not AuthenticatedCurrentTimeWitness
-        or getattr(witness, "environment", None) != "production"
-    ):
-        raise ProductionHandoffAdmissionError("production current-time witness differs")
+) -> tuple[dict[str, object], bytes, str, str, ProtectedLocalOutbox, object]:
+    """Validate published bytes under live path pins without creating admission state.
+
+    The caller owns the pins and adapter lifetime. This result is publication
+    evidence only, never release or submission authority.
+    """
     for protected_path in (
         deployment.data_home,
         deployment.outbox_root,
@@ -660,6 +653,37 @@ def _run_production_handoff_admission_pinned(
         raise ProductionHandoffAdmissionError(
             "execution receipt and authenticated bundle differ"
         )
+    paths.verify_references()
+    return document, receipt_bytes, current_commit, source_record, adapter, handoff
+
+
+def _run_production_handoff_admission_pinned(
+    *,
+    execution_receipt_path: str | Path,
+    deployment: _ProductionAdmissionDeployment,
+    witness: AuthenticatedCurrentTimeWitness,
+    paths: _PinnedProductionPaths,
+    commit_resolver: Callable[[Path, int], str],
+) -> ProductionHandoffAdmissionReceipt:
+    if (
+        deployment.execution_receipt_root != deployment.outbox_root / "receipts"
+        or deployment.admission_root
+        != deployment.data_home / "state" / "jaa-production-admissions"
+    ):
+        raise ProductionHandoffAdmissionError("production deployment roots differ")
+    if (
+        type(witness) is not AuthenticatedCurrentTimeWitness
+        or getattr(witness, "environment", None) != "production"
+    ):
+        raise ProductionHandoffAdmissionError("production current-time witness differs")
+    document, receipt_bytes, current_commit, source_record, adapter, _handoff = (
+        _read_published_handoff_pinned(
+            execution_receipt_path=execution_receipt_path,
+            deployment=deployment,
+            paths=paths,
+            commit_resolver=commit_resolver,
+        )
+    )
     data_descriptor = os.dup(paths.data_descriptor)
     try:
         state_descriptor = _open_private_child(data_descriptor, "state")

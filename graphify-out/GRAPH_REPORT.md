@@ -4948,3 +4948,7 @@ Scoped deterministic AST refresh of cv_generation/service.py after restoring the
 ## CV service owner accounting ma-0133
 
 Deterministic43-feature owner inventory refresh, nine preserved donor variants,29 explicit dispositions and current inventory line locations. Source graph remains ma-0132 extraction. No model graph enrichment or sensitive-source scan.
+
+## Published handoff validation ma-0134
+
+Scoped deterministic AST refresh of production_handoff_admission_runner.py for shared read-only validation. Other communities remain historical; incident edges replaced by scoped extraction. No full semantic join or sensitive-source scan.
