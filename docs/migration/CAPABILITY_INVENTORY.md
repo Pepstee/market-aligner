@@ -11,11 +11,11 @@ exclusively beneath `internal/jaa`; donor copies never gain runtime authority.
 - `adopted_adapted`: 2259
 - `canonical`: 20669
 - `canonical_relocated_exact`: 958
-- `conflicting_variant_review`: 723
+- `conflicting_variant_review`: 708
 - `integration_required`: 297
 - `quarantined`: 327
 - `retained_evidence`: 2448
-- `superseded`: 2643
+- `superseded`: 2658
 
 `integration_required` and `conflicting_variant_review` are fail-closed work
 queues, not evidence of safe mergeability. `retained_evidence` remains
