@@ -201,7 +201,7 @@ Unless a field-specific rule is stricter:
 - RFC3339 means a timezone-aware parseable string of length 20..64
 - operation_id matches ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$
 - profile_id matches ^prf_[0-9a-f]{32}$
-- job_key is exact board:job identity, 3..256 Unicode code points
+- job_key is exact board:job identity, 3..256 Unicode code points; the existing Workable collector identity `workable:<tenant>:<shortcode>` is also admitted, with nonempty tenant containing no colon, whitespace or slash and a ten-character uppercase ASCII alphanumeric shortcode. The board itself cannot contain a colon, and raw admission still binds the exact board/job pair
 - profile_version is a nonempty string of length 1..128
 - track is a nonempty string of length 1..128
 

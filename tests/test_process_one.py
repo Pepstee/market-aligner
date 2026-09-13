@@ -15714,7 +15714,12 @@ class EligibilityFixture:
 
     FIT_OPERATION_ID = "fit-op-accept-000001"
 
-    def __init__(self, base: Path):
+    def __init__(self, base: Path, *, job=None,
+                 fetched_at="2026-08-26T00:00:00Z", raw_text=None,
+                 extraction_overrides=None):
+        from market_aligner.domain.contracts import JobUrl
+        self.job = job or JobUrl("board", "42", "https://x/y")
+        self.fetched_at = fetched_at
         self.base = base
         self.root = (base / "data").resolve()
         self.state = self.root / "state"
@@ -15781,14 +15786,14 @@ class EligibilityFixture:
         self.vacancy_db = self.state / "vacancies.sqlite3"
         JobDatabase(self.vacancy_db)
         conn = _sq.connect(self.vacancy_db)
-        self.raw_text = "Senior backend engineer in Amsterdam."
+        self.raw_text = raw_text if raw_text is not None else "Senior backend engineer in Amsterdam."
         self.content_hash = _sha(self.raw_text)
         conn.execute(
             "INSERT INTO postings(key,board,job_id,url,fetched_at,raw_text,"
             "content_hash,fetch_status)"
-            " VALUES('board:42','board','42','https://x/y',"
-            "'2026-08-26T00:00:00Z',?,?, 'fetched')",
-            (self.raw_text, self.content_hash))
+            " VALUES(?,?,?,?,?,?,?, 'fetched')",
+            (self.job.key, self.job.board, self.job.job_id, self.job.url,
+             self.fetched_at, self.raw_text, self.content_hash))
         conn.commit()
         conn.close()
 
@@ -15808,20 +15813,21 @@ class EligibilityFixture:
             "remote_policy": "hybrid", "extraction_confidence": 0.9,
             "unknown_fields": [],
             "contract_version": LLM_CONTRACT_VERSION}
+        self.extraction_output.update(extraction_overrides or {})
         extraction = SemanticVacancyExtraction(
             **{**self.extraction_output,
-               "responsibilities": tuple(),
-               "required_skills": tuple(), "preferred_skills": tuple(),
+               "responsibilities": tuple(self.extraction_output["responsibilities"]),
+               "required_skills": tuple(self.extraction_output["required_skills"]), "preferred_skills": tuple(self.extraction_output["preferred_skills"]),
                "required_qualifications": tuple(
                    self.extraction_output["required_qualifications"]),
-               "preferred_qualifications": tuple(),
+               "preferred_qualifications": tuple(self.extraction_output["preferred_qualifications"]),
                "work_authorisation": tuple(
                    self.extraction_output["work_authorisation"]),
-               "unknown_fields": tuple()})
+               "unknown_fields": tuple(self.extraction_output["unknown_fields"])})
         extraction_input_node = {
             "schema_version": EXTRACTION_INPUT_SCHEMA_VERSION,
-            "job_key": "board:42", "board": "board", "job_id": "42",
-            "url": "https://x/y", "fetched_at": "2026-08-26T00:00:00Z",
+            "job_key": self.job.key, "board": self.job.board, "job_id": self.job.job_id,
+            "url": self.job.url, "fetched_at": self.fetched_at,
             "source_content_sha256": self.content_hash,
             "raw_snapshot_sha256": self._raw_snapshot_sha(),
             "raw_text": self.raw_text, "raw_json": None}
@@ -15835,8 +15841,8 @@ class EligibilityFixture:
             "contract_version": LLM_CONTRACT_VERSION}
 
         from market_aligner.domain.contracts import RawPosting
-        posting = RawPosting(board="board", job_id="42", url="https://x/y",
-                             fetched_at="2026-08-26T00:00:00Z",
+        posting = RawPosting(board=self.job.board, job_id=self.job.job_id, url=self.job.url,
+                             fetched_at=self.fetched_at,
                              raw_text=self.raw_text, raw_json=None,
                              content_sha256=self.content_hash)
         from market_aligner.llm.pipeline import accept_extraction
@@ -15844,14 +15850,14 @@ class EligibilityFixture:
                                     LLMReceipt(**extraction_receipt))
         alignment_output = {
             "profile_id": _PROFILE_ID, "profile_version": "gen-1",
-            "job_key": "board:42", "matches": [],
+            "job_key": self.job.key, "matches": [],
             "missing_requirements": [],
             "technical_alignment": 0.8, "evidence_match": 0.7,
             "confidence": 0.75, "unknowns": [],
             "contract_version": LLM_CONTRACT_VERSION}
         alignment_input_node = {
             "schema_version": ALIGNMENT_INPUT_SCHEMA_VERSION,
-            "job_key": "board:42", "profile_id": _PROFILE_ID,
+            "job_key": self.job.key, "profile_id": _PROFILE_ID,
             "profile_version": "gen-1", "track": "backend",
             "vacancy": dataclasses_asdict(vacancy),
             "profile_context": self.profile_context,
@@ -15868,7 +15874,7 @@ class EligibilityFixture:
         axes = AssessmentAxes(technical_alignment=0.8 * 10,
                               evidence_match=0.7 * 10, market_demand=0,
                               barrier_to_entry=10, growth_potential=0)
-        score_result = score(profile, "board:42", "backend", axes, None)
+        score_result = score(profile, self.job.key, "backend", axes, None)
 
         self.assessments_path = self.state / "assessments.sqlite3"
         astore = AssessmentStore(self.assessments_path)
@@ -15880,7 +15886,7 @@ class EligibilityFixture:
         fit_envelope = {
             "schema_version": "market-aligner.processing-envelope.v1",
             "operation_id": self.FIT_OPERATION_ID,
-            "job_key": "board:42", "profile_id": _PROFILE_ID,
+            "job_key": self.job.key, "profile_id": _PROFILE_ID,
             "profile_version": "gen-1", "track": "backend",
             "config": self.config_binding,
             "databases": {"assessments": self._identity(
@@ -15908,7 +15914,7 @@ class EligibilityFixture:
             supplied_operation_id=self.FIT_OPERATION_ID,
             supplied_config_path=self.resolved_config_path,
             supplied_profile_id=_PROFILE_ID,
-            supplied_job_key="board:42", supplied_track="backend")
+            supplied_job_key=self.job.key, supplied_track="backend")
         conn = _sq.connect(self.assessments_path)
         self.fit_stored_bytes = conn.execute(
             "SELECT receipt_bytes FROM processing_receipts WHERE "
@@ -15921,9 +15927,9 @@ class EligibilityFixture:
         _os.chmod(Path(self.vacancy_db), 0o600)
 
     def _raw_snapshot_sha(self) -> str:
-        semantic = {"job_key": "board:42", "board": "board", "job_id": "42",
-                    "url": "https://x/y", "posted_at": None,
-                    "fetched_at": "2026-08-26T00:00:00Z",
+        semantic = {"job_key": self.job.key, "board": self.job.board, "job_id": self.job.job_id,
+                    "url": self.job.url, "posted_at": None,
+                    "fetched_at": self.fetched_at,
                     "raw_text": self.raw_text, "raw_json": None,
                     "fetch_status": "fetched"}
         return _sha(_cj(semantic))
@@ -16005,7 +16011,7 @@ class EligibilityFixture:
             "schema_version": ELIGIBILITY_ENVELOPE_SCHEMA_VERSION,
             "eligibility_operation_id": operation_id,
             "fit_operation_id": fit_operation_id or self.FIT_OPERATION_ID,
-            "job_key": "board:42", "profile_id": _PROFILE_ID,
+            "job_key": self.job.key, "profile_id": _PROFILE_ID,
             "profile_version": "gen-1", "track": "backend",
             "fit_receipt_self_hash": self.fit_self_hash,
             "fit_receipt_file_sha256": self.fit_file_hash,
@@ -16141,6 +16147,31 @@ class EligibilityEndToEndTests(unittest.TestCase):
             evidence_file_sha256=_sha((profile / "evidence.jsonl").read_bytes()),
             normalized_json_sha256=_sha(normalized[0]),
         )
+
+    def test_workable_tenant_identity_reaches_fit_and_eligibility(self):
+        from market_aligner.domain.contracts import JobUrl
+        from market_aligner.processing import job_key_value
+        job = JobUrl("workable", "cogna:847CFBC5F4",
+                     "https://apply.workable.com/cogna/j/847CFBC5F4")
+        self.assertEqual(job.key, job_key_value(job.key))
+        for invalid in ("board:tenant:847CFBC5F4", "workable::847CFBC5F4",
+                        "workable:a:b:847CFBC5F4", "workable:cogna:short",
+                        "workable:cogna:847cfbc5f4", "workable:a/b:847CFBC5F4"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                job_key_value(invalid)
+        fx = EligibilityFixture(Path(self.tmpdir.name) / "workable", job=job)
+        payload = fx.envelope()
+        raw = eligibility_one(
+            fx.root, fx.stage(payload),
+            supplied_operation_id=payload["eligibility_operation_id"],
+            supplied_fit_operation_id=payload["fit_operation_id"],
+            supplied_config_path=fx.resolved_config_path,
+            supplied_profile_id=payload["profile_id"], supplied_job_key=job.key,
+            supplied_track=payload["track"])
+        receipt = parse_eligibility_receipt(raw)
+        self.assertEqual(job.key, receipt["job_key"])
+        self.assertEqual("reject", receipt["decision"])
+        self.assertFalse(receipt["eligibility_authority"])
 
     def test_handoff_requires_current_matching_detailed_eligibility(self):
         from market_aligner.applications.production_handoff import (

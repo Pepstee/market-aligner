@@ -255,7 +255,7 @@ Unless stricter per field:
 - RFC3339 means timezone-aware parseable length 20..64 (strict owner rules where used);
 - operation id matches `^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$`;
 - profile_id matches `^prf_[0-9a-f]{32}$` exactly;
-- job_key is exact `board:job`, 3..256 code points, board <= 128, job <= 256, no second colon;
+- job_key is exact `board:job`, 3..256 code points, board <= 128, job <= 256, no second colon except the canonical Workable tenant-qualified form `workable:<tenant>:<shortcode>` (tenant nonempty with no colon, whitespace or slash; shortcode exactly ten uppercase ASCII letters/digits);
 - track/profile_version: plain strings 1..128;
 - BLANKNESS (normative, used by sections 9–10): a code point `c` is BLANK iff
   `c` is one of U+0009, U+000A, U+000B, U+000C, U+000D, U+0020, or

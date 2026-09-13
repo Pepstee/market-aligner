@@ -348,7 +348,11 @@ def operation_id_value(value: Any) -> str:
 def job_key_value(value: Any) -> str:
     key = plain_string(value, "job_key", 3, 256)
     board, separator, job_id = key.partition(":")
-    if not separator or not board or not job_id or ":" in job_id:
+    workable_tenant_key = (
+        board == "workable"
+        and re.fullmatch(r"[^:\s/]+:[A-Z0-9]{10}", job_id) is not None
+    )
+    if not separator or not board or not job_id or (":" in job_id and not workable_tenant_key):
         raise ValueError("job_key must be exact board:job identity")
     if len(board) > 128 or len(job_id) > 256:
         raise ValueError("board/job segments exceed bounded lengths")
@@ -3035,7 +3039,7 @@ def _raw_snapshot_from_row(
         fetch_status,
     ) = values
     staged_job_key = facts.job_key
-    if key != staged_job_key or key != f"{board}:{job_id}":
+    if ":" in board or key != staged_job_key or key != f"{board}:{job_id}":
         raise ValueError(
             "posting identity does not bind board, job_id, and the staged job key"
         )
