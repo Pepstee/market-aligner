@@ -120,6 +120,72 @@ CREATE TRIGGER IF NOT EXISTS published_application_handoffs_no_delete
 BEFORE DELETE ON published_application_handoffs
 BEGIN SELECT RAISE(ABORT, 'published handoff evidence is immutable'); END;
 
+CREATE TABLE IF NOT EXISTS v1_event_inbox (
+    event_id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    handoff_root_sha256 TEXT NOT NULL,
+    transition_sequence INTEGER NOT NULL CHECK(transition_sequence > 0),
+    event_type TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    envelope_exact_bytes BLOB NOT NULL,
+    detail_exact_bytes BLOB NOT NULL,
+    event_root_sha256 TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    UNIQUE(application_id, handoff_root_sha256, transition_sequence)
+);
+CREATE TABLE IF NOT EXISTS v1_event_projection (
+    application_id TEXT NOT NULL,
+    handoff_root_sha256 TEXT NOT NULL,
+    state_bytes BLOB NOT NULL,
+    last_sequence INTEGER NOT NULL,
+    last_event_id TEXT NOT NULL REFERENCES v1_event_inbox(event_id),
+    terminal INTEGER NOT NULL CHECK(terminal IN (0,1)),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(application_id, handoff_root_sha256)
+);
+CREATE TABLE IF NOT EXISTS v1_reference_objects (
+    object_sha256 TEXT PRIMARY KEY, exact_bytes BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS v1_reference_resolutions (
+    metadata_sha256 TEXT PRIMARY KEY,
+    object_sha256 TEXT NOT NULL REFERENCES v1_reference_objects(object_sha256),
+    reference_key TEXT NOT NULL, type_id TEXT NOT NULL, schema_version TEXT NOT NULL,
+    subject_bytes BLOB NOT NULL, issuer_id TEXT NOT NULL, trust_root_id TEXT NOT NULL,
+    trust_proof_sha256 TEXT NOT NULL, issued_at TEXT NOT NULL, valid_until TEXT,
+    exact_metadata_bytes BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS v1_event_references (
+    event_id TEXT NOT NULL REFERENCES v1_event_inbox(event_id),
+    reference_key TEXT NOT NULL,
+    metadata_sha256 TEXT NOT NULL REFERENCES v1_reference_resolutions(metadata_sha256),
+    PRIMARY KEY(event_id, reference_key)
+);
+
+CREATE TRIGGER IF NOT EXISTS v1_event_inbox_no_update
+BEFORE UPDATE ON v1_event_inbox
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS v1_event_inbox_no_delete
+BEFORE DELETE ON v1_event_inbox
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS v1_reference_objects_no_update
+BEFORE UPDATE ON v1_reference_objects
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS v1_reference_objects_no_delete
+BEFORE DELETE ON v1_reference_objects
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS v1_reference_resolutions_no_update
+BEFORE UPDATE ON v1_reference_resolutions
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS v1_reference_resolutions_no_delete
+BEFORE DELETE ON v1_reference_resolutions
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS v1_event_references_no_update
+BEFORE UPDATE ON v1_event_references
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS v1_event_references_no_delete
+BEFORE DELETE ON v1_event_references
+BEGIN SELECT RAISE(ABORT, 'event evidence is immutable'); END;
+
 CREATE TABLE IF NOT EXISTS assessments (
   profile_id TEXT NOT NULL,
   job_key TEXT NOT NULL,

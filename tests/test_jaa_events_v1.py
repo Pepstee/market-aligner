@@ -341,3 +341,98 @@ def test_v0_is_retained_for_inspection_but_release_blocked() -> None:
     assert inspection.admission_kind == "legacy_v0"
     assert inspection.verified_v1 is False
     assert inspection.release_blocked is True
+
+
+class _DurableSyntheticResolver(_Resolver):
+    """Storage-test metadata only, never a production trust adapter."""
+
+    def validate(self, *, event_type, detail, expected, occurred_at):
+        references = super().validate(event_type=event_type, detail=detail,
+                                      expected=expected, occurred_at=occurred_at)
+        return tuple(VerifiedEventReference(r.reference_key, r.exact_bytes, {
+            **r.metadata, "reference_key": r.reference_key,
+            "type_id": "synthetic_test_binding", "schema_version": "synthetic.v1",
+            "subject": {"application_id": expected.application_id,
+                        "handoff_root_sha256": expected.handoff_root_sha256},
+            "issuer_id": "synthetic", "trust_root_id": "synthetic",
+            "trust_proof_sha256": _digest("synthetic-proof"),
+            "issued_at": occurred_at, "valid_until": None,
+        }) for r in references)
+
+
+def _register_synthetic_handoff(store, handoff):
+    basis = {"schema_version": "market-aligner.production-handoff-execution.v2",
+             "application_id": handoff.application_id,
+             "handoff_root_sha256": handoff.root_sha256,
+             "release_token_issued": False, "submission_authority": False}
+    receipt = canonical_json_bytes({**basis, "semantic_receipt_sha256":
+                                    digest_bytes(canonical_json_bytes(basis))})
+    store._record_published_handoff(handoff.exact_bytes, receipt)
+
+
+def test_durable_receiver_restarts_replays_and_rolls_back(tmp_path):
+    from market_aligner.research.store import AssessmentStore
+    from market_aligner.service.event_consumer import DurableEventConsumer
+
+    store = AssessmentStore(tmp_path / "assessments.sqlite3")
+    handoff = _handoff()
+    events = _successful_events(handoff)
+    consumer = DurableEventConsumer(store, _DurableSyntheticResolver())
+    with pytest.raises(ContractValidationError, match="published handoff"):
+        consumer.consume(events[0].exact_bytes, events[0].exact_detail_bytes)
+    _register_synthetic_handoff(store, handoff)
+    for event in events[:4]:
+        consumer.consume(event.exact_bytes, event.exact_detail_bytes)
+    reopened = AssessmentStore(store.path)
+    consumer = DurableEventConsumer(reopened, _DurableSyntheticResolver())
+    for event in events[4:]:
+        consumer.consume(event.exact_bytes, event.exact_detail_bytes)
+    result = consumer.consume(events[0].exact_bytes, events[0].exact_detail_bytes)
+    assert result.replayed and result.state.terminal and result.state.outcome_code == "offer"
+    assert consumer.state(handoff.application_id, handoff.root_sha256) == result.state
+    assert consumer.state(handoff.application_id) == result.state
+    with reopened.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM v1_event_inbox").fetchone()[0] == 8
+        assert connection.execute("SELECT COUNT(*) FROM v1_event_references").fetchone()[0] == 8
+
+    other = AssessmentStore(tmp_path / "rollback.sqlite3")
+    _register_synthetic_handoff(other, handoff)
+    with other.connection() as connection:
+        connection.execute("CREATE TRIGGER reject_reference BEFORE INSERT ON v1_event_references "
+                           "BEGIN SELECT RAISE(ABORT, 'injected reference failure'); END")
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError, match="injected reference failure"):
+        DurableEventConsumer(other, _DurableSyntheticResolver()).consume(
+            events[0].exact_bytes, events[0].exact_detail_bytes)
+    with other.connection() as connection:
+        for table in ("v1_event_inbox", "v1_event_projection", "v1_reference_objects",
+                      "v1_reference_resolutions", "v1_event_references"):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_durable_receiver_keeps_application_roots_separate(tmp_path):
+    from market_aligner.applications.handoff import encode_handoff_v1
+    from market_aligner.research.store import AssessmentStore
+    from market_aligner.service.event_consumer import DurableEventConsumer
+
+    first = _handoff()
+    payload = deepcopy(dict(first.payload))
+    from datetime import datetime, timedelta
+    payload["created_at"] = (datetime.fromisoformat(payload["created_at"].replace("Z", "+00:00"))
+                             + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    second = encode_handoff_v1(payload)
+    assert first.application_id == second.application_id
+    assert first.root_sha256 != second.root_sha256
+    store = AssessmentStore(tmp_path / "assessments.sqlite3")
+    for handoff in (first, second):
+        _register_synthetic_handoff(store, handoff)
+    consumer = DurableEventConsumer(store, _DurableSyntheticResolver())
+    for handoff, count in ((first, 2), (second, 1)):
+        for event in _successful_events(handoff)[:count]:
+            consumer.consume(event.exact_bytes, event.exact_detail_bytes)
+    assert consumer.state(first.application_id, first.root_sha256).last_sequence == 2
+    assert consumer.state(second.application_id, second.root_sha256).last_sequence == 1
+    with pytest.raises(ContractValidationError, match="explicit handoff root"):
+        consumer.state(first.application_id)
+    with store.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM v1_event_inbox").fetchone()[0] == 3
