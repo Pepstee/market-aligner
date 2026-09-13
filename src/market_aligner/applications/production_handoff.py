@@ -1482,7 +1482,7 @@ def _build_production_handoff_from_authenticated_time(
         "uk_hybrid": ("UK_HYBRID", 2, "GB", "hybrid"),
         "uk_onsite": ("UK_ONSITE", 3, "GB", "onsite"),
         "romania_remote": ("RO_REMOTE", 4, "RO", "remote"),
-        "eu_remote": ("EU_REMOTE", 5, "RO", "remote"),
+        "eu_remote": ("EU_REMOTE", 5, None, "remote"),
     }
     try:
         geography_bucket, geography_rank, country_code, work_mode = location_map[
@@ -1493,6 +1493,16 @@ def _build_production_handoff_from_authenticated_time(
             "geography_binding", "processing geography cannot enter the handoff"
         ) from exc
     raw_location = str(vacancy.get("location") or "")
+    if location_category == "eu_remote":
+        from market_aligner.assessment.geography import (
+            retained_location_country, EU_REMOTE_COUNTRIES, SelectionBlocked)
+        raw_country = expected_raw_json.get("country") if isinstance(expected_raw_json, dict) else None
+        try:
+            country_code = retained_location_country(raw_country, raw_location)
+            if country_code not in EU_REMOTE_COUNTRIES:
+                raise SelectionBlocked("location_country_invalid", "country does not belong to EU_REMOTE")
+        except (ValueError, SelectionBlocked) as exc:
+            raise ProductionHandoffError("geography_binding", "EU-remote country evidence is absent or conflicting") from exc
     location = {
         "country_code": country_code,
         "locality": raw_location.split(",", 1)[0].strip(),

@@ -1007,7 +1007,8 @@ def test_handoff_eligibility_retains_verified_promotion_and_rejects_drift(tmp_pa
             connection.execute("RELEASE mutation")
 
 
-def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z"):
+def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z",
+                                location="London, United Kingdom", jurisdiction="GB"):
     import sqlite3
     from test_process_one import EligibilityFixture, EligibilityEndToEndTests
     from market_aligner.llm.contracts import SemanticVacancyExtraction, EvidenceAlignment, LLMReceipt
@@ -1018,23 +1019,23 @@ def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z"):
 
     from market_aligner.domain.contracts import JobUrl
     fixture = EligibilityFixture(tmp_path, job=JobUrl("workable", "cogna:847CFBC5F4", FLAT_URL),
-        fetched_at=fetched_at, raw_text="Build software in London. At least one year experience.", extraction_overrides={
+        fetched_at=fetched_at, raw_text=f"Build software in {location}. At least one year experience.", extraction_overrides={
         "title": "Software Engineer", "seniority": "junior",
-        "location": "London, United Kingdom", "remote_policy": "remote",
+        "location": location, "remote_policy": "remote",
         "description": "Build software. At least one year experience.",
         "required_qualifications": ["At least one year experience."],
-        "work_authorisation": ["GB"],
+        "work_authorisation": [jurisdiction],
     })
     harness = EligibilityEndToEndTests()
     harness.fx = fixture
     candidate = fixture.candidate_facts()
-    candidate["authorised_jurisdictions"]["value"][0]["value"] = "GB"
-    candidate["current_residence"]["value"] = "GB"
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = jurisdiction
+    candidate["current_residence"]["value"] = jurisdiction
     candidate["maximum_years_required"]["value"] = 5.0
     candidate["requires_sponsorship"]["value"] = False
     vacancy_facts = fixture.vacancy_facts()
-    vacancy_facts["work_jurisdiction"]["value"] = "GB"
-    vacancy_facts["required_residence"]["value"] = "GB"
+    vacancy_facts["work_jurisdiction"]["value"] = jurisdiction
+    vacancy_facts["required_residence"]["value"] = jurisdiction
     harness.run_one(fixture, candidate_overrides=candidate, vacancy_overrides=vacancy_facts)
 
     class Worker:
@@ -1111,5 +1112,11 @@ def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z"):
     return fixture, service, config, profile
 
 
-def test_real_processing_opportunity_enrichment_retains_eligibility(tmp_path):
-    _real_processing_enrichment(tmp_path)
+@pytest.mark.parametrize("location,jurisdiction", [
+    ("London, United Kingdom", "GB"),
+    ("Berlin, Germany, Europe", "DE"),
+])
+def test_real_processing_opportunity_enrichment_retains_eligibility(
+    tmp_path, location, jurisdiction
+):
+    _real_processing_enrichment(tmp_path, location=location, jurisdiction=jurisdiction)

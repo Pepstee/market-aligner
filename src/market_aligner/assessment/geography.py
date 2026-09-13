@@ -137,6 +137,43 @@ EU27_2026_08 = frozenset(
     "AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE".split()
 )
 EU_REMOTE_COUNTRIES = EU27_2026_08 - {"RO"}
+# Exact country names/codes for the already-supported geographic scope. These
+# are aliases, not a geocoder: cities and broad regions never imply a country.
+_COUNTRY_NAMES = dict(zip(
+    "AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE".split(),
+    ("Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czechia", "Denmark",
+     "Estonia", "Finland", "France", "Germany", "Greece", "Hungary", "Ireland",
+     "Italy", "Latvia", "Lithuania", "Luxembourg", "Malta", "Netherlands", "Poland",
+     "Portugal", "Romania", "Slovakia", "Slovenia", "Spain", "Sweden"),
+))
+_COUNTRY_ALIASES = {name.casefold(): code for code, name in _COUNTRY_NAMES.items()}
+_COUNTRY_ALIASES.update({code.casefold(): code for code in EU27_2026_08 | {"GB"}})
+_COUNTRY_ALIASES.update({"united kingdom": "GB", "great britain": "GB", "uk": "GB",
+                         "czech republic": "CZ"})
+
+
+def explicit_country_code(value: str) -> str | None:
+    """Resolve an exact country name/code, never an inferred region or city."""
+    if not isinstance(value, str):
+        raise ValueError("explicit country value must be a string")
+    return _COUNTRY_ALIASES.get(" ".join(value.split()).casefold())
+
+
+def retained_location_country(raw_country: object, location: str) -> str:
+    """Reconcile explicit collector country with comma-separated location facts."""
+    explicit = None
+    if raw_country is not None:
+        explicit = explicit_country_code(raw_country)
+        if explicit is None:
+            raise SelectionBlocked("location_country_unknown", "collector country is unsupported or ambiguous")
+    named = {code for part in location.split(",")
+             if (code := explicit_country_code(part)) is not None}
+    if explicit is not None:
+        named.add(explicit)
+    if len(named) != 1:
+        raise SelectionBlocked("location_country_unknown", "location requires one explicit, unambiguous country")
+    return named.pop()
+
 GEOGRAPHY_BUCKETS: Mapping[tuple[str, str], tuple[str, int]] = {
     ("GB", "remote"): ("UK_REMOTE", 1),
     ("GB", "hybrid"): ("UK_HYBRID", 2),

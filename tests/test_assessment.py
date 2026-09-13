@@ -748,3 +748,16 @@ def test_eligibility_decision_rejects_invalid_direct_construction():
     assert EligibilityDecision("pass", (), ()).decision == "pass"
     assert EligibilityDecision("review", (), ("missing",)).unknowns == ("missing",)
     assert EligibilityDecision("reject", ("mismatch",), ("missing",)).reasons == ("mismatch",)
+
+
+def test_retained_country_uses_explicit_evidence_without_region_guessing():
+    import pytest
+    from market_aligner.assessment.geography import retained_location_country
+    assert retained_location_country("Germany", "Berlin, Europe") == "DE"
+    assert retained_location_country(None, "Berlin, Germany, Europe") == "DE"
+    assert retained_location_country("DE", "Berlin, Germany") == "DE"
+    for country, location in ((None, "Europe"), (None, "Berlin"),
+                              ("Europe", "Berlin"), ("Germany", "Paris, France"),
+                              (None, "Germany, France")):
+        with pytest.raises(SelectionBlocked):
+            retained_location_country(country, location)
