@@ -367,6 +367,38 @@ def test_extract_retains_multiple_cache_formats_without_bypassing_selection(tmp_
     assert messages == []
 
 
+def test_discovery_cap_stops_consumption_and_preserves_existing_rows(tmp_dir: Path, monkeypatch):
+    consumed = []
+
+    class Adapter:
+        def discover(self, terms, *, live):
+            assert live is False
+            for index in range(5):
+                consumed.append(index)
+                yield JobUrl("fixture", str(index), f"https://example.test/{index}")
+
+    monkeypatch.setattr(pipeline_run, "_try_scraper", lambda: lambda *a, **k: Adapter())
+    destination = tmp_dir / "discovered.jsonl"
+    ctx = SimpleNamespace(
+        cfg={"boards": {"enabled": ["fixture", "second"], "mode": "fixture", "max_jobs_total": 2}},
+        paths=SimpleNamespace(job_urls=destination), force=True, log=lambda message: None,
+    )
+    pipeline_run.stage_discover(ctx)
+    assert consumed == [0, 1]
+    assert len(list(pipeline_run.read_jsonl(destination, JobUrl))) == 2
+    consumed.clear()
+    pipeline_run.stage_discover(ctx)
+    assert consumed == []
+    ctx.cfg["boards"]["max_jobs_total"] = 0
+    pipeline_run.stage_discover(ctx)
+    assert len(list(pipeline_run.read_jsonl(destination, JobUrl))) == 5
+    ctx.cfg["boards"]["max_jobs_total"] = 1
+    consumed.clear()
+    pipeline_run.stage_discover(ctx)
+    assert consumed == []
+    assert len(list(pipeline_run.read_jsonl(destination, JobUrl))) == 5
+
+
 # --------------------------------------------------------------------------- #
 # Minimal runner: works with or without pytest.
 # --------------------------------------------------------------------------- #

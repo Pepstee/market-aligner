@@ -212,14 +212,19 @@ def stage_discover(ctx: RunContext) -> Optional[Path]:
     boards = list(boards_cfg.get("enabled", []) or [])
     terms = list(ctx.cfg.get("search_terms", []) or [])
     rate = float(boards_cfg.get("rate_limit_seconds", 0) or 0)
+    cap = int(boards_cfg.get("max_jobs_total", 0) or 0)
+    if cap < 0:
+        raise ValueError("max_jobs_total must be non-negative")
     # boards.mode: "live" (default — real HTTP) or "fixture" (offline test data).
     live = str(boards_cfg.get("mode", "live")).lower() != "fixture"
-    ctx.log(f"[discover] mode={'live' if live else 'fixture'} boards={boards} cap=none")
+    ctx.log(f"[discover] mode={'live' if live else 'fixture'} boards={boards} cap={cap or 'none'}")
 
     existing = list(read_jsonl(out, JobUrl)) if out.exists() else []
     seen: set[str] = {row.key for row in existing}
     urls: list[JobUrl] = list(existing)
     for board in boards:
+        if cap and len(urls) >= cap:
+            break
         try:
             adapter = load_adapter(board, config=(ctx.cfg.get(board) or {}))
         except Exception as e:  # noqa: BLE001 - a missing board adapter shouldn't kill the run
@@ -231,6 +236,8 @@ def stage_discover(ctx: RunContext) -> Optional[Path]:
                     continue
                 seen.add(ju.key)
                 urls.append(ju)
+                if cap and len(urls) >= cap:
+                    break
         except Exception as e:  # noqa: BLE001 — a mid-crawl blip must not kill the run
             ctx.log(f"[discover] board '{board}' failed mid-crawl: {e} — "
                     f"keeping the {len(urls)} urls collected so far")
