@@ -15,7 +15,7 @@ exclusively beneath `internal/jaa`; donor copies never gain runtime authority.
 - `integration_required`: 407
 - `quarantined`: 327
 - `retained_evidence`: 2448
-- `superseded`: 2551
+- `superseded`: 2553
 
 `integration_required` and `conflicting_variant_review` are fail-closed work
 queues, not evidence of safe mergeability. `retained_evidence` remains
