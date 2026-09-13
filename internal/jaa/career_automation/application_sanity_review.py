@@ -479,6 +479,9 @@ def _package_document(
         },
         "instruction_boundary_end": "END UNTRUSTED QUOTED DATA",
     }
+    hashes["review_input_sha256"] = hashlib.sha256(
+        canonical_json(document).encode("utf-8")
+    ).hexdigest()
     return document, hashes
 
 

@@ -180,6 +180,9 @@ def test_clean_relevant_canary_passes_and_legitimate_llm_claim_is_quoted(
     assert "opaque receipt-binding identifiers" in backend.last_system
     assert "do not block a claim merely because" in backend.last_system
     assert "Build Python automation for Example Systems." in backend.last_user
+    assert receipt.package_hashes["review_input_sha256"] == hashlib.sha256(
+        backend.last_user.encode("utf-8")
+    ).hexdigest()
     assert (
         receipt.package_hashes["raw_listing_sha256"]
         == hashlib.sha256(b"vacancy").hexdigest()

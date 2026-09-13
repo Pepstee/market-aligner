@@ -4932,3 +4932,7 @@ Deterministic update of four inventory statuses and their disposition/ledger edg
 ## Projection and extractor accounting ma-0129
 
 Deterministic update of three inventory dispositions and ledger links. Production code is unchanged. Supported-installation version enforcement and exact projection identities are covered; metadata/accessor/review-time equivalence remains open. No semantic enrichment or sensitive inputs.
+
+## Exact review input identity ma-0130
+
+Deterministic AST refresh of application_sanity_review.py and its synthetic tests; added source-bound ledger node. Incident edges for changed sources were replaced by scoped extraction; cross-source semantic enrichment is not claimed. Historical communities elsewhere remain. No private sources or model extraction.
