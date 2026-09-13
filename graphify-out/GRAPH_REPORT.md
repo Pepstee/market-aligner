@@ -4964,3 +4964,7 @@ Scoped deterministic AST refresh of test_production_ats_executor.py and current 
 ## Verified ATS fixture clock correction ma-0142
 
 Deterministic AST refresh for the corrected synthetic release and vacancy clock.41 affected tests pass on clean32bc4b7. ma0141 moving-observation proposal was rejected, with both rejected intermediate sources retained in Git. Inventory and ledger links refreshed. Incident edges replaced; cross-source semantic re-enrichment not performed. No private input or model extraction.
+
+## Review material accounting ma-0143
+
+Thirteen declaration/schema/digest records accounted from exact source comparison. Inventory status and explicit disposition/ledger graph links refreshed. No product or test source changes; ma-0142 AST extraction remains current. Issuer allowlist, complete persistence and integration gaps remain unresolved. No model graph enrichment or sensitive inputs.
