@@ -4928,3 +4928,7 @@ ma-0127 restores donor byte/row/field limits in the existing sanity-review owner
 ## Review limit accounting ma-0128
 
 Deterministic update of four inventory statuses and their disposition/ledger edges. Production source is unchanged from ddb6e51. Remaining 24 donor review fields are unresolved. No semantic enrichment or sensitive inputs were processed.
+
+## Projection and extractor accounting ma-0129
+
+Deterministic update of three inventory dispositions and ledger links. Production code is unchanged. Supported-installation version enforcement and exact projection identities are covered; metadata/accessor/review-time equivalence remains open. No semantic enrichment or sensitive inputs.
