@@ -102,6 +102,7 @@ class TrustedReviewMaterialAccessor(Protocol):
     accessor_identity_sha256: str
     environment: str
     trust_root_id: str
+    trusted_issuer_ids: frozenset[str]
 
     def resolve(self, *, request_bytes: bytes) -> ResolvedReviewMaterial:
         """Resolve the exact canonical request into separate protected bytes."""
@@ -480,6 +481,7 @@ def _validate_metadata(
     schema_version: str,
     subject: Mapping[str, str],
     trust_root_id: str,
+    trusted_issuer_ids: frozenset[str],
     evaluated_at: str,
     handoff_created_at: str | None,
     expected_valid_until: str | None = None,
@@ -500,6 +502,8 @@ def _validate_metadata(
     if any(metadata.get(key) != value for key, value in expected.items()):
         raise ReviewMaterialError("metadata_substitution", f"{reference_key} metadata differs")
     _strict_identity(metadata["issuer_id"], f"{reference_key} issuer")
+    if metadata["issuer_id"] not in trusted_issuer_ids:
+        raise ReviewMaterialError("metadata_issuer", f"{reference_key} issuer is not trusted")
     _digest(metadata["trust_proof_sha256"], f"{reference_key} trust proof")
     _, issued = _timestamp(metadata["issued_at"], f"{reference_key} issued_at")
     evaluated_text, evaluated = _timestamp(evaluated_at, "review evaluated_at")
@@ -780,6 +784,11 @@ class ReviewMaterialAssembler:
             raise ReviewMaterialError("accessor_environment", "accessor environment differs")
         if getattr(self.accessor, "trust_root_id", None) != context.trust_root_id:
             raise ReviewMaterialError("accessor_trust", "accessor trust root differs")
+        trusted_issuer_ids = getattr(self.accessor, "trusted_issuer_ids", None)
+        if type(trusted_issuer_ids) is not frozenset or not trusted_issuer_ids:
+            raise ReviewMaterialError("accessor_issuers", "accessor issuer allowlist is absent or invalid")
+        for issuer in trusted_issuer_ids:
+            _strict_identity(issuer, "accessor trusted issuer")
         try:
             time_evidence = obtain_current_time(
                 self.current_time_witness,
@@ -844,6 +853,7 @@ class ReviewMaterialAssembler:
             schema_version="market-aligner.vacancy-snapshot.v1",
             subject=source_subject,
             trust_root_id=context.trust_root_id,
+            trusted_issuer_ids=trusted_issuer_ids,
             evaluated_at=time_evidence.evaluated_at,
             handoff_created_at=context.handoff_created_at,
         )
@@ -855,6 +865,7 @@ class ReviewMaterialAssembler:
             schema_version="market-aligner.raw-listing-evidence.v1",
             subject=source_subject,
             trust_root_id=context.trust_root_id,
+            trusted_issuer_ids=trusted_issuer_ids,
             evaluated_at=time_evidence.evaluated_at,
             handoff_created_at=context.handoff_created_at,
             expected_valid_until=snapshot_evidence.valid_until,
@@ -888,6 +899,7 @@ class ReviewMaterialAssembler:
             schema_version=REVIEW_TEXT_PROJECTION_SCHEMA,
             subject=projection_subject,
             trust_root_id=context.trust_root_id,
+            trusted_issuer_ids=trusted_issuer_ids,
             evaluated_at=time_evidence.evaluated_at,
             handoff_created_at=None,
             expected_valid_until=snapshot_evidence.valid_until,

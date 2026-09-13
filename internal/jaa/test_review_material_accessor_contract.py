@@ -207,6 +207,7 @@ def SyntheticCurrentTimeWitness(
 
 
 class SyntheticReviewMaterialAccessor:
+    trusted_issuer_ids = frozenset({"synthetic-market-review-accessor-v1"})
     accessor_identity_sha256 = _sha(b"synthetic-review-material-accessor-v1")
 
     def __init__(self, fixture, *, visible_text: bytes = VISIBLE_TEXT) -> None:
@@ -929,3 +930,32 @@ def test_compatibility_admission_cannot_assemble_release_review(tmp_path) -> Non
     assert failure.value.code == "review_admission_blocked"
     assert witness.issue_count == 0
     assert accessor.resolve_calls == []
+
+
+@pytest.mark.parametrize("field", ["snapshot_metadata_mutation", "raw_metadata_mutation", "projection_metadata_mutation"])
+def test_review_metadata_rejects_unlisted_issuer_before_authentication(tmp_path, field):
+    _fixture, admission, accessor, _witness, assembler = _ready(tmp_path)
+    getattr(accessor, field)["issuer_id"] = "unlisted-but-well-formed-issuer"
+    with pytest.raises(ReviewMaterialError) as raised:
+        assembler.assemble(
+            admission.application_id,
+            application_source_identity=APPLICATION_SOURCE_IDENTITY,
+            application_package_bytes=_application_package(),
+        )
+    assert raised.value.code == "metadata_issuer"
+    assert accessor.authenticate_calls == 0
+
+
+@pytest.mark.parametrize("issuers", [None, frozenset(), {"synthetic-market-review-accessor-v1"}])
+def test_review_requires_explicit_immutable_issuer_allowlist(tmp_path, issuers):
+    _fixture, admission, accessor, witness, assembler = _ready(tmp_path)
+    accessor.trusted_issuer_ids = issuers
+    with pytest.raises(ReviewMaterialError) as raised:
+        assembler.assemble(
+            admission.application_id,
+            application_source_identity=APPLICATION_SOURCE_IDENTITY,
+            application_package_bytes=_application_package(),
+        )
+    assert raised.value.code == "accessor_issuers"
+    assert accessor.resolve_calls == []
+    assert witness.issue_count == 0

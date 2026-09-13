@@ -4968,3 +4968,7 @@ Deterministic AST refresh for the corrected synthetic release and vacancy clock.
 ## Review material accounting ma-0143
 
 Thirteen declaration/schema/digest records accounted from exact source comparison. Inventory status and explicit disposition/ledger graph links refreshed. No product or test source changes; ma-0142 AST extraction remains current. Issuer allowlist, complete persistence and integration gaps remain unresolved. No model graph enrichment or sensitive inputs.
+
+## Explicit review issuer policy ma-0144
+
+Scoped deterministic AST extraction of review_material.py and its accessor contract tests after restoring issuer allowlist validation.88 affected tests pass. Exact relocated declaration statuses prove syntax presence only, not behaviour of unrelated event resolvers. Inventory/ledger links refreshed. Incident edges replaced; cross-source semantic re-enrichment not performed. No private input or model extraction.
