@@ -4980,3 +4980,7 @@ Six request/projection/reference/environment roles mapped to tested canonical ow
 ## Persisted review entrypoint ma-0146
 
 Scoped deterministic AST extraction of review_material.py and accessor tests after adding archive-backed assembly completion.92 affected tests pass using actual temporary archive/SQLite and synthetic material. Existing archive owner reused; no production wiring or cross-store transaction claim. Inventory/ledger links refreshed. Incident edges replaced; cross-source semantic re-enrichment not performed. No sensitive inputs or model graph extraction.
+
+## Persisted replay evidence ma-0147
+
+Scoped deterministic AST refresh of review accessor tests after extending replay-after-restart checks through archive-backed assembly.93 related tests pass. Ledger records bounded historical caller search and unclosed time/persistence differences. Inventory/ledger links refreshed. Incident edges replaced; cross-source semantic re-enrichment not performed. No sensitive inputs or model graph extraction.

@@ -671,8 +671,20 @@ def test_stale_nonlisting_reference_blocks_review_before_accessor_resolution(tmp
             ).fetchone()[0] == 0
 
 
-def test_absent_or_replayed_time_proof_blocks_before_new_resolution(tmp_path) -> None:
-    _, admission, accessor, _, assembler = _ready(tmp_path)
+@pytest.mark.parametrize("persisted", [False, True])
+def test_absent_or_replayed_time_proof_blocks_before_new_resolution(tmp_path, persisted) -> None:
+    fixture, admission, accessor, _, assembler = _ready(tmp_path)
+    archive = _review_archive(tmp_path, fixture, admission) if persisted else None
+
+    def run_review(actor):
+        arguments = {
+            "application_source_identity": APPLICATION_SOURCE_IDENTITY,
+            "application_package_bytes": _application_package(),
+        }
+        if persisted:
+            return actor.assemble_and_archive(admission.application_id, archive=archive, **arguments)
+        return actor.assemble(admission.application_id, **arguments)
+
     invalid = SyntheticCurrentTimeWitness(proof_valid=False)
     assembler.admission_store.current_time_witness = invalid
     invalid_assembler = ReviewMaterialAssembler(
@@ -683,11 +695,7 @@ def test_absent_or_replayed_time_proof_blocks_before_new_resolution(tmp_path) ->
         current_time_witness=invalid,
     )
     with pytest.raises(ReviewMaterialError) as proof:
-        invalid_assembler.assemble(
-            admission.application_id,
-            application_source_identity=APPLICATION_SOURCE_IDENTITY,
-            application_package_bytes=_application_package(),
-        )
+        run_review(invalid_assembler)
     assert proof.value.code == "time_authentication"
     assert accessor.resolve_calls == []
 
@@ -700,11 +708,7 @@ def test_absent_or_replayed_time_proof_blocks_before_new_resolution(tmp_path) ->
         pdf_text_extractor=assembler.pdf_text_extractor,
         current_time_witness=replay,
     )
-    replay_assembler.assemble(
-        admission.application_id,
-        application_source_identity=APPLICATION_SOURCE_IDENTITY,
-        application_package_bytes=_application_package(),
-    )
+    run_review(replay_assembler)
     assert isinstance(replay._issuer, _ReplayIssuer)
     assert replay._issuer.first is not None
     restarted_witness = _witness_for_evidence(replay._issuer.first)
@@ -717,13 +721,14 @@ def test_absent_or_replayed_time_proof_blocks_before_new_resolution(tmp_path) ->
         current_time_witness=restarted_witness,
     )
     with pytest.raises(ReviewMaterialError) as repeated:
-        restarted_assembler.assemble(
-            admission.application_id,
-            application_source_identity=APPLICATION_SOURCE_IDENTITY,
-            application_package_bytes=_application_package(),
-        )
+        run_review(restarted_assembler)
     assert repeated.value.code == "time_replay"
     assert len(accessor.resolve_calls) == 1
+
+    if persisted:
+        objects = archive._objects(archive._events())
+        assert len(objects) == 12
+        assert sum(obj.role == "review.material.manifest" for obj in objects) == 1
 
 
 @pytest.mark.parametrize(
