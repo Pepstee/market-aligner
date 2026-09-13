@@ -105,6 +105,21 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=30000;
 
+CREATE TABLE IF NOT EXISTS published_application_handoffs (
+    application_id TEXT NOT NULL,
+    handoff_root_sha256 TEXT NOT NULL,
+    execution_receipt_sha256 TEXT NOT NULL,
+    handoff_exact_bytes BLOB NOT NULL,
+    execution_receipt_bytes BLOB NOT NULL,
+    PRIMARY KEY(handoff_root_sha256, execution_receipt_sha256)
+);
+CREATE TRIGGER IF NOT EXISTS published_application_handoffs_no_update
+BEFORE UPDATE ON published_application_handoffs
+BEGIN SELECT RAISE(ABORT, 'published handoff evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS published_application_handoffs_no_delete
+BEFORE DELETE ON published_application_handoffs
+BEGIN SELECT RAISE(ABORT, 'published handoff evidence is immutable'); END;
+
 CREATE TABLE IF NOT EXISTS assessments (
   profile_id TEXT NOT NULL,
   job_key TEXT NOT NULL,
@@ -1250,6 +1265,49 @@ class AssessmentStore:
                 raise
             finally:
                 connection.close()
+
+    def _record_published_handoff(
+        self, handoff_exact_bytes: bytes, execution_receipt_bytes: bytes
+    ) -> None:
+        """Record producer-published evidence; this grants no release authority.
+
+        Called after the canonical producer persists both bundle and execution
+        receipt. Multiple published roots for one application remain distinct.
+        """
+        from market_aligner.applications.canonical import (
+            canonical_json_bytes, parse_canonical_json, ContractValidationError,
+        )
+        from market_aligner.applications.handoff import parse_handoff_v1
+
+        handoff = parse_handoff_v1(handoff_exact_bytes)
+        receipt = parse_canonical_json(execution_receipt_bytes)
+        if not isinstance(receipt, dict):
+            raise ContractValidationError("published execution receipt must be an object")
+        basis = dict(receipt)
+        semantic = basis.pop("semantic_receipt_sha256", None)
+        if (receipt.get("schema_version") != "market-aligner.production-handoff-execution.v2"
+                or receipt.get("application_id") != handoff.application_id
+                or receipt.get("handoff_root_sha256") != handoff.root_sha256
+                or receipt.get("release_token_issued") is not False
+                or receipt.get("submission_authority") is not False
+                or hashlib.sha256(canonical_json_bytes(basis)).hexdigest() != semantic):
+            raise ContractValidationError("published handoff execution binding differs")
+        digest = hashlib.sha256(execution_receipt_bytes).hexdigest()
+        values = (handoff.application_id, handoff.root_sha256, digest,
+                  handoff_exact_bytes, execution_receipt_bytes)
+        with self.transaction() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO published_application_handoffs VALUES(?,?,?,?,?)",
+                values,
+            )
+            row = connection.execute(
+                "SELECT application_id,handoff_root_sha256,execution_receipt_sha256,"
+                "handoff_exact_bytes,execution_receipt_bytes FROM published_application_handoffs "
+                "WHERE handoff_root_sha256=? AND execution_receipt_sha256=?",
+                (handoff.root_sha256, digest),
+            ).fetchone()
+            if row is None or tuple(row) != values:
+                raise ContractValidationError("published handoff registry identity conflicts")
 
     def upsert_score(
         self,

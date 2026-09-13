@@ -1120,3 +1120,41 @@ def test_real_processing_opportunity_enrichment_retains_eligibility(
     tmp_path, location, jurisdiction
 ):
     _real_processing_enrichment(tmp_path, location=location, jurisdiction=jurisdiction)
+
+
+def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
+    import sqlite3
+    from test_jaa_events_v1 import _handoff
+    from market_aligner.research.store import AssessmentStore
+    from market_aligner.applications.canonical import ContractValidationError
+
+    handoff = _handoff()
+    basis = {
+        "schema_version": "market-aligner.production-handoff-execution.v2",
+        "application_id": handoff.application_id,
+        "handoff_root_sha256": handoff.root_sha256,
+        "release_token_issued": False,
+        "submission_authority": False,
+    }
+    def exact(value):
+        return production_module._canonical({
+            **value, "semantic_receipt_sha256": _sha(production_module._canonical(value))})
+    receipt = exact(basis)
+    store = AssessmentStore(tmp_path / "state/assessments.sqlite3")
+    store._record_published_handoff(handoff.exact_bytes, receipt)
+    reopened = AssessmentStore(store.path)
+    reopened._record_published_handoff(handoff.exact_bytes, receipt)
+    with reopened.connection() as connection:
+        rows = connection.execute("SELECT * FROM published_application_handoffs").fetchall()
+        assert len(rows) == 1
+        assert bytes(rows[0]["handoff_exact_bytes"]) == handoff.exact_bytes
+        assert bytes(rows[0]["execution_receipt_bytes"]) == receipt
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute("DELETE FROM published_application_handoffs")
+    for changes in ({"application_id": "app_" + "a" * 64},
+                    {"handoff_root_sha256": "a" * 64},
+                    {"submission_authority": True}):
+        with pytest.raises(ContractValidationError, match="binding differs"):
+            reopened._record_published_handoff(handoff.exact_bytes, exact({**basis, **changes}))
+    with reopened.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM published_application_handoffs").fetchone()[0] == 1
