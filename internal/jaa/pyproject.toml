@@ -26,6 +26,7 @@ full = ["matplotlib==3.10.5", "jsonschema==4.25.0"]
 # Market Aligner owns its own CLI. JAA exposes only JAA-owned commands.
 jaa-baseline = "baseline_adoption.cli:main"
 jaa-lifecycle = "career_automation.cli:main"
+jaa-handoff = "career_automation.handoff_cli:main"
 jaa-official-cohort = "career_automation.official_cohort:main"
 jaa-document-assurance = "career_automation.external_document_assurance:main"
 
