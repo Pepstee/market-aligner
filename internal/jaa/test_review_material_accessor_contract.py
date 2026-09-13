@@ -60,7 +60,7 @@ GOLDEN_HASHES = {
     "review_input_sha256": "29f00cf477069bcfee6a43bae33d43e23690009a92320f0f4d24037928f34b41",
     "review_text_sha256": "f8af5a716e271d1e0ecc792455ca8d5bdb5dda2d9936943fab9dfca84c40fb24",
     "vacancy_snapshot_metadata_sha256": "d57aaedf94d2a1c53a99aa4cdc91b282514dbc30b1c13e54786457f56ff90f84",
-    "verification_receipt_sha256": "cfbb7c80e7fcfdd09e4c2391018fb7531b3aa51bf5aa055dd458fc4ffa0529c6",
+    "verification_receipt_sha256": "06fa1a8ed960141ce4d0c384519f29ee58218c0773e6b289082b9ef7e53c62ef",
 }
 
 
@@ -520,7 +520,7 @@ def test_exact_request_projection_review_input_and_receipt_bindings(tmp_path) ->
     assert receipt["form_answers_sha256"] == _sha(
         canonical_json_bytes(
             {
-                "answers": json.loads(_application_package())["form_answers"],
+                "form_answers": json.loads(_application_package())["form_answers"],
                 "schema_version": "jaa.form-answers.v1",
             }
         )
@@ -892,6 +892,16 @@ def test_application_package_is_exact_canonical_and_bounded(tmp_path) -> None:
             application_package_bytes=canonical_json_bytes(oversized),
         )
     assert answer.value.code == "form_answers"
+
+    oversized_id = json.loads(_application_package())
+    oversized_id["form_answers"][0]["question_id"] = "q" * 8_001
+    with pytest.raises(ReviewMaterialError) as identifier:
+        assembler.assemble(
+            admission.application_id,
+            application_source_identity=APPLICATION_SOURCE_IDENTITY,
+            application_package_bytes=canonical_json_bytes(oversized_id),
+        )
+    assert identifier.value.code == "form_answers"
 
     reversed_answers = json.loads(_application_package())
     reversed_answers["form_answers"] = [

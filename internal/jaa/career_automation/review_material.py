@@ -44,6 +44,9 @@ from .market_aligner_handoff import (
 )
 
 
+from .form_answers import form_answers_sha256 as canonical_form_answers_sha256
+
+
 REVIEW_MATERIAL_REQUEST_SCHEMA = "majaa.review-material-request.v1"
 REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v1"
 REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
@@ -670,6 +673,16 @@ class ReviewMaterialAssembler:
             application_source_identity, "application source identity"
         )
         application_document = _application_document(application_package_bytes)
+        try:
+            form_answers_sha256 = canonical_form_answers_sha256(
+                tuple(
+                    (row["question_id"], row["question"], row["answer"])
+                    for row in application_document["form_answers"]
+                ),
+                allow_empty=True,
+            )
+        except ValueError as exc:
+            raise ReviewMaterialError("form_answers", str(exc)) from exc
         application_package_sha256 = hashlib.sha256(
             application_package_bytes
         ).hexdigest()
@@ -777,14 +790,7 @@ class ReviewMaterialAssembler:
             raise ReviewMaterialError(
                 "artifact_authentication", "application artifact proof is not trusted"
             ) from exc
-        form_answers_sha256 = hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "answers": application_document["form_answers"],
-                    "schema_version": "jaa.form-answers.v1",
-                }
-            )
-        ).hexdigest()
+
 
         accessor_identity = _digest(
             getattr(self.accessor, "accessor_identity_sha256", None), "accessor identity"
