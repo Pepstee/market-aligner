@@ -731,3 +731,20 @@ def test_eligibility_check_projection_preserves_route_semantics():
         EligibilityDecision("reject", ("future_reason",), ()).checks
     with pytest.raises(ValueError, match="disagrees"):
         EligibilityDecision("pass", ("work_authorisation_mismatch",), ()).checks
+
+
+def test_eligibility_decision_rejects_invalid_direct_construction():
+    import pytest
+    for decision, reasons, unknowns in (
+        ("unknown", (), ()), ("pass", ("mismatch",), ()),
+        ("pass", (), ("missing",)), ("reject", (), ()),
+        ("review", (), ()), ("review", ("mismatch",), ("missing",)),
+        ("reject", ["mismatch"], ()), ("reject", (" ",), ()),
+        ("reject", ("z", "a"), ()), ("reject", ("a", "a"), ()),
+        ("review", (), ("z", "a")), ("review", (), (1,)),
+    ):
+        with pytest.raises(ValueError):
+            EligibilityDecision(decision, reasons, unknowns)
+    assert EligibilityDecision("pass", (), ()).decision == "pass"
+    assert EligibilityDecision("review", (), ("missing",)).unknowns == ("missing",)
+    assert EligibilityDecision("reject", ("mismatch",), ("missing",)).reasons == ("mismatch",)

@@ -62,6 +62,18 @@ class EligibilityDecision:
     reasons: tuple[str, ...]
     unknowns: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        if self.decision not in {"pass", "reject", "review"}:
+            raise ValueError("eligibility decision must be pass, reject, or review")
+        for name, values in (("reasons", self.reasons), ("unknowns", self.unknowns)):
+            if (not isinstance(values, tuple)
+                    or any(not isinstance(value, str) or not value.strip() for value in values)
+                    or tuple(sorted(set(values))) != values):
+                raise ValueError(f"eligibility {name} must be sorted unique non-empty strings")
+        expected = "reject" if self.reasons else "review" if self.unknowns else "pass"
+        if self.decision != expected:
+            raise ValueError("eligibility decision disagrees with its reasons")
+
     @property
     def checks(self) -> tuple[EligibilityCheck, ...]:
         """Explain the accepted decision without running another policy.
@@ -83,9 +95,6 @@ class EligibilityDecision:
         reasons, unknowns = set(self.reasons), set(self.unknowns)
         if (reasons | unknowns) - set().union(*dimensions.values()):
             raise ValueError("unrecognised eligibility reason cannot be explained")
-        expected = "reject" if reasons else "review" if unknowns else "pass"
-        if self.decision != expected:
-            raise ValueError("eligibility decision disagrees with its reasons")
         return tuple(EligibilityCheck(
             code, "fail" if reasons & tokens else "unknown" if unknowns & tokens else "pass"
         ) for code, tokens in sorted(dimensions.items()))
