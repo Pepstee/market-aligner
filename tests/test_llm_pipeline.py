@@ -538,3 +538,52 @@ class RetainedContractValidationTests(unittest.TestCase):
         for changes in ({'model': ''}, {'input_sha256': 'x' * 64}, {'contract_version': 'invalid'}):
             with self.subTest(changes=changes), self.assertRaises((TypeError, ValueError)):
                 replace(receipt, **changes)
+
+
+class RetainedSubjectBindingTests(unittest.TestCase):
+    def test_exact_subject_receipts_reject_cross_job_and_requirement_results(self) -> None:
+        from dataclasses import replace
+        from market_aligner.llm.pipeline import (
+            EvidenceAlignmentSubject, alignment_input, extraction_input,
+            accept_subject_bound_alignment, accept_subject_bound_extraction,
+        )
+        from market_aligner.llm.contracts import EvidenceAlignment, EvidenceMatch
+
+        raw, _ = LLMPipelineTests._structured_listing()
+        payload = _extraction_payload(raw.content_sha256)
+        payload = {key: tuple(value) if isinstance(value, list) else value for key, value in payload.items()}
+        extraction = SemanticVacancyExtraction(**payload)
+        receipt = LLMReceipt.bind(
+            receipt_id='synthetic-extraction', task='semantic_vacancy_extraction',
+            model='fixture-model', prompt_version='v1', inputs=extraction_input(raw),
+            output=extraction, created_at='2026-09-14T00:00:00Z',
+        )
+        accept_subject_bound_extraction(raw, extraction, receipt)
+        with self.assertRaisesRegex(ValueError, 'input identity differs'):
+            accept_subject_bound_extraction(replace(raw, job_id='other'), extraction, receipt)
+        subject = EvidenceAlignmentSubject(
+            profile_id='prf_' + 'a' * 32, profile_version='v1',
+            candidate_intent_sha256='b' * 64, role_track_id='engineering',
+            job_key=raw.key, vacancy_snapshot_sha256='c' * 64,
+            requirements_sha256='c' * 64, evidence_ledger_sha256='c' * 64,
+            extraction_output_sha256='c' * 64, extraction_receipt_sha256='c' * 64,
+        )
+        item = EvidenceItem('ev-1', 'project', 'Python', 'synthetic:project', 'verified', 1.0, content_sha256='d' * 64)
+        evidence = {'ev-1': item}
+        alignment = EvidenceAlignment(
+            subject.profile_id, subject.profile_version, subject.job_key,
+            (EvidenceMatch('Python', ('ev-1',), 0.9, 'Direct evidence'),),
+            (), 0.9, 0.9, 0.9,
+        )
+        inputs = alignment_input(subject, requirements=('Python',), evidence=evidence, selected_evidence_ids=('ev-1',))
+        def bind(value):
+            return LLMReceipt.bind(receipt_id='synthetic-alignment', task='evidence_alignment', model='fixture-model', prompt_version='v1', inputs=inputs, output=value, created_at='2026-09-14T00:00:00Z')
+        arguments = dict(subject=subject, requirements=('Python',), selected_evidence_ids=('ev-1',))
+        self.assertEqual(accept_subject_bound_alignment(alignment, evidence, bind(alignment), **arguments), alignment)
+        for changed in (
+            replace(alignment, job_key='another-job'),
+            replace(alignment, missing_requirements=('Invented',)),
+            replace(alignment, matches=(replace(alignment.matches[0], requirement='Invented'),)),
+        ):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                accept_subject_bound_alignment(changed, evidence, bind(changed), **arguments)
