@@ -69,7 +69,7 @@ def get_client() -> LLMClient:
 # --------------------------------------------------------------------------- #
 def extract_job(
     raw: dict[str, Any],
-    profile: Optional[dict[str, Any]] = None,
+    profile: Optional[dict[str, Any] | LLMClient] = None,
     client: Optional[LLMClient] = None,
 ) -> dict[str, Any]:
     """Extract a structured job row from a raw posting (JobRow-shaped subset).
@@ -78,6 +78,10 @@ def extract_job(
     Returns the job_extract-schema fields; provenance & dedup_key are added by
     the caller (the scraper) which owns those.
     """
+    if isinstance(profile, LLMClient):
+        if client is not None:
+            raise TypeError("extract_job received a client twice")
+        client, profile = profile, None
     client = client or _client
     prompt = load_prompt("extract_job")
     schema = load_schema("job_extract")

@@ -241,3 +241,15 @@ def run() -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
+
+
+def test_extract_job_preserves_positional_client_and_profile_calls(tmp_path):
+    import pytest
+    client, backend = _fresh_client(tmp_path)
+    positional = caps.extract_job(FIXTURE_RAW, client)
+    keyword = caps.extract_job(FIXTURE_RAW, client=client)
+    with_profile = caps.extract_job(FIXTURE_RAW, {"tracks": {}}, client=client)
+    assert positional == keyword == with_profile
+    validate_json(positional, load_schema("job_extract"))
+    with pytest.raises(TypeError, match="client twice"):
+        caps.extract_job(FIXTURE_RAW, client, client=client)

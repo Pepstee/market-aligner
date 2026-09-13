@@ -1,11 +1,11 @@
 {
   "community_count": 994,
-  "edge_count": 142108,
-  "node_count": 71385,
+  "edge_count": 141892,
+  "node_count": 71348,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "dc3ee14aaa2ed840f1cccc3e62c8e05d91d5e03542f16e70b2d08dbbcbc74627"
+    "graph.json": "44221203560510f2219632bf41d672f7a24e98ddcec4b9612eb18f79259781a3"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "ebad23eda9ab1a7865eb8c960465fc5f12d66eae",
+  "source_base_commit": "5921941061c8025f8817e4a8e446f6ee03bb0049",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "df38015c235b3cd31d346ddb2549921d053a81277c3bd5f7405d7f3d64f19e60",
+    "docs/migration/CAPABILITY_INVENTORY.md": "32374523b260dba804247c67cdb1f2b67c4851f18cb0feeaaf7e0f46b0ab0f06",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "60d75a960a998fccebd69f8c93a39069162c9d6fd8cc4635b52b524292a2d710",
-    "docs/migration/capability-inventory.jsonl": "7a5e5a2b3f4122056b717dbd92fa4a353be6e08b3497d861c7c2aa5ebc3141aa",
-    "docs/migration/ledger.jsonl": "7ba0cfc3bec9b77add51b260447919e94f0d8e3ebcff0d8bdf17979ef808c121",
+    "docs/migration/capability-dispositions.jsonl": "710174316394921aec222c921ec1834632b4e3b1c5fb4905904c5931e44a4003",
+    "docs/migration/capability-inventory.jsonl": "bf7892171f0bd96a8b022fb4c3a58ac83106760870f4f4e4a321bf8aa35352b2",
+    "docs/migration/ledger.jsonl": "d427028439edc5c7e9be24702b9eddd1dc86405c403f11a6bb2cedb9af5813fa",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -268,7 +268,7 @@
     "internal/jaa/jaa_core/contracts.py": "908a58288f6dc4f064cff2f7dce28b988aa4717023b2c58068f03ddc88825f3c",
     "internal/jaa/jaa_core/module_boundaries.py": "56580d531a879978f0e667113a82bbbc3c2a184a7afff18dec312f4bac8303d2",
     "internal/jaa/llm/__init__.py": "11c07124fb98d46d6be340d65e7e299bb2b815d09a78a66527a3b941badc9df3",
-    "internal/jaa/llm/capabilities.py": "3b6028f1a34bfdd45b59a7b72c9d8e206b72a8a2dd2dbdad9fbe8d62e7f45491",
+    "internal/jaa/llm/capabilities.py": "fc3483779d2caa9945061dfaab42c2dbb36c4180b99009664fea01751d4d0720",
     "internal/jaa/llm/client.py": "dba7b7b5aa7e11e2c4743e585c677724c98af32c9d6ca0f1b980ba910f5284ec",
     "internal/jaa/llm/openai_responses.py": "886a373cb1e62fc96fa21e6ecc5f84642c6e82394080a5f7a8232049ee52487b",
     "internal/jaa/llm/prompt_loader.py": "92ae3f346f0bc0ec5dd7b0a9a07674a25150a2d58dc7a18bd82770e9cee2132a",
@@ -281,7 +281,7 @@
     "internal/jaa/llm/schemas/job_extract.json": "a449ef81ac9394f1a19cd65c19636a486ff16c3cd56948fa20a0f516e511c2c4",
     "internal/jaa/llm/schemas/portfolio_assess.json": "27363de1f51fec512765acf48c7e9836fb361ce439271d2c7837b669615e6015",
     "internal/jaa/llm/schemas/skill_normalise.json": "5231012fe943225bdfbdb6ebbb23fcbd26b354dda08230cc131b1f300c9fa441",
-    "internal/jaa/llm/test_llm.py": "ab4a21c7737c83d933ff1c6ae451a3a938bd7859aa497767b0d972a72932c490",
+    "internal/jaa/llm/test_llm.py": "63920106af0f30fcf0565c2d1b1e0a1e5333d99614b2aac5f820fc0648975ece",
     "internal/jaa/llm/test_openai_responses.py": "22fce3bea284ee042314684b935229ea19d1b72d0b2f7b36de458090fcf0b413",
     "internal/jaa/profiler/README.md": "0dcfacea968fe6eb81143e283ff78acb20392da99e9e23c04ed9aad04f158d02",
     "internal/jaa/profiler/__init__.py": "c534d914bc9425930391f29420321c835eda759ee60942336f0d7b226b94bd9e",
