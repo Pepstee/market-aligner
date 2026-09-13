@@ -805,6 +805,112 @@ def _run_production_handoff_admission(
         paths.close()
 
 
+def _selected_published_handoffs(
+    *,
+    profile_id: str,
+    profile_version: str,
+    candidate_intent_sha256: str,
+    deployment: _ProductionAdmissionDeployment,
+    commit_resolver: Callable[[Path, int], str],
+) -> list[dict[str, object]]:
+    """Inspect one captured receipt listing; never create admissions or release authority."""
+    from market_aligner.assessment.geography import selection_sort_key
+    from market_aligner.profiler.schema import validate_profile_id
+
+    validate_profile_id(profile_id)
+    if type(profile_version) is not str or not profile_version.strip():
+        raise ProductionHandoffAdmissionError("profile version is required")
+    if (
+        type(candidate_intent_sha256) is not str
+        or len(candidate_intent_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in candidate_intent_sha256)
+    ):
+        raise ProductionHandoffAdmissionError("candidate intent identity is invalid")
+    if deployment.execution_receipt_root != deployment.outbox_root / "receipts":
+        raise ProductionHandoffAdmissionError("production receipt root differs")
+    paths = _PinnedProductionPaths(deployment)
+    try:
+        rows = []
+        for name in sorted(os.listdir(paths.receipts_descriptor)):
+            # Interrupted private publications never become published selections.
+            if name.startswith("."):
+                continue
+            document, _, _, _, _, handoff = _read_published_handoff_pinned(
+                execution_receipt_path=deployment.execution_receipt_root / name,
+                deployment=deployment,
+                paths=paths,
+                commit_resolver=commit_resolver,
+            )
+            if not handoff.strict_profile:
+                raise ProductionHandoffAdmissionError("published handoff is not strict")
+            payload = handoff.payload
+            if (
+                payload["profile_id"] != profile_id
+                or payload["profile_version"] != profile_version
+                or payload["candidate_intent_sha256"] != candidate_intent_sha256
+            ):
+                continue
+            selection = payload["selection"]
+            if (
+                selection["decision"] != "selected_for_application"
+                or selection["hard_gate_passed"] is not True
+                or payload["eligibility"]["hard_gate_passed"] is not True
+            ):
+                raise ProductionHandoffAdmissionError("published selection is blocked")
+            assessment = payload["assessment"]
+            row = {
+                "application_id": handoff.application_id,
+                "handoff_root_sha256": handoff.root_sha256,
+                "execution_receipt_sha256": document["semantic_receipt_sha256"],
+                "profile_id": profile_id,
+                "profile_version": profile_version,
+                "candidate_intent_sha256": candidate_intent_sha256,
+                "geography_bucket": selection["geography_bucket"],
+                "geography_rank": selection["geography_priority_rank"],
+                "final_score": assessment["final"] * 100,
+                "opportunity": assessment["opportunity"],
+                "job_key": payload["job_key"],
+                "source_job_key": document["source_job_key"],
+                "vacancy_snapshot_sha256": payload["vacancy"]["vacancy_snapshot_sha256"],
+                "handoff_created_at": payload["created_at"],
+                "release_authority": False,
+                "submission_authority": False,
+            }
+            selection_sort_key(row["geography_rank"], row["final_score"],
+                               row["opportunity"], row["job_key"])
+            rows.append(row)
+        rows.sort(key=lambda row: (*selection_sort_key(
+            row["geography_rank"], row["final_score"], row["opportunity"], row["job_key"]
+        ), row["application_id"]))
+        paths.verify_references()
+        return rows
+    finally:
+        paths.close()
+
+
+def selected_published_handoffs(
+    profile_id: str, *, profile_version: str, candidate_intent_sha256: str
+) -> list[dict[str, object]]:
+    """List verified fixed-deployment selections, explicitly without release authority."""
+    deployment = installed_production_handoff_deployment()
+    _validate_deployment_roots(deployment)
+    return _selected_published_handoffs(
+        profile_id=profile_id,
+        profile_version=profile_version,
+        candidate_intent_sha256=candidate_intent_sha256,
+        deployment=_ProductionAdmissionDeployment(
+            data_home=PRODUCTION_MARKET_DATA_HOME,
+            repository_root=PRODUCTION_MARKET_REPOSITORY_ROOT,
+            outbox_root=PRODUCTION_MARKET_OUTBOX_ROOT,
+            execution_receipt_root=PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT,
+            admission_root=PRODUCTION_ADMISSION_ROOT,
+        ),
+        commit_resolver=lambda repository, descriptor: _git_commit(
+            repository, repository_descriptor=descriptor
+        ),
+    )
+
+
 def run_production_handoff_admission(
     *, execution_receipt_path: str | Path
 ) -> ProductionHandoffAdmissionReceipt:
@@ -832,4 +938,5 @@ __all__ = [
     "ProductionHandoffAdmissionError",
     "ProductionHandoffAdmissionReceipt",
     "run_production_handoff_admission",
+    "selected_published_handoffs",
 ]

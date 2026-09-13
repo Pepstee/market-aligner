@@ -555,6 +555,21 @@ class MarketAlignerService:
             ),
         )
 
+    @staticmethod
+    def selected_handoffs(
+        profile_id: str, *, profile_version: str, candidate_intent_sha256: str
+    ) -> list[dict[str, object]]:
+        """Inspect installed published selections; never create release authority."""
+        from career_automation.production_handoff_admission_runner import (
+            selected_published_handoffs,
+        )
+
+        return selected_published_handoffs(
+            profile_id,
+            profile_version=profile_version,
+            candidate_intent_sha256=candidate_intent_sha256,
+        )
+
     def handoff(
         self,
         profile_id: str,
