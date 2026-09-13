@@ -990,3 +990,45 @@ def test_concrete_preparation_uses_only_owned_candidate_generator() -> None:
     assert "sink.generate_candidate_application(" in source
     assert "producer=" not in source
     assert "generate_product" not in source
+
+
+def test_original_visible_listing_is_archived_before_contact_authority(tmp_path, monkeypatch):
+    from playwright.sync_api import sync_playwright
+
+    def stop_before_private_authority(_name):
+        raise RuntimeError("synthetic stop before contact authority")
+
+    monkeypatch.setattr(session_module, "_required_file", stop_before_private_authority)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content("<html><body><h1>Cafe\u0301 engineer</h1><p>Build systems.</p></body></html>")
+        raw = page.content().encode("utf-8")
+        original = page.locator("body").inner_text().encode("utf-8")
+        vacancy = VacancyArchiveIdentity(
+            job_key="greenhouse:fixture:visible-source", vacancy_sha256=hashlib.sha256(raw).hexdigest(),
+            role_title="Synthetic engineer", company_name="Fixture company",
+            source_url="https://example.test/synthetic-listing",
+        )
+        recorder = GreenhouseAttemptRecorder.create(
+            archive_root=tmp_path / "archive", repository_root=Path.cwd(), vacancy=vacancy,
+            complete_vacancy=raw, structured_vacancy={"job_key": vacancy.job_key},
+            assessment={"fixture_only": True},
+        )
+        session = object.__new__(GutuaGreenhouseSession)
+        session.complete_vacancy_by_key = {vacancy.job_key: raw}
+        item = SimpleNamespace(vacancy=SimpleNamespace(vacancy=vacancy))
+        with pytest.raises(RuntimeError, match="synthetic stop before contact authority"):
+            session.prepare_release(item, recorder, page, GeneratedRevisionSink(recorder))
+        objects = recorder.attempt._objects(recorder.attempt._events())
+        captured = [obj for obj in objects if obj.role == "vacancy.visible_listing_capture"]
+        assert len(captured) == 1
+        obj = captured[0]
+        assert (recorder.attempt.archive.root / obj.relative_path).read_bytes() == original
+        assert obj.sha256 == hashlib.sha256(original).hexdigest()
+        assert obj.lineage == (vacancy.vacancy_sha256,)
+        assert obj.disposition == "observed"
+        review = next(obj for obj in objects if obj.role == "vacancy.review_material")
+        projected = json.loads((recorder.attempt.archive.root / review.relative_path).read_bytes())
+        assert projected["exact_text"].encode("utf-8") != original
+        browser.close()

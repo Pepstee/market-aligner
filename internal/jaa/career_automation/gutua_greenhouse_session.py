@@ -908,11 +908,17 @@ class GutuaGreenhouseSession:
             source_body,
             page.content().encode("utf-8"),
         )
+        visible_listing_bytes = page.locator("body").inner_text().encode("utf-8")
+        recorder.attempt.add_artifact(
+            "vacancy.visible_listing_capture",
+            visible_listing_bytes,
+            media_type="text/plain",
+            lineage=(vacancy.vacancy_sha256,),
+            disposition="observed",
+        )
         vacancy_review_material = build_vacancy_review_material(
             raw_listing_bytes=source_body,
-            visible_listing_text_bytes=page.locator("body")
-            .inner_text()
-            .encode("utf-8"),
+            visible_listing_text_bytes=visible_listing_bytes,
             expected_raw_listing_sha256=vacancy.vacancy_sha256,
         )
         recorder.add_revision(
