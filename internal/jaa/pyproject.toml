@@ -30,6 +30,7 @@ jaa-official-cohort = "career_automation.official_cohort:main"
 jaa-document-assurance = "career_automation.external_document_assurance:main"
 
 [tool.setuptools]
+py-modules = ["tracked_source_revision"]
 packages = [
     "baseline_adoption",
     "career_automation",
