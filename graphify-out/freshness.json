@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "f6ea8ac92591afbe9b5bf8d6c505e86c2d47e0e4",
+  "source_base_commit": "63a447ca6b778e7c27f8a325022aa6ec43c1cb26",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -30,7 +30,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "c0f06601952d5ab41f8fd054c839acec5578f8a5f128a747bdacaec2ce65d795",
     "docs/migration/capability-inventory.jsonl": "80999ee6d90a4c7503ffa4c23eac80bc59259567c094a4e7c9e69d1493089916",
-    "docs/migration/ledger.jsonl": "331f1f0948d67d5bbcae50a78b85c5c751e09d23fe793d684985d409dbe5c5b5",
+    "docs/migration/ledger.jsonl": "f673928a3fb8e88f6b2e2605f870f387c2f9d06e5801fb6850361e15e9c030b0",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
