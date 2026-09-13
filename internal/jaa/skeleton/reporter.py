@@ -77,6 +77,8 @@ def write_reports(
     scored: Sequence[ScoredRow],
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     make_plot: bool = True,
+    *,
+    entry_level_only: bool = False,
 ) -> ReportPaths:
     """Write both workbooks (+ the scatter) from a list of C4 rows.
 
@@ -87,7 +89,7 @@ def write_reports(
     out.mkdir(parents=True, exist_ok=True)
 
     ranked = sorted(scored, key=lambda sr: sr.final, reverse=True)
-    fields = aggregate_fields(ranked)
+    fields = aggregate_fields(ranked, entry_level_only=entry_level_only)
 
     paths = ReportPaths(
         jobs_xlsx=out / "jobs_ranked.xlsx",

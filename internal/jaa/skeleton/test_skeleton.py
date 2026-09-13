@@ -455,3 +455,26 @@ except ImportError:  # pragma: no cover - pytest not installed
 
 if __name__ == "__main__":
     raise SystemExit(_run_standalone())
+
+
+def test_creative_mode_preserves_confidence_tools_and_entry_only_ranking():
+    from contracts import CandidatePreferenceProfile, FieldProfile
+    profile = CandidatePreferenceProfile(fields={"UX_UI": FieldProfile(8, 8, .25)})
+    params = scoring.ScoringParams.from_config({
+        "scoring": {"mode": "creative", "fit_weights": {"skill_alignment": 1, "software_match": 1}},
+        "candidate": {"tools": [" FIGMA "]},
+    })
+    row = JobRow("fixture", "entry", "https://example.test/entry", mapped_career="UX_UI",
+                 entry_level=True, required_software=["Figma", "Blender"], visualization=8,
+                 spatial_relevance=7, freelance_potential=6)
+    subs = scoring.fit_subscores(row, profile, params.candidate_tools, mode=params.mode)
+    assert subs["skill_alignment"] == .2
+    assert subs["software_match"] == .5
+    assert _equal(scoring.fit_score(row, profile, params), math.sqrt(.2 * .5))
+    entry = scoring.score_row(row, profile, params)
+    senior = JobRow("fixture", "senior", "https://example.test/senior", mapped_career="UX_UI", entry_level=False)
+    assert scoring.score_row(senior, profile, params).final == 0
+    scored = [entry, ScoredRow(senior, fit=1, opportunity=1, final=0)]
+    field = scoring.aggregate_fields(scored, entry_level_only=True)[0]
+    assert field.median_top_fit == entry.fit
+    assert _equal(field.field_score, entry.fit * math.log(2))

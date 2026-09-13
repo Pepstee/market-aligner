@@ -54,7 +54,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import contracts  # noqa: E402
 from contracts import (  # noqa: E402
-    JobUrl, RawPosting, JobRow, ScoredRow, CandidateFitProfile,
+    JobUrl, RawPosting, JobRow, ScoredRow, CandidateFitProfile, CandidatePreferenceProfile,
     read_jsonl, write_jsonl, to_dict, from_dict,
 )
 import scoring  # noqa: E402
@@ -139,6 +139,8 @@ def _profile_block(cfg: dict[str, Any]) -> dict[str, Any]:
     Prefer the profiler's generated, privacy-screened projection.  The compact
     config block remains a fallback so the skeleton can still run by itself.
     """
+    if ((cfg or {}).get("scoring") or {}).get("mode") == "creative":
+        return dict((cfg or {}).get("candidate_preferences", {}) or {})
     configured = os.environ.get("CANDIDATE_PROFILE_PATH") or str(
         ((cfg or {}).get("io", {}) or {}).get(
             "candidate_profile", "profiler/data/candidate_profile.yaml"
@@ -496,7 +498,9 @@ def stage_score(ctx: RunContext) -> Optional[Path]:
             **tracks,
             "blind_spots": list(profile_context.get("blind_spots") or []),
         }
-    profile = CandidateFitProfile.from_config(profile_cfg)
+    profile = (CandidatePreferenceProfile.from_config(profile_cfg)
+               if (ctx.cfg.get("scoring") or {}).get("mode") == "creative"
+               else CandidateFitProfile.from_config(profile_cfg))
     params = scoring.ScoringParams.from_config(ctx.cfg)
     scored = scoring.score_rows(rows, profile, params)
     n = write_jsonl(out, scored_to_records(scored))
@@ -552,7 +556,10 @@ def stage_report(ctx: RunContext) -> Optional[Path]:
     if not scored:
         ctx.log("[report] no C4 scored rows — run score first, or pass a scored --fixture (skipping)")
         return None
-    paths = reporter.write_reports(scored, output_dir=ctx.paths.outputs)
+    paths = reporter.write_reports(
+        scored, output_dir=ctx.paths.outputs,
+        entry_level_only=(ctx.cfg.get("scoring") or {}).get("mode") == "creative",
+    )
     ctx.log(f"[report] wrote {paths.jobs_xlsx}")
     ctx.log(f"[report] wrote {paths.requirements_xlsx}")
     ctx.log(f"[report] wrote {paths.shortlist_md}")
