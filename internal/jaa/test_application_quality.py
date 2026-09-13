@@ -599,3 +599,38 @@ def test_artifact_source_receipt_and_answer_substitution_fail_before_review(
         build_deterministic_preflight_quality_review(
             replace(ats_input, form_inventory_bytes=b"substituted\n")
         )
+
+
+def test_retained_form_answers_preserve_source_ids_and_exact_inventory() -> None:
+    from career_automation.form_answers import (
+        embedded_source_form_answers,
+        form_answers_bytes,
+        render_form_answers_text,
+        source_form_answers,
+    )
+
+    source = _quality_source()
+    rows = embedded_source_form_answers(source)
+    inventory = {
+        str(index): (answer.question_id, answer.question)
+        for index, answer in enumerate(source.answers)
+    }
+    assert source_form_answers(source, inventory) == rows
+    assert tuple(row[0] for row in rows) == tuple(
+        answer.question_id for answer in source.answers
+    )
+    assert rows
+    encoded = form_answers_bytes(rows)
+    assert encoded == form_answers_bytes(source_form_answers(source, inventory))
+    changed = ((rows[0][0] + '-different', *rows[0][1:]), *rows[1:])
+    assert form_answers_bytes(changed) != encoded
+    assert rows[0][0] in render_form_answers_text(rows)
+    wrong = dict(inventory)
+    first = next(iter(wrong))
+    wrong[first] = (wrong[first][0], 'A different question')
+    with pytest.raises(ValueError, match='differs from live question'):
+        source_form_answers(source, wrong)
+    with pytest.raises(ValueError, match='unique'):
+        form_answers_bytes((rows[0], rows[0]))
+    with pytest.raises(ValueError, match='NFC'):
+        form_answers_bytes((('q1', 'Question', 'e\u0301'),))
