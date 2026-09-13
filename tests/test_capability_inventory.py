@@ -194,3 +194,14 @@ def test_semantic_fingerprint_preserves_empty_fields_across_python_versions() ->
         b"FunctionDef(name='f', args=arguments(posonlyargs=[], args=[], kwonlyargs=[], "
         b"kw_defaults=[], defaults=[]), body=[Pass()], decorator_list=[], type_params=[])"
     )
+
+
+def test_packaged_market_namespace_precedes_shared_jaa_directory_names() -> None:
+    for leaf in ("llm/contracts.py", "profiler/store.py", "scripts/check.py"):
+        for prefix in (
+            "home/gutua/.local/share/Trash/files/build.2/lib/market_aligner/",
+            "home/gutua/market-aligner/src/market_aligner/",
+        ):
+            assert MODULE._normalise_tar_path(prefix + leaf) == "src/market_aligner/" + leaf
+    assert MODULE._normalise_tar_path("home/gutua/jaa/llm/client.py") == "internal/jaa/llm/client.py"
+    assert MODULE._normalise_tar_path("home/gutua/market-aligner/internal/jaa/llm/client.py") == "internal/jaa/llm/client.py"

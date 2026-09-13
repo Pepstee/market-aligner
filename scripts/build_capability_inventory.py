@@ -154,6 +154,12 @@ def _normalise_tar_path(path: str) -> str | None:
         if marker in joined:
             return marker + joined.split(marker, 1)[1]
 
+    # Build/install trees retain the Market package namespace even when the
+    # source-tree "src/" prefix is absent. Resolve it before shared JAA names.
+    for index, part in enumerate(parts[:-1]):
+        if part == "market_aligner":
+            return "src/market_aligner/" + "/".join(parts[index + 1:])
+
     lower = [part.lower() for part in parts]
     for index, part in enumerate(lower):
         if part in JAA_TOP_LEVELS:
