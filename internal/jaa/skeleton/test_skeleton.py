@@ -515,12 +515,12 @@ def test_extraction_interruption_preserves_prefix_and_resumes_only_missing(tmp_d
                     f"https://example.test/{index}", "2026-09-14T00:00:00Z", raw_text="Synthetic role")])
     calls = []
     interrupt = [True]
-    def extract(record, profile):
+    def extract(record, profile, **options):
         calls.append(record["job_id"])
         if record["job_id"] == "1" and interrupt[0]:
             raise KeyboardInterrupt("synthetic interruption")
         return {"job_title": "Role", "mapped_career": "UX_UI", "required_software": ["Tool A"]}
-    monkeypatch.setattr(pipeline_run, "_try_llm", lambda: (extract, lambda *a: {}))
+    monkeypatch.setattr(pipeline_run, "_try_llm", lambda: (extract, lambda *a, **kw: {}))
     client = types.ModuleType("llm.client")
     client.make_backend = lambda cfg: types.SimpleNamespace(name="synthetic")
     client.LLMClient = lambda **kw: types.SimpleNamespace(**kw)

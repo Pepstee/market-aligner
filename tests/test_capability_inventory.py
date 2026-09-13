@@ -214,3 +214,11 @@ def test_named_archived_copy_retains_source_and_excludes_private_cache():
         assert MODULE._normalise_tar_path(prefix + leaf) == "internal/jaa/" + leaf
     assert not MODULE._tar_candidate(prefix + "scraper/data/private.yaml")
     assert not MODULE._tar_candidate(prefix + "llm/data/cache/response.py")
+
+
+def test_prompt_and_schema_contracts_are_source_but_private_payloads_are_not():
+    assert MODULE._candidate_suffix("internal/jaa/llm/prompts/creative_extract_job.txt")
+    assert MODULE._candidate_suffix("internal/jaa/llm/schemas/creative_job_extract.json")
+    assert MODULE._tar_candidate("home/project/market-aligner-artiom/llm/prompts/extract_job.txt")
+    assert not MODULE._candidate_suffix("internal/jaa/llm/data/payload.json")
+    assert not MODULE._tar_candidate("home/project/market-aligner/llm/data/cache/prompts/input.txt")

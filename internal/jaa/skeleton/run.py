@@ -440,12 +440,14 @@ def stage_extract(ctx: RunContext) -> Optional[Path]:
             # Sol sees the complete career-relevant dossier for every vacancy,
             # including extraction fields that require personal judgement
             # (why_it_fits and skills_to_learn).
-            extracted = extract_job(to_dict(rp), profile_block)
+            mode = (ctx.cfg.get("scoring") or {}).get("mode", "evidence")
+            options = {"mode": "creative"} if mode == "creative" else {}
+            extracted = extract_job(to_dict(rp), profile_block, **options)
             extracted["required_software"] = _canon_list(extracted.get("required_software"))
             extracted["required_skills"] = _canon_list(extracted.get("required_skills"))
             extracted["preferred_skills"] = _canon_list(extracted.get("preferred_skills"))
             extracted["skills_to_learn"] = _canon_list(extracted.get("skills_to_learn"))
-            ratings = rate_axes(extracted, profile_block)
+            ratings = rate_axes(extracted, profile_block, **options)
         except Exception as e:  # noqa: BLE001 — per-row fault tolerance
             failed += 1
             ctx.log(f"[extract] FAILED {rp.key} ({idx}/{len(todo)}): {e}")

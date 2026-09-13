@@ -127,6 +127,11 @@ def _normalise_repository_path(path: str, *, jaa_only: bool = False) -> str:
 
 
 def _candidate_suffix(path: str) -> bool:
+    value = "/" + PurePosixPath(path).as_posix().lstrip("/")
+    if "/llm/prompts/" in value and value.endswith(".txt"):
+        return True
+    if "/llm/schemas/" in value and value.endswith(".json"):
+        return True
     return PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES
 
 
