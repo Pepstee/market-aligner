@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol
 
+from .application_archive import ArchivedObject, AttemptArchive
 from .current_time import (
     AuthenticatedCurrentTimeWitness,
     AuthenticatedTimeEvidence,
@@ -181,6 +182,13 @@ class AssembledReviewMaterial:
     review_input_sha256: str
     verification_receipt_bytes: bytes
     verification_receipt_sha256: str
+
+
+@dataclass(frozen=True)
+class ArchivedReviewMaterial:
+    material: AssembledReviewMaterial
+    attempt_id: str
+    manifest: ArchivedObject
 
 
 @dataclass(frozen=True)
@@ -987,7 +995,75 @@ class ReviewMaterialAssembler:
         )
 
 
+    def assemble_and_archive(
+        self,
+        application_id: str,
+        *,
+        application_source_identity: str,
+        application_package_bytes: bytes,
+        archive: AttemptArchive,
+    ) -> ArchivedReviewMaterial:
+        """Persist complete material before returning a completion manifest.
+
+        Time is consumed by assemble before source resolution. Archive failure
+        keeps that consumed time and any partial evidence, but returns no result.
+        The filesystem archive and admission database are not one transaction.
+        """
+        if type(archive) is not AttemptArchive:
+            raise TypeError("review persistence requires the canonical attempt archive")
+        context = _load_admission_context(self.admission_store, application_id)
+        vacancy = archive.vacancy
+        if (vacancy.job_key != context.job_key
+                or vacancy.vacancy_sha256 != context.raw_listing_sha256):
+            raise ReviewMaterialError("archive_subject", "review archive vacancy differs")
+        material = self.assemble(
+            application_id,
+            application_source_identity=application_source_identity,
+            application_package_bytes=application_package_bytes,
+        )
+        byte_fields = (
+            "evaluation_time_receipt_bytes", "request_bytes",
+            "vacancy_snapshot_bytes", "raw_listing_bytes", "projected_text_bytes",
+            "projection_bytes", "vacancy_snapshot_metadata_bytes",
+            "raw_listing_metadata_bytes", "projection_metadata_bytes",
+            "review_input_bytes", "verification_receipt_bytes",
+        )
+        objects = {}
+        for name in byte_fields:
+            value = getattr(material, name)
+            objects[name] = archive.add_artifact(
+                "review.material." + name,
+                value,
+                media_type=("text/plain" if name in {"raw_listing_bytes", "projected_text_bytes"}
+                            else "application/json"),
+                created_at=material.evaluated_at,
+            )
+        manifest_bytes = canonical_json_bytes({
+            "schema_version": "jaa.archived-review-material.v1",
+            "application_id": material.application_id,
+            "application_source_identity": material.application_source_identity,
+            "environment": material.environment,
+            "evaluated_at": material.evaluated_at,
+            "evaluation_time_receipt_sha256": material.evaluation_time_receipt_sha256,
+            "request_sha256": material.request_sha256,
+            "verification_receipt_sha256": material.verification_receipt_sha256,
+            "objects": {
+                name: {"sha256": obj.sha256, "byte_length": obj.byte_length}
+                for name, obj in objects.items()
+            },
+        })
+        manifest = archive.add_artifact(
+            "review.material.manifest",
+            manifest_bytes,
+            media_type="application/json",
+            lineage=tuple(obj.sha256 for obj in objects.values()),
+            created_at=material.evaluated_at,
+        )
+        return ArchivedReviewMaterial(material, archive.attempt_id, manifest)
+
+
 __all__ = [
+    "ArchivedReviewMaterial",
     "AssembledReviewMaterial",
     "DeterministicPDFTextExtractor",
     "EMPLOYER_REVIEW_INPUT_SCHEMA",

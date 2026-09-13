@@ -6,6 +6,8 @@ import json
 import sqlite3
 import unicodedata
 from datetime import datetime, timezone
+from dataclasses import fields
+from pathlib import Path
 
 import pytest
 
@@ -959,3 +961,95 @@ def test_review_requires_explicit_immutable_issuer_allowlist(tmp_path, issuers):
     assert raised.value.code == "accessor_issuers"
     assert accessor.resolve_calls == []
     assert witness.issue_count == 0
+
+
+def _review_archive(tmp_path, fixture, admission, *, vacancy_sha256=None):
+    from career_automation.application_archive import ApplicationArchive, VacancyArchiveIdentity
+    archive = ApplicationArchive(tmp_path / "archive", repository_root=Path(__file__).parent)
+    return archive.create_attempt(VacancyArchiveIdentity(
+        job_key=admission.job_key,
+        vacancy_sha256=vacancy_sha256 or fixture.payload["vacancy"]["raw_listing_sha256"],
+        role_title="Synthetic role",
+        company_name="Synthetic employer",
+        source_url="https://example.test/synthetic-review",
+    ))
+
+
+def test_persisted_review_reopens_every_exact_material_byte_and_completion_link(tmp_path):
+    from career_automation.application_archive import ApplicationArchive
+    fixture, admission, _accessor, _witness, assembler = _ready(tmp_path)
+    attempt = _review_archive(tmp_path, fixture, admission)
+    result = assembler.assemble_and_archive(
+        admission.application_id,
+        application_source_identity=APPLICATION_SOURCE_IDENTITY,
+        application_package_bytes=_application_package(),
+        archive=attempt,
+    )
+    reopened = ApplicationArchive(
+        attempt.archive.root, repository_root=Path(__file__).parent, create=False
+    ).open_attempt(result.attempt_id)
+    objects = reopened._objects(reopened._events())
+    manifests = [obj for obj in objects if obj.role == "review.material.manifest"]
+    assert manifests == [result.manifest]
+    manifest = json.loads((attempt.archive.root / result.manifest.relative_path).read_bytes())
+    expected_bytes = {
+        field.name: getattr(result.material, field.name)
+        for field in fields(result.material)
+        if isinstance(getattr(result.material, field.name), bytes)
+    }
+    assert set(manifest["objects"]) == set(expected_bytes)
+    for name, value in expected_bytes.items():
+        obj = next(obj for obj in objects if obj.role == "review.material." + name)
+        assert (attempt.archive.root / obj.relative_path).read_bytes() == value
+        assert manifest["objects"][name] == {"sha256": _sha(value), "byte_length": len(value)}
+        assert obj.sha256 in result.manifest.lineage
+    assert manifest["verification_receipt_sha256"] == result.material.verification_receipt_sha256
+    assert manifest["request_sha256"] == result.material.request_sha256
+    with sqlite3.connect(assembler.admission_store.database) as connection:
+        assert connection.execute(
+            "SELECT consumer_id FROM authenticated_time_evidence WHERE receipt_sha256=?",
+            (manifest["evaluation_time_receipt_sha256"],),
+        ).fetchone() == (manifest["request_sha256"],)
+
+
+@pytest.mark.parametrize("fail_at", [4, 12])
+def test_archive_failure_preserves_consumed_time_and_never_records_completion(tmp_path, monkeypatch, fail_at):
+    fixture, admission, _accessor, _witness, assembler = _ready(tmp_path)
+    attempt = _review_archive(tmp_path, fixture, admission)
+    original = attempt.add_artifact
+    calls = []
+    def fail_archive(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == fail_at:
+            raise OSError("synthetic archive failure")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(attempt, "add_artifact", fail_archive)
+    with pytest.raises(OSError, match="synthetic archive failure"):
+        assembler.assemble_and_archive(
+            admission.application_id,
+            application_source_identity=APPLICATION_SOURCE_IDENTITY,
+            application_package_bytes=_application_package(),
+            archive=attempt,
+        )
+    assert not any(obj.role == "review.material.manifest" for obj in attempt._objects(attempt._events()))
+    assert len(attempt._objects(attempt._events())) == fail_at - 1
+    with sqlite3.connect(assembler.admission_store.database) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM authenticated_time_evidence WHERE consumer_kind='review_request'"
+        ).fetchone() == (1,)
+
+
+def test_wrong_review_archive_subject_is_refused_before_consuming_time(tmp_path):
+    fixture, admission, accessor, witness, assembler = _ready(tmp_path)
+    attempt = _review_archive(tmp_path, fixture, admission, vacancy_sha256="f" * 64)
+    with pytest.raises(ReviewMaterialError) as raised:
+        assembler.assemble_and_archive(
+            admission.application_id,
+            application_source_identity=APPLICATION_SOURCE_IDENTITY,
+            application_package_bytes=_application_package(),
+            archive=attempt,
+        )
+    assert raised.value.code == "archive_subject"
+    assert witness.issue_count == 0
+    assert accessor.resolve_calls == []
+    assert attempt._objects(attempt._events()) == ()

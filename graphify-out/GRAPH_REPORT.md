@@ -4976,3 +4976,7 @@ Scoped deterministic AST extraction of review_material.py and its accessor contr
 ## Review reference adaptation ma-0145
 
 Six request/projection/reference/environment roles mapped to tested canonical owners. Inventory statuses and explicit ledger/disposition links refreshed. Product/test source unchanged; ma-0144 AST extraction remains current. Full material persistence and evaluation-time representation remain open. No model graph enrichment or sensitive inputs.
+
+## Persisted review entrypoint ma-0146
+
+Scoped deterministic AST extraction of review_material.py and accessor tests after adding archive-backed assembly completion.92 affected tests pass using actual temporary archive/SQLite and synthetic material. Existing archive owner reused; no production wiring or cross-store transaction claim. Inventory/ledger links refreshed. Incident edges replaced; cross-source semantic re-enrichment not performed. No sensitive inputs or model graph extraction.
