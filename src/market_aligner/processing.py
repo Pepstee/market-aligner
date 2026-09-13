@@ -8862,11 +8862,16 @@ def _cj_list(values: list[str]) -> str:
     return canonical_json(values)
 
 
-def _classify_own_receipt(
-    connection: sqlite3.Connection, facts: EligibilityEnvelopeFacts,
+def read_eligibility_receipt(
+    connection: sqlite3.Connection, *, operation_id: str,
     binding_sha256: str,
-) -> ReplayClassification | None:
-    """Own-receipt classification; None means definitive absence."""
+) -> bytes | None:
+    """Read a sealed receipt and verify its row, binding and event without writes.
+
+    This proves stored evidence consistency only. The caller must additionally
+    bind current profile/vacancy/processing identity and require a pass decision;
+    the receipt never grants application, release or submission authority.
+    """
     exists = connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND "
         "name='eligibility_receipts'").fetchone()
@@ -8875,7 +8880,7 @@ def _classify_own_receipt(
     columns = ",".join(_ELIGIBILITY_RECEIPT_ROW_COLUMNS)
     row = connection.execute(
         f"SELECT {columns} FROM eligibility_receipts WHERE operation_id=?",
-        (facts.operation_id,)).fetchone()
+        (operation_id,)).fetchone()
     if row is None:
         return None
     if type(row) is not tuple or len(row) != 38:
@@ -8990,6 +8995,18 @@ def _classify_own_receipt(
         raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
                                 "the bound eligibility_decided event row "
                                 "drifted")
+    return stored_bytes
+
+
+def _classify_own_receipt(
+    connection: sqlite3.Connection, facts: EligibilityEnvelopeFacts,
+    binding_sha256: str,
+) -> ReplayClassification | None:
+    """Own-receipt replay uses the same stored-evidence verifier as readers."""
+    stored_bytes = read_eligibility_receipt(
+        connection, operation_id=facts.operation_id, binding_sha256=binding_sha256)
+    if stored_bytes is None:
+        return None
     return ReplayClassification(DISPOSITION_EXACT_REPLAY, stored_bytes,
                                 "sealed replay")
 

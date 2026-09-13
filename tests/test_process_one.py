@@ -16127,6 +16127,34 @@ class EligibilityEndToEndTests(unittest.TestCase):
             supplied_job_key="board:42",
             supplied_track="backend"), payload
 
+    def test_read_receipt_reuses_durable_verifier_without_writes(self):
+        from market_aligner.processing import ProcessingRefused, read_eligibility_receipt
+
+        result, _ = self.run_one(self.fx)
+        receipt = parse_eligibility_receipt(result)
+        with _sq.connect(self.fx.assessments_path) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            before = connection.total_changes
+            self.assertEqual(result, read_eligibility_receipt(
+                connection, operation_id=receipt["operation_id"],
+                binding_sha256=receipt["binding_sha256"]))
+            self.assertIsNone(read_eligibility_receipt(
+                connection, operation_id="op-eligible-absent",
+                binding_sha256=receipt["binding_sha256"]))
+            with self.assertRaises(ProcessingRefused):
+                read_eligibility_receipt(
+                    connection, operation_id=receipt["operation_id"],
+                    binding_sha256="0" * 64)
+            self.assertEqual(before, connection.total_changes)
+            connection.execute("PRAGMA query_only=OFF")
+            connection.execute(
+                "UPDATE assessment_events SET payload_json='{}' WHERE id=?",
+                (receipt["eligibility_event"]["id"],))
+            with self.assertRaises(ProcessingRefused):
+                read_eligibility_receipt(
+                    connection, operation_id=receipt["operation_id"],
+                    binding_sha256=receipt["binding_sha256"])
+
     def test_happy_path_creates_event_and_receipt_atomically(self):
         result, _ = self.run_one(self.fx)
         receipt = parse_eligibility_receipt(result)
