@@ -138,6 +138,7 @@ def _tar_candidate(path: str) -> bool:
         marker in low
         for marker in (
             "/market-aligner/",
+            "/market-aligner-artiom/",
             "/market_aligner/",
             "/job-application-automation/",
             "/majaa-",

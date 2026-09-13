@@ -205,3 +205,12 @@ def test_packaged_market_namespace_precedes_shared_jaa_directory_names() -> None
             assert MODULE._normalise_tar_path(prefix + leaf) == "src/market_aligner/" + leaf
     assert MODULE._normalise_tar_path("home/gutua/jaa/llm/client.py") == "internal/jaa/llm/client.py"
     assert MODULE._normalise_tar_path("home/gutua/market-aligner/internal/jaa/llm/client.py") == "internal/jaa/llm/client.py"
+
+
+def test_named_archived_copy_retains_source_and_excludes_private_cache():
+    prefix = "home/gutua/giga/giga-user/market-aligner-artiom/"
+    for leaf in ("skeleton/scoring.py", "skeleton/contracts.py"):
+        assert MODULE._tar_candidate(prefix + leaf)
+        assert MODULE._normalise_tar_path(prefix + leaf) == "internal/jaa/" + leaf
+    assert not MODULE._tar_candidate(prefix + "scraper/data/private.yaml")
+    assert not MODULE._tar_candidate(prefix + "llm/data/cache/response.py")
