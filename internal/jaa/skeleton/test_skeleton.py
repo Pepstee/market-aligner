@@ -478,3 +478,28 @@ def test_creative_mode_preserves_confidence_tools_and_entry_only_ranking():
     field = scoring.aggregate_fields(scored, entry_level_only=True)[0]
     assert field.median_top_fit == entry.fit
     assert _equal(field.field_score, entry.fit * math.log(2))
+
+
+def test_creative_reports_keep_all_jobs_but_exclude_ineligible_recommendations(tmp_dir: Path):
+    from openpyxl import load_workbook
+    entry = JobRow("fixture", "entry", "https://example.test/entry", mapped_career="UX_UI",
+                   entry_level=True, job_title="Eligible role", required_software=["figma", "figma"],
+                   visualization=8, spatial_relevance=7, freelance_potential=6)
+    senior = JobRow("fixture", "senior", "https://example.test/senior", mapped_career="UX_UI",
+                    entry_level=False, required_software=["senior-tool"], technical_alignment=10)
+    rows = [ScoredRow(entry, .8, .8, 80), ScoredRow(senior, 1, 1, 99)]
+    paths = reporter.write_reports(rows, tmp_dir / "creative", make_plot=False, entry_level_only=True)
+    wb = load_workbook(paths.requirements_xlsx, read_only=True)
+    values = list(wb.active.values)
+    assert values[0] == ("skill", "frequency", "pct_of_postings", "top_fields")
+    assert values[1:] == [("figma", 1, 100, "UX_UI(1)")]
+    wb.close()
+    wb = load_workbook(paths.jobs_xlsx, read_only=True)
+    jobs = list(wb["jobs"].values)
+    assert len(jobs) == 3
+    assert all(key in jobs[0] for key in ("visualization", "spatial_relevance", "freelance_potential", "site_intensity"))
+    wb.close()
+    shortlist = paths.shortlist_md.read_text()
+    assert "Eligible role" in shortlist
+    assert "https://example.test/senior" not in shortlist
+    assert {r["skill"] for r in reporter.skill_frequency(rows)} == {"figma", "senior-tool"}
