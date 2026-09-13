@@ -202,11 +202,32 @@ def _prepared_authority(
         ("cover_note", "answers.full"),
     )
     consent_states = (("consent", True),)
+    inputs = _issued_release_inputs(
+        tmp_path,
+        route_adapter_id="greenhouse.production",
+        route_adapter_version="v1",
+        route_source_identity=APPLICATION_URL,
+    )
+    (
+        database,
+        _strategy,
+        contact,
+        questions,
+        source,
+        artifacts,
+        artifact_root,
+        publication,
+        _compilation,
+        gate,
+        _route,
+        issued,
+    ) = inputs
+    observation_time = _fixture_now(database).replace(hour=10).isoformat()
     success_observation = (
         json.dumps(
             {
                 "schema_version": "jaa.greenhouse-nonconsequential-canary.v1",
-                "observed_at": "2026-08-05T10:00:00+00:00",
+                "observed_at": observation_time,
                 "provider": "greenhouse",
                 "request": {
                     "url": APPLICATION_URL,
@@ -231,30 +252,10 @@ def _prepared_authority(
     ).encode()
     success_evidence = GreenhouseSuccessEvidence(
         observation_sha256=hashlib.sha256(success_observation).hexdigest(),
-        observed_at="2026-08-05T10:00:00+00:00",
+        observed_at=observation_time,
         confirmation_url=CONFIRMATION_URL,
         required_visible_markers=("Thank you for applying",),
     )
-    inputs = _issued_release_inputs(
-        tmp_path,
-        route_adapter_id="greenhouse.production",
-        route_adapter_version="v1",
-        route_source_identity=APPLICATION_URL,
-    )
-    (
-        database,
-        _strategy,
-        contact,
-        questions,
-        source,
-        artifacts,
-        artifact_root,
-        publication,
-        _compilation,
-        gate,
-        _route,
-        issued,
-    ) = inputs
     intended = IntendedVacancy(
         job_key=source.job_key,
         vacancy_sha256=source.vacancy_sha256,

@@ -4956,3 +4956,7 @@ Scoped deterministic AST refresh of production_handoff_admission_runner.py for s
 ## Admitted review material recovery ma-0140
 
 Deterministic AST extraction refreshed five recovered or changed review and synthetic test sources. Inventory now records exact restored source presence, with historical variants preserved. Current model-review integration remains incomplete. Incident edges of changed sources were replaced; cross-source semantic edges were not re-enriched. No private inputs or model extraction.
+
+## ATS fixture clock ma-0141
+
+Scoped deterministic AST refresh of test_production_ats_executor.py and current inventory/ledger links. Synthetic observation time follows the release fixture clock. Incident edges replaced; cross-source semantic re-enrichment not performed. No private sources or model extraction.
