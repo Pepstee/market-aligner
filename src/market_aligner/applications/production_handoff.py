@@ -1674,15 +1674,7 @@ def _build_production_handoff_from_authenticated_time(
     candidate_intent_bytes = serialize_candidate_intent(candidate_intent_document)
 
     scoring_parameters_bytes = json.dumps(
-        {
-            "blend": ScoringParams().blend,
-            "epsilon": ScoringParams().epsilon,
-            "fit_weights": [list(row) for row in ScoringParams().fit_weights],
-            "mean_p": ScoringParams().mean_p,
-            "opportunity_weights": [
-                list(row) for row in ScoringParams().opportunity_weights
-            ],
-        },
+        ScoringParams().reference_payload,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()

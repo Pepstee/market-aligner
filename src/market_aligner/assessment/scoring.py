@@ -104,8 +104,13 @@ class ScoringParams:
 
     @property
     def parameters_hash(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(self.reference_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @property
+    def reference_payload(self) -> dict[str, object]:
+        """The established parameter wire projection, shared with handoff export."""
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -222,13 +227,10 @@ def _unit(value: float) -> float:
 
 
 def _track(profile: CandidateProfile, name: str) -> TrackProfile:
-    return profile.tracks.get(name) or TrackProfile(
-        interest=0,
-        demonstrated_skill=0,
-        confidence=0,
-        market_readiness=0,
-        rationale="No track evidence is available.",
-    )
+    try:
+        return profile.tracks[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown profile role track: {name}") from exc
 
 
 def _weighted_mean(subscores: Mapping[str, float], weights: Mapping[str, float], params: ScoringParams) -> float:

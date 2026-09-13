@@ -822,3 +822,22 @@ def test_score_result_freezes_subscores_without_changing_serialisation():
     ):
         with pytest.raises(ValueError):
             replace(result, **changed)
+
+
+def test_scoring_parameter_export_and_unknown_track_share_canonical_contract():
+    from market_aligner.assessment.scoring import ScoringParams
+    from dataclasses import asdict
+    import hashlib
+    import json
+    import pytest
+
+    params = ScoringParams()
+    exact = json.dumps(params.reference_payload, sort_keys=True, separators=(",", ":")).encode()
+    assert params.reference_payload == asdict(params)
+    assert hashlib.sha256(exact).hexdigest() == params.parameters_hash
+    assert params.parameters_hash == "35aa5c1ac138edd6289fecbdea329b24e738cae799792c96bb7a95fbf05c3f92"
+    projection = params.reference_payload
+    projection["blend"] = 0.1
+    assert params.blend == 0.6
+    with pytest.raises(ValueError, match="unknown profile role track"):
+        score(profile(), "board:1", "missing_track", AssessmentAxes(8, 8, 9, 2, 8))
