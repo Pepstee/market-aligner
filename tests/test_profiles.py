@@ -381,3 +381,22 @@ def test_retained_profile_revision_is_exact_and_ignores_current_pointer(tmp_path
     path.write_bytes(profile_bytes)
     path.chmod(0o600)
     assert store.load_revision(old.profile_id, old.version) == (old, {})
+
+    # A retained donor store has only a current pointer plus revisions.
+    for name in ("profile.yaml", "evidence.jsonl", "generation.json"):
+        (directory / name).unlink()
+    pointer = directory / "current.json"
+    pointer.write_bytes((revision / "manifest.json").read_bytes())
+    pointer.chmod(0o600)
+    assert store.list_profile_ids() == [old.profile_id]
+    assert store.load(old.profile_id) == (old, {})
+    changed = {**manifest, "profile_sha256": "0" * 64}
+    pointer.write_text(json.dumps(changed, sort_keys=True, separators=(",", ":")))
+    with pytest.raises(ValueError, match="differs from revision manifest"):
+        store.load(old.profile_id)
+    pointer.write_bytes((revision / "manifest.json").read_bytes())
+    assert store.load(old.profile_id) == (old, {})
+    (directory / "generation.json").write_bytes(b"invalid generation")
+    (directory / "generation.json").chmod(0o600)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        store.load(old.profile_id)

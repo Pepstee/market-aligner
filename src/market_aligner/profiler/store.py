@@ -894,11 +894,54 @@ class ProfileStore:
         legacy_unsealed after strict leaf validation; any PRESENT-but-invalid
         or unsafe manifest refuses.
         """
+        directory = self.directory(profile_id)
+        if (directory / "current.json").exists() and not (directory / MANIFEST_NAME).exists():
+            return self._load_legacy_current(profile_id)
         snapshot = self.snapshot(profile_id, require_committed_generation=False)
         try:
             return snapshot.profile, snapshot.evidence
         finally:
             snapshot.close()
+
+    def _load_legacy_current(
+        self, profile_id: str
+    ) -> tuple[CandidateProfile, dict[str, EvidenceItem]]:
+        """Bind the old current pointer to one verified immutable revision."""
+        levels = _open_profile_chain(
+            self, profile_id, exclusive=False, wait=True, create=False
+        )
+        children: list[_RetainedDirectory] = []
+        try:
+            directory = levels[-1]
+            if _entry_exists(directory.fd, MANIFEST_NAME):
+                raise ValueError("legacy current pointer cannot override a generation manifest")
+            current, identity = _read_leaf_bounded(directory.fd, "current.json", MAX_MANIFEST_BYTES)
+            value = _strict_json_loads(current)
+            if not isinstance(value, dict):
+                raise ValueError("legacy current manifest must be a mapping")
+            version = value.get("profile_version")
+            if not isinstance(version, str) or not version.strip():
+                raise ValueError("legacy current profile version is missing")
+            parent = directory
+            for name in ("revisions", hashlib.sha256(version.encode("utf-8")).hexdigest()):
+                child = _RetainedDirectory(parent_fd=parent.fd, name=name, path_label="current revision")
+                children.append(child)
+                child.initial_proof()
+                parent = child
+            retained, _ = _read_leaf_bounded(parent.fd, "manifest.json", MAX_MANIFEST_BYTES)
+            if current != retained:
+                raise ValueError("legacy current pointer differs from revision manifest")
+            result = self.load_revision(profile_id, version)
+            reread, current_identity = _read_leaf_bounded(directory.fd, "current.json", MAX_MANIFEST_BYTES)
+            if reread != current or current_identity != identity or _entry_exists(directory.fd, MANIFEST_NAME):
+                raise ValueError("legacy current pointer changed during load")
+            for level in (*levels, *children):
+                level.revalidate()
+            return result
+        finally:
+            for child in reversed(children):
+                child.close()
+            _close_chain(levels)
 
     def load_revision(
         self, profile_id: str, profile_version: str
@@ -958,7 +1001,9 @@ class ProfileStore:
         return sorted(
             child.name
             for child in self.paths.profiles.iterdir()
-            if child.is_dir() and child.joinpath(PROFILE_NAME).is_file()
+            if child.is_dir() and (
+                child.joinpath(PROFILE_NAME).is_file() or child.joinpath("current.json").is_file()
+            )
         )
 
     def save_projection(
