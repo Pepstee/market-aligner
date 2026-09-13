@@ -20,6 +20,7 @@ Uses only a tiny synthetic fixture — no scraper, llm, or profiler needed.
 from __future__ import annotations
 
 import math
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -321,6 +322,7 @@ def test_extract_ignores_diagnostics_and_skips_malformed_raw_cache(
     )
     messages: list[str] = []
     ctx = SimpleNamespace(
+        cfg={},
         paths=SimpleNamespace(
             raw_cache=raw_cache,
             processing_job_urls=selection,
@@ -334,6 +336,35 @@ def test_extract_ignores_diagnostics_and_skips_malformed_raw_cache(
     assert [record.key for record in records] == ["greenhouse:123"]
     assert len(messages) == 1
     assert "skip malformed raw cache file" in messages[0]
+
+
+def test_extract_retains_multiple_cache_formats_without_bypassing_selection(tmp_dir: Path):
+    from dataclasses import asdict
+
+    first = tmp_dir / "first"
+    second = tmp_dir / "second"
+    first.mkdir()
+    second.mkdir()
+    rows = [RawPosting("fixture", str(i), f"https://example.test/{i}",
+                       "2026-09-14T00:00:00Z", raw_text=f"Role {i}")
+            for i in range(3)]
+    (first / "a.json").write_text(json.dumps(asdict(rows[0]), indent=2))
+    (second / "a.json").write_text(json.dumps([asdict(r) for r in rows], indent=2))
+    write_jsonl(second / "b.json", rows)
+    selection = tmp_dir / "selected.jsonl"
+    messages = []
+    ctx = SimpleNamespace(
+        cfg={"io": {"raw_cache_roots": ["first", "second"]}},
+        paths=SimpleNamespace(root=tmp_dir, raw_cache=tmp_dir / "absent",
+                              processing_job_urls=None, job_urls=selection),
+        log=messages.append,
+    )
+    assert [r.key for r in pipeline_run._iter_raw_postings(ctx)] == [r.key for r in rows]
+    write_jsonl(selection, [JobUrl("fixture", "1", "https://example.test/1")])
+    assert [r.key for r in pipeline_run._iter_raw_postings(ctx)] == ["fixture:1"]
+    write_jsonl(selection, [])
+    assert list(pipeline_run._iter_raw_postings(ctx)) == []
+    assert messages == []
 
 
 # --------------------------------------------------------------------------- #

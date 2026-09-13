@@ -37,6 +37,7 @@ Run from the repo root:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -298,9 +299,12 @@ def stage_fetch(ctx: RunContext) -> Optional[Path]:
 # Stage 3 — extract  (llm: C2 → C3 jobs.jsonl, structured + rated)
 # --------------------------------------------------------------------------- #
 def _iter_raw_postings(ctx: RunContext):
-    base = ctx.paths.raw_cache
-    if not base.exists():
-        return
+    configured = (ctx.cfg.get("io") or {}).get("raw_cache_roots") or []
+    if not isinstance(configured, list) or any(
+        not isinstance(path, str) or not path.strip() for path in configured
+    ):
+        raise ValueError("raw_cache_roots must be a list of non-empty paths")
+    bases = [ctx.paths.root / path for path in configured] or [ctx.paths.raw_cache]
     selection = ctx.paths.processing_job_urls or ctx.paths.job_urls
     if ctx.paths.processing_job_urls is not None and not selection.exists():
         raise RuntimeError(
@@ -309,20 +313,32 @@ def _iter_raw_postings(ctx: RunContext):
         )
     allowed = {
         rec.key for rec in read_jsonl(selection, JobUrl)
-    } if selection.exists() else set()
-    for f in sorted(base.rglob("*.json")):
-        if "_scrapling_failures" in f.parts:
-            continue
-        try:
-            records = list(read_jsonl(f, RawPosting))
-        except (OSError, ValueError) as error:
-            ctx.log(
-                f"[extract] skip malformed raw cache file {f}: "
-                f"{type(error).__name__}: {error}"
-            )
-            continue
-        for rec in records:
-            if not allowed or rec.key in allowed:
+    } if selection.exists() else None
+    seen: set[str] = set()
+    for base in bases:
+        for f in sorted(base.rglob("*.json")):
+            if "_scrapling_failures" in f.parts:
+                continue
+            try:
+                try:
+                    payload = json.loads(f.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    records = list(read_jsonl(f, RawPosting))
+                else:
+                    items = payload if isinstance(payload, list) else [payload]
+                    if any(not isinstance(item, dict) for item in items):
+                        raise ValueError("raw cache must contain posting objects")
+                    records = [from_dict(RawPosting, item) for item in items]
+            except (OSError, ValueError, TypeError) as error:
+                ctx.log(
+                    f"[extract] skip malformed raw cache file {f}: "
+                    f"{type(error).__name__}: {error}"
+                )
+                continue
+            for rec in records:
+                if rec.key in seen or (allowed is not None and rec.key not in allowed):
+                    continue
+                seen.add(rec.key)
                 yield rec
 
 
