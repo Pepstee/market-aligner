@@ -48,5 +48,6 @@ packages = [
 
 [tool.setuptools.package-data]
 skeleton = ["config.yaml"]
+scraper = ["fixtures/*.json", "fixtures/*/*.json"]
 llm = ["prompts/*.txt", "schemas/*.json"]
 career_automation = ["fixtures/*.json", "fixtures/provider-observation-capture-objects/*.json"]
