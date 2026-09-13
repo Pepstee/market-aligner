@@ -761,3 +761,35 @@ def test_retained_country_uses_explicit_evidence_without_region_guessing():
                               (None, "Germany, France")):
         with pytest.raises(SelectionBlocked):
             retained_location_country(country, location)
+
+
+def test_scoring_validation_preserves_numeric_api_and_receipt_identity():
+    from market_aligner.assessment.scoring import ScoringParams, power_mean
+    import pytest
+
+    params = ScoringParams()
+    assert params.parameters_hash == "35aa5c1ac138edd6289fecbdea329b24e738cae799792c96bb7a95fbf05c3f92"
+    result = score(profile(), "board:1", "applied", AssessmentAxes(8, 8, 9, 2, 8))
+    assert (result.fit, result.opportunity, result.final) == (
+        0.7764682691005906, 0.8336684573330293, 79.9348344393566)
+    for bad in (True, "8", float("nan"), float("inf"), -1, 11):
+        with pytest.raises(ValueError):
+            AssessmentAxes(bad, 8, 9, 2, 8)
+    for kwargs in (
+        {"mean_p": float("nan")}, {"mean_p": True}, {"epsilon": 0},
+        {"epsilon": 0, "mean_p": 1e-10}, {"blend": True},
+        {"fit_weights": (("interest", 0.5), ("interest", 0.5))},
+        {"fit_weights": (("interest", -0.2),) + params.fit_weights[1:]},
+        {"fit_weights": (("interest", float("inf")),) + params.fit_weights[1:]},
+        {"fit_weights": params.fit_weights[:-1]},
+    ):
+        with pytest.raises(ValueError):
+            ScoringParams(**kwargs)
+    assert power_mean([0.2, 0.8], [0, 1], 0, 0.05) == pytest.approx(0.8)
+    assert power_mean([0, 0.8], [1, 1], 1, 0) == pytest.approx(0.4)
+    for weights in ([0, 0], [-1, 2], [float("nan"), 1], [True, 1]):
+        with pytest.raises(ValueError):
+            power_mean([0.2, 0.8], weights, 0, 0.05)
+    for p, epsilon in ((float("nan"), 0.05), (0, 0), (1e-10, 0)):
+        with pytest.raises(ValueError):
+            power_mean([0, 0.8], [1, 1], p, epsilon)
