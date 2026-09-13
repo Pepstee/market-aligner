@@ -45,6 +45,7 @@ from career_automation.production_attempt import (
 from career_automation.testing_sanity_review import fixture_pass_receipt
 from test_jaa08_independent_acceptance import (
     _fixture_now,
+    _fit_database as _release_fit_database,
     _issued_release_inputs,
 )
 
@@ -237,7 +238,19 @@ def _prepared_authority(
     )
     # Keep the release clock in the registered synthetic observation's time frame.
     # Its exact bytes are authority-bound and must not drift with the calendar.
+    def dated_fit_database(*args, **kwargs):
+        values = _release_fit_database(*args, **kwargs)
+        with values[0].connection() as connection:
+            connection.execute(
+                "UPDATE pipeline_jobs SET created_at=?",
+                (success_evidence.observed_at,),
+            )
+        return values
+
     with pytest.MonkeyPatch.context() as fixture_clock:
+        fixture_clock.setattr(
+            "test_jaa08_independent_acceptance._fit_database", dated_fit_database
+        )
         fixture_clock.setattr(
             "test_jaa06_independent_acceptance._utc_today",
             lambda: datetime.fromisoformat(success_evidence.observed_at).date(),
