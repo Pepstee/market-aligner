@@ -4940,3 +4940,7 @@ Deterministic AST refresh of application_sanity_review.py and its synthetic test
 ## Current review owner accounting ma-0131
 
 Deterministic current AST inventory refresh, preserved historical source bindings, six explicit disposition links and current inventory line locations. Production code graph remains the ma-0130 extraction; no extra semantic or sensitive-source scan.
+
+## CV service export ma-0132
+
+Scoped deterministic AST refresh of cv_generation/service.py after restoring the donor public export. Other graph communities remain historical. Incident edges replaced by scoped extraction; no full semantic join or sensitive-source scan claimed.

@@ -1,11 +1,11 @@
 {
   "community_count": 998,
-  "edge_count": 147617,
-  "node_count": 67270,
+  "edge_count": 146360,
+  "node_count": 67241,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
-    "GRAPH_REPORT.md": "f19e35ec7b89f4bb709ff0b1eb7f117e7105b914de293d63f573e81a5e79b48f",
-    "graph.json": "9e8d0a33c3711ca9e6e20aa89f87f6a9f301201d22cbb4cae83ec7aa20b800b0"
+    "GRAPH_REPORT.md": "dbcf272f405e42ef7f58b49887f9e4047efee4fa5a6e6ec86168a2c2b629a8ed",
+    "graph.json": "29bf3c2961db74c01dcd2fe2136dc0f1e2a4ca9866c5ef2aef8af6e182c9fc9a"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "b0bdb630d804d0610298754aaaa977fa82b3bbc6",
+  "source_base_commit": "6a449b1dc1e8683e8448d52bd30302323855a627",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -30,7 +30,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "a20e1c361f39bdaae0bc9649526ab1deeefb9919cb8ee7ab98f7d86c2c095ca5",
     "docs/migration/capability-inventory.jsonl": "aba916f0672db2ac4e4463f03b036f9e5112ca31f7316fcab61515fc6873320d",
-    "docs/migration/ledger.jsonl": "b297d46bc22956ea0100f8e04abd48f1c5e170d55f0c67cb36371af6ef9b07bb",
+    "docs/migration/ledger.jsonl": "545bea7ee9a4113a1e396e71360cbaab888a2d20f06a202b43774cb3bf43feef",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -223,7 +223,7 @@
     "internal/jaa/cv_generation/constraints.py": "0e89652577ab6270ea1e570fa874eed894efbfe12bd4813c408d39ffa5d52568",
     "internal/jaa/cv_generation/document_quality.py": "a27e7055dc665f3f174b501815839527e6dfc88bc167e9f50c46eefff3b11f45",
     "internal/jaa/cv_generation/editorial_composition.py": "ac7a903a7dc119bbb0d20980096f16f2218625d8ec0d526b813aa1adb22fdf98",
-    "internal/jaa/cv_generation/service.py": "c3968506a4438c3bda79d665dbb15a87bdde55f6c85801345996af46e2f789ea",
+    "internal/jaa/cv_generation/service.py": "2b294a6646d0d21260111db90364768a92e09d3c580ce93b9d86cb8489c82240",
     "internal/jaa/docs/APPLICATION_SANITY_REVIEW.md": "9e52a5522d07b62ef6150c8f89600af7d81ec8836f84951dc429f39fdb387f0d",
     "internal/jaa/docs/AUTONOMOUS_CAREER_PIPELINE.md": "6bab386a619fe56dc01d8f0865f5d0e98624d2f245cf40d43615ff4eb8d3c627",
     "internal/jaa/docs/BORROWED_PATTERNS_IMPLEMENTATION.md": "2b523f646931301a5af90801cdf996f391957f93745dc6c69ca05a1e85702a4d",
