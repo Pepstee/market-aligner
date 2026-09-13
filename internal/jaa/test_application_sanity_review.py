@@ -648,3 +648,37 @@ def test_live_smoke_incident_input_is_bound_to_permanent_hash(tmp_path) -> None:
     with pytest.raises(ValueError, match="incident PDF hash differs"):
         _incident_pdf_bytes(wrong)
     assert len(INCIDENT_PDF_SHA256) == 64
+
+
+@pytest.mark.parametrize("fields", [
+    tuple((f"q{i:03d}", "Question", "Answer") for i in range(201)),
+    (("q", "Question", "é" * 4001),),
+    (("q", "é" * 4001, "Answer"),),
+    (("q", "Question", "A"), ("q", "Question", "B")),
+    (("z", "Question", "A"), ("a", "Question", "B")),
+    (("q", "", "A"),),
+])
+def test_review_form_bounds_reject_invalid_material(fields) -> None:
+    with pytest.raises(ValueError, match="sanity review form"):
+        package(fields=fields)
+
+
+def test_review_form_byte_and_row_boundaries_remain_accepted() -> None:
+    rows = tuple((f"q{i:03d}", "Question", "é" * 4000) for i in range(200))
+    assert package(fields=rows).form_fields == rows
+
+
+def test_oversized_review_pdf_is_rejected_before_parser(monkeypatch) -> None:
+    monkeypatch.setattr(review_module, "MAX_PDF_BYTES", 8)
+    monkeypatch.setattr(review_module, "PdfReader", lambda *a, **kw: pytest.fail("parser called"))
+    with pytest.raises(ValueError, match="byte limit"):
+        review_module._independent_pdf_text(b"%PDF-1234")
+
+
+def test_extracted_text_bound_rejects_before_provider(tmp_path, monkeypatch) -> None:
+    value = package()
+    backend = ScriptedBackend(PASS)
+    monkeypatch.setattr(review_module, "MAX_DOCUMENT_TEXT_BYTES", 8)
+    with pytest.raises(ApplicationSanityReviewError, match="byte limit"):
+        review_application_package(value, client=client(backend, tmp_path))
+    assert backend.last_user == ""

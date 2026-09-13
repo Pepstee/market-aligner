@@ -30,6 +30,10 @@ REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v
 REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
 MAX_REVIEW_TEXT_BYTES = 500_000
 MAX_RAW_LISTING_BYTES = 2_000_000
+MAX_DOCUMENT_TEXT_BYTES = 250_000
+MAX_FORM_ANSWER_ROWS = 200
+MAX_FORM_VALUE_BYTES = 8_000
+MAX_PDF_BYTES = 20 * 1024 * 1024
 
 # This is policy, not model-specific advice. Vacancy and application content
 # are deliberately placed only in the quoted JSON user payload.
@@ -297,6 +301,23 @@ class SanityReviewPackage:
         IntendedVacancy.__post_init__(self.intended_vacancy)
         if not self.cv_pdf_bytes or not self.cover_letter_pdf_bytes:
             raise ValueError("sanity review requires both exact final PDFs")
+        for value in (self.cv_pdf_bytes, self.cover_letter_pdf_bytes):
+            if not isinstance(value, bytes) or len(value) > MAX_PDF_BYTES:
+                raise ValueError("sanity review PDF exceeds the byte limit or is invalid")
+        if not isinstance(self.form_fields, (tuple, list)) or len(self.form_fields) > MAX_FORM_ANSWER_ROWS:
+            raise ValueError("sanity review form-answer row count is invalid")
+        question_ids = []
+        for row in self.form_fields:
+            if not isinstance(row, (tuple, list)) or len(row) != 3:
+                raise ValueError("sanity review form-answer row is invalid")
+            question_id, question, answer = row
+            if not all(isinstance(value, str) for value in row) or not question_id or not question:
+                raise ValueError("sanity review form-answer values are invalid")
+            if any(len(value.encode("utf-8")) > MAX_FORM_VALUE_BYTES for value in (question, answer)):
+                raise ValueError("sanity review form-answer value exceeds the byte limit")
+            question_ids.append(question_id)
+        if question_ids != sorted(set(question_ids)):
+            raise ValueError("sanity review form answers require ascending unique question IDs")
         if not re.fullmatch(r"[0-9a-f]{64}", self.application_source_identity):
             raise ValueError("sanity review requires an application-source identity")
         if not self.vacancy_requirements:
@@ -390,6 +411,8 @@ def package_from_application(
 def _independent_pdf_text(pdf_bytes: bytes) -> str:
     if not isinstance(pdf_bytes, bytes) or not pdf_bytes.startswith(b"%PDF-"):
         raise ValueError("sanity review input is not an exact PDF")
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        raise ValueError("sanity review PDF exceeds the byte limit")
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes), strict=True)
         if reader.is_encrypted or not reader.pages:
@@ -403,12 +426,15 @@ def _independent_pdf_text(pdf_bytes: bytes) -> str:
         ) from exc
     if not text.strip():
         raise ValueError("sanity review PDF has no independently extractable text")
+    if len((text + "\n").encode("utf-8")) > MAX_DOCUMENT_TEXT_BYTES:
+        raise ValueError("sanity review extracted text exceeds the byte limit")
     return text + "\n"
 
 
 def _package_document(
     package: SanityReviewPackage,
 ) -> tuple[dict[str, object], dict[str, str]]:
+    SanityReviewPackage.__post_init__(package)
     cv_text = _independent_pdf_text(package.cv_pdf_bytes)
     letter_text = _independent_pdf_text(package.cover_letter_pdf_bytes)
     form_document = [

@@ -1,11 +1,11 @@
 {
   "community_count": 998,
-  "edge_count": 148628,
-  "node_count": 67344,
+  "edge_count": 147600,
+  "node_count": 67244,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
-    "GRAPH_REPORT.md": "ff12468ed9c4123881c2fa019f7b5332bd55b4b241df22d790a828d233286fdb",
-    "graph.json": "d17240144d25f79cc2490435f7a12fee1c1d3adb6eb48a43712b2384e257538f"
+    "GRAPH_REPORT.md": "7e7941ef3cc417967bb4fe04fa683d7761ce84b1fe98ad6ee3547b5e21f1dc4d",
+    "graph.json": "1b4ff5f4eea33a8dbda3b2bcf15db99fd3ece5cf2474e6dbde5866d81bc97db4"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "a812de9e79d0ae3f6bec7d423ce1d9054535f363",
+  "source_base_commit": "0bee18a5df101e9d3389d65a4917a6af08182412",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -30,7 +30,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "c96f5e8e31c658814620ecec2a88b58e934c3df7f82abfbe1b21927509719752",
     "docs/migration/capability-inventory.jsonl": "62f5f1ace0d614c0d9be7c534adf89a1b22c43e4829f4476a1621d9e32ae2bc7",
-    "docs/migration/ledger.jsonl": "f4218f74ef3753b0883ff6cb0ad6845beb381f2e8403b99c24f31ad79c46e621",
+    "docs/migration/ledger.jsonl": "1c742158b5ab393eaec8970f4f066d589519eb0971824ee00f6605236ce82e50",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "e964399c2ee3c3772e4e65a15324fdd552e3f44b9c9960a2494457f8a1ed8db6",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -69,7 +69,7 @@
     "internal/jaa/career_automation/application_preview.py": "f1d85977ab8adf914ca365ba44082ee8d33f12917d8a7e3c8198dee856499309",
     "internal/jaa/career_automation/application_quality.py": "290ffa0d41c9bf78eb66066e99ec758a35f7bc1721655b060ac5378ca306a360",
     "internal/jaa/career_automation/application_quality_contracts.py": "bb76d13b10ad74aaac82653b45825dd086312e16fb7a2c22437966f62479fd1a",
-    "internal/jaa/career_automation/application_sanity_review.py": "a35c08c4df29447ceb80d08028b926cf3560c24cff30105cef424a384d2708b0",
+    "internal/jaa/career_automation/application_sanity_review.py": "f393e907dbf2f9ac49b864b6c225ed08fa31e38d91c40ec2f5ef83985a8f0b2a",
     "internal/jaa/career_automation/application_strategy.py": "58ff3d1ed0e0ca6838335c398ff7771ec6c4acacee0ad856975732a2da691c7a",
     "internal/jaa/career_automation/ashby_live_adapter.py": "e55c5f5056a30a6ba0be05452e4eb2c453a6a460a4b826974d1e575d97d0dccc",
     "internal/jaa/career_automation/ats_application_authority.py": "f28df747584d6f1a5af7c08ad29914619d2b3d828ad6bb3404d0a4845b3d5c8d",
@@ -473,7 +473,7 @@
     "internal/jaa/test_application_evidence_safe_rebuild.py": "8e2c0e56cbde5669b64be21ba12922c1a58d289058fcab7491d97a9b523e5570",
     "internal/jaa/test_application_preview.py": "49476fe8be2c98b7560595ab64e66c066f751b20777cd616f1bdebfc8e505985",
     "internal/jaa/test_application_quality.py": "d97c6e6e512b618b47faaa14c593be24135efeba4116a9abc48c7c2181b9c8de",
-    "internal/jaa/test_application_sanity_review.py": "0eccf79728019738779225ecb248277998df540696e7bf125b0eb14c38ebb082",
+    "internal/jaa/test_application_sanity_review.py": "b9749dfe9baeda7e215f5be47e5b1be8bf65d589c20246bfda6b17b53f0aee23",
     "internal/jaa/test_archive_observation_bundle.py": "7a4edc71c2437d7704ed90a0ae16962d646f046655c5b2679a239e4a00e1eb98",
     "internal/jaa/test_assurance_manifest_truth.py": "7c332645e440d38b38b42e0ad9b914a8bc737db7b72473d09b146ad818cdc969",
     "internal/jaa/test_ats_application_authority.py": "f1c5dddae68334d7ed5af23ad885966e79be99d2d88ddbaa702d756d4d117d70",

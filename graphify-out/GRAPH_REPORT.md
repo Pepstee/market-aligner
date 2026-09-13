@@ -4919,3 +4919,8 @@ ma-0125 restores the absent compatibility owner and its donor test suite. Both a
 ## Runtime compatibility accounting
 
 ma-0126 refreshes the two restored runtime/test owners using canonical Python3.12 AST identities and cached provenance.53 records accounted for,8 explicit nonexact decisions,25 previously missing code records closed. Global queue1300. Structured statuses/line references and decision edges refreshed deterministically; no semantic calls/private inputs. Current graph: 67344 nodes, 148628 edges.
+
+
+## Review input limit recovery
+
+ma-0127 restores donor byte/row/field limits in the existing sanity-review owner. Both changed code/test sources re-extracted; structured ledger edge added. No semantic calls or private inputs. Metadata/time field accounting remains open. Current graph: 67244 nodes, 147600 edges.
