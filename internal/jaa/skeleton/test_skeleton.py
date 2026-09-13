@@ -503,3 +503,44 @@ def test_creative_reports_keep_all_jobs_but_exclude_ineligible_recommendations(t
     assert "Eligible role" in shortlist
     assert "https://example.test/senior" not in shortlist
     assert {r["skill"] for r in reporter.skill_frequency(rows)} == {"figma", "senior-tool"}
+
+
+def test_extraction_interruption_preserves_prefix_and_resumes_only_missing(tmp_dir: Path, monkeypatch):
+    import types
+    import pytest
+    raw = tmp_dir / "raw"
+    raw.mkdir()
+    for index in range(2):
+        write_jsonl(raw / f"{index}.json", [RawPosting("fixture", str(index),
+                    f"https://example.test/{index}", "2026-09-14T00:00:00Z", raw_text="Synthetic role")])
+    calls = []
+    interrupt = [True]
+    def extract(record, profile):
+        calls.append(record["job_id"])
+        if record["job_id"] == "1" and interrupt[0]:
+            raise KeyboardInterrupt("synthetic interruption")
+        return {"job_title": "Role", "mapped_career": "UX_UI", "required_software": ["Tool A"]}
+    monkeypatch.setattr(pipeline_run, "_try_llm", lambda: (extract, lambda *a: {}))
+    client = types.ModuleType("llm.client")
+    client.make_backend = lambda cfg: types.SimpleNamespace(name="synthetic")
+    client.LLMClient = lambda **kw: types.SimpleNamespace(**kw)
+    caps = types.ModuleType("llm.capabilities")
+    caps.set_client = lambda client: None
+    caps.normalise_skill = lambda term, *a, **kw: term.lower().replace(" ", "_")
+    monkeypatch.setitem(sys.modules, "llm.client", client)
+    monkeypatch.setitem(sys.modules, "llm.capabilities", caps)
+    ctx = pipeline_run.RunContext(
+        cfg={"scoring": {"mode": "creative"}, "boards": {"mode": "fixture"}},
+        paths=pipeline_run.Paths.build(tmp_dir, {"io": {"raw_cache": "raw", "jobs": "jobs.jsonl"}}),
+        log=lambda message: None,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        pipeline_run.stage_extract(ctx)
+    first = list(pipeline_run.read_jsonl(ctx.paths.jobs, JobRow))
+    assert [r.key for r in first] == ["fixture:0"]
+    assert first[0].required_software == ["tool_a"]
+    calls.clear()
+    interrupt[0] = False
+    assert pipeline_run.stage_extract(ctx) == ctx.paths.jobs
+    assert calls == ["1"]
+    assert [r.key for r in pipeline_run.read_jsonl(ctx.paths.jobs, JobRow)] == ["fixture:0", "fixture:1"]
