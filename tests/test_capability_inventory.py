@@ -186,3 +186,11 @@ def test_required_gmail_lifecycle_capability_is_fail_closed(tmp_path: Path) -> N
     assert capability["owner"] == "Market Aligner / internal JAA"
     assert capability["status"] == "required_missing_owner_gate_pending"
     assert "send" in capability["forbidden"]
+
+
+def test_semantic_fingerprint_preserves_empty_fields_across_python_versions() -> None:
+    node = ast.parse("def f(): pass").body[0]
+    assert MODULE._semantic_bytes(node) == (
+        b"FunctionDef(name='f', args=arguments(posonlyargs=[], args=[], kwonlyargs=[], "
+        b"kw_defaults=[], defaults=[]), body=[Pass()], decorator_list=[], type_params=[])"
+    )

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import inspect
 import json
 import re
 import subprocess
@@ -164,8 +165,13 @@ def _normalise_tar_path(path: str) -> str | None:
     return None
 
 
+_AST_DUMP_OPTIONS = {"show_empty": True} if "show_empty" in inspect.signature(ast.dump).parameters else {}
+
+
 def _semantic_bytes(node: ast.AST) -> bytes:
-    return ast.dump(node, annotate_fields=True, include_attributes=False).encode()
+    # Python 3.13+ can omit empty fields, and 3.14 does so by default.
+    # Preserve the original inventory representation across these runtimes.
+    return ast.dump(node, annotate_fields=True, include_attributes=False, **_AST_DUMP_OPTIONS).encode()
 
 
 @dataclass(frozen=True)
