@@ -1225,7 +1225,7 @@ def _require_detailed_eligibility(
     connection: sqlite3.Connection, *, profile_id: str, profile_version: str,
     track: str, job_key: str, source_content_sha256: str,
     profile_file_sha256: str, evidence_file_sha256: str,
-    normalized_json_sha256: str,
+    normalized_json_sha256: str, current_profile=None,
 ) -> bytes:
     """Require current, matching eligibility evidence; never grant release."""
     from market_aligner.processing import (
@@ -1242,7 +1242,8 @@ def _require_detailed_eligibility(
         if len(rows) != 1:
             raise ProductionHandoffError("eligibility_state", "one detailed eligibility receipt is required")
         raw = read_current_eligibility_receipt(
-            connection, operation_id=rows[0][0], binding_sha256=rows[0][1])
+            connection, operation_id=rows[0][0], binding_sha256=rows[0][1],
+            opportunity_profile=current_profile)
         if raw is None:
             raise ProductionHandoffError("eligibility_state", "detailed eligibility disappeared")
         receipt = parse_eligibility_receipt(raw)
@@ -1563,7 +1564,7 @@ def _build_production_handoff_from_authenticated_time(
             track=track, job_key=source_job_key,
             source_content_sha256=str(posting["content_hash"]),
             profile_file_sha256=_sha(_profile_bytes), evidence_file_sha256=_sha(evidence_bytes),
-            normalized_json_sha256=_sha(_canonical(vacancy)),
+            normalized_json_sha256=_sha(_canonical(vacancy)), current_profile=profile,
         )
     finally:
         eligibility_connection.close()

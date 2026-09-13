@@ -8613,16 +8613,51 @@ def _fit_row_present_or_refuse(connection: sqlite3.Connection,
 
 def _matches_promoted_fit_projection(
     connection: sqlite3.Connection, parsed: dict[str, Any], score_row: tuple,
+    opportunity_profile: CandidateProfile | None = None,
 ) -> bool:
-    """Recognise recorded downstream progress of the SAME admitted FIT score.
+    """Recognise recorded progress preserving admitted FIT components.
 
     This is only a reader rule. Initial admission and recovery still require
-    the exact scored projection. A changed score requires separate evidence
-    and is deliberately not accepted here.
+    the exact scored projection. Opportunity enrichment requires canonical recomputation and an exact
+    completed processing result bound by the promotion.
     """
     projection = parsed["assessment_projection"]
+    expected_score_hash = projection["score_payload_hash"]
+    enriched = None
+    derivation = None
+    if score_row[2] != expected_score_hash:
+        if (opportunity_profile is None
+                or opportunity_profile.profile_id != parsed["profile_id"]
+                or opportunity_profile.version != parsed["profile_version"]):
+            return False
+        from market_aligner.assessment.opportunity import derive_opportunity_axes
+        from market_aligner.domain.contracts import Vacancy
+        normalized = read_normalized_job(connection, key=parsed["job_key"])
+        if normalized is None:
+            return False
+        vacancy = Vacancy(**strict_json_loads(normalized[0]))
+        derivation = derive_opportunity_axes(vacancy)
+        alignment = parsed["alignment"]["output"]
+        enriched_result = deterministic_score(
+            opportunity_profile, parsed["job_key"], parsed["track"],
+            AssessmentAxes(alignment["technical_alignment"] * 10,
+                           alignment["evidence_match"] * 10,
+                           derivation.market_demand, derivation.barrier_to_entry,
+                           derivation.growth_potential), ScoringParams())
+        enriched_bytes, expected_score_hash = canonical_score_payload(enriched_result)
+        enriched = strict_json_loads(enriched_bytes)
+        admitted = parsed["scoring"]["expected_score"]
+        if any(enriched[key] != admitted[key] for key in (
+                "profile_id", "job_key", "track", "fit", "fit_status",
+                "fit_subscores", "parameters_hash")):
+            return False
+        stored_payload = connection.execute(
+            "SELECT score_payload_json FROM assessments WHERE profile_id=? AND job_key=?",
+            (parsed["profile_id"], parsed["job_key"])).fetchone()
+        if stored_payload is None or stored_payload[0] != enriched_bytes:
+            return False
     if (tuple(score_row[:3]) != (parsed["profile_id"], parsed["job_key"],
-                               projection["score_payload_hash"])
+                               expected_score_hash)
             or score_row[3] not in {"opportunity_promoted", "employer_researched"}
             or score_row[4] != projection["created_at"]):
         return False
@@ -8647,8 +8682,8 @@ def _matches_promoted_fit_projection(
             or receipt.get("decision") != "pass"
             or receipt.get("profile_id") != parsed["profile_id"]
             or receipt.get("job_key") != parsed["job_key"]
-            or receipt.get("score_payload_hash") != projection["score_payload_hash"]
-            or row[2] != projection["score_payload_hash"]
+            or receipt.get("score_payload_hash") != expected_score_hash
+            or row[2] != expected_score_hash
             or row[4] != parsed["track"]
             or row[5] != parsed["raw"]["source_content_sha256"]
             or not isinstance(binding, dict) or not isinstance(policy, dict)
@@ -8661,6 +8696,28 @@ def _matches_promoted_fit_projection(
                 "processing_result_sha256", "evidence_authority_sha256",
                 "processing_config_sha256")) != tuple(row[6:10])):
         return False
+    if enriched is not None:
+        completed = connection.execute(
+            "SELECT result_json FROM vacancy.processing_jobs WHERE profile_id=? "
+            "AND job_key=? AND track=? AND authority_sha256=? AND source_content_sha256=? "
+            "AND processing_config_sha256=? AND status='completed' AND result_json IS NOT NULL",
+            (parsed["profile_id"], parsed["job_key"], parsed["track"], row[8], row[5], row[9]),
+        ).fetchall()
+        if len(completed) != 1:
+            return False
+        result = strict_json_loads(completed[0][0])
+        if (not isinstance(result, dict)
+                or sha256_hex(canonical_json(result).encode("utf-8")) != row[7]
+                or result.get("score") != enriched
+                or result.get("included") is not True
+                or result.get("processing_config_sha256") != row[9]
+                or sha256_hex(canonical_json(result.get("vacancy")).encode("utf-8"))
+                   != parsed["normalised_projection"]["normalized_json_sha256"]
+                or canonical_json(result.get("opportunity_axes")) != canonical_json(asdict(derivation))
+                or binding.get("opportunity_input_sha256")
+                   != sha256_hex(canonical_json(asdict(derivation)).encode("utf-8"))
+                or policy.get("opportunity_policy_sha256") != derivation.policy_sha256):
+            return False
     current = connection.execute(
         "SELECT opportunity_decision,policy_hash,opportunity_reason FROM assessments "
         "WHERE profile_id=? AND job_key=?",
@@ -8698,6 +8755,7 @@ def _matches_promoted_fit_projection(
 def bind_fit_authority(
     connection: sqlite3.Connection, facts: EligibilityEnvelopeFacts,
     payload: dict[str, Any], *, allow_assessment_progression: bool = False,
+    opportunity_profile: CandidateProfile | None = None,
 ) -> dict[str, Any]:
     """S4/S5: parse and FULLY self-validate the referenced FIT receipt.
 
@@ -8863,7 +8921,8 @@ def bind_fit_authority(
                           assessment_projection["updated_at"])
     if (tuple(score_row) != expected_score_row
             and not (allow_assessment_progression
-                     and _matches_promoted_fit_projection(connection, parsed, score_row))):
+                     and _matches_promoted_fit_projection(
+                         connection, parsed, score_row, opportunity_profile))):
         raise ProcessingRefused(ELIGIBILITY_REASON_FIT_RECEIPT,
                                 "the assessment row disagrees with the FIT "
                                 "projection")
@@ -9090,6 +9149,7 @@ def read_eligibility_receipt(
 
 def read_current_eligibility_receipt(
     connection: sqlite3.Connection, *, operation_id: str, binding_sha256: str,
+    opportunity_profile: CandidateProfile | None = None,
 ) -> bytes | None:
     """Recheck stored eligibility against its FIT graph and current raw posting.
 
@@ -9110,7 +9170,8 @@ def read_current_eligibility_receipt(
         raise ProcessingRefused(ELIGIBILITY_REASON_EXISTING_RECEIPT,
                                 "reconstructed eligibility binding differs")
     fit = bind_fit_authority(
-        connection, facts, payload, allow_assessment_progression=True)
+        connection, facts, payload, allow_assessment_progression=True,
+        opportunity_profile=opportunity_profile)
     _validate_current_raw_against_fit(connection, fit)
     view = reconstruct_decision_view(facts, fit)
     for key in ("decision", "reasons", "unknowns", "decision_input",

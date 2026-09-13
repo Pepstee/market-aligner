@@ -1027,3 +1027,78 @@ def test_handoff_eligibility_retains_verified_promotion_and_rejects_drift(tmp_pa
                 _require_detailed_eligibility(connection, **inputs)
             connection.execute("ROLLBACK TO mutation")
             connection.execute("RELEASE mutation")
+
+
+def test_real_processing_opportunity_enrichment_retains_eligibility(tmp_path):
+    import sqlite3
+    from test_process_one import EligibilityFixture, EligibilityEndToEndTests
+    from market_aligner.llm.contracts import SemanticVacancyExtraction, EvidenceAlignment, LLMReceipt
+    from market_aligner.service.processing import ProcessingService
+    from market_aligner.service.api import MarketAlignerService
+    from market_aligner.profiler.store import ProfileStore
+    from market_aligner.applications.production_handoff import _require_detailed_eligibility
+
+    fixture = EligibilityFixture(tmp_path, extraction_overrides={
+        "title": "Software Engineer", "seniority": "junior",
+        "location": "London, United Kingdom", "remote_policy": "remote",
+        "description": "Build software. At least one year experience.",
+        "required_qualifications": ["At least one year experience."],
+    })
+    harness = EligibilityEndToEndTests()
+    harness.fx = fixture
+    candidate = fixture.candidate_facts()
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = "NL"
+    candidate["current_residence"]["value"] = "NL"
+    candidate["maximum_years_required"]["value"] = 5.0
+    candidate["requires_sponsorship"]["value"] = False
+    harness.run_one(fixture, candidate_overrides=candidate)
+
+    class Worker:
+        def extract_vacancy(self, context):
+            value = SemanticVacancyExtraction(**fixture.extraction_output)
+            return value, LLMReceipt.bind(
+                receipt_id="rc-extr", task="semantic_vacancy_extraction",
+                model="fixture-model", prompt_version="pv-1", inputs=context,
+                output=value, created_at="2026-08-26T00:30:00Z")
+
+        def align_evidence(self, context):
+            value = EvidenceAlignment(
+                profile_id=fixture.fit_parsed["profile_id"], profile_version="gen-1",
+                job_key=fixture.job.key, matches=(), missing_requirements=(),
+                technical_alignment=0.8, evidence_match=0.7, confidence=0.75, unknowns=())
+            return value, LLMReceipt.bind(
+                receipt_id="rc-align", task="evidence_alignment", model="fixture-model",
+                prompt_version="pv-1", inputs=context, output=value,
+                created_at="2026-08-26T00:31:00Z")
+
+    config = tmp_path / "pipeline.yaml"
+    config.write_text("io:\n  database: state/vacancies.sqlite3\nprocessing:\n  shard_size: 10\n  lease_seconds: 60\n")
+    run = ProcessingService(fixture.root, Worker()).process(
+        config, profile_id=fixture.fit_parsed["profile_id"], track="backend",
+        worker_id="enrichment-worker", job_key=fixture.job.key)
+    assert run["included"] == 1
+    service = MarketAlignerService(fixture.root)
+    service.promote_processing(
+        profile_id=fixture.fit_parsed["profile_id"], track="backend",
+        job_key=fixture.job.key, processing_receipt_path=Path(run["receipt_path"]))
+    from market_aligner.applications.assessment_promotion import AssessmentPromotionError
+    with pytest.raises(AssessmentPromotionError, match="scope"):
+        service.promote_processing(
+            profile_id=fixture.fit_parsed["profile_id"], track="backend",
+            job_key="board:other", processing_receipt_path=Path(run["receipt_path"]))
+    profile, _ = ProfileStore(fixture.root).load(fixture.fit_parsed["profile_id"])
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        raw, inputs = harness._handoff_eligibility_inputs(connection)
+        assert _require_detailed_eligibility(connection, **inputs, current_profile=profile) == raw
+        for mutation in (
+            "UPDATE assessments SET score_payload_json='{}'",
+            "UPDATE vacancy.processing_jobs SET result_json='{}'",
+            "UPDATE assessment_promotions SET processing_result_sha256='changed'",
+        ):
+            connection.execute("SAVEPOINT mutation")
+            connection.execute(mutation)
+            with pytest.raises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs, current_profile=profile)
+            connection.execute("ROLLBACK TO mutation")
+            connection.execute("RELEASE mutation")
