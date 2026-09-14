@@ -15,6 +15,7 @@ from .application_compiler import ApplicationSource, verify_application_source
 from .evidence_matching import canonical_json
 from .rendering import (
     ApplicationArtifacts,
+    render_pdf_artifacts,
     validate_pdf_artifact,
     verify_application_artifacts,
 )
@@ -60,6 +61,8 @@ class PublishedArtifactReceipt:
     certifies_slice: bool = False
 
     def __post_init__(self) -> None:
+        if self.schema_version != "jaa07.artifact-publication.v1":
+            raise ValueError("unsupported artifact publication receipt schema")
         for value, label in (
             (self.artifact_set_sha256, "artifact-set hash"),
             (self.source_id, "source ID"),
@@ -130,6 +133,8 @@ def _artifact_payloads(
     if artifacts.source_id != source.source_id:
         raise ValueError("rendered artifacts cite a different application source")
     verify_application_artifacts(artifacts)
+    if artifacts != render_pdf_artifacts(source):
+        raise ValueError("application artifacts differ from an exact source rerender")
     cv_facts = tuple(row.text for row in source.facts if row.document_kind == "cv")
     letter_facts = tuple(
         row.text for row in source.facts if row.document_kind == "cover_letter"
@@ -256,6 +261,11 @@ def _read_receipt(directory: Path) -> PublishedArtifactReceipt:
             or hashlib.sha256(value).hexdigest() != row.sha256
         ):
             raise ValueError("published application artifact differs from its receipt")
+    if any(
+        entry.name not in ARTIFACT_FILENAMES and entry.name != "receipt.json"
+        for entry in directory.iterdir()
+    ):
+        raise ValueError("artifact publication contains unreceipted content")
     return receipt
 
 
@@ -342,3 +352,18 @@ def verify_published_application_artifacts(
     if actual != expected:
         raise ValueError("published artifact receipt differs from exact artifacts")
     return actual
+
+
+def verify_application_artifact_receipt(
+    source: ApplicationSource,
+    artifacts: ApplicationArtifacts,
+    receipt: PublishedArtifactReceipt,
+) -> None:
+    """Verify a retained publication receipt against exact in-memory artifacts."""
+
+    if not isinstance(receipt, PublishedArtifactReceipt):
+        raise TypeError("artifact publication receipt must be typed")
+    payloads = _artifact_payloads(source, artifacts)
+    expected = _receipt(source, artifacts, payloads)
+    if receipt != expected:
+        raise ValueError("artifact publication receipt differs from exact artifacts")

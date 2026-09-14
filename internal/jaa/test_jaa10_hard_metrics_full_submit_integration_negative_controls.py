@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parent
 CONTROL_ROOT = Path(
     os.environ.get("JAA_OPERATOR_CONTROL_ROOT", ROOT.parent.parent / ".control")
 )
-FIXTURE = ROOT / "career_automation/fixtures/jaa07_locked_application_packs.json"
+FIXTURE = (
+    ROOT
+    / "career_automation/fixtures/jaa07_locked_application_packs_hard_metrics_v1.json"
+)
 REPORT = (
     CONTROL_ROOT
     / "jaa-single-codex-20260729/"

@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "axis_ratings",
+  "description": "The 0-10 axis ratings for one posting (llm.rate_axes). These are the fuzzy sub-scores; the deterministic geometric-mean scoring lives in the skeleton, NOT here. Each axis has a rubric in the rate_axes prompt. barrier_to_entry is an INVERSE axis (10 = very hard to enter); the skeleton inverts it into accessibility.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "visualization",
+    "spatial_relevance",
+    "cs_usefulness",
+    "english_usefulness",
+    "freelance_potential",
+    "market_demand",
+    "barrier_to_entry"
+  ],
+  "properties": {
+    "visualization": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "How central is visual/rendering/aesthetic craft? 10 = rendering/visual output is the job; 0 = no visual component."
+    },
+    "spatial_relevance": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "10 = core spatial/VMD/exhibition/architectural work; 0 = no physical-space component."
+    },
+    "cs_usefulness": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "How useful is computer-science / programming ability? 10 = scripting/tools/shaders central; 0 = none needed."
+    },
+    "english_usefulness": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "How much does English help? 10 = global/English-first team or docs; 0 = Korean-only, English irrelevant."
+    },
+    "freelance_potential": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "How viable is this as freelance/contract work? 10 = commonly freelanced; 0 = only in-house/salaried."
+    },
+    "market_demand": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "How much hiring demand does this field show? 10 = abundant openings; 0 = almost none."
+    },
+    "barrier_to_entry": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "INVERSE axis. 10 = very hard to break into (senior-only, rare skills, heavy portfolio); 0 = very accessible to a career switcher. The skeleton computes accessibility = 1 - barrier/10."
+    }
+  }
+}

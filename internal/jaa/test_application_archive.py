@@ -907,3 +907,90 @@ def test_export_is_create_only(tmp_path: Path) -> None:
             destination=destination,
         )
     assert marker.read_text() == "keep"
+
+
+def test_private_evidence_event_is_ordered_recoverable_and_redacted_from_view(
+    tmp_path: Path,
+) -> None:
+    from career_automation.application_archive import (
+        load_complete_attempt_view,
+        render_complete_attempt_view,
+    )
+
+    repository, root = _roots(tmp_path)
+    archive = ApplicationArchive(root, repository_root=repository)
+    attempt = archive.create_attempt(_vacancy(), attempt_id=ATTEMPT_ID)
+    kwargs = {
+        "event_id": "field.email.0001",
+        "event_kind": "field_filled",
+        "occurred_at": "2026-08-05T22:00:00Z",
+        "result": "completed",
+        "details": {
+            "field_id": "email",
+            "field_type": "email",
+            "required": True,
+            "options": [],
+            "provenance": "synthetic-test-profile",
+        },
+        "private_value": b"synthetic@example.test",
+        "private_media_type": "text/plain",
+    }
+    first = attempt.record_evidence_event(**kwargs)
+    second = attempt.record_evidence_event(**kwargs)
+    assert first == second
+    private_objects = [
+        row
+        for row in attempt._objects(attempt._events())
+        if row.role == "evidence.private.field.email.0001"
+    ]
+    assert len(private_objects) == 1
+    private_path = archive.root / private_objects[0].relative_path
+    assert private_path.stat().st_mode & 0o777 == 0o600
+    view = load_complete_attempt_view(
+        ATTEMPT_ID, root=archive.root, repository_root=repository
+    )
+    rendered = render_complete_attempt_view(
+        ATTEMPT_ID, root=archive.root, repository_root=repository
+    )
+    assert view["evidence_events"][0]["payload"]["member_sha256s"]
+    assert "synthetic@example.test" not in json.dumps(view)
+    assert "synthetic@example.test" not in rendered
+    with pytest.raises(ApplicationArchiveError, match="replay differs"):
+        attempt.record_evidence_event(**{**kwargs, "result": "failed"})
+
+
+def test_private_evidence_event_rejects_secret_bytes(tmp_path: Path) -> None:
+    repository, root = _roots(tmp_path)
+    attempt = ApplicationArchive(root, repository_root=repository).create_attempt(
+        _vacancy(), attempt_id=ATTEMPT_ID
+    )
+    with pytest.raises(ApplicationArchiveError, match="secret-like"):
+        attempt.record_evidence_event(
+            event_id="field.password.0001",
+            event_kind="field_filled",
+            occurred_at="2026-08-05T22:00:00Z",
+            result="refused",
+            private_value=b"Authorization: Bearer secret-secret",
+            private_media_type="text/plain",
+        )
+
+
+def test_exact_artifact_read_survives_reopen_and_refuses_substitution(tmp_path):
+    from dataclasses import replace
+
+    repository, root = _roots(tmp_path)
+    archive = ApplicationArchive(root, repository_root=repository)
+    attempt = archive.create_attempt(_vacancy(), attempt_id=ATTEMPT_ID)
+    original = attempt.add_artifact("vacancy.visible_listing_capture", b"original", media_type="text/plain")
+    attempt.add_artifact("vacancy.visible_listing_capture", b"newer", media_type="text/plain")
+    reopened = archive.open_attempt(ATTEMPT_ID)
+    assert reopened.read_artifact(original) == b"original"
+    for changed in (replace(original, role="vacancy.capture"), replace(original, lineage=("a" * 64,)), replace(original, event_sha256="b" * 64)):
+        with pytest.raises(ApplicationArchiveError, match="recorded event"):
+            reopened.read_artifact(changed)
+    other = archive.create_attempt(_vacancy("other"))
+    with pytest.raises(ApplicationArchiveError, match="recorded event"):
+        other.read_artifact(original)
+    (root / original.relative_path).write_bytes(b"tampered")
+    with pytest.raises(ApplicationArchiveError, match="bytes differ"):
+        reopened.read_artifact(original)

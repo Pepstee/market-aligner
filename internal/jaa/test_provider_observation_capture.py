@@ -15,6 +15,8 @@ from career_automation.provider_observation_capture import (
     _redact_sensitive_response,
     _mask_page_for_screenshot,
     capture_greenhouse_observation,
+    load_provider_observation_capture,
+    render_provider_observation_capture,
 )
 
 
@@ -245,6 +247,7 @@ def test_invalid_acceptance_refuses_before_playwright_import_or_launch(
     ("failure_stage", "expected_code"),
     (
         ("browser_launch", "provider_browser_launch_failed"),
+        ("browser_context", "provider_browser_context_failed"),
         ("page_create", "provider_page_create_failed"),
         ("navigation", "provider_navigation_failed"),
         ("response_body_read", "provider_response_body_read_failed"),
@@ -314,10 +317,24 @@ def test_every_browser_stage_failure_is_terminally_archived(
             return b"masked png"
 
     class Browser:
+        def new_context(self, **_kwargs):
+            if failure_stage == "browser_context":
+                raise RuntimeError("context failed")
+            return self
+
         def new_page(self):
             if failure_stage == "page_create":
                 raise RuntimeError("page failed")
             return Page()
+
+        def route(self, *_args):
+            return None
+
+        def on(self, *_args):
+            return None
+
+        def unroute_all(self, **_kwargs):
+            return None
 
         def close(self):
             return None
@@ -405,3 +422,180 @@ def test_every_browser_stage_failure_is_terminally_archived(
         / "provider-observation-captures"
         / f"{caught.value.receipt.manifest_sha256}.terminal.json"
     ).is_file()
+
+
+def test_read_only_network_boundary_blocks_mutating_and_external_requests() -> None:
+    events: list[dict[str, object]] = []
+    boundary = capture_module._ReadOnlyNetworkBoundary(
+        source_url=APPLICATION_URL,
+        events=events,
+    )
+
+    class Request:
+        def __init__(self, method: str, url: str, resource_type: str) -> None:
+            self.method = method
+            self.url = url
+            self.resource_type = resource_type
+
+        def is_navigation_request(self) -> bool:
+            return self.resource_type == "document"
+
+    class Route:
+        def __init__(self, request: Request) -> None:
+            self.request = request
+            self.action = ""
+
+        def continue_(self) -> None:
+            self.action = "continue"
+
+        def abort(self, _reason: str) -> None:
+            self.action = "abort"
+
+    document = Route(Request("GET", APPLICATION_URL, "document"))
+    boundary.guard(document)
+    assert document.action == "continue"
+    asset = Route(
+        Request(
+            "GET",
+            "https://job-boards.greenhouse.io/assets/app.js?token=redacted",
+            "script",
+        )
+    )
+    boundary.guard(asset)
+    assert asset.action == "continue"
+    mutation = Route(Request("POST", APPLICATION_URL, "fetch"))
+    boundary.guard(mutation)
+    assert mutation.action == "abort"
+    external = Route(Request("GET", "https://tracker.example/pixel", "image"))
+    boundary.guard(external)
+    assert external.action == "abort"
+
+    class Effect:
+        url = APPLICATION_URL
+        suggested_filename = "unexpected.pdf"
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    popup = Effect()
+    boundary.observe_web_socket(Effect())
+    boundary.observe_download(Effect())
+    boundary.observe_popup(popup)
+    assert popup.closed is True
+    with pytest.raises(
+        capture_module.ProviderObservationNetworkBoundaryError,
+        match="blocked_requests=2",
+    ):
+        boundary.assert_clean()
+    assert [row["disposition"] for row in events] == [
+        "allowed_read_only",
+        "allowed_read_only",
+        "blocked",
+        "blocked",
+        "observed_disallowed",
+        "observed_disallowed",
+        "observed_disallowed",
+    ]
+    assert all("?" not in str(row["url"]) for row in events)
+
+
+def test_route_failure_retains_inventory_and_view_is_hash_only(
+    tmp_path: Path,
+) -> None:
+    inventory = _json_bytes(
+        {
+            "schema_version": "jaa.greenhouse-form-inventory.v1",
+            "form_state": {
+                "schema_version": "jaa.greenhouse-form-state.v1",
+                "provider": "greenhouse",
+                "title": "Expired role",
+                "url": APPLICATION_URL,
+                "fields": [
+                    {
+                        "id": "name",
+                        "type": "text",
+                        "required": True,
+                        "options": [],
+                    }
+                ],
+            },
+            "select_inventories": [],
+            "title": "Expired role",
+            "url": APPLICATION_URL,
+        }
+    )
+    identity = capture_module.exact_committed_source_identity(ROOT)
+    _, collector_sha256 = capture_module.collector_source_identity(
+        ROOT, commit=identity.head
+    )
+    operator_acceptance = {
+        "acceptance_id": "fixture-observation-acceptance",
+        "collector_source_sha256": collector_sha256,
+        "consumed_at": "2026-08-06T11:59:59Z",
+        "envelope_sha256": "a" * 64,
+        "key_id": "fixture-observation-key",
+        "receipt_sha256": "b" * 64,
+        "repository_commit": identity.head,
+        "repository_tree": identity.tree,
+        "source_url": APPLICATION_URL,
+    }
+    failure = _persist_failure(
+        archive_root=tmp_path,
+        repository_root=ROOT,
+        source_url=APPLICATION_URL,
+        observed_at="2026-08-06T12:00:00+00:00",
+        code="provider_route_changed",
+        status=200,
+        final_url="https://job-boards.greenhouse.io/example",
+        primary_response=b"expired",
+        visible_content=b"job no longer open",
+        network=[],
+        screenshot=None,
+        form_inventory=inventory,
+        operator_acceptance=operator_acceptance,
+    )
+    view = load_provider_observation_capture(
+        archive_root=tmp_path,
+        manifest_sha256=failure.receipt.manifest_sha256,
+    )
+    rendered = render_provider_observation_capture(
+        archive_root=tmp_path,
+        manifest_sha256=failure.receipt.manifest_sha256,
+    )
+    assert view["outcome"] == "provider_route_changed"
+    assert view["form_inventory"]["availability"] == "captured"
+    assert view["form_inventory"]["field_count"] == 1
+    assert view["operator_acceptance"] == operator_acceptance
+    assert "Acceptance receipt: " + "b" * 64 in rendered
+    assert "job no longer open" not in rendered
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_failure_capture_view_states_inventory_unavailable(tmp_path: Path) -> None:
+    failure = _persist_failure(
+        archive_root=tmp_path,
+        repository_root=ROOT,
+        source_url=APPLICATION_URL,
+        observed_at="2026-08-06T12:00:00+00:00",
+        code="provider_route_changed",
+        status=200,
+        final_url="https://job-boards.greenhouse.io/example",
+        primary_response=b"expired",
+        visible_content=b"job no longer open",
+        network=[],
+        screenshot=None,
+    )
+    view = load_provider_observation_capture(
+        archive_root=tmp_path,
+        manifest_sha256=failure.receipt.manifest_sha256,
+    )
+    assert view["form_inventory"] == {
+        "availability": "unavailable",
+        "reason": "provider_route_changed",
+        "sha256": None,
+    }

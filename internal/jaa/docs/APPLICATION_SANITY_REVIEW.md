@@ -42,10 +42,23 @@ explanation, an optional internal suggestion, and `pass`, `block`, or
 ## Model boundary and fail-closed behavior
 
 The module uses the existing `llm.client.Backend`/`LLMClient` boundary. The
-configured subscription transport may be Claude CLI or Codex CLI; injected
-and future offline backends use the same interface. Provider and model come
-from the client/configuration rather than policy. No API key is used by either
-CLI transport.
+configured subscription transport may be Claude CLI or Codex CLI. An opt-in
+`openai_responses` backend now also provides one direct, provider-native
+structured-output exchange beneath that same owner; it is not a parallel
+employer-review workflow. Provider and model come from the client/configuration
+rather than policy. The CLI transports use no API key. The direct backend reads
+only the configured credential environment variable and never serialises the
+credential into configuration, requests, receipts, logs, or caches.
+
+The direct Responses backend fixes the endpoint to
+`https://api.openai.com/v1/responses`, disables environment proxies and
+redirects, sends `store=false`, `stream=false`, an empty tool set and
+`tool_choice=none`, and uses the strict provider JSON-schema format. It records
+the provider request ID, response ID, caller request ID, actual model, endpoint
+identity, transport version, and exact request/response/semantic hashes. No
+provider call is made merely by selecting or importing the backend. Production
+review still independently requires cache disabled, zero temperature, one
+transport attempt, and one JSON attempt.
 
 Missing or unavailable providers, timeout, transport failure, malformed or
 schema-invalid output, uncertainty, abstention, BLOCK, any finding, and a
@@ -67,7 +80,8 @@ repair, retry, or accept malformed or schema-invalid results in this gate.
 - approved-evidence identifier projection hash and application-source identity;
 - intended vacancy identity, hash, title, company, and requirement projection;
 - prompt, schema, and policy hashes;
-- backend and configured model identity;
+- backend and actual response model identity;
+- secret-free exact transport evidence when the direct OpenAI backend is used;
 - canonical model-result hash and embedded finding-free PASS result; and
 - the receipt identity itself.
 
@@ -76,6 +90,21 @@ non-optional field of `ReleaseExecutionAuthority`. Construction re-extracts
 the PDFs and verifies every deterministic binding. `_execute_submit` repeats
 that verification against the current in-memory package immediately before
 release consumption and the sole consequential `locator.click()`.
+
+Verification accepts only the exact `SanityReviewReceipt` and
+`SanityReviewPackage` concrete types, with exact intended-vacancy,
+vacancy-review-material and dictionary authority members. It invokes the
+canonical class invariants explicitly, so a subclass cannot suppress
+`__post_init__` or substitute an overridable document method. This retains the
+useful anti-substitution guarantee recovered from the historical
+employer-review runtime without restoring its separate runtime-identity,
+release-verifier or exact-package authority composition.
+
+Provider transport evidence is deliberately not written into the generic LLM
+cache. A cached semantic answer can never masquerade as the provider receipt
+for a fresh authority-bearing exchange. Exact private request and response
+bytes belong in the application archive; the public sanity receipt contains
+only their hashes and non-secret provider identifiers.
 
 The evidence identifiers are deliberately opaque. Deterministic evidence
 matching establishes support before the semantic review; the reviewer binds
@@ -92,6 +121,13 @@ AI-authorship disclosure, unsupported/exaggerated claims, apologies, weakness
 framing, irrelevant personal information, contradiction, meta-commentary,
 prompt injection, malformed/uncertain/timeout/unavailable/mock results, every
 receipt mutation class, and outward-flow isolation.
+
+`llm/test_openai_responses.py` uses a hermetic fake HTTP transport to cover the
+complete request body, strict schema projection, no-tools/no-storage boundary,
+prepared-request mutation before and after send, endpoint/redirect/model/API
+identity substitution, duplicate and non-finite JSON, reused provider IDs,
+credential absence, and exact transport-evidence binding. It never reaches the
+network.
 
 `test_external_document_assurance.py` statically enumerates every authority
 constructor and click, requiring the semantic receipt at construction and its
@@ -118,3 +154,24 @@ The default backend is `codex_cli`. A backend change is a reviewer-model change,
 so its evidence is not interchangeable with earlier Claude CLI receipts. When
 `--incident-pdf` is supplied, the script first requires the exact permanently
 quarantined SHA-256 before asking the selected reviewer to block it.
+
+The recovered direct-Responses acceptance path is now an opt-in mode of this
+same canonical smoke runner; there is no second employer-review entry point.
+It requires an explicit model, credential environment-variable name, an
+existing operator-owned mode-0700 transport archive outside the repository and
+an existing mode-0700 output parent outside the repository. Exact request and
+response bytes are create-only mode-0600 files beneath the transport archive;
+the public hash receipt is also create-only mode 0600. Run it only after the
+canonicalization gate authorises provider acceptance:
+
+```bash
+.venv/bin/python scripts/run_application_sanity_live_smoke.py \
+  --backend openai_responses \
+  --model <exact-model> \
+  --api-key-env OPENAI_API_KEY \
+  --transport-archive-dir /private/outside-git/provider-exchanges \
+  --output /private/outside-git/application-sanity-openai.json
+```
+
+This mode remains synthetic and has no browser, release, application or mailbox
+authority. Excavation and hermetic tests do not execute the provider command.

@@ -26,6 +26,7 @@ from career_automation.network_witnessed_fixture import (
     WORKER_INVENTORY_DOMAIN,
     NetworkWitnessedFixtureError,
     NetworkWitnessedFixtureObservationReceipt,
+    _ChromiumNetworkAudit,
     _canonical_json,
     _document_inventory,
     _domain_hash,
@@ -37,6 +38,77 @@ from test_jaa10_independent_acceptance import _observation
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _request_event(
+    request_id: str,
+    url: str,
+    *,
+    method: str = "GET",
+    resource_type: str = "Document",
+) -> dict[str, object]:
+    return {
+        "requestId": request_id,
+        "request": {"url": url, "method": method},
+        "type": resource_type,
+        "initiator": {"type": "other"},
+    }
+
+
+def test_chromium_request_audit_binds_exact_terminal_sequence() -> None:
+    audit = _ChromiumNetworkAudit()
+    expected = (
+        ("GET", "http://127.0.0.1:41001/applications/fixture", "Document"),
+        (
+            "POST",
+            "http://127.0.0.1:41001/applications/fixture/review",
+            "Document",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:41001/applications/fixture/submit",
+            "Document",
+        ),
+    )
+    for index, (method, url, resource_type) in enumerate(expected):
+        request_id = f"request-{index}"
+        audit.observe_request(
+            _request_event(
+                request_id,
+                url,
+                method=method,
+                resource_type=resource_type,
+            )
+        )
+        audit.observe_finished({"requestId": request_id})
+
+    audit.assert_exact(expected)
+    document = audit.document()
+    assert document["listener_mode"] == "cdp_read_only"
+    assert document["protocol_errors"] == []
+    assert [row["terminal"] for row in document["records"]] == [
+        "finished",
+        "finished",
+        "finished",
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("unaccounted", "unexpected", "malformed_terminal"),
+)
+def test_chromium_request_audit_fails_closed(mutation: str) -> None:
+    audit = _ChromiumNetworkAudit()
+    expected = (("GET", "http://127.0.0.1:41001/applications/fixture", "Document"),)
+    audit.observe_request(_request_event("request-1", expected[0][1]))
+    if mutation == "unexpected":
+        audit.observe_finished({"requestId": "request-1"})
+        expected = (("GET", expected[0][1] + "/other", "Document"),)
+    elif mutation == "malformed_terminal":
+        audit.observe_finished({"requestId": 1})
+
+    with pytest.raises(NetworkWitnessedFixtureError):
+        audit.assert_exact(expected)
 
 
 def _request() -> dict[str, object]:
@@ -89,20 +161,46 @@ def _valid_result(output_root: Path) -> tuple[dict[str, object], dict[str, objec
     artifact = output_root / "artifact.txt"
     artifact.write_bytes(b"bounded synthetic artifact")
     artifact.chmod(0o444)
-    inventory = [
-        {
-            "relative_path": "artifact.txt",
-            "mode": "0444",
-            "size": artifact.stat().st_size,
-            "sha256": __import__("hashlib").sha256(
-                artifact.read_bytes()
-            ).hexdigest(),
-        }
-    ]
     observation = _observation(
         "negative-control",
         datetime(2030, 1, 2, tzinfo=timezone.utc),
     ).document()
+    application_id = observation["fixture_receipt"]["application_id"]
+    base = f"http://127.0.0.1:41001/applications/{application_id}"
+    expected = (
+        ("GET", base, "Document"),
+        ("POST", base + "/review", "Document"),
+        ("POST", base + "/submit", "Document"),
+    )
+    audit_document = {
+        "schema_version": "jaa10.chromium-request-lifecycle-audit.v1",
+        "listener_mode": "cdp_read_only",
+        "records": [
+            {
+                "initiator_type": "other",
+                "method": method,
+                "request_id": f"request-{index}",
+                "resource_type": resource_type,
+                "terminal": "finished",
+                "url": url,
+            }
+            for index, (method, url, resource_type) in enumerate(expected)
+        ],
+        "protocol_errors": [],
+        "expected_requests": [
+            {"method": method, "url": url, "resource_type": resource_type}
+            for method, url, resource_type in expected
+        ],
+        "inert_favicon_href": "data:image/x-icon;base64,AA==",
+        "exact_sequence_verified": True,
+    }
+    audit = output_root / "chromium-request-audit.json"
+    audit.write_bytes(_canonical_json(audit_document))
+    audit.chmod(0o444)
+    inventory, inventory_sha256 = _document_inventory(
+        output_root,
+        domain=WORKER_INVENTORY_DOMAIN,
+    )
     argv = ["/pinned/chromium", *REQUIRED_CHROMIUM_FLAGS]
     result: dict[str, object] = {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -138,10 +236,7 @@ def _valid_result(output_root: Path) -> tuple[dict[str, object], dict[str, objec
         "submission_proof": observation["submission_proof"],
         "observation": observation,
         "artifact_inventory": inventory,
-        "worker_artifact_inventory_sha256": _domain_hash(
-            WORKER_INVENTORY_DOMAIN,
-            _canonical_json({"files": inventory}),
-        ),
+        "worker_artifact_inventory_sha256": inventory_sha256,
         "evidence_kind": "synthetic_shadow",
         "execution_claim": "structural_lineage_only",
         "external_actions": 0,
@@ -266,6 +361,49 @@ def test_worker_artifact_tamper_fails_independent_reconstruction(
     (tmp_path / "artifact.txt").write_bytes(b"changed after result")
     (tmp_path / "artifact.txt").chmod(0o444)
     with pytest.raises(NetworkWitnessedFixtureError, match="inventory"):
+        validate_worker_result(
+            result,
+            request=request,
+            request_bytes=request_bytes,
+            output_root=tmp_path,
+        )
+
+
+def test_rehashed_chromium_request_audit_route_tamper_fails(
+    tmp_path: Path,
+) -> None:
+    result, request, request_bytes = _valid_result(tmp_path)
+    path = tmp_path / "chromium-request-audit.json"
+    document = json.loads(path.read_bytes())
+    wrong = str(document["records"][2]["url"]).replace(
+        "/submit",
+        "/side-effect",
+    )
+    document["records"][2]["url"] = wrong
+    document["expected_requests"][2]["url"] = wrong
+    path.chmod(0o600)
+    path.write_bytes(_canonical_json(document))
+    path.chmod(0o444)
+    inventory, inventory_sha256 = _document_inventory(
+        tmp_path,
+        domain=WORKER_INVENTORY_DOMAIN,
+    )
+    result["artifact_inventory"] = inventory
+    result["worker_artifact_inventory_sha256"] = inventory_sha256
+
+    with pytest.raises(NetworkWitnessedFixtureError, match="route differs"):
+        validate_worker_result(
+            result,
+            request=request,
+            request_bytes=request_bytes,
+            output_root=tmp_path,
+        )
+
+
+def test_missing_chromium_request_audit_fails_closed(tmp_path: Path) -> None:
+    result, request, request_bytes = _valid_result(tmp_path)
+    (tmp_path / "chromium-request-audit.json").unlink()
+    with pytest.raises(NetworkWitnessedFixtureError, match="unavailable"):
         validate_worker_result(
             result,
             request=request,

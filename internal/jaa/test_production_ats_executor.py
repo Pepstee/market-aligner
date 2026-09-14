@@ -33,7 +33,9 @@ from career_automation.production_ats_executor import (
     ProductionATSBoundaryError,
     ProductionSubmissionIndeterminate,
     canonical_non_secret_form_state,
+    compile_greenhouse_ats_plans,
     collect_greenhouse_form_inventory,
+    greenhouse_ats_inventory_from_capture,
     is_greenhouse_auxiliary_field,
 )
 from career_automation.production_attempt import (
@@ -43,6 +45,7 @@ from career_automation.production_attempt import (
 from career_automation.testing_sanity_review import fixture_pass_receipt
 from test_jaa08_independent_acceptance import (
     _fixture_now,
+    _fit_database as _release_fit_database,
     _issued_release_inputs,
 )
 
@@ -233,12 +236,31 @@ def _prepared_authority(
         confirmation_url=CONFIRMATION_URL,
         required_visible_markers=("Thank you for applying",),
     )
-    inputs = _issued_release_inputs(
-        tmp_path,
-        route_adapter_id="greenhouse.production",
-        route_adapter_version="v1",
-        route_source_identity=APPLICATION_URL,
-    )
+    # Keep the release clock in the registered synthetic observation's time frame.
+    # Its exact bytes are authority-bound and must not drift with the calendar.
+    def dated_fit_database(*args, **kwargs):
+        values = _release_fit_database(*args, **kwargs)
+        with values[0].connection() as connection:
+            connection.execute(
+                "UPDATE pipeline_jobs SET created_at=?",
+                (success_evidence.observed_at,),
+            )
+        return values
+
+    with pytest.MonkeyPatch.context() as fixture_clock:
+        fixture_clock.setattr(
+            "test_jaa08_independent_acceptance._fit_database", dated_fit_database
+        )
+        fixture_clock.setattr(
+            "test_jaa06_independent_acceptance._utc_today",
+            lambda: datetime.fromisoformat(success_evidence.observed_at).date(),
+        )
+        inputs = _issued_release_inputs(
+            tmp_path,
+            route_adapter_id="greenhouse.production",
+            route_adapter_version="v1",
+            route_source_identity=APPLICATION_URL,
+        )
     (
         database,
         _strategy,
@@ -578,6 +600,7 @@ def test_certified_greenhouse_executor_records_success_and_terminal_archive(
         receipt = CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
             gmail_confirmation_checker=_NoMatchGmailChecker(),
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert receipt.provider == "greenhouse"
@@ -593,6 +616,12 @@ def test_certified_greenhouse_executor_records_success_and_terminal_archive(
     )
     assert "browser.post_submit_visible_text" in terminal["selected"]
     assert "browser.redirect_http_evidence" in terminal["selected"]
+    evidence_kinds = {
+        event["payload"]["event_kind"]
+        for event in recorder.attempt._events()
+        if event["event_type"] == "evidence_recorded"
+    }
+    assert {"click", "request", "response", "terminal"} <= evidence_kinds
     assert "submission.reconciliation" in terminal["selected"]
     assert "submission.receipt" in terminal["selected"]
     checkpoints = sorted(
@@ -618,6 +647,7 @@ def test_cv_only_greenhouse_form_preserves_unattached_cover_assurance(
         receipt = CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
             gmail_confirmation_checker=_NoMatchGmailChecker(),
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert receipt.provider == "greenhouse"
@@ -645,6 +675,7 @@ def test_provider_success_can_defer_connector_gmail_verification(
         authority, plan, recorder = _prepared_authority(tmp_path, page)
         receipt = CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert receipt.confirmation_email_checked is False
@@ -1022,7 +1053,10 @@ def test_immediate_revalidation_runs_inside_primitive_after_intent(
         _install_routes(page)
         page.goto(APPLICATION_URL)
         authority, plan, recorder = _prepared_authority(tmp_path, page)
-        executor = CertifiedGreenhouseSubmitExecutor(repository_root=ROOT)
+        executor = CertifiedGreenhouseSubmitExecutor(
+            repository_root=ROOT,
+            now=lambda: authority.consumed_at,
+        )
         original = executor._authoritative_revalidation
         calls = 0
 
@@ -1094,6 +1128,7 @@ def test_exact_receipt_sanity_archive_and_upload_gates_run_twice(
         CertifiedGreenhouseSubmitExecutor(
             repository_root=ROOT,
             gmail_confirmation_checker=_NoMatchGmailChecker(),
+            now=lambda: authority.consumed_at,
         ).execute(page, authority=authority, plan=plan)
         browser.close()
     assert pdf_calls == 4
@@ -1135,6 +1170,7 @@ def test_url_only_confirmation_is_indeterminate_and_archived(
             CertifiedGreenhouseSubmitExecutor(
                 repository_root=ROOT,
                 gmail_confirmation_checker=gmail,
+                now=lambda: authority.consumed_at,
             ).execute(page, authority=authority, plan=plan)
         browser.close()
     terminal = json.loads(
@@ -1190,6 +1226,124 @@ def test_react_combobox_selection_and_enumerable_options_are_captured() -> None:
     assert privacy["selected_text"] == ["Yes"]
     options = inventory["select_inventories"][0]["options"]
     assert [row["text"] for row in options] == ["Select", "Yes", "No"]
+
+
+def test_greenhouse_capture_compiles_closed_exact_ats_inventory_and_plans() -> None:
+    capture = {
+        "schema_version": "jaa.greenhouse-form-inventory.v1",
+        "form_state": {
+            "schema_version": "jaa.greenhouse-form-state.v1",
+            "url": APPLICATION_URL,
+            "title": "Fixture",
+            "provider": "greenhouse",
+            "fields": [
+                {
+                    "id": "csrf",
+                    "name": "csrf",
+                    "tag": "input",
+                    "type": "hidden",
+                    "labels": [],
+                    "required": False,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": False,
+                    "value_present": True,
+                },
+                {
+                    "id": "first_name",
+                    "name": "first_name",
+                    "tag": "input",
+                    "type": "text",
+                    "labels": ["First name"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "value": "",
+                    "selected_text": [],
+                },
+                {
+                    "id": "work_right",
+                    "name": "work_right",
+                    "tag": "select",
+                    "type": "",
+                    "labels": ["Legal right to work in the UK"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "value": "",
+                    "selected_text": [],
+                },
+                {
+                    "id": "resume",
+                    "name": "resume",
+                    "tag": "input",
+                    "type": "file",
+                    "labels": ["CV"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "files": [],
+                },
+                {
+                    "id": "consent",
+                    "name": "consent",
+                    "tag": "input",
+                    "type": "checkbox",
+                    "labels": ["Privacy consent"],
+                    "required": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "visible": True,
+                    "checked": False,
+                    "value": "on",
+                },
+            ],
+        },
+        "select_inventories": [
+            {
+                "field_identity": "work_right",
+                "option_source": "native_select",
+                "options": [
+                    {"value": "", "text": "Select", "disabled": False},
+                    {"value": "yes", "text": "Yes", "disabled": False},
+                    {"value": "no", "text": "No", "disabled": False},
+                ],
+            }
+        ],
+    }
+    inventory = greenhouse_ats_inventory_from_capture(
+        (json.dumps(capture, sort_keys=True) + "\n").encode(),
+        captured_at="2026-08-28T08:00:00Z",
+        page_snapshot_sha256="a" * 64,
+        screenshot_sha256="b" * 64,
+    )
+    plans = compile_greenhouse_ats_plans(
+        inventory,
+        field_authority_names={
+            "first_name": "contact.given_name",
+            "work_right": "candidate.uk_work_right",
+        },
+        consent_states={"consent": True},
+        upload_roles_by_field={"resume": "cv"},
+    )
+    assert [row.field_id for row in inventory.fields] == [
+        "csrf",
+        "first_name",
+        "work_right",
+        "resume",
+        "consent",
+    ]
+    assert inventory.fields[0].automation_role == "provider_managed"
+    assert [(row.action, row.source_reference) for row in plans] == [
+        ("omit", "none"),
+        ("fill", "contact.given_name"),
+        ("fill", "candidate.uk_work_right"),
+        ("upload", "artifact.cv"),
+        ("fill", "consent.true"),
+    ]
 
 
 def test_greenhouse_authority_rejects_nonofficial_or_mismatched_routes(

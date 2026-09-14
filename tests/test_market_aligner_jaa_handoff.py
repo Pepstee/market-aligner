@@ -271,15 +271,26 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
     references = {}
     for row in document["reference_bundle"]["value"]["entries"]:
         metadata = row["metadata"]
+        original_bytes = base64.b64decode(row["object_base64"], validate=True)
+        supplied_bytes = bytearray(original_bytes)
+        supplied_subject = dict(metadata["subject"])
         references[metadata["reference_key"]] = HandoffReference(
-            exact_bytes=base64.b64decode(row["object_base64"], validate=True),
+            exact_bytes=supplied_bytes,
             type_id=metadata["type_id"],
             schema_version=metadata["schema_version"],
-            subject=metadata["subject"],
+            subject=supplied_subject,
             issued_at=metadata["issued_at"],
             valid_until=metadata["valid_until"],
             issuer_id=metadata["issuer_id"],
         )
+        supplied_bytes[:] = b"changed after reference construction"
+        supplied_subject["unexpected"] = "changed after reference construction"
+        reference = references[metadata["reference_key"]]
+        assert reference.exact_bytes == original_bytes
+        assert dict(reference.subject) == metadata["subject"]
+        with pytest.raises(TypeError):
+            reference.subject["unexpected"] = "mutation"
+
     output_root = tmp_path / "external-data-home"
     first = write_protected_handoff_bundle(
         output_root,
@@ -317,7 +328,19 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
         *(first.path / "metadata").iterdir(),
     ):
         assert file_path.stat().st_mode & 0o777 == 0o600
-    adapter = ProtectedLocalOutbox(
+    class SubjectCheckingOutbox(ProtectedLocalOutbox):
+        def resolve(self, request):
+            from dataclasses import replace
+
+            supplied_subject = dict(request.expected_subject)
+            copied_request = replace(request, expected_subject=supplied_subject)
+            supplied_subject["unexpected"] = "caller mutation"
+            assert dict(copied_request.expected_subject) == dict(request.expected_subject)
+            with pytest.raises(TypeError):
+                request.expected_subject["unexpected"] = "resolver mutation"
+            return super().resolve(request)
+
+    adapter = SubjectCheckingOutbox(
         first.path,
         repository_root=Path(__file__).resolve().parents[1],
         expected_source_record_sha256=first.source_record_sha256,
@@ -1076,7 +1099,8 @@ def _canonical_market_jaa_materialization(
     job_key: str | None = None,
     source_job_id: str | None = None,
 ):
-    import career_automation.candidate_application_factory as candidate_factory_module
+    import career_automation.application_compiler as application_compiler_module
+    import career_automation.candidate_authority as candidate_authority_module
     from career_automation.application_compiler import CandidateContact
     from career_automation.candidate_application_factory import (
         CandidateApplicationPackage,
@@ -1358,20 +1382,22 @@ def _canonical_market_jaa_materialization(
         evidence_path.write_bytes(evidence_bytes)
         evidence_path.chmod(0o600)
         monkeypatch.setitem(
-            candidate_factory_module.APPROVED_CANDIDATE_SOURCE_HASHES,
+            candidate_authority_module.APPROVED_CANDIDATE_SOURCE_HASHES,
             "approved_evidence",
             hashlib.sha256(evidence_bytes).hexdigest(),
         )
         monkeypatch.setattr(
-            candidate_factory_module,
-            "OUTWARD_PROFILE_REWRITES",
+            candidate_authority_module,
+            "APPROVED_EVIDENCE_PATH",
+            evidence_path,
+        )
+        monkeypatch.setattr(
+            application_compiler_module,
+            "EXACT_OUTWARD_PROFILE_REWRITES",
             {
                 evidence_id: statement
                 for evidence_id, _kind, statement in statements
             },
-        )
-        monkeypatch.setattr(
-            candidate_factory_module, "OUTWARD_LETTER_REWRITES", {}
         )
         candidate_authority_path = tmp_path / "synthetic-candidate-authority.json"
         candidate_authority_path.write_bytes(candidate_authority_bytes)
@@ -1751,21 +1777,64 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
       };</script></body></html>"""
     real_sync_playwright = playwright_api.sync_playwright
 
+    class RoutedBrowserContext:
+        def __init__(self, context):
+            self._context = context
+            self._guard = None
+
+        def new_page(self):
+            page = self._context.new_page()
+
+            class FixtureRoute:
+                def __init__(self, route):
+                    self._route = route
+                    self.request = route.request
+
+                def continue_(self):
+                    return self._route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body=greenhouse_html,
+                    )
+
+                def abort(self, reason):
+                    return self._route.abort(reason)
+
+            def route_request(route):
+                if self._guard is None:
+                    return route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body=greenhouse_html,
+                    )
+                return self._guard(FixtureRoute(route))
+
+            page.route(
+                "**/*",
+                route_request,
+            )
+            return page
+
+        def route(self, *arguments, **keywords):
+            self._guard = arguments[1]
+            return None
+
+        def on(self, *arguments, **keywords):
+            return self._context.on(*arguments, **keywords)
+
+        def unroute_all(self, **keywords):
+            self._guard = None
+            return None
+
+        def close(self):
+            return self._context.close()
+
     class RoutedBrowser:
         def __init__(self, browser):
             self._browser = browser
 
-        def new_page(self):
-            page = self._browser.new_page()
-            page.route(
-                "**/*",
-                lambda route: route.fulfill(
-                    status=200,
-                    content_type="text/html",
-                    body=greenhouse_html,
-                ),
-            )
-            return page
+        def new_context(self, **keywords):
+            return RoutedBrowserContext(self._browser.new_context(**keywords))
 
         def close(self):
             return self._browser.close()

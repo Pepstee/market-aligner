@@ -18,12 +18,13 @@ def test_public_runner_owns_current_time_and_exposes_no_release_path(
 ) -> None:
     data_home = tmp_path / "data"
     repository_root = tmp_path / "repo"
+    output_root = tmp_path / "market-handoff"
     data_home.mkdir(mode=0o700)
     repository_root.mkdir(mode=0o755)
     deployment = _ProductionHandoffDeployment(
         data_home=data_home,
         repository_root=repository_root,
-        output_root=runner.PRODUCTION_MARKET_OUTBOX_ROOT,
+        output_root=output_root,
         collection_config_path=runner.PRODUCTION_COLLECTION_CONFIG_PATH,
         collection_config_sha256=runner.PRODUCTION_COLLECTION_CONFIG_SHA256,
         collection_config_file_sha256=runner.PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
@@ -80,7 +81,7 @@ def test_public_runner_owns_current_time_and_exposes_no_release_path(
         "data_home": str(data_home),
         "deployment_configuration_sha256": "d" * 64,
         "execution_receipt_root": str(runner.PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT),
-        "output_root": str(runner.PRODUCTION_MARKET_OUTBOX_ROOT),
+        "output_root": str(output_root),
         "profile_id": "prf_" + "1" * 32,
         "repository_root": str(repository_root),
         "schema_version": "jaa.production-handoff-freshness-subject.v1",

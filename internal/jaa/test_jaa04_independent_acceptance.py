@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -31,6 +31,11 @@ from career_automation.models import IntelligenceKind, PipelineState
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
+
+
+def _utc_today():
+    return datetime.now(timezone.utc).date()
 
 
 def _job(job_id: str, opportunity: float = 0.9):
@@ -59,7 +64,7 @@ def _strict_dossier(cache: RawResponseCache, job_key: str) -> dict[str, object]:
         IntelligenceKind.HIRING: "official_careers",
         IntelligenceKind.OPERATIONAL_HEALTH: "official_financial",
     }
-    timestamp = f"{date.today().isoformat()}T00:00:00+00:00"
+    timestamp = f"{_utc_today().isoformat()}T00:00:00+00:00"
     sources: list[dict[str, object]] = []
     plan: list[dict[str, object]] = []
     claims: list[dict[str, object]] = []
@@ -136,7 +141,7 @@ def test_invalid_or_unsafe_claims_fail_closed(tmp_path: Path, attack: str) -> No
     elif attack == "hallucinated":
         claim["source_ids"] = ["invented-source"]
     elif attack == "stale-current":
-        claim["observed_at"] = (date.today() - timedelta(days=366)).isoformat() + "T00:00:00+00:00"
+        claim["observed_at"] = (_utc_today() - timedelta(days=366)).isoformat() + "T00:00:00+00:00"
     elif attack == "protected":
         claim["health"] = "attacker-supplied private attribute"
     else:
@@ -155,7 +160,7 @@ def test_invalid_or_unsafe_claims_fail_closed(tmp_path: Path, attack: str) -> No
     elif attack == "hallucinated":
         runtime_claim["source_ids"] = ["invented-source"]
     elif attack == "stale-current":
-        runtime_claim["observed_at"] = (date.today() - timedelta(days=366)).isoformat() + "T00:00:00+00:00"
+        runtime_claim["observed_at"] = (_utc_today() - timedelta(days=366)).isoformat() + "T00:00:00+00:00"
     elif attack == "protected":
         runtime_claim["health"] = "attacker-supplied private attribute"
     else:
@@ -250,7 +255,7 @@ def test_production_worker_consumes_real_database_queue_and_fails_closed_for_ret
                 b"<p>In 2026 Example reported operational revenue and profit performance.</p>"
             )
             digest, reference = cache.store(body)
-            timestamp = date.today().isoformat() + "T00:00:00+00:00"
+            timestamp = _utc_today().isoformat() + "T00:00:00+00:00"
             return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,
                             digest, reference, 200)
 
@@ -274,7 +279,7 @@ def test_production_worker_consumes_real_database_queue_and_fails_closed_for_ret
                 # No substantive paragraph makes the production dossier builder
                 # reject the result before completion.
                 digest, reference = failed_cache.store(b"<html>unusable</html>")
-                timestamp = date.today().isoformat() + "T00:00:00+00:00"
+                timestamp = _utc_today().isoformat() + "T00:00:00+00:00"
                 return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,
                                 digest, reference, 200)
 
@@ -291,9 +296,12 @@ def test_production_worker_consumes_real_database_queue_and_fails_closed_for_ret
 def test_jaa04_command_is_declared_and_refuses_missing_external_authority(tmp_path: Path) -> None:
     declaration = (ROOT / "acceptance").read_text(encoding="utf-8")
     assert "scripts/run_acceptance_declaration.py" in declaration
-    clone = tmp_path / "certification-repository"
-    copied = subprocess.run(("git", "clone", "--no-local", str(ROOT), str(clone)), text=True, capture_output=True, check=False)
+    repository = tmp_path / "certification-repository"
+    copied = subprocess.run(("git", "clone", "--no-local", "--single-branch", "--depth", "1",
+                             str(REPOSITORY_ROOT), str(repository)), text=True,
+                            capture_output=True, check=False)
     assert copied.returncode == 0, copied.stderr
+    clone = repository / "internal" / "jaa"
     receipt = tmp_path / "receipt"
     completed = subprocess.run(
         (sys.executable, "scripts/accept_jaa_04.py", "--receipt", str(receipt)),

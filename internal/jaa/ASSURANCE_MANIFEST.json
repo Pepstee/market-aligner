@@ -18,7 +18,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "4b87d86f263c24b2aae6d7cb2dcbbc20baa953c5",
+        "current_git_blob": "84d84e79f26200ccbe6c7d5d2b51a549742d7169",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -26,7 +26,7 @@
         "path": "career_automation/release_gate.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "99c962a202ea606be5079a777ed365718fe27fb9",
-        "current_git_blob": "aed4b5b9cd103458ab13402aaf23bfb8fceb2ef8",
+        "current_git_blob": "19f22ed8c1205632f8143ffa42e752147f4d4d9d",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -34,7 +34,7 @@
         "path": "test_jaa09_independent_acceptance.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "6e260955c84c3c3aba88ac76d7f5606abce6c8ea",
-        "current_git_blob": "2681ab31414e13eefb794920992d32bed6babd7d",
+        "current_git_blob": "46c9c7590ca778a7d5cd410dc160ebec46828f7e",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -42,7 +42,7 @@
         "path": "test_jaa09_negative_controls.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "415a1168e2b22108ab1c596a489647a7cec40577",
-        "current_git_blob": "8a5cab1d4eee87bce3caf71eebda2b7195c231af",
+        "current_git_blob": "68fc10b3f174f7fbf7f25b1d371e667cc5901060",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -50,7 +50,7 @@
         "path": "career_automation/hard_metrics_evaluation.py",
         "historical_source_git_revision": "fc2476442aafbd9f378669d3f54b68ea7dc9f1c8",
         "historical_git_blob": "660d60d2b5496bc937be08cad25fbfe1ad90b4b5",
-        "current_git_blob": "760d4d13b3cac7c427d93122bb09b81460f0d31c",
+        "current_git_blob": "77f6b1c5c91d1088876d2c69faf50f9f5bc3b895",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -58,7 +58,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "4b87d86f263c24b2aae6d7cb2dcbbc20baa953c5",
+        "current_git_blob": "84d84e79f26200ccbe6c7d5d2b51a549742d7169",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -66,7 +66,7 @@
         "path": "test_jaa09_negative_controls.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "415a1168e2b22108ab1c596a489647a7cec40577",
-        "current_git_blob": "8a5cab1d4eee87bce3caf71eebda2b7195c231af",
+        "current_git_blob": "68fc10b3f174f7fbf7f25b1d371e667cc5901060",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -74,7 +74,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "4b87d86f263c24b2aae6d7cb2dcbbc20baa953c5",
+        "current_git_blob": "84d84e79f26200ccbe6c7d5d2b51a549742d7169",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -82,7 +82,7 @@
         "path": "career_automation/release_gate.py",
         "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
         "historical_git_blob": "99c962a202ea606be5079a777ed365718fe27fb9",
-        "current_git_blob": "aed4b5b9cd103458ab13402aaf23bfb8fceb2ef8",
+        "current_git_blob": "19f22ed8c1205632f8143ffa42e752147f4d4d9d",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -90,7 +90,7 @@
         "path": "career_automation/application_compiler.py",
         "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
         "historical_git_blob": "c46fae1c4a55d6fcdff6bdc4362dfd526ebc0f20",
-        "current_git_blob": "3ef01161d3b0c20eb471fa56f9e7193199f9e5fb",
+        "current_git_blob": "e015aa4eb598c61d4429baa43db71f4c9630f866",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -98,7 +98,7 @@
         "path": "career_automation/database.py",
         "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
         "historical_git_blob": "fa5bc51deb37868d057c11d64685cf6d4aa66ccf",
-        "current_git_blob": "feb5520bb5ad84cf2bc8f4772d89990b94aed4d2",
+        "current_git_blob": "59e435ff96494d98e5cb0ea196096cf7d87bf99e",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -106,7 +106,7 @@
         "path": "career_automation/migrations.py",
         "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
         "historical_git_blob": "98d7232a53bcf8124721fd87e53e12159704ed8c",
-        "current_git_blob": "d81195b2de5a00e3d62a8b7459af6c98b96b5db3",
+        "current_git_blob": "f6b41d9d1adc91c27c5abca985168e24f3e2e886",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -114,7 +114,7 @@
         "path": "test_durable_live_evidence_separation.py",
         "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
         "historical_git_blob": "af0617a8dfab9f9a68fb49c243f19aa29636916a",
-        "current_git_blob": "d0648f7784210ef0a37df74ab3d82d849ed9c5e1",
+        "current_git_blob": "e1d819492cb95b7783318e06df27519caf21246a",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -122,7 +122,7 @@
         "path": "test_jaa01_checked_receipt_current_revision.py",
         "historical_source_git_revision": "a9f94bcd75213fb0511edf55d7e67256df41f756",
         "historical_git_blob": "78dbabb72c27abc414d2bf3cf1b32efc68f22a40",
-        "current_git_blob": "8b382d69ecf2df772a087e1178faf57e42143891",
+        "current_git_blob": "6d8d9fbfbdc35a3bb70c67fd5e903a977b64e139",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -130,7 +130,7 @@
         "path": "test_jaa09_real_vacancy_acceptance.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "3806b931bfbc8b14729e3e17917b69a6f1fdbd34",
-        "current_git_blob": "1633d2c38d7ff183dcb1d0bc999d66131f23d635",
+        "current_git_blob": "6163e66b7d505c2017aa8ac52cfd080ebd16f917",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -138,7 +138,7 @@
         "path": "test_jaa09_real_vacancy_negative_controls.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "e31da690112b5948bb79c1bfe056211a5a4c7af5",
-        "current_git_blob": "2895cd0587ba5616a53404cdca466339db1f9170",
+        "current_git_blob": "60bb1d0e1b9216f7ea0d93913469ed1488ee344d",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -146,7 +146,119 @@
         "path": "test_jaa10_hard_metrics_evaluation_negative_controls.py",
         "historical_source_git_revision": "fc2476442aafbd9f378669d3f54b68ea7dc9f1c8",
         "historical_git_blob": "43610221fb35447637cf7f10a0aa1cfe41d0ded4",
-        "current_git_blob": "3ae96a8b9b56815e173f6cf24c321482d9952718",
+        "current_git_blob": "40686b9aeb5cfb452ecbae8de32b02434444ec11",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-09",
+        "path": "career_automation/ats_fixture.py",
+        "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
+        "historical_git_blob": "98d3739c05dda8631065967e531813c5aa099516",
+        "current_git_blob": "69cfdcf121f3c14a37e14a11d42b8d8f3ac903f3",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "career_automation/ats_fixture.py",
+        "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+        "historical_git_blob": "98d3739c05dda8631065967e531813c5aa099516",
+        "current_git_blob": "69cfdcf121f3c14a37e14a11d42b8d8f3ac903f3",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "test_jaa07_negative_controls.py",
+        "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+        "historical_git_blob": "be4c88a0737591ff1eb59d244c4de9b6c94795c4",
+        "current_git_blob": "8be0e02f0b66cebab185d9dca44f7058d7635455",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "test_jaa08_negative_controls.py",
+        "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+        "historical_git_blob": "74a5427f42e00b8069d9948b739de7db9a35644f",
+        "current_git_blob": "b7faeefdf01bd5f7e70ae6e298d3d72be0efeef0",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-12",
+        "path": "career_automation/database.py",
+        "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "historical_git_blob": "feb5520bb5ad84cf2bc8f4772d89990b94aed4d2",
+        "current_git_blob": "59e435ff96494d98e5cb0ea196096cf7d87bf99e",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-13",
+        "path": "career_automation/employer_research.py",
+        "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "historical_git_blob": "1d609bf8bc2e3ef62c7a59f668818317fad3363d",
+        "current_git_blob": "419b1df0fdc3a16b96b39c6d6c9532f29381a3ab",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-13",
+        "path": "test_jaa13_independent_acceptance.py",
+        "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "historical_git_blob": "dfc46bda2f04a15838f5968bc0a3a2a8b315888f",
+        "current_git_blob": "86ae4fc21256a9d584d863e7772461d2b0b1c662",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-16",
+        "path": "test_acceptance_declaration_contract.py",
+        "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
+        "historical_git_blob": "2275b75c98708bf508ee36fd5f13eb02ff0f0fbf",
+        "current_git_blob": "7e8f8dd071cdd6d1c367088682905bc10d514e7e",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "career_automation/shadow_certification.py",
+        "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+        "historical_git_blob": "89b379096e3dcdb72bbff93c628efac8c9cb4c15",
+        "current_git_blob": "33d1062083aa5dd5fde241ff6267ed42251ff205",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "test_jaa10_independent_acceptance.py",
+        "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
+        "historical_git_blob": "cbf9ec4917009114d6ff32bce995f9a2fede821d",
+        "current_git_blob": "99f2136d5a7b3efa75bc98e5dd27bc908888666f",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-11",
+        "path": "test_jaa11_durable_integration.py",
+        "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "historical_git_blob": "46068ea8c914e315d7ff87d235f0c33d3ae0a842",
+        "current_git_blob": "eef7e0f60a3371ca0ce48e0fa1ffacae58895d38",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-11",
+        "path": "test_jaa11_independent_acceptance.py",
+        "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
+        "historical_git_blob": "77fbf0e95e818f63d450d8b3fa7706ce680e5561",
+        "current_git_blob": "5434aa8c2697400ad14694310e2f04a7ebfd535e",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-12",
+        "path": "career_automation/status_store_coordinator.py",
+        "historical_source_git_revision": "d5f2f99f8165aabf53132eb3e6451a8b7a5eab79",
+        "historical_git_blob": "15baa07fe87857246fb04ae2c791335715603dbe",
+        "current_git_blob": "4cc0f75dc52c689f2ca5022300467f346aaae9ef",
+        "reason": "current_source_differs_from_historical_authority"
+      },
+      {
+        "component": "JAA-10",
+        "path": "test_jaa10_shadow_observation_ledger_negative_controls.py",
+        "historical_source_git_revision": "68f0f245b58a3ad0180f4d49ecb086d29ee0e99f",
+        "historical_git_blob": "fdc0d3ceff67d667524186728ae92d5844831882",
+        "current_git_blob": "7ac7ea85d8304645b5bcab553da48d6777f2e345",
         "reason": "current_source_differs_from_historical_authority"
       }
     ]
@@ -2995,7 +3107,7 @@
           "phase_a_source_content_revision": "sha256:127cefe54cac785661cc704df66a6f33532fa98a15cb4501754f9d6ddb408f06",
           "route_url": "http://127.0.0.1:0/applications/graphcore-build-engineer",
           "route_policy_sha256": "042de40c5633fe7f41c652d81fbce4502f2192d79b53c3492a928e592376ea1c",
-          "adapter_contract_sha256": "e4cb8ee1b416d75063bb70b72208a3554fb0ccc59998f6ff4d9ef44b3eced4e5",
+          "adapter_contract_sha256": "3eb83d42c43a6a2f73d2a03f7cf72b8d986eff32b79764d7a3ff84448a51d27a",
           "changed_file_sha256": {
             "career_automation/official_ats_adapter.py": "c80f8281e7f5a531c423a31e48644a803493673e10d0b45a9dbd458f11dea37a",
             "test_jaa11_independent_acceptance.py": "cbaaec9457b7f56195102eabe6c3301dfdae95b8924c6023ef3573cb0c302a87",

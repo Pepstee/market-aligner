@@ -68,10 +68,15 @@ class ScoringParams:
     fit_weights: dict[str, float]
     opportunity_weights: dict[str, float]
     blend: float
+    mode: str = "evidence"
+    candidate_tools: frozenset[str] = frozenset()
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any]) -> "ScoringParams":
         s = dict((cfg or {}).get("scoring", {}) or {})
+        mode = s.get("mode", "evidence")
+        if mode not in {"evidence", "creative"}:
+            raise ValueError("scoring.mode must be evidence or creative")
         mean_p = float(s.get("mean_p", 0.0))
         epsilon = float(s.get("epsilon", 0.05))
         blend = float(s.get("fit_opportunity_blend", 0.6))
@@ -79,12 +84,14 @@ class ScoringParams:
         opp_w = _normalise_weights(s.get("opportunity_weights") or {})
         if not fit_w:
             fit_w = _normalise_weights(
-                {"interest": 1, "skill_alignment": 1, "market_readiness": 1,
-                 "technical_alignment": 1, "evidence_match": 1}
+                ({"interest": 1, "skill_alignment": 1, "visualization": 1, "spatial_relevance": 1}
+                 if mode == "creative" else {"interest": 1, "skill_alignment": 1, "market_readiness": 1,
+                 "technical_alignment": 1, "evidence_match": 1})
             )
         if not opp_w:
             opp_w = _normalise_weights(
-                {"market_demand": 1, "accessibility": 1, "growth_potential": 1}
+                {"market_demand": 1, "accessibility": 1,
+                 "freelance_potential" if mode == "creative" else "growth_potential": 1}
             )
         if not (0.0 <= epsilon < 1.0):
             raise ValueError(f"epsilon must be in [0,1); got {epsilon}")
@@ -96,6 +103,9 @@ class ScoringParams:
             fit_weights=fit_w,
             opportunity_weights=opp_w,
             blend=blend,
+            mode=mode,
+            candidate_tools=frozenset(str(tool).strip().lower() for tool in
+                ((cfg or {}).get("candidate", {}).get("tools", []) or []) if str(tool).strip()),
         )
 
 
@@ -201,9 +211,23 @@ def _profile_for(profile: CandidateFitProfile, career: str) -> CandidateTrackPro
     return fp
 
 
-def fit_subscores(row: JobRow, profile: CandidateFitProfile) -> dict[str, float]:
+def fit_subscores(row: JobRow, profile: CandidateFitProfile,
+                  candidate_tools: frozenset[str] = frozenset(), *,
+                  mode: str = "evidence") -> dict[str, float]:
     """Personal priors plus posting-specific evidence, normalised to 0–1."""
     fp = _profile_for(profile, row.mapped_career)
+    if mode == "creative":
+        subs = {
+            "interest": _n10(fp.interest),
+            "skill_alignment": _n10(fp.skill) * max(0.0, min(1.0, fp.confidence)),
+            "visualization": _n10(row.visualization),
+            "spatial_relevance": _n10(row.spatial_relevance),
+        }
+        required = {str(tool).strip().lower() for tool in (row.required_software or [])
+                    if str(tool).strip()}
+        if required:
+            subs["software_match"] = len(required & candidate_tools) / len(required)
+        return subs
     return {
         "interest": _n10(fp.interest),
         "skill_alignment": _n10(fp.skill),
@@ -213,12 +237,13 @@ def fit_subscores(row: JobRow, profile: CandidateFitProfile) -> dict[str, float]
     }
 
 
-def opportunity_subscores(row: JobRow) -> dict[str, float]:
+def opportunity_subscores(row: JobRow, *, mode: str = "evidence") -> dict[str, float]:
     """The three Opportunity axes, each normalised to 0–1."""
     return {
         "market_demand": _n10(row.market_demand),
         "accessibility": accessibility(row.barrier_to_entry),
-        "growth_potential": _n10(row.growth_potential),
+        ("freelance_potential" if mode == "creative" else "growth_potential"):
+            _n10(row.freelance_potential if mode == "creative" else row.growth_potential),
     }
 
 
@@ -241,13 +266,13 @@ def _aligned(subscores: Mapping[str, float], weights: Mapping[str, float]) -> tu
 # The two axes + the final score — Build-Spec §5.
 # --------------------------------------------------------------------------- #
 def fit_score(row: JobRow, profile: CandidateFitProfile, params: ScoringParams) -> float:
-    subs = fit_subscores(row, profile)
+    subs = fit_subscores(row, profile, params.candidate_tools, mode=params.mode)
     vals, ws = _aligned(subs, params.fit_weights)
     return power_mean(vals, ws, params.mean_p, params.epsilon)
 
 
 def opportunity_score(row: JobRow, params: ScoringParams) -> float:
-    subs = opportunity_subscores(row)
+    subs = opportunity_subscores(row, mode=params.mode)
     vals, ws = _aligned(subs, params.opportunity_weights)
     return power_mean(vals, ws, params.mean_p, params.epsilon)
 
@@ -262,6 +287,8 @@ def score_row(row: JobRow, profile: CandidateFitProfile, params: ScoringParams) 
     fit = fit_score(row, profile, params)
     opp = opportunity_score(row, params)
     final = 100.0 * (params.blend * fit + (1.0 - params.blend) * opp)
+    if params.mode == "creative" and row.entry_level is not True:
+        final = 0.0
     return ScoredRow(row=row, fit=fit, opportunity=opp, final=final)
 
 
@@ -292,13 +319,15 @@ def _entry_count(scored: Sequence[ScoredRow]) -> int:
     return sum(1 for sr in scored if sr.row.entry_level is True)
 
 
-def field_score(scored_for_career: Sequence[ScoredRow]) -> float:
+def field_score(scored_for_career: Sequence[ScoredRow], *, entry_level_only: bool = False) -> float:
     """field_score(career) = median(top-10 Fit) · log(1 + entry_count).
 
     `top-10 Fit` = the 10 highest Fit values among that career's postings
     (fewer than 10 → use them all). The log term rewards fields with real
     entry-level volume without letting a flood of postings dominate.
     """
+    if entry_level_only:
+        scored_for_career = [sr for sr in scored_for_career if sr.row.entry_level is True]
     if not scored_for_career:
         return 0.0
     top_fits = sorted((sr.fit for sr in scored_for_career), reverse=True)[:10]
@@ -307,7 +336,7 @@ def field_score(scored_for_career: Sequence[ScoredRow]) -> float:
     return median_top * math.log(1.0 + entry_n)
 
 
-def aggregate_fields(scored: Sequence[ScoredRow]) -> list[FieldScore]:
+def aggregate_fields(scored: Sequence[ScoredRow], *, entry_level_only: bool = False) -> list[FieldScore]:
     """Group scored rows by mapped_career and compute each field's score.
 
     Returns one FieldScore per career that has at least one posting, sorted by
@@ -320,11 +349,12 @@ def aggregate_fields(scored: Sequence[ScoredRow]) -> list[FieldScore]:
 
     out: list[FieldScore] = []
     for career, group in by_career.items():
-        top_fits = sorted((sr.fit for sr in group), reverse=True)[:10]
+        eligible = [sr for sr in group if sr.row.entry_level is True] if entry_level_only else group
+        top_fits = sorted((sr.fit for sr in eligible), reverse=True)[:10]
         out.append(
             FieldScore(
                 career=career,
-                field_score=field_score(group),
+                field_score=field_score(group, entry_level_only=entry_level_only),
                 n_jobs=len(group),
                 n_entry_level=_entry_count(group),
                 median_top_fit=statistics.median(top_fits) if top_fits else 0.0,
@@ -387,7 +417,7 @@ def sensitivity(
     which fields challenge the winner — divergence is the signal to distrust the
     ranking (Meta_Plan: "if not, the winner isn't robust").
     """
-    baseline = aggregate_fields(score_rows(rows, profile, params))
+    baseline = aggregate_fields(score_rows(rows, profile, params), entry_level_only=params.mode == "creative")
     baseline_top = baseline[0].career if baseline else None
 
     variants: list[ScoringParams] = []
@@ -402,13 +432,15 @@ def sensitivity(
                     fit_weights=fw,
                     opportunity_weights=ow,
                     blend=params.blend,
+                    mode=params.mode,
+                    candidate_tools=params.candidate_tools,
                 )
             )
 
     agreeing = 0
     challengers: dict[str, int] = {}
     for vp in variants:
-        agg = aggregate_fields(score_rows(rows, profile, vp))
+        agg = aggregate_fields(score_rows(rows, profile, vp), entry_level_only=vp.mode == "creative")
         top = agg[0].career if agg else None
         if top == baseline_top:
             agreeing += 1

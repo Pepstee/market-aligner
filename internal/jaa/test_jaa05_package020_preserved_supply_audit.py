@@ -1,4 +1,5 @@
 """Package 020 offline preserved-supply exhaustion audit controls."""
+
 from __future__ import annotations
 
 import copy
@@ -10,11 +11,12 @@ from types import ModuleType
 
 import pytest
 
-
-CONTROL = Path(
-    "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/"
-    "jaa/jaa05-next-cycle"
+from testing_repository import (
+    operator_control_path,
+    rebind_historical_control_paths,
 )
+
+CONTROL = operator_control_path("resumed-dual-lane-20260728", "jaa", "jaa05-next-cycle")
 SCRIPT = CONTROL / "package-020-audit-preserved-supply.py"
 REPORT = CONTROL / "package-020-preserved-supply-exhaustion-audit.json"
 SCRIPT_SHA256 = "33ab676ecfbcc3ce818b406ddd6055f12cb4c5e0021c971990b2c60bc0ce4caa"
@@ -38,7 +40,7 @@ def audit_module() -> ModuleType:
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    return rebind_historical_control_paths(module)
 
 
 def _digest(path: Path) -> str:
@@ -255,9 +257,7 @@ def test_quarantine_overlap_is_classified_before_existing_authority(
         "job_key": frozenset(),
         "payload_hash": frozenset(),
         "content_sha256": frozenset(),
-        "canonical_url_sha256": frozenset(
-            {hashlib.sha256(url.encode()).hexdigest()}
-        ),
+        "canonical_url_sha256": frozenset({hashlib.sha256(url.encode()).hexdigest()}),
     }
     extracted = audit_module._extract_tenant(url)
     assert extracted
@@ -274,9 +274,7 @@ def test_quarantine_overlap_is_classified_before_existing_authority(
             ),
         }
     ]
-    configured = {
-        provider: frozenset() for provider in audit_module.PROVIDERS
-    }
+    configured = {provider: frozenset() for provider in audit_module.PROVIDERS}
     candidates = audit_module._summarize_candidates(
         observations,
         configured,

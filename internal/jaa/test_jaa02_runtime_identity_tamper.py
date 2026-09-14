@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 
 ROOT = Path(__file__).resolve().parent
 VALIDATOR = "scripts/accept_jaa02_receipt.py"
@@ -23,28 +25,35 @@ VALIDATOR = "scripts/accept_jaa02_receipt.py"
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ("git", *arguments), cwd=root, text=True, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False,
+        ("git", *arguments),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 def _validate(root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        (sys.executable, VALIDATOR), cwd=root, text=True, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False,
+        (sys.executable, VALIDATOR),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 @pytest.fixture()
 def certified_clone(tmp_path: Path) -> Path:
-    clone = tmp_path / "certified-clone"
-    cloned = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    clone = clone_jaa_repository(ROOT, tmp_path / "certified-clone")
+    assert (
+        _git(clone, "config", "user.name", "JAA-02 independent tester").returncode == 0
     )
-    assert cloned.returncode == 0, cloned.stderr
-    assert _git(clone, "config", "user.name", "JAA-02 independent tester").returncode == 0
-    assert _git(clone, "config", "user.email", "jaa02-tester@example.test").returncode == 0
+    assert (
+        _git(clone, "config", "user.email", "jaa02-tester@example.test").returncode == 0
+    )
     return clone
 
 
@@ -61,7 +70,9 @@ def _commit_runtime_evidence(root: Path, message: str) -> None:
     assert committed.returncode == 0, committed.stderr
 
 
-def test_authentic_jaa02_historical_receipt_binds_runtime(certified_clone: Path) -> None:
+def test_authentic_jaa02_historical_receipt_binds_runtime(
+    certified_clone: Path,
+) -> None:
     accepted = _validate(certified_clone)
     assert accepted.returncode == 0, accepted.stderr
     assert json.loads(accepted.stdout)["status"] == "accepted"
@@ -71,16 +82,23 @@ def test_unrelated_source_change_does_not_rewrite_historical_runtime_evidence(
     certified_clone: Path,
 ) -> None:
     readme = certified_clone / "README.md"
-    readme.write_text(readme.read_text(encoding="utf-8") + "\nunrelated documentation\n", encoding="utf-8")
+    readme.write_text(
+        readme.read_text(encoding="utf-8") + "\nunrelated documentation\n",
+        encoding="utf-8",
+    )
     assert _git(certified_clone, "add", "README.md").returncode == 0
-    assert _git(certified_clone, "commit", "-m", "unrelated documentation").returncode == 0
+    assert (
+        _git(certified_clone, "commit", "-m", "unrelated documentation").returncode == 0
+    )
     accepted = _validate(certified_clone)
     assert accepted.returncode == 0, accepted.stderr
 
 
 def test_jaa02_validator_rejects_missing_receipt(certified_clone: Path) -> None:
     receipt = _receipt(certified_clone)
-    removed = _git(certified_clone, "rm", "--", receipt.relative_to(certified_clone).as_posix())
+    removed = _git(
+        certified_clone, "rm", "--", receipt.relative_to(certified_clone).as_posix()
+    )
     assert removed.returncode == 0, removed.stderr
     committed = _git(certified_clone, "commit", "-m", "remove JAA-02 receipt")
     assert committed.returncode == 0, committed.stderr
@@ -96,21 +114,26 @@ def test_jaa02_validator_rejects_malformed_receipt(certified_clone: Path) -> Non
     receipt.write_bytes(malformed)
     renamed = receipt.with_name(f"sha256-{hashlib.sha256(malformed).hexdigest()}.json")
     receipt.rename(renamed)
-    _commit_runtime_evidence(certified_clone, "replace JAA-02 receipt with malformed JSON")
+    _commit_runtime_evidence(
+        certified_clone, "replace JAA-02 receipt with malformed JSON"
+    )
 
     rejected = _validate(certified_clone)
     assert rejected.returncode == 2
     assert "invalid JAA-02 receipt JSON" in rejected.stderr
 
 
-def test_jaa02_validator_rejects_rehashed_runtime_identity_mismatch(certified_clone: Path) -> None:
+def test_jaa02_validator_rejects_rehashed_runtime_identity_mismatch(
+    certified_clone: Path,
+) -> None:
     receipt = _receipt(certified_clone)
     document = json.loads(receipt.read_text(encoding="utf-8"))
     runtime = document["runtime"]
     assert isinstance(runtime, dict)
     runtime["python_version"] = "0.0.0-forged-runtime"
     forged = (
-        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
     ).encode("utf-8")
     replacement = receipt.with_name(f"sha256-{hashlib.sha256(forged).hexdigest()}.json")
     receipt.unlink()

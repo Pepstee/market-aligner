@@ -1,7 +1,11 @@
 {
   "schema_version": "jaa07.locked-application-packs.v1",
   "certifies_slice": false,
-  "dependency_gates": ["JAA-06", "JAA-05", "JAA-04"],
+  "dependency_gates": [
+    "JAA-06",
+    "JAA-05",
+    "JAA-04"
+  ],
   "limitations": [
     "Synthetic packs do not establish production document quality.",
     "Synthetic employers, vacancies, contacts and claims are not applicant data.",
@@ -18,25 +22,205 @@
     "deterministic_replay": 10000
   },
   "cases": [
-    {"id":"pack-01","company":"Example Alpha Ltd","role":"Platform Engineer","metric":"99.1%","year":"2021","email":"candidate01@example.test","phone":"+44 7700 900001","expected_artifact_set_sha256":"08e0914646bd2e953dcdad365ece1615a07889d3e8dd0c833beb5ff2fe607c4c"},
-    {"id":"pack-02","company":"Example Bravo Ltd","role":"Data Engineer","metric":"99.2%","year":"2022","email":"candidate02@example.test","phone":"+44 7700 900002","expected_artifact_set_sha256":"83f16c3a3880116c926efebb83207484899976773c46197b55c6455fed43547c"},
-    {"id":"pack-03","company":"Example Charlie Ltd","role":"Security Engineer","metric":"99.3%","year":"2023","email":"candidate03@example.test","phone":"+44 7700 900003","expected_artifact_set_sha256":"310487358c67cd3f6fe5b3e14c1bce14f637fee0ad2d6a85d5013af892849b10"},
-    {"id":"pack-04","company":"Example Delta Ltd","role":"Cloud Engineer","metric":"99.4%","year":"2024","email":"candidate04@example.test","phone":"+44 7700 900004","expected_artifact_set_sha256":"bbda10a9c7b2522d97a1fcabeb6d084cf7788742cd53a63ae8e2d8857f7436ee"},
-    {"id":"pack-05","company":"Example Echo Ltd","role":"Software Engineer","metric":"99.5%","year":"2025","email":"candidate05@example.test","phone":"+44 7700 900005","expected_artifact_set_sha256":"c5fdb08c1e5fff642de22bc2e00bcb27b5bda44b8c39d1ddff6baf23b8c0c012"},
-    {"id":"pack-06","company":"Example Foxtrot Ltd","role":"DevOps Engineer","metric":"98.6%","year":"2021","email":"candidate06@example.test","phone":"+44 7700 900006","expected_artifact_set_sha256":"d16a48b50a14db820412b58fd658c89304d4d14a12a119ae289cfacdab8ab87f"},
-    {"id":"pack-07","company":"Example Golf Ltd","role":"Systems Engineer","metric":"98.7%","year":"2022","email":"candidate07@example.test","phone":"+44 7700 900007","expected_artifact_set_sha256":"3573540803a61451d51bea46111a263db3e83614fa7511a7a52d61cd9a11ebf9"},
-    {"id":"pack-08","company":"Example Hotel Ltd","role":"Backend Engineer","metric":"98.8%","year":"2023","email":"candidate08@example.test","phone":"+44 7700 900008","expected_artifact_set_sha256":"6811ab22fd7c5c30a64b8171562e465dd73f23189caeb83cfd30ea78174a0bf6"},
-    {"id":"pack-09","company":"Example India Ltd","role":"Infrastructure Engineer","metric":"98.9%","year":"2024","email":"candidate09@example.test","phone":"+44 7700 900009","expected_artifact_set_sha256":"4fef9fcf826bfac43fa1fe53171980b2da17d446550d2c226826a6ef2307153e"},
-    {"id":"pack-10","company":"Example Juliet Ltd","role":"Site Reliability Engineer","metric":"99.0%","year":"2025","email":"candidate10@example.test","phone":"+44 7700 900010","expected_artifact_set_sha256":"189bbeb34c6c983def21bc161534db84040e21b98cf21f03af2b3229b6d48139"},
-    {"id":"pack-11","company":"Example Kilo Ltd","role":"Machine Learning Engineer","metric":"97.1%","year":"2021","email":"candidate11@example.test","phone":"+44 7700 900011","expected_artifact_set_sha256":"8b1c510c1b2fa4c8f449ceeba03642db934b8dfb9fd6ae8846101f8b1bb57457"},
-    {"id":"pack-12","company":"Example Lima Ltd","role":"Application Engineer","metric":"97.2%","year":"2022","email":"candidate12@example.test","phone":"+44 7700 900012","expected_artifact_set_sha256":"3508347eaa07735766c687a27d654b3109c7d74bb5800ebc00fd6c00d2007875"},
-    {"id":"pack-13","company":"Example Mike Ltd","role":"Integration Engineer","metric":"97.3%","year":"2023","email":"candidate13@example.test","phone":"+44 7700 900013","expected_artifact_set_sha256":"c1423748a44b230179972297a5802dd8849de6993fc5d45012d72c6f3d48ed9e"},
-    {"id":"pack-14","company":"Example November Ltd","role":"Automation Engineer","metric":"97.4%","year":"2024","email":"candidate14@example.test","phone":"+44 7700 900014","expected_artifact_set_sha256":"6b912e108b2977fba759b45868d7267e41b72f86b93c9438aa38aa791e629c3d"},
-    {"id":"pack-15","company":"Example Oscar Ltd","role":"Product Engineer","metric":"97.5%","year":"2025","email":"candidate15@example.test","phone":"+44 7700 900015","expected_artifact_set_sha256":"c3ab29463af8682978e1e635c2d0c48eca59f0ac7273b2773780a7b47c5e6ef6"},
-    {"id":"pack-16","company":"Example Papa Ltd","role":"Quality Engineer","metric":"96.6%","year":"2021","email":"candidate16@example.test","phone":"+44 7700 900016","expected_artifact_set_sha256":"8465458be5fd704ca861b149839dae1bcbda1fdcf97cbe84dd9d1443edd7d721"},
-    {"id":"pack-17","company":"Example Quebec Ltd","role":"Release Engineer","metric":"96.7%","year":"2022","email":"candidate17@example.test","phone":"+44 7700 900017","expected_artifact_set_sha256":"4c8dbc01e32cbe90895a9339413fde764c8356f42d2d388a86bfc75302321f73"},
-    {"id":"pack-18","company":"Example Romeo Ltd","role":"Network Engineer","metric":"96.8%","year":"2023","email":"candidate18@example.test","phone":"+44 7700 900018","expected_artifact_set_sha256":"7a6280711e50ff6813d06e609e83119b76b28d8ebee137f40dcc680a1363452b"},
-    {"id":"pack-19","company":"Example Sierra Ltd","role":"Solutions Engineer","metric":"96.9%","year":"2024","email":"candidate19@example.test","phone":"+44 7700 900019","expected_artifact_set_sha256":"9537b5812e8dc7a08497c403ffe04556871d8af3f4dc5d5b38b474df3ad6492c"},
-    {"id":"pack-20","company":"Example Tango Ltd","role":"Technical Engineer","metric":"97.0%","year":"2025","email":"candidate20@example.test","phone":"+44 7700 900020","expected_artifact_set_sha256":"9aa8c250eaa3053fe22c58faff7da5a4cee0716266ea4fdca22589ca68352ef2"}
+    {
+      "id": "pack-01",
+      "company": "Example Alpha Ltd",
+      "role": "Platform Engineer",
+      "metric": "99.1%",
+      "year": "2021",
+      "email": "candidate01@example.test",
+      "phone": "+44 7700 900001",
+      "expected_artifact_set_sha256": "f8799f0b7608cd6e07efc3b320d5b902236274250bfb4b3559f4ee15c9cd6dcd"
+    },
+    {
+      "id": "pack-02",
+      "company": "Example Bravo Ltd",
+      "role": "Data Engineer",
+      "metric": "99.2%",
+      "year": "2022",
+      "email": "candidate02@example.test",
+      "phone": "+44 7700 900002",
+      "expected_artifact_set_sha256": "3ea1bbec7a90808f9479e8c7011fa083a9930e84b0a4c8e02fed9e021beedf1b"
+    },
+    {
+      "id": "pack-03",
+      "company": "Example Charlie Ltd",
+      "role": "Security Engineer",
+      "metric": "99.3%",
+      "year": "2023",
+      "email": "candidate03@example.test",
+      "phone": "+44 7700 900003",
+      "expected_artifact_set_sha256": "59cab6b976dc8847bfbb184aa11264a5d1fb77ae1e34c965ea9e0121d93e6234"
+    },
+    {
+      "id": "pack-04",
+      "company": "Example Delta Ltd",
+      "role": "Cloud Engineer",
+      "metric": "99.4%",
+      "year": "2024",
+      "email": "candidate04@example.test",
+      "phone": "+44 7700 900004",
+      "expected_artifact_set_sha256": "ff8a5e3b4f39a4ac4c55ebdcac86c6c0b51b36ea03af28d41fcfc85a19792486"
+    },
+    {
+      "id": "pack-05",
+      "company": "Example Echo Ltd",
+      "role": "Software Engineer",
+      "metric": "99.5%",
+      "year": "2025",
+      "email": "candidate05@example.test",
+      "phone": "+44 7700 900005",
+      "expected_artifact_set_sha256": "6987504848c7eda80d2bf24ccbc3e254200945404a2b07ab68e3148ee4a0c616"
+    },
+    {
+      "id": "pack-06",
+      "company": "Example Foxtrot Ltd",
+      "role": "DevOps Engineer",
+      "metric": "98.6%",
+      "year": "2021",
+      "email": "candidate06@example.test",
+      "phone": "+44 7700 900006",
+      "expected_artifact_set_sha256": "37c0f6bc0f3e66e025a78352a7b1f0ce119cf30c2af1dafa7da88f1028d33e5a"
+    },
+    {
+      "id": "pack-07",
+      "company": "Example Golf Ltd",
+      "role": "Systems Engineer",
+      "metric": "98.7%",
+      "year": "2022",
+      "email": "candidate07@example.test",
+      "phone": "+44 7700 900007",
+      "expected_artifact_set_sha256": "dafac6f0582faacffae3d8b8758a39a747dd1d5097adb7c39431f5da72b17a38"
+    },
+    {
+      "id": "pack-08",
+      "company": "Example Hotel Ltd",
+      "role": "Backend Engineer",
+      "metric": "98.8%",
+      "year": "2023",
+      "email": "candidate08@example.test",
+      "phone": "+44 7700 900008",
+      "expected_artifact_set_sha256": "502cce15dc600847ea4cb58d6288c8b954851fe3b486f7f239325409b81f59de"
+    },
+    {
+      "id": "pack-09",
+      "company": "Example India Ltd",
+      "role": "Infrastructure Engineer",
+      "metric": "98.9%",
+      "year": "2024",
+      "email": "candidate09@example.test",
+      "phone": "+44 7700 900009",
+      "expected_artifact_set_sha256": "ea410569541c40146c81a814385f0d340b83bec923b3dac35cd8fdf0f0a02e86"
+    },
+    {
+      "id": "pack-10",
+      "company": "Example Juliet Ltd",
+      "role": "Site Reliability Engineer",
+      "metric": "99.0%",
+      "year": "2025",
+      "email": "candidate10@example.test",
+      "phone": "+44 7700 900010",
+      "expected_artifact_set_sha256": "0589657ce5a028e2dc27b4588205c86de3064bb54991b4cdfd5936ff434d6421"
+    },
+    {
+      "id": "pack-11",
+      "company": "Example Kilo Ltd",
+      "role": "Machine Learning Engineer",
+      "metric": "97.1%",
+      "year": "2021",
+      "email": "candidate11@example.test",
+      "phone": "+44 7700 900011",
+      "expected_artifact_set_sha256": "63a2abc8fbcd328d42b06f4ed46ff395c6a6e113c930c0206503782a0f2a9535"
+    },
+    {
+      "id": "pack-12",
+      "company": "Example Lima Ltd",
+      "role": "Application Engineer",
+      "metric": "97.2%",
+      "year": "2022",
+      "email": "candidate12@example.test",
+      "phone": "+44 7700 900012",
+      "expected_artifact_set_sha256": "98c9329e1eeb87403151042cec566c337257fc49532694b323f9d29939278aa9"
+    },
+    {
+      "id": "pack-13",
+      "company": "Example Mike Ltd",
+      "role": "Integration Engineer",
+      "metric": "97.3%",
+      "year": "2023",
+      "email": "candidate13@example.test",
+      "phone": "+44 7700 900013",
+      "expected_artifact_set_sha256": "89905e5a1fa8943bd465932e4b7ee3850d3d25ad242ed361cbdaa39e2cceca0f"
+    },
+    {
+      "id": "pack-14",
+      "company": "Example November Ltd",
+      "role": "Automation Engineer",
+      "metric": "97.4%",
+      "year": "2024",
+      "email": "candidate14@example.test",
+      "phone": "+44 7700 900014",
+      "expected_artifact_set_sha256": "a9836a4b494a3d9fb5dd6643a199f6332de23ad9023d64528db66a7d36a255cf"
+    },
+    {
+      "id": "pack-15",
+      "company": "Example Oscar Ltd",
+      "role": "Product Engineer",
+      "metric": "97.5%",
+      "year": "2025",
+      "email": "candidate15@example.test",
+      "phone": "+44 7700 900015",
+      "expected_artifact_set_sha256": "30d1659fd28d571b7d197f2def1f31a6e455d93f9ed4c327eaa45f2a35f43b21"
+    },
+    {
+      "id": "pack-16",
+      "company": "Example Papa Ltd",
+      "role": "Quality Engineer",
+      "metric": "96.6%",
+      "year": "2021",
+      "email": "candidate16@example.test",
+      "phone": "+44 7700 900016",
+      "expected_artifact_set_sha256": "8256bb6e9774d41bb1d7a3940c30cb521305ad34f8e50fd8066059db4c333a0b"
+    },
+    {
+      "id": "pack-17",
+      "company": "Example Quebec Ltd",
+      "role": "Release Engineer",
+      "metric": "96.7%",
+      "year": "2022",
+      "email": "candidate17@example.test",
+      "phone": "+44 7700 900017",
+      "expected_artifact_set_sha256": "5b6e190e70e5034e7d0f85a08d38e38fd655202ac9d1bd2678de06fc5728f637"
+    },
+    {
+      "id": "pack-18",
+      "company": "Example Romeo Ltd",
+      "role": "Network Engineer",
+      "metric": "96.8%",
+      "year": "2023",
+      "email": "candidate18@example.test",
+      "phone": "+44 7700 900018",
+      "expected_artifact_set_sha256": "df702d6a56bdc48c51d537ef834e3e58e8704ddc55fff0fb425101af9cfd2e04"
+    },
+    {
+      "id": "pack-19",
+      "company": "Example Sierra Ltd",
+      "role": "Solutions Engineer",
+      "metric": "96.9%",
+      "year": "2024",
+      "email": "candidate19@example.test",
+      "phone": "+44 7700 900019",
+      "expected_artifact_set_sha256": "99476dd74aac9d521f4415250619e421b2c9a4b09a4b2244f3f8ce1379b1f070"
+    },
+    {
+      "id": "pack-20",
+      "company": "Example Tango Ltd",
+      "role": "Technical Engineer",
+      "metric": "97.0%",
+      "year": "2025",
+      "email": "candidate20@example.test",
+      "phone": "+44 7700 900020",
+      "expected_artifact_set_sha256": "e4789d0a0b41315bfcaa6c27e4201c0876fa43bf9cc500d46c5739c11b1f3811"
+    }
   ]
 }

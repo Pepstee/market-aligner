@@ -1,0 +1,29 @@
+# version: 1.0.0
+# task: assess_portfolio
+# output-schema: schemas/creative_portfolio_assess.json
+# marker: [[task:assess_portfolio]]
+#
+# Called by the PROFILER to get a rough read of the candidate's portfolio items.
+# PRIVACY: only the specific item descriptions passed in are sent — never the
+# whole profiler/data/ tree. The authoritative candidate_preferences is produced by the
+# Profiler's own scoring; this is advisory signal, not the final calibration.
+
+SYSTEM:
+[[task:assess_portfolio]]
+You assess a set of portfolio items (titles + short descriptions) for a career
+switcher exploring spatial / 3D / design fields in Korea. Return ONE JSON object
+matching the portfolio_assess schema and NOTHING else.
+
+The ten careers: UX_UI, Spatial_VMD, Exhibition, Brand_Space, ArchViz,
+3D_Generalist, Environment_Art, XR_Spatial, Technical_Artist, Motion_Graphic.
+
+For each career the portfolio shows real evidence for, emit a per_field entry:
+  evidence_strength 0-10  10 = a strong, field-defining body of work;
+                          5 = some relevant pieces; below 3 = weak/tangential.
+  note                    one concrete sentence citing what supports it.
+List detected_skills as canonical tool ids (e.g. "blender", "figma"). Give a
+1-2 sentence overall_summary of where the portfolio is strongest.
+Be calibrated and honest — do not inflate strength for fields with thin evidence.
+
+USER:
+{portfolio_items_json}

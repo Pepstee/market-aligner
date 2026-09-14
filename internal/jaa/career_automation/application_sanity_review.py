@@ -24,7 +24,15 @@ from .external_document_assurance import IntendedVacancy
 
 PROMPT_SCHEMA_VERSION = "jaa.application-sanity-prompt.v1"
 RESULT_SCHEMA_VERSION = "jaa.application-sanity-result.v1"
-RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v1"
+RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v2"
+REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v1"
+REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
+MAX_REVIEW_TEXT_BYTES = 500_000
+MAX_RAW_LISTING_BYTES = 2_000_000
+MAX_DOCUMENT_TEXT_BYTES = 250_000
+MAX_FORM_ANSWER_ROWS = 200
+MAX_FORM_VALUE_BYTES = 8_000
+MAX_PDF_BYTES = 20 * 1024 * 1024
 
 # This is policy, not model-specific advice. Vacancy and application content
 # are deliberately placed only in the quoted JSON user payload.
@@ -123,16 +131,140 @@ POLICY_SHA256 = content_hash(
     }
 )
 
+_NON_EXACT_MODEL_IDENTITIES = {
+    "codex-default",
+    "provider-default",
+    "replace_me",
+    "unknown",
+}
+_OPENAI_TRANSPORT_PREFIX = "openai.responses.https@sha256:"
+_OPENAI_TRANSPORT_EVIDENCE_SCHEMA = "jaa.llm.openai-response-evidence.v1"
+_OPENAI_PROVIDER_IDENTITY = "openai.responses-api"
+_TRANSPORT_EVIDENCE_KEYS = {
+    "schema_version",
+    "provider_identity",
+    "model_identity",
+    "endpoint_sha256",
+    "transport_identity",
+    "transport_version",
+    "client_request_id",
+    "transport_request_id",
+    "provider_response_id",
+    "request_sha256",
+    "response_sha256",
+    "semantic_output_sha256",
+    "archive_manifest_sha256",
+}
+
 
 class ApplicationSanityReviewError(ValueError):
     """No production authority may be issued for this review attempt."""
 
     def __init__(
-        self, code: str, message: str, *, result: Mapping[str, object] | None = None
+        self,
+        code: str,
+        message: str,
+        *,
+        result: Mapping[str, object] | None = None,
+        transport_evidence: Mapping[str, str] | None = None,
     ) -> None:
         self.code = code
         self.result = dict(result) if result is not None else None
+        self.transport_evidence = (
+            dict(transport_evidence) if transport_evidence is not None else None
+        )
         super().__init__(f"application sanity review blocked ({code}): {message}")
+
+
+def _project_visible_listing_text(value: bytes) -> bytes:
+    """Reuse the admitted-material UTF-8/NFC/LF projection and scalar checks."""
+    from .review_material import _project_visible_text
+
+    return _project_visible_text(value)[0]
+
+
+@dataclass(frozen=True)
+class VacancyReviewMaterial:
+    """Exact archived vacancy bytes plus current browser-visible review text.
+
+    Production constructs this only after the live destination has been proven
+    semantically equivalent to the archived raw listing.  Carrying both byte
+    identities into the sanity receipt prevents a caller from substituting a
+    shortened or different vacancy during review.
+    """
+
+    raw_listing_bytes: bytes
+    visible_listing_text_bytes: bytes
+    raw_listing_sha256: str
+    review_text_sha256: str
+    projection_sha256: str
+    projection_id: str = REVIEW_TEXT_PROJECTION_ID
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.raw_listing_bytes, bytes)
+            or not self.raw_listing_bytes
+            or len(self.raw_listing_bytes) > MAX_RAW_LISTING_BYTES
+        ):
+            raise ValueError("raw vacancy listing bytes are invalid")
+        if self.projection_id != REVIEW_TEXT_PROJECTION_ID:
+            raise ValueError("vacancy review projection is unsupported")
+        projected = _project_visible_listing_text(self.visible_listing_text_bytes)
+        if projected != self.visible_listing_text_bytes:
+            raise ValueError("visible vacancy listing is not canonical UTF-8/NFC/LF")
+        if (
+            self.raw_listing_sha256
+            != hashlib.sha256(self.raw_listing_bytes).hexdigest()
+        ):
+            raise ValueError("raw vacancy listing identity is invalid")
+        if self.review_text_sha256 != hashlib.sha256(projected).hexdigest():
+            raise ValueError("visible vacancy listing identity is invalid")
+        if self.projection_sha256 != content_hash(self.projection_document()):
+            raise ValueError("vacancy review projection identity is invalid")
+
+    def projection_document(self) -> dict[str, str]:
+        return {
+            "projection_id": self.projection_id,
+            "raw_listing_sha256": self.raw_listing_sha256,
+            "review_text_sha256": self.review_text_sha256,
+            "schema_version": REVIEW_TEXT_PROJECTION_SCHEMA,
+        }
+
+    def document(self) -> dict[str, str]:
+        return {
+            **self.projection_document(),
+            "exact_text": self.visible_listing_text_bytes.decode("utf-8"),
+            "projection_sha256": self.projection_sha256,
+        }
+
+
+def build_vacancy_review_material(
+    *,
+    raw_listing_bytes: bytes,
+    visible_listing_text_bytes: bytes,
+    expected_raw_listing_sha256: str,
+) -> VacancyReviewMaterial:
+    """Bind trusted raw vacancy bytes to one exact visible-text projection."""
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_raw_listing_sha256):
+        raise ValueError("expected raw vacancy identity must be lowercase SHA-256")
+    raw_sha256 = hashlib.sha256(raw_listing_bytes).hexdigest()
+    if raw_sha256 != expected_raw_listing_sha256:
+        raise ValueError("raw vacancy listing differs from application authority")
+    projected = _project_visible_listing_text(visible_listing_text_bytes)
+    review_sha256 = hashlib.sha256(projected).hexdigest()
+    projection = {
+        "projection_id": REVIEW_TEXT_PROJECTION_ID,
+        "raw_listing_sha256": raw_sha256,
+        "review_text_sha256": review_sha256,
+        "schema_version": REVIEW_TEXT_PROJECTION_SCHEMA,
+    }
+    return VacancyReviewMaterial(
+        raw_listing_bytes=raw_listing_bytes,
+        visible_listing_text_bytes=projected,
+        raw_listing_sha256=raw_sha256,
+        review_text_sha256=review_sha256,
+        projection_sha256=content_hash(projection),
+    )
 
 
 @dataclass(frozen=True)
@@ -144,10 +276,31 @@ class SanityReviewPackage:
     vacancy_requirements: tuple[str, ...]
     approved_evidence_ids: tuple[str, ...]
     application_source_identity: str
+    vacancy_review_material: VacancyReviewMaterial | None = None
 
     def __post_init__(self) -> None:
+        if type(self.intended_vacancy) is not IntendedVacancy:
+            raise TypeError("sanity review requires the exact intended-vacancy type")
+        IntendedVacancy.__post_init__(self.intended_vacancy)
         if not self.cv_pdf_bytes or not self.cover_letter_pdf_bytes:
             raise ValueError("sanity review requires both exact final PDFs")
+        for value in (self.cv_pdf_bytes, self.cover_letter_pdf_bytes):
+            if not isinstance(value, bytes) or len(value) > MAX_PDF_BYTES:
+                raise ValueError("sanity review PDF exceeds the byte limit or is invalid")
+        if not isinstance(self.form_fields, (tuple, list)) or len(self.form_fields) > MAX_FORM_ANSWER_ROWS:
+            raise ValueError("sanity review form-answer row count is invalid")
+        question_ids = []
+        for row in self.form_fields:
+            if not isinstance(row, (tuple, list)) or len(row) != 3:
+                raise ValueError("sanity review form-answer row is invalid")
+            question_id, question, answer = row
+            if not all(isinstance(value, str) for value in row) or not question_id or not question:
+                raise ValueError("sanity review form-answer values are invalid")
+            if any(len(value.encode("utf-8")) > MAX_FORM_VALUE_BYTES for value in (question, answer)):
+                raise ValueError("sanity review form-answer value exceeds the byte limit")
+            question_ids.append(question_id)
+        if question_ids != sorted(set(question_ids)):
+            raise ValueError("sanity review form answers require ascending unique question IDs")
         if not re.fullmatch(r"[0-9a-f]{64}", self.application_source_identity):
             raise ValueError("sanity review requires an application-source identity")
         if not self.vacancy_requirements:
@@ -156,6 +309,15 @@ class SanityReviewPackage:
             raise ValueError("sanity review requires approved-evidence identifiers")
         if len(set(self.approved_evidence_ids)) != len(self.approved_evidence_ids):
             raise ValueError("approved-evidence identifiers must be unique")
+        if self.vacancy_review_material is not None:
+            if type(self.vacancy_review_material) is not VacancyReviewMaterial:
+                raise TypeError("sanity review requires exact vacancy-review material")
+            VacancyReviewMaterial.__post_init__(self.vacancy_review_material)
+            if (
+                self.vacancy_review_material.raw_listing_sha256
+                != self.intended_vacancy.vacancy_sha256
+            ):
+                raise ValueError("review listing differs from intended vacancy")
 
 
 def canonical_form_fields(
@@ -203,6 +365,7 @@ def package_from_application(
     artifacts: object,
     questions: Mapping[str, tuple[str, str]] | None,
     vacancy_requirements: Sequence[str] | None = None,
+    vacancy_review_material: VacancyReviewMaterial | None = None,
 ) -> SanityReviewPackage:
     """Build review data from the exact immutable application objects."""
     return SanityReviewPackage(
@@ -224,12 +387,15 @@ def package_from_application(
         ),
         approved_evidence_ids=approved_evidence_projection(source),
         application_source_identity=source.source_id,
+        vacancy_review_material=vacancy_review_material,
     )
 
 
 def _independent_pdf_text(pdf_bytes: bytes) -> str:
     if not isinstance(pdf_bytes, bytes) or not pdf_bytes.startswith(b"%PDF-"):
         raise ValueError("sanity review input is not an exact PDF")
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        raise ValueError("sanity review PDF exceeds the byte limit")
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes), strict=True)
         if reader.is_encrypted or not reader.pages:
@@ -243,12 +409,15 @@ def _independent_pdf_text(pdf_bytes: bytes) -> str:
         ) from exc
     if not text.strip():
         raise ValueError("sanity review PDF has no independently extractable text")
+    if len((text + "\n").encode("utf-8")) > MAX_DOCUMENT_TEXT_BYTES:
+        raise ValueError("sanity review extracted text exceeds the byte limit")
     return text + "\n"
 
 
 def _package_document(
     package: SanityReviewPackage,
 ) -> tuple[dict[str, object], dict[str, str]]:
+    SanityReviewPackage.__post_init__(package)
     cv_text = _independent_pdf_text(package.cv_pdf_bytes)
     letter_text = _independent_pdf_text(package.cover_letter_pdf_bytes)
     form_document = [
@@ -266,13 +435,24 @@ def _package_document(
         "form_package_sha256": content_hash(form_document),
         "approved_evidence_projection_sha256": content_hash(evidence_document),
     }
+    vacancy_document: dict[str, object] = {
+        **package.intended_vacancy.document(),
+        "requirements": list(package.vacancy_requirements),
+    }
+    if package.vacancy_review_material is not None:
+        review_material = package.vacancy_review_material
+        hashes.update(
+            {
+                "raw_listing_sha256": review_material.raw_listing_sha256,
+                "review_text_sha256": review_material.review_text_sha256,
+                "review_text_projection_sha256": review_material.projection_sha256,
+            }
+        )
+        vacancy_document["exact_listing"] = review_material.document()
     document = {
         "contract": "jaa.application-sanity-input.v1",
         "instruction_boundary": "BEGIN UNTRUSTED QUOTED DATA",
-        "vacancy": {
-            **package.intended_vacancy.document(),
-            "requirements": list(package.vacancy_requirements),
-        },
+        "vacancy": vacancy_document,
         "application": {
             "cv_exact_pdf_extracted_text": cv_text,
             "cover_letter_exact_pdf_extracted_text": letter_text,
@@ -282,6 +462,9 @@ def _package_document(
         },
         "instruction_boundary_end": "END UNTRUSTED QUOTED DATA",
     }
+    hashes["review_input_sha256"] = hashlib.sha256(
+        canonical_json(document).encode("utf-8")
+    ).hexdigest()
     return document, hashes
 
 
@@ -296,6 +479,7 @@ class SanityReviewReceipt:
     policy_sha256: str
     backend_identity: str
     model_identity: str
+    transport_evidence: Mapping[str, str] | None
     model_result: Mapping[str, object]
     model_result_sha256: str
     verdict: str
@@ -303,6 +487,17 @@ class SanityReviewReceipt:
     schema_version: str = RECEIPT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        if (
+            type(self.package_hashes) is not dict
+            or type(self.intended_vacancy) is not IntendedVacancy
+            or type(self.model_result) is not dict
+            or (
+                self.transport_evidence is not None
+                and type(self.transport_evidence) is not dict
+            )
+        ):
+            raise TypeError("sanity receipt contains an inexact authority type")
+        IntendedVacancy.__post_init__(self.intended_vacancy)
         if self.schema_version != RECEIPT_SCHEMA_VERSION or self.verdict != "pass":
             raise ValueError("only a current PASS sanity receipt is valid")
         if (
@@ -315,10 +510,40 @@ class SanityReviewReceipt:
             not self.backend_identity
             or self.backend_identity == "mock"
             or not self.model_identity
+            or self.model_identity.casefold() in _NON_EXACT_MODEL_IDENTITIES
         ):
             raise ValueError(
                 "sanity receipt lacks a production-capable reviewer identity"
             )
+        if self.transport_evidence is not None:
+            evidence = dict(self.transport_evidence)
+            if set(evidence) != _TRANSPORT_EVIDENCE_KEYS:
+                raise ValueError("sanity receipt transport evidence is malformed")
+            if (
+                evidence.get("schema_version")
+                != _OPENAI_TRANSPORT_EVIDENCE_SCHEMA
+                or evidence.get("provider_identity") != _OPENAI_PROVIDER_IDENTITY
+                or evidence.get("model_identity") != self.model_identity
+                or evidence.get("transport_identity") != self.backend_identity
+                or self.backend_identity
+                != _OPENAI_TRANSPORT_PREFIX + evidence.get("endpoint_sha256", "")
+                or not evidence.get("transport_version")
+                or not evidence.get("client_request_id")
+                or not evidence.get("transport_request_id")
+                or not evidence.get("provider_response_id")
+            ):
+                raise ValueError("sanity receipt transport evidence is inconsistent")
+            for key in (
+                "endpoint_sha256",
+                "request_sha256",
+                "response_sha256",
+                "semantic_output_sha256",
+                "archive_manifest_sha256",
+            ):
+                if not re.fullmatch(r"[0-9a-f]{64}", evidence.get(key, "")):
+                    raise ValueError("sanity receipt transport hash is invalid")
+        elif self.backend_identity.startswith(_OPENAI_TRANSPORT_PREFIX):
+            raise ValueError("OpenAI sanity receipt lacks exact transport evidence")
         validate_json(dict(self.model_result), RESULT_SCHEMA)
         if (
             self.model_result.get("verdict") != "pass"
@@ -327,6 +552,12 @@ class SanityReviewReceipt:
             raise ValueError("sanity PASS receipt contains a non-PASS model result")
         if self.model_result_sha256 != content_hash(dict(self.model_result)):
             raise ValueError("sanity receipt model-result identity is invalid")
+        if (
+            self.transport_evidence is not None
+            and self.transport_evidence["semantic_output_sha256"]
+            != self.model_result_sha256
+        ):
+            raise ValueError("sanity receipt semantic transport binding is invalid")
         if self.receipt_sha256 != content_hash(self.document(include_identity=False)):
             raise ValueError("sanity receipt identity is invalid")
 
@@ -343,6 +574,11 @@ class SanityReviewReceipt:
             "policy_sha256": self.policy_sha256,
             "backend_identity": self.backend_identity,
             "model_identity": self.model_identity,
+            "transport_evidence": (
+                dict(self.transport_evidence)
+                if self.transport_evidence is not None
+                else None
+            ),
             "model_result": dict(self.model_result),
             "model_result_sha256": self.model_result_sha256,
             "verdict": self.verdict,
@@ -364,9 +600,14 @@ def review_application_package(
         raise ApplicationSanityReviewError(
             "review.provider_unavailable", "configured backend is unavailable"
         )
+    if client.cache_enabled or client.max_retries != 1 or client.temperature != 0:
+        raise ApplicationSanityReviewError(
+            "review.runtime_unsafe",
+            "sanity review requires one uncached zero-temperature transport attempt",
+        )
     try:
         document, hashes = _package_document(package)
-        result = client.complete_json(
+        result, response = client.complete_json_with_response(
             REVIEWER_PROMPT,
             canonical_json(document),
             schema=RESULT_SCHEMA,
@@ -384,12 +625,16 @@ def review_application_package(
             else "review.material_finding"
         )
         raise ApplicationSanityReviewError(
-            code, "review did not return a certain finding-free PASS", result=result
+            code,
+            "review did not return a certain finding-free PASS",
+            result=result,
+            transport_evidence=response.transport_evidence,
         )
-    model_identity = client.model.strip()
-    if not model_identity:
+    model_identity = response.model.strip()
+    if not model_identity or model_identity.casefold() in _NON_EXACT_MODEL_IDENTITIES:
         raise ApplicationSanityReviewError(
-            "review.model_missing", "backend returned no model identity"
+            "review.model_missing",
+            "backend returned no exact response model identity",
         )
     preimage = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
@@ -403,6 +648,11 @@ def review_application_package(
         "policy_sha256": POLICY_SHA256,
         "backend_identity": client.backend.name,
         "model_identity": model_identity,
+        "transport_evidence": (
+            dict(response.transport_evidence)
+            if response.transport_evidence is not None
+            else None
+        ),
         "model_result": result,
         "model_result_sha256": content_hash(result),
         "verdict": "pass",
@@ -417,6 +667,11 @@ def review_application_package(
         policy_sha256=POLICY_SHA256,
         backend_identity=client.backend.name,
         model_identity=model_identity,
+        transport_evidence=(
+            dict(response.transport_evidence)
+            if response.transport_evidence is not None
+            else None
+        ),
         model_result=result,
         model_result_sha256=preimage["model_result_sha256"],
         verdict="pass",
@@ -428,7 +683,12 @@ def verify_sanity_review_receipt(
     receipt: SanityReviewReceipt, package: SanityReviewPackage
 ) -> None:
     """Recompute every deterministic binding without making a second model call."""
-    receipt.__post_init__()
+    if type(receipt) is not SanityReviewReceipt:
+        raise TypeError("sanity verification requires the exact receipt type")
+    if type(package) is not SanityReviewPackage:
+        raise TypeError("sanity verification requires the exact package type")
+    SanityReviewPackage.__post_init__(package)
+    SanityReviewReceipt.__post_init__(receipt)
     _, hashes = _package_document(package)
     if (
         dict(receipt.package_hashes) != hashes
@@ -443,13 +703,18 @@ def verify_sanity_review_receipt(
 __all__ = [
     "ApplicationSanityReviewError",
     "FINDING_CODES",
+    "MAX_REVIEW_TEXT_BYTES",
     "POLICY_SHA256",
     "PROMPT_SHA256",
+    "REVIEW_TEXT_PROJECTION_ID",
+    "REVIEW_TEXT_PROJECTION_SCHEMA",
     "RESULT_SCHEMA",
     "SCHEMA_SHA256",
     "SanityReviewPackage",
     "SanityReviewReceipt",
+    "VacancyReviewMaterial",
     "approved_evidence_projection",
+    "build_vacancy_review_material",
     "canonical_form_fields",
     "package_from_application",
     "review_application_package",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import csv
 import json
 import struct
@@ -17,6 +19,75 @@ from market_aligner.reporting.reports import RankedVacancy, skill_frequency, wri
 
 
 class ReportingTests(unittest.TestCase):
+    def test_selected_report_uses_geography_before_score(self) -> None:
+        profile = CandidateProfile(
+            new_profile_id(),
+            "v1",
+            {"track": TrackProfile(8, 7, 0.8, 6, rationale="fixture")},
+        )
+        uk = Vacancy("board", "uk", "https://example.test/uk", title="UK", description="Role")
+        eu = Vacancy("board", "eu", "https://example.test/eu", title="EU", description="Role")
+        base_uk = score(
+            profile, uk.key, "track", AssessmentAxes(1.0, 1.0, 1.0, 9.0, 1.0)
+        )
+        base_eu = score(
+            profile, eu.key, "track", AssessmentAxes(10.0, 10.0, 10.0, 0.0, 10.0)
+        )
+        with self.assertRaisesRegex(ValueError, "bucket and priority rank differ"):
+            RankedVacancy(uk, base_uk, "UK_REMOTE", 5)
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = write_reports(
+                profile.profile_id,
+                [
+                    RankedVacancy(eu, replace(base_eu, final=99.0), "EU_REMOTE", 5),
+                    RankedVacancy(uk, replace(base_uk, final=1.0), "UK_REMOTE", 1),
+                ],
+                temporary,
+            )
+            with paths.jobs_csv.open(encoding="utf-8") as handle:
+                exported = list(csv.DictReader(handle))
+        self.assertEqual("UK", exported[0]["title"])
+        self.assertEqual("UK_REMOTE", exported[0]["geography_bucket"])
+
+    def test_fixed_selection_and_configurable_preferences_remain_distinct(self) -> None:
+        profile = CandidateProfile(new_profile_id(), "v1", {
+            "track": TrackProfile(8, 7, 0.8, 6, rationale="fixture")})
+        vacancy = Vacancy("board", "1", "https://example.test/1", title="Role", description="Role")
+        result = score(profile, vacancy.key, "track", AssessmentAxes(8, 7, 8, 2, 8))
+        for bucket, rank, category in (
+            ("UK_REMOTE", 1, "uk_remote"), ("UK_HYBRID", 2, "uk_hybrid"),
+            ("UK_ONSITE", 3, "uk_onsite"), ("RO_REMOTE", 4, "romania_remote"),
+            ("EU_REMOTE", 5, "eu_remote"),
+        ):
+            with self.subTest(bucket=bucket):
+                positional = RankedVacancy(vacancy, result, bucket, rank)
+                keyword = RankedVacancy(vacancy, result, geography_bucket=bucket,
+                                        geography_priority_rank=rank)
+                self.assertEqual(positional, keyword)
+                self.assertEqual((category, rank - 1),
+                                 (keyword.preference_classification, keyword.preference_rank))
+                self.assertEqual(keyword, replace(keyword))
+        for kwargs in (
+            {"geography_bucket": "UK_REMOTE"}, {"geography_priority_rank": 1},
+            {"geography_bucket": "UK_REMOTE", "geography_priority_rank": 5},
+            {"geography_bucket": "UK_REMOTE", "geography_priority_rank": True},
+            {"geography_bucket": "UK_REMOTE", "geography_priority_rank": 1,
+             "preference_classification": "eu_remote", "preference_rank": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                RankedVacancy(vacancy, result, **kwargs)
+        custom = RankedVacancy(vacancy, result, "eu_remote", 0)
+        self.assertIsNone(custom.geography_bucket)
+        self.assertEqual(0, custom.preference_rank)
+        self.assertEqual(5, RankedVacancy(vacancy, result, "unknown_other", 5).preference_rank)
+        self.assertEqual(RankedVacancy(vacancy, result), RankedVacancy(vacancy, result, None, None))
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = write_reports(profile.profile_id, [custom], temporary)
+            row = next(csv.DictReader(paths.jobs_csv.open()))
+            self.assertEqual("eu_remote", row["preference_classification"])
+            self.assertEqual("unselected", row["geography_bucket"])
+            self.assertEqual("", row["geography_priority_rank"])
+
     def test_ranked_jobs_requirements_and_scatter_outputs(self) -> None:
         profile = CandidateProfile(
             new_profile_id(),

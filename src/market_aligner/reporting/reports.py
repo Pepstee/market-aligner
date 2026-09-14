@@ -7,10 +7,13 @@ import html
 import json
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from market_aligner.assessment.geography import (
+    GeographyMatch, PREFERENCE_CATEGORIES, selection_sort_key,
+)
 from market_aligner.assessment.scoring import ScoreResult
 from market_aligner.domain.contracts import Vacancy
 from market_aligner.profiler.schema import validate_profile_id
@@ -22,10 +25,62 @@ class RankedVacancy:
     score: ScoreResult
     preference_classification: str = "unknown_other"
     preference_rank: int = 999
+    geography_bucket: str | None = field(default=None, kw_only=True)
+    geography_priority_rank: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.vacancy.key != self.score.job_key:
             raise ValueError("vacancy and score job keys differ")
+        # Historical selected reports supplied uppercase buckets positionally.
+        # Keep that fixed selection contract separate from configurable preferences.
+        bucket, rank = self.geography_bucket, self.geography_priority_rank
+        classification, preference_rank = self.preference_classification, self.preference_rank
+        legacy_positional = classification is None or (
+            isinstance(classification, str) and classification.isupper()
+        )
+        if legacy_positional:
+            if bucket is not None or rank is not None:
+                raise ValueError("geography supplied both positionally and by keyword")
+            bucket, rank = classification, preference_rank
+            classification, preference_rank = "unknown_other", 999
+        if (bucket is None) != (rank is None):
+            raise ValueError("geography bucket and rank must be supplied together")
+        if bucket is not None:
+            if isinstance(rank, bool) or not isinstance(rank, int):
+                raise ValueError("geography priority rank must be an integer")
+            match = GeographyMatch(bucket, rank)
+            selected_preference = (PREFERENCE_CATEGORIES[match.priority_rank - 1], match.priority_rank - 1)
+            if (classification, preference_rank) not in (("unknown_other", 999), selected_preference):
+                raise ValueError("fixed selection geography conflicts with report preference")
+            classification, preference_rank = selected_preference
+        object.__setattr__(self, "geography_bucket", bucket)
+        object.__setattr__(self, "geography_priority_rank", rank)
+        object.__setattr__(self, "preference_classification", classification)
+        object.__setattr__(self, "preference_rank", preference_rank)
+        if (
+            isinstance(self.preference_rank, bool)
+            or not isinstance(self.preference_rank, int)
+            or self.preference_rank < 0
+        ):
+            raise ValueError("preference rank must be a non-negative integer")
+
+
+def _ranked_vacancy_sort_key(item: RankedVacancy) -> tuple[int, float, float, str]:
+    if item.preference_rank in range(5):
+        return selection_sort_key(
+            item.preference_rank + 1,
+            item.score.final,
+            item.score.opportunity,
+            item.vacancy.key,
+        )
+    # Unknown geography remains inspectable but always follows every supported
+    # bucket; preserve the recovered score/opportunity/identity tie-breaks.
+    return (
+        item.preference_rank + 1,
+        -item.score.final,
+        -item.score.opportunity,
+        item.vacancy.key,
+    )
 
 
 @dataclass(frozen=True)
@@ -103,7 +158,7 @@ def write_reports(
     )
     ranked = sorted(
         rows,
-        key=lambda item: (item.preference_rank, -item.score.final, item.vacancy.key),
+        key=_ranked_vacancy_sort_key,
     )
     _write_jobs(ranked, paths.jobs_csv)
     _write_ranked_json(profile_id, ranked, paths.ranked_json)
@@ -149,6 +204,8 @@ def _write_jobs(rows: Sequence[RankedVacancy], path: Path) -> None:
         "title",
         "company",
         "location",
+        "geography_bucket",
+        "geography_priority_rank",
         "track",
         "fit",
         "fit_status",
@@ -174,6 +231,8 @@ def _write_jobs(rows: Sequence[RankedVacancy], path: Path) -> None:
                     "title": item.vacancy.title,
                     "company": item.vacancy.company,
                     "location": item.vacancy.location,
+                    "geography_bucket": item.geography_bucket or "unselected",
+                    "geography_priority_rank": item.geography_priority_rank or "",
                     "track": item.score.track,
                     "fit": round(item.score.fit, 6),
                     "fit_status": item.score.fit_status.value,
@@ -224,6 +283,8 @@ def _write_scatter(profile_id: str, rows: Sequence[RankedVacancy], path: Path) -
             "preference_rank": item.preference_rank,
             "final": item.score.final,
             "fit_status": item.score.fit_status.value,
+            "geography_bucket": item.geography_bucket,
+            "geography_priority_rank": item.geography_priority_rank,
         }
         for item in rows
     ]

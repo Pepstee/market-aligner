@@ -121,6 +121,102 @@ def _private_tree(root: Path) -> None:
         os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
 
+def _promote_fixture_assessment(store, *, profile_id, job_key, track, source_sha):
+    with store.connection() as connection:
+        current = connection.execute(
+            "SELECT * FROM assessments WHERE profile_id=? AND job_key=?",
+            (profile_id, job_key),
+        ).fetchone()
+    assert current is not None
+    authority_sha = "c" * 64
+    config_sha = "d" * 64
+    processing_receipt_sha = "e" * 64
+    processing_result_sha = "f" * 64
+    policy = {"name": "fixture-promotion", "version": 1}
+    policy_sha = _sha(canonical_json_bytes(policy))
+    binding = {
+        "evidence_authority_sha256": authority_sha,
+        "processing_config_sha256": config_sha,
+        "processing_receipt_sha256": processing_receipt_sha,
+        "processing_result_sha256": processing_result_sha,
+        "source_content_sha256": source_sha,
+        "track": track,
+    }
+    promotion_body = {
+        "binding": binding,
+        "binding_sha256": _sha(canonical_json_bytes(binding)),
+        "decision": "pass",
+        "job_key": job_key,
+        "policy": policy,
+        "policy_sha256": policy_sha,
+        "profile_id": profile_id,
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        "score_payload_hash": current["score_payload_hash"],
+    }
+    promotion_sha = _sha(canonical_json_bytes(promotion_body))
+    promotion_bytes = canonical_json_bytes(
+        {**promotion_body, "receipt_sha256": promotion_sha}
+    )
+    store.promote_processing_gate(
+        profile_id=profile_id,
+        job_key=job_key,
+        score={
+            "fit": current["fit"],
+            "opportunity": current["opportunity"],
+            "final": current["final_score"],
+            "fit_status": current["fit_status"],
+        },
+        policy_hash=policy_sha,
+        processing_receipt_sha256=processing_receipt_sha,
+        processing_result_sha256=processing_result_sha,
+        source_content_sha256=source_sha,
+        authority_sha256=authority_sha,
+        processing_config_sha256=config_sha,
+        track=track,
+        receipt_bytes=promotion_bytes,
+        receipt_sha256=promotion_sha,
+    )
+    return promotion_sha
+
+
+def _canonical_research_plan(*, source, raw_text, profile_id, job_key, company, title, url, source_sha, snapshot_sha, promotion_sha):
+    start = source.body.index(raw_text.encode())
+    return PublicResearchPlan(
+        profile_id,
+        job_key,
+        company,
+        title,
+        (
+            PlannedCitation(
+                "official_job",
+                url,
+                "Canonical collector vacancy",
+                _sha(source.body),
+                url,
+                "canonical_vacancy",
+            ),
+        ),
+        (
+            PlannedClaim(
+                raw_text,
+                ("official_job",),
+                1.0,
+                (
+                    PlannedSupport(
+                        "official_job",
+                        f"bytes:{start}-{start + len(raw_text.encode())}",
+                        raw_text,
+                    ),
+                ),
+            ),
+        ),
+        source_sha,
+        snapshot_sha,
+        promotion_sha,
+        (),
+    )
+
+
 def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     raw_text = "Build agentic software systems."
     database_relative = Path("scraper/data_overnight/jobs.sqlite3")
@@ -174,99 +270,18 @@ def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     )
     apply_gate(store, PROFILE_ID, JOB_KEY)
     _job, source_sha, _ = database.fetched_posting(JOB_KEY)
-    with store.connection() as connection:
-        current = connection.execute(
-            "SELECT * FROM assessments WHERE profile_id=? AND job_key=?",
-            (PROFILE_ID, JOB_KEY),
-        ).fetchone()
-    assert current is not None
-    authority_sha = "c" * 64
-    config_sha = "d" * 64
-    processing_receipt_sha = "e" * 64
-    processing_result_sha = "f" * 64
-    policy = {"name": "fixture-promotion", "version": 1}
-    policy_sha = _sha(canonical_json_bytes(policy))
-    binding = {
-        "evidence_authority_sha256": authority_sha,
-        "processing_config_sha256": config_sha,
-        "processing_receipt_sha256": processing_receipt_sha,
-        "processing_result_sha256": processing_result_sha,
-        "source_content_sha256": source_sha,
-        "track": "track",
-    }
-    promotion_body = {
-        "binding": binding,
-        "binding_sha256": _sha(canonical_json_bytes(binding)),
-        "decision": "pass",
-        "job_key": JOB_KEY,
-        "policy": policy,
-        "policy_sha256": policy_sha,
-        "profile_id": PROFILE_ID,
-        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
-        "score_payload_hash": current["score_payload_hash"],
-    }
-    promotion_sha = _sha(canonical_json_bytes(promotion_body))
-    promotion_bytes = canonical_json_bytes(
-        {**promotion_body, "receipt_sha256": promotion_sha}
-    )
-    store.promote_processing_gate(
-        profile_id=PROFILE_ID,
-        job_key=JOB_KEY,
-        score={
-            "fit": current["fit"],
-            "opportunity": current["opportunity"],
-            "final": current["final_score"],
-            "fit_status": current["fit_status"],
-        },
-        policy_hash=policy_sha,
-        processing_receipt_sha256=processing_receipt_sha,
-        processing_result_sha256=processing_result_sha,
-        source_content_sha256=source_sha,
-        authority_sha256=authority_sha,
-        processing_config_sha256=config_sha,
-        track="track",
-        receipt_bytes=promotion_bytes,
-        receipt_sha256=promotion_sha,
-    )
+    promotion_sha = _promote_fixture_assessment(
+        store, profile_id=PROFILE_ID, job_key=JOB_KEY, track="track",
+        source_sha=source_sha)
     task = store.claim_research("initial-preview", _preview_without_lease=True)
     assert task is not None
     initial_loader = CanonicalCollectorVacancyLoader(database.path)
     initial_source = initial_loader(task)
-    start = initial_source.body.index(raw_text.encode())
-    plan = PublicResearchPlan(
-        PROFILE_ID,
-        JOB_KEY,
-        "Cogna",
-        "Software Engineer",
-        (
-            PlannedCitation(
-                "official_job",
-                url,
-                "Canonical collector vacancy",
-                _sha(initial_source.body),
-                url,
-                "canonical_vacancy",
-            ),
-        ),
-        (
-            PlannedClaim(
-                raw_text,
-                ("official_job",),
-                1.0,
-                (
-                    PlannedSupport(
-                        "official_job",
-                        f"bytes:{start}-{start + len(raw_text.encode())}",
-                        raw_text,
-                    ),
-                ),
-            ),
-        ),
-        source_sha,
-        task.vacancy_snapshot_sha256,
-        promotion_sha,
-        (),
-    )
+    plan = _canonical_research_plan(
+        source=initial_source, raw_text=raw_text, profile_id=PROFILE_ID,
+        job_key=JOB_KEY, company="Cogna", title="Software Engineer", url=url,
+        source_sha=source_sha, snapshot_sha=task.vacancy_snapshot_sha256,
+        promotion_sha=promotion_sha)
     repository = tmp_path / "repo"
     repository.mkdir()
     initial_provider = SourceBoundResearchProvider(
@@ -332,41 +347,11 @@ def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
         data_home=tmp_path, collection_config_path=config
     )
     refresh_source = refresh_loader(refresh_task)
-    start = refresh_source.body.index(raw_text.encode())
-    refresh_plan = PublicResearchPlan(
-        PROFILE_ID,
-        JOB_KEY,
-        "Cogna",
-        "Software Engineer",
-        (
-            PlannedCitation(
-                "official_job",
-                url,
-                "Canonical collector vacancy",
-                _sha(refresh_source.body),
-                url,
-                "canonical_vacancy",
-            ),
-        ),
-        (
-            PlannedClaim(
-                raw_text,
-                ("official_job",),
-                1.0,
-                (
-                    PlannedSupport(
-                        "official_job",
-                        f"bytes:{start}-{start + len(raw_text.encode())}",
-                        raw_text,
-                    ),
-                ),
-            ),
-        ),
-        source_sha,
-        refresh_task.vacancy_snapshot_sha256,
-        promotion_sha,
-        (),
-    )
+    refresh_plan = _canonical_research_plan(
+        source=refresh_source, raw_text=raw_text, profile_id=PROFILE_ID,
+        job_key=JOB_KEY, company="Cogna", title="Software Engineer", url=url,
+        source_sha=source_sha, snapshot_sha=refresh_task.vacancy_snapshot_sha256,
+        promotion_sha=promotion_sha)
     refresh_provider = SourceBoundResearchProvider(
         plan=refresh_plan,
         repository_root=repository,
@@ -975,3 +960,227 @@ def test_producer_identity_requires_exact_clean_executing_head(
     (repository / "untracked-authority.txt").write_text("not allowed")
     with pytest.raises(ProductionHandoffError, match="producer_dirty"):
         _git_commit(repository)
+
+
+def test_handoff_eligibility_retains_verified_promotion_and_rejects_drift(tmp_path):
+    import sqlite3
+    from test_process_one import EligibilityFixture, EligibilityEndToEndTests
+    from market_aligner.applications.production_handoff import _require_detailed_eligibility
+
+    fixture = EligibilityFixture(tmp_path)
+    harness = EligibilityEndToEndTests()
+    harness.fx = fixture
+    candidate = fixture.candidate_facts()
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = "NL"
+    candidate["current_residence"]["value"] = "NL"
+    candidate["maximum_years_required"]["value"] = 5.0
+    candidate["requires_sponsorship"]["value"] = False
+    harness.run_one(fixture, candidate_overrides=candidate)
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        raw, inputs = harness._handoff_eligibility_inputs(connection)
+        assert _require_detailed_eligibility(connection, **inputs) == raw
+    _promote_fixture_assessment(
+        AssessmentStore(fixture.assessments_path), profile_id=inputs["profile_id"],
+        job_key=fixture.job.key, track="backend", source_sha=fixture.content_hash)
+    from market_aligner.processing import ProcessingRefused
+    with pytest.raises(ProcessingRefused):
+        harness.run_one(fixture, operation_id="op-eligible-after-promotion",
+                        candidate_overrides=candidate)
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        assert _require_detailed_eligibility(connection, **inputs) == raw
+        for mutation in (
+            "UPDATE assessment_events SET payload_json='{}' WHERE event_type='processing_assessment_promoted'",
+            "UPDATE assessments SET score_payload_hash='changed'",
+            "UPDATE assessment_promotions SET receipt_bytes=x'7b7d'",
+            "UPDATE assessments SET opportunity_decision='reject'",
+            "UPDATE assessment_promotions SET processing_result_sha256='changed'",
+            "UPDATE assessments SET state='employer_researched'",
+            "UPDATE vacancy.postings SET raw_text='changed'",
+        ):
+            connection.execute("SAVEPOINT mutation")
+            connection.execute(mutation)
+            with pytest.raises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs)
+            connection.execute("ROLLBACK TO mutation")
+            connection.execute("RELEASE mutation")
+
+
+def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z",
+                                location="London, United Kingdom", jurisdiction="GB"):
+    import sqlite3
+    from test_process_one import EligibilityFixture, EligibilityEndToEndTests
+    from market_aligner.llm.contracts import SemanticVacancyExtraction, EvidenceAlignment, LLMReceipt
+    from market_aligner.service.processing import ProcessingService
+    from market_aligner.service.api import MarketAlignerService
+    from market_aligner.profiler.store import ProfileStore
+    from market_aligner.applications.production_handoff import _require_detailed_eligibility
+
+    from market_aligner.domain.contracts import JobUrl
+    fixture = EligibilityFixture(tmp_path, job=JobUrl("workable", "cogna:847CFBC5F4", FLAT_URL),
+        fetched_at=fetched_at, raw_text=f"Build software in {location}. At least one year experience.", extraction_overrides={
+        "title": "Software Engineer", "seniority": "junior",
+        "location": location, "remote_policy": "remote",
+        "description": "Build software. At least one year experience.",
+        "required_qualifications": ["At least one year experience."],
+        "work_authorisation": [jurisdiction],
+    })
+    harness = EligibilityEndToEndTests()
+    harness.fx = fixture
+    candidate = fixture.candidate_facts()
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = jurisdiction
+    candidate["current_residence"]["value"] = jurisdiction
+    candidate["maximum_years_required"]["value"] = 5.0
+    candidate["requires_sponsorship"]["value"] = False
+    vacancy_facts = fixture.vacancy_facts()
+    vacancy_facts["work_jurisdiction"]["value"] = jurisdiction
+    vacancy_facts["required_residence"]["value"] = jurisdiction
+    harness.run_one(fixture, candidate_overrides=candidate, vacancy_overrides=vacancy_facts)
+
+    class Worker:
+        def extract_vacancy(self, context):
+            value = SemanticVacancyExtraction(**fixture.extraction_output)
+            return value, LLMReceipt.bind(
+                receipt_id="rc-extr", task="semantic_vacancy_extraction",
+                model="fixture-model", prompt_version="pv-1", inputs=context,
+                output=value, created_at="2026-08-26T00:30:00Z")
+
+        def align_evidence(self, context):
+            value = EvidenceAlignment(
+                profile_id=fixture.fit_parsed["profile_id"], profile_version="gen-1",
+                job_key=fixture.job.key, matches=(), missing_requirements=(),
+                technical_alignment=0.8, evidence_match=0.7, confidence=0.75, unknowns=())
+            return value, LLMReceipt.bind(
+                receipt_id="rc-align", task="evidence_alignment", model="fixture-model",
+                prompt_version="pv-1", inputs=context, output=value,
+                created_at="2026-08-26T00:31:00Z")
+
+    config = tmp_path / "pipeline.yaml"
+    config.write_text("io:\n  database: state/vacancies.sqlite3\nprocessing:\n  shard_size: 10\n  lease_seconds: 60\n")
+    run = ProcessingService(fixture.root, Worker()).process(
+        config, profile_id=fixture.fit_parsed["profile_id"], track="backend",
+        worker_id="enrichment-worker", job_key=fixture.job.key)
+    assert run["included"] == 1
+    service = MarketAlignerService(fixture.root)
+    service.promote_processing(
+        profile_id=fixture.fit_parsed["profile_id"], track="backend",
+        job_key=fixture.job.key, processing_receipt_path=Path(run["receipt_path"]))
+    from market_aligner.applications.assessment_promotion import AssessmentPromotionError
+    with pytest.raises(AssessmentPromotionError, match="scope"):
+        service.promote_processing(
+            profile_id=fixture.fit_parsed["profile_id"], track="backend",
+            job_key="board:other", processing_receipt_path=Path(run["receipt_path"]))
+    profile, _ = ProfileStore(fixture.root).load(fixture.fit_parsed["profile_id"])
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        raw, inputs = harness._handoff_eligibility_inputs(connection)
+        assert _require_detailed_eligibility(connection, **inputs, current_profile=profile) == raw
+        for mutation in (
+            "UPDATE assessments SET score_payload_json='{}'",
+            "UPDATE vacancy.processing_jobs SET result_json='{}'",
+            "UPDATE assessment_promotions SET processing_result_sha256='changed'",
+        ):
+            connection.execute("SAVEPOINT mutation")
+            connection.execute(mutation)
+            with pytest.raises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs, current_profile=profile)
+            connection.execute("ROLLBACK TO mutation")
+            connection.execute("RELEASE mutation")
+
+    task = service.assessments.claim_research("enrichment-preview", _preview_without_lease=True)
+    assert task is not None
+    loader = CanonicalCollectorVacancyLoader(fixture.vacancy_db)
+    source = loader(task)
+    promotion = service.assessments.processing_promotion(profile.profile_id, fixture.job.key)
+    plan = _canonical_research_plan(
+        source=source, raw_text=fixture.raw_text, profile_id=profile.profile_id,
+        job_key=fixture.job.key, company=fixture.extraction_output["company"],
+        title=fixture.extraction_output["title"], url=fixture.job.url,
+        source_sha=fixture.content_hash, snapshot_sha=task.vacancy_snapshot_sha256,
+        promotion_sha=promotion["receipt_sha256"])
+    provider = SourceBoundResearchProvider(
+        plan=plan, repository_root=Path(__file__).resolve().parents[1],
+        archive_root=fixture.root / "state/public-employer-research-v2",
+        canonical_vacancy_loader=loader)
+    research = ResearchWorker(service.assessments, provider, "enrichment-research").run_one()
+    assert research.status == "completed", research.error
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        assert connection.execute("SELECT state FROM assessments").fetchone()[0] == "employer_researched"
+        assert _require_detailed_eligibility(connection, **inputs, current_profile=profile) == raw
+    return fixture, service, config, profile
+
+
+@pytest.mark.parametrize("location,jurisdiction", [
+    ("London, United Kingdom", "GB"),
+    ("Berlin, Germany, Europe", "DE"),
+])
+def test_real_processing_opportunity_enrichment_retains_eligibility(
+    tmp_path, location, jurisdiction
+):
+    _real_processing_enrichment(tmp_path, location=location, jurisdiction=jurisdiction)
+
+
+def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
+    import sqlite3
+    from test_jaa_events_v1 import _handoff
+    from market_aligner.research.store import AssessmentStore
+    from market_aligner.applications.canonical import ContractValidationError
+
+    handoff = _handoff()
+    basis = {
+        "schema_version": "market-aligner.production-handoff-execution.v2",
+        "application_id": handoff.application_id,
+        "handoff_root_sha256": handoff.root_sha256,
+        "release_token_issued": False,
+        "submission_authority": False,
+    }
+    def exact(value):
+        return production_module._canonical({
+            **value, "semantic_receipt_sha256": _sha(production_module._canonical(value))})
+    receipt = exact(basis)
+    store = AssessmentStore(tmp_path / "state/assessments.sqlite3")
+    store._record_published_handoff(handoff.exact_bytes, receipt)
+    reopened = AssessmentStore(store.path)
+    reopened._record_published_handoff(handoff.exact_bytes, receipt)
+    with reopened.connection() as connection:
+        rows = connection.execute("SELECT * FROM published_application_handoffs").fetchall()
+        assert len(rows) == 1
+        assert bytes(rows[0]["handoff_exact_bytes"]) == handoff.exact_bytes
+        assert bytes(rows[0]["execution_receipt_bytes"]) == receipt
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute("DELETE FROM published_application_handoffs")
+    for changes in ({"application_id": "app_" + "a" * 64},
+                    {"handoff_root_sha256": "a" * 64},
+                    {"submission_authority": True}):
+        with pytest.raises(ContractValidationError, match="binding differs"):
+            reopened._record_published_handoff(handoff.exact_bytes, exact({**basis, **changes}))
+    with reopened.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM published_application_handoffs").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("exact_capture", [False, True])
+def test_producer_reopens_collector_source_representation(tmp_path, exact_capture):
+    import base64
+    from market_aligner.domain.contracts import JobUrl, RawPosting
+    from market_aligner.state.vacancies import JobDatabase
+    from market_aligner.applications.production_handoff import _retained_raw_listing
+
+    jobs = JobDatabase(tmp_path / "state" / "vacancies.sqlite3")
+    job = JobUrl("greenhouse", "synthetic:representation", "https://example.test/job")
+    jobs.upsert_discovered(job)
+    exact = b"<html><body>Exact original vacancy</body></html>"
+    row = RawPosting(
+        board=job.board, job_id=job.job_id, url=job.url,
+        fetched_at="2026-09-13T15:00:00Z", raw_text="Extracted vacancy", raw_json={"title": "Engineer"},
+        public_content_base64=base64.b64encode(exact).decode() if exact_capture else None,
+    )
+    jobs.store_raw(row)
+    with jobs.connect() as connection:
+        connection.row_factory = __import__("sqlite3").Row
+        posting = connection.execute("SELECT * FROM postings WHERE key=?", (job.key,)).fetchone()
+    expected = exact if exact_capture else b'Extracted vacancy{"title": "Engineer"}'
+    assert _retained_raw_listing(jobs, job.key, posting) == expected
+    with pytest.raises(ProductionHandoffError, match="vacancy_hash"):
+        _retained_raw_listing(jobs, job.key, {**dict(posting), "content_hash": "0" * 64})

@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from market_aligner.applications.canonical import ContractValidationError
+from market_aligner.collectors.evidence import (
+    sanitized_fetch_engine,
+    sanitized_transport_receipt,
+    sanitized_worker_response,
+)
+
 
 RESULT_PREFIX = "__SCRAPLING_RESULT__="
 
@@ -34,9 +41,18 @@ class ScraplingResult:
 class ScraplingClient:
     """Invoke pinned Scrapling without importing it into the main Python 3.14 app."""
 
-    def __init__(self, root: Path, config: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        config: Mapping[str, Any] | None = None,
+        *,
+        protected_roots: tuple[str | Path, ...] = (),
+    ) -> None:
         self.root = Path(root).resolve()
         self.config = dict(config or {})
+        self.protected_roots = tuple(
+            dict.fromkeys((self.root, *(Path(value).resolve() for value in protected_roots)))
+        )
         configured = self.config.get("runtime_python", ".venv-scrapling/bin/python")
         runtime = Path(str(configured))
         self.runtime = runtime if runtime.is_absolute() else self.root / runtime
@@ -75,16 +91,11 @@ class ScraplingClient:
                 payload = json.loads(line[len(RESULT_PREFIX):])
                 break
         if payload is None:
-            detail = (completed.stderr or completed.stdout).strip()[-4000:]
             raise ScraplingError(
-                f"Scrapling worker returned no protocol result (exit {completed.returncode}): {detail}"
+                f"Scrapling worker returned no protocol result (exit {completed.returncode})"
             )
         if not payload.get("ok"):
-            detail = str(payload.get("message") or payload.get("error") or "unknown error")
-            logs = completed.stderr.strip()[-2000:]
-            if logs:
-                detail = f"{detail}; worker logs: {logs}"
-            raise ScraplingError(detail)
+            raise ScraplingError("Scrapling worker failed")
         return payload.get("result")
 
     def capabilities(self) -> dict[str, Any]:
@@ -103,7 +114,10 @@ class ScraplingClient:
         })
         if not isinstance(result, dict):
             raise ScraplingError("invalid fetch response")
-        return result
+        try:
+            return sanitized_worker_response(result, protected_roots=self.protected_roots)
+        except ContractValidationError as exc:
+            raise ScraplingError("invalid fetch response") from exc
 
     def fetch_with_chain(self, url: str) -> ScraplingResult:
         chain = list(self.config.get("fallback_chain") or ())
@@ -116,7 +130,10 @@ class ScraplingClient:
         minimum = int(self.config.get("minimum_body_bytes", 128))
         accepted_statuses = tuple(int(code) for code in self.config.get("accepted_statuses", range(200, 400)))
         for stage in chain:
-            engine = str(stage["engine"])
+            try:
+                engine = sanitized_fetch_engine(stage.get("engine"))
+            except ContractValidationError as exc:
+                raise ScraplingError("invalid fallback engine configuration") from exc
             request = {
                 "operation": "fetch",
                 "engine": engine,
@@ -125,18 +142,27 @@ class ScraplingClient:
                 "kwargs": dict(stage.get("kwargs") or {}),
             }
             try:
-                response = self.execute(request, timeout=float(stage.get("timeout_seconds", self.timeout)))
-                attempt = {"engine": engine, "ok": True, "response": response}
+                raw_response = self.execute(
+                    request, timeout=float(stage.get("timeout_seconds", self.timeout))
+                )
+                response = sanitized_worker_response(
+                    raw_response, protected_roots=self.protected_roots
+                )
+                attempt = {
+                    **sanitized_transport_receipt(response, engine=engine),
+                    "ok": True,
+                }
                 attempts.append(attempt)
                 if int(response.get("status", 0)) in accepted_statuses and int(response.get("body_bytes", 0)) >= minimum:
                     return ScraplingResult(engine, response, tuple(attempts))
-            except (ScraplingError, subprocess.TimeoutExpired) as exc:
-                attempts.append({
-                    "engine": engine,
-                    "ok": False,
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                })
+            except ContractValidationError:
+                attempts.append(
+                    {"engine": engine, "ok": False, "error_code": "invalid_worker_response"}
+                )
+            except ScraplingError:
+                attempts.append({"engine": engine, "ok": False, "error_code": "worker_error"})
+            except subprocess.TimeoutExpired:
+                attempts.append({"engine": engine, "ok": False, "error_code": "worker_timeout"})
         raise ScraplingFetchError("all configured Scrapling engines were exhausted", attempts)
 
 

@@ -54,6 +54,10 @@ QUALITY_POLICY_SHA256 = content_hash(
         "forbidden_structure": ("image", "table", "form", "annotation"),
         "duplicate_prose": "exact-normalized-logical-line-at-least-24-characters",
         "raster": "poppler-png-144-dpi-sha256-per-page",
+        "protected_failure_output": (
+            "generic-reason-only; never text, path, identifier, exception, metadata, "
+            "subprocess-output, or raster bytes"
+        ),
         "visual_judgement": "separate-required",
     }
 )
@@ -79,7 +83,9 @@ class PopplerRuntime:
             raise DocumentQualityError("Poppler runtime is incomplete")
         if set(dict(self.tool_sha256)) != set(POPPLER_TOOLS):
             raise DocumentQualityError("Poppler runtime hashes are incomplete")
-        if self.tool_descriptors and set(dict(self.tool_descriptors)) != set(POPPLER_TOOLS):
+        if self.tool_descriptors and set(dict(self.tool_descriptors)) != set(
+            POPPLER_TOOLS
+        ):
             raise DocumentQualityError("Poppler runtime descriptors are incomplete")
         if len(self.preload_paths) != len(self.preload_descriptors):
             raise DocumentQualityError("Poppler runtime preload lease is incomplete")
@@ -113,7 +119,12 @@ class PdfQualityResult:
             raise DocumentQualityError("quality result document kind is unsupported")
         if self.page_count < 1 or len(self.raster_sha256) != self.page_count:
             raise DocumentQualityError("quality result page identity is inconsistent")
-        for value in (self.pdf_sha256, self.ats_text_sha256, self.raster_set_sha256, *self.raster_sha256):
+        for value in (
+            self.pdf_sha256,
+            self.ats_text_sha256,
+            self.raster_set_sha256,
+            *self.raster_sha256,
+        ):
             if not _SHA256.fullmatch(value):
                 raise DocumentQualityError("quality result hash is invalid")
         if self.duplicate_prose:
@@ -147,9 +158,16 @@ class DocumentQualityReceipt:
     schema_version: str = QUALITY_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.schema_version != QUALITY_SCHEMA or self.policy_sha256 != QUALITY_POLICY_SHA256:
+        if (
+            self.schema_version != QUALITY_SCHEMA
+            or self.policy_sha256 != QUALITY_POLICY_SHA256
+        ):
             raise DocumentQualityError("document-quality policy is unsupported")
-        for value in (self.artifact_set_sha256, self.poppler_runtime_sha256, self.receipt_sha256):
+        for value in (
+            self.artifact_set_sha256,
+            self.poppler_runtime_sha256,
+            self.receipt_sha256,
+        ):
             if not _SHA256.fullmatch(value):
                 raise DocumentQualityError("document-quality receipt hash is invalid")
         if tuple(row.document_kind for row in self.results) != ("cv", "cover_letter"):
@@ -157,9 +175,16 @@ class DocumentQualityReceipt:
         for row in self.results:
             row.__post_init__()
         if self.release_authority is not False:
-            raise DocumentQualityError("document quality cannot grant release authority")
-        if self.visual_judgement != "not_performed" or self.requires_visual_review is not True:
-            raise DocumentQualityError("deterministic quality cannot claim visual judgement")
+            raise DocumentQualityError(
+                "document quality cannot grant release authority"
+            )
+        if (
+            self.visual_judgement != "not_performed"
+            or self.requires_visual_review is not True
+        ):
+            raise DocumentQualityError(
+                "deterministic quality cannot claim visual judgement"
+            )
         if self.receipt_sha256 != content_hash(self.document(include_identity=False)):
             raise DocumentQualityError("document-quality receipt identity is invalid")
 
@@ -183,20 +208,44 @@ def _candidate_bin_directories(explicit: str | Path | None) -> Iterable[Path]:
     if explicit is not None:
         yield Path(explicit)
         return
+    seen: set[Path] = set()
+
+    def admit(candidate: str | Path) -> Path | None:
+        path = Path(candidate).expanduser()
+        if path in seen:
+            return None
+        seen.add(path)
+        return path
+
     configured = os.environ.get("JAA_POPPLER_BIN")
     if configured:
-        yield Path(configured)
+        candidate = admit(configured)
+        if candidate is not None:
+            yield candidate
     discovered = shutil.which("pdftoppm")
     if discovered:
-        yield Path(discovered).parent
-    yield Path.home() / ".local" / "poppler" / "usr" / "bin"
+        candidate = admit(Path(discovered).parent)
+        if candidate is not None:
+            yield candidate
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = admit(entry)
+        if candidate is not None:
+            yield candidate
+    candidate = admit(Path.home() / ".local" / "poppler" / "usr" / "bin")
+    if candidate is not None:
+        yield candidate
 
 
 def resolve_poppler_runtime(bin_directory: str | Path | None = None) -> PopplerRuntime:
     """Resolve one complete Poppler installation or fail closed."""
     selected: Path | None = None
     for candidate in _candidate_bin_directories(bin_directory):
-        if all((candidate / tool).is_file() and os.access(candidate / tool, os.X_OK) for tool in POPPLER_TOOLS):
+        if all(
+            (candidate / tool).is_file() and os.access(candidate / tool, os.X_OK)
+            for tool in POPPLER_TOOLS
+        ):
             selected = candidate.resolve()
             break
     if selected is None:
@@ -224,7 +273,9 @@ def resolve_poppler_runtime(bin_directory: str | Path | None = None) -> PopplerR
         "pdftoppm version" in line for line in version_output
     ):
         raise DocumentQualityError("Poppler runtime cannot execute")
-    version = next(line.strip() for line in version_output if "pdftoppm version" in line)
+    version = next(
+        line.strip() for line in version_output if "pdftoppm version" in line
+    )
     runtime_sha256 = content_hash({"version": version, "tool_sha256": dict(hashes)})
     return PopplerRuntime(version, paths, hashes, runtime_sha256, library_directory)
 
@@ -237,7 +288,9 @@ def pinned_poppler_runtime(
     expected_library_sha256: Mapping[str, str] | None = None,
 ) -> PopplerRuntime:
     """Build a runtime that consumes only already-open executable descriptors."""
-    if set(descriptors) != set(POPPLER_TOOLS) or set(expected_sha256) != set(POPPLER_TOOLS):
+    if set(descriptors) != set(POPPLER_TOOLS) or set(expected_sha256) != set(
+        POPPLER_TOOLS
+    ):
         raise DocumentQualityError("pinned Poppler lease is incomplete")
     paths: list[tuple[str, str]] = []
     hashes: list[tuple[str, str]] = []
@@ -260,7 +313,9 @@ def pinned_poppler_runtime(
     library_paths: list[str] = []
     library_hashes: list[tuple[str, str]] = []
     if library_descriptors is not None and expected_library_sha256 is not None:
-        if not library_descriptors or set(library_descriptors) != set(expected_library_sha256):
+        if not library_descriptors or set(library_descriptors) != set(
+            expected_library_sha256
+        ):
             raise DocumentQualityError("pinned Poppler library lease is incomplete")
         for name in sorted(library_descriptors):
             descriptor = library_descriptors[name]
@@ -293,7 +348,9 @@ def pinned_poppler_runtime(
         "pdftoppm version" in line for line in version_output
     ):
         raise DocumentQualityError("pinned Poppler runtime cannot execute")
-    version = next(line.strip() for line in version_output if "pdftoppm version" in line)
+    version = next(
+        line.strip() for line in version_output if "pdftoppm version" in line
+    )
     runtime_identity: dict[str, object] = {
         "version": version,
         "tool_sha256": dict(hashes),
@@ -328,19 +385,27 @@ def _runtime_environment(
     return environment
 
 
-def _run(runtime: PopplerRuntime, tool: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        (dict(runtime.tool_paths)[tool], *arguments),
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-        env=_runtime_environment(runtime.library_directory, runtime.preload_paths),
-        pass_fds=(
-            tuple(dict(runtime.tool_descriptors).values())
-            + runtime.preload_descriptors
-        ),
-    )
+def _run(
+    runtime: PopplerRuntime, tool: str, *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    timeout_seconds = 90 if tool == "pdftoppm" else 20
+    try:
+        completed = subprocess.run(
+            (dict(runtime.tool_paths)[tool], *arguments),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=_runtime_environment(runtime.library_directory, runtime.preload_paths),
+            pass_fds=(
+                tuple(dict(runtime.tool_descriptors).values())
+                + runtime.preload_descriptors
+            ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DocumentQualityError(
+            f"Poppler {tool} exceeded its {timeout_seconds}-second execution bound"
+        ) from exc
     if completed.returncode != 0:
         raise DocumentQualityError(f"Poppler {tool} failed")
     return completed
@@ -364,7 +429,10 @@ def _duplicate_prose(text: str) -> tuple[str, ...]:
 
 
 def _font_hierarchy(artifact: PdfArtifact) -> tuple[tuple[str, float], ...]:
-    commands = tuple((font.decode(), float(size)) for font, size in _FONT_COMMAND.findall(artifact.pdf_bytes))
+    commands = tuple(
+        (font.decode(), float(size))
+        for font, size in _FONT_COMMAND.findall(artifact.pdf_bytes)
+    )
     sizes = set(commands)
     required = {("F2", 16.0), ("F1", 10.0)}
     if artifact.document_kind == "cv":
@@ -382,18 +450,27 @@ def _parse_pdfinfo(output: str, artifact: PdfArtifact) -> tuple[float, float]:
             values[key.strip()] = value.strip()
     if values.get("Pages") != str(artifact.page_count):
         raise DocumentQualityError("Poppler page count differs from the artifact")
-    if values.get("Encrypted") != "no" or values.get("Form") != "none" or values.get("JavaScript") != "no":
+    if (
+        values.get("Encrypted") != "no"
+        or values.get("Form") != "none"
+        or values.get("JavaScript") != "no"
+    ):
         raise DocumentQualityError("PDF contains forbidden active or form content")
     match = re.match(r"([0-9.]+)\s+x\s+([0-9.]+)\s+pts", values.get("Page size", ""))
     if match is None:
         raise DocumentQualityError("Poppler did not report page geometry")
     width, height = (float(match.group(1)), float(match.group(2)))
-    if abs(width - _A4_WIDTH) > _GEOMETRY_TOLERANCE or abs(height - _A4_HEIGHT) > _GEOMETRY_TOLERANCE:
+    if (
+        abs(width - _A4_WIDTH) > _GEOMETRY_TOLERANCE
+        or abs(height - _A4_HEIGHT) > _GEOMETRY_TOLERANCE
+    ):
         raise DocumentQualityError("PDF page size is not A4")
     return width, height
 
 
-def _minimum_margin(bbox_path: Path, page_size: tuple[float, float], expected_pages: int) -> float:
+def _minimum_margin(
+    bbox_path: Path, page_size: tuple[float, float], expected_pages: int
+) -> float:
     root = ET.parse(bbox_path).getroot()
     pages = root.findall(".//{*}page")
     if len(pages) != expected_pages:
@@ -402,7 +479,10 @@ def _minimum_margin(bbox_path: Path, page_size: tuple[float, float], expected_pa
     for page in pages:
         width = float(page.attrib["width"])
         height = float(page.attrib["height"])
-        if abs(width - page_size[0]) > _GEOMETRY_TOLERANCE or abs(height - page_size[1]) > _GEOMETRY_TOLERANCE:
+        if (
+            abs(width - page_size[0]) > _GEOMETRY_TOLERANCE
+            or abs(height - page_size[1]) > _GEOMETRY_TOLERANCE
+        ):
             raise DocumentQualityError("Poppler page geometries differ")
         words = page.findall(".//{*}word")
         if not words:
@@ -412,13 +492,23 @@ def _minimum_margin(bbox_path: Path, page_size: tuple[float, float], expected_pa
             x_max = float(word.attrib["xMax"])
             y_min = float(word.attrib["yMin"])
             y_max = float(word.attrib["yMax"])
-            if x_min < 0 or y_min < 0 or x_max > width or y_max > height or x_max <= x_min or y_max <= y_min:
+            if (
+                x_min < 0
+                or y_min < 0
+                or x_max > width
+                or y_max > height
+                or x_max <= x_min
+                or y_max <= y_min
+            ):
                 raise DocumentQualityError("PDF text is clipped or outside its page")
             margins.extend((x_min, width - x_max, y_min, height - y_max))
     minimum = min(margins)
-    if minimum < _MINIMUM_MARGIN:
+    if minimum + _GEOMETRY_TOLERANCE < _MINIMUM_MARGIN:
         raise DocumentQualityError("PDF text violates the minimum page margin")
-    return minimum
+    # Poppler releases can report sub-point bounding-box differences for the
+    # same PDF bytes.  Treat values inside the already-declared geometry
+    # tolerance as the policy floor so receipts stay cross-version stable.
+    return max(minimum, _MINIMUM_MARGIN)
 
 
 def _verify_pdf(
@@ -439,7 +529,9 @@ def _verify_pdf(
     layout_path = directory / f"{artifact.document_kind}.txt"
     _run(runtime, "pdftotext", "-layout", str(pdf_path), str(layout_path))
     poppler_text = layout_path.read_text(encoding="utf-8")
-    expected_lines = tuple(line for page in artifact.rendered_lines for line in page if line.strip())
+    expected_lines = tuple(
+        line for page in artifact.rendered_lines for line in page if line.strip()
+    )
     if _normalized_lines(poppler_text) != expected_lines:
         raise DocumentQualityError("Poppler ATS text order differs from rendered order")
     bbox_path = directory / f"{artifact.document_kind}.html"
@@ -450,7 +542,9 @@ def _verify_pdf(
     raster_paths = sorted(directory.glob(f"{artifact.document_kind}-page-*.png"))
     if len(raster_paths) != artifact.page_count:
         raise DocumentQualityError("Poppler raster page count differs")
-    raster_hashes = tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in raster_paths)
+    raster_hashes = tuple(
+        hashlib.sha256(path.read_bytes()).hexdigest() for path in raster_paths
+    )
     return PdfQualityResult(
         document_kind=artifact.document_kind,
         pdf_sha256=artifact.pdf_sha256,
@@ -477,7 +571,9 @@ def verify_document_quality(
     with tempfile.TemporaryDirectory(prefix="jaa-cv-quality-") as temporary:
         directory = Path(temporary)
         results = (
-            _verify_pdf(artifacts.cv_pdf, artifacts.editable.cv_text, runtime, directory),
+            _verify_pdf(
+                artifacts.cv_pdf, artifacts.editable.cv_text, runtime, directory
+            ),
             _verify_pdf(
                 artifacts.cover_letter_pdf,
                 artifacts.editable.cover_letter_text,

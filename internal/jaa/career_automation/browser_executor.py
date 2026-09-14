@@ -166,7 +166,9 @@ def validate_greenhouse_success_observation(
 ) -> dict[str, object]:
     """Bind observed provider semantics to schema, route, time and visible text."""
     if hashlib.sha256(value).hexdigest() != evidence.observation_sha256:
-        raise ValueError("provider success observation differs from its evidence identity")
+        raise ValueError(
+            "provider success observation differs from its evidence identity"
+        )
     try:
         document = json.loads(value)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -174,8 +176,7 @@ def validate_greenhouse_success_observation(
     if not isinstance(document, dict) or value != _json_bytes(document):
         raise ValueError("provider success observation is not canonical JSON")
     if (
-        document.get("schema_version")
-        != "jaa.greenhouse-nonconsequential-canary.v1"
+        document.get("schema_version") != "jaa.greenhouse-nonconsequential-canary.v1"
         or document.get("provider") != "greenhouse"
     ):
         raise ValueError("provider success observation schema is unsupported")
@@ -208,8 +209,7 @@ def validate_greenhouse_success_observation(
         or isinstance(request.get("status"), bool)
         or not 200 <= int(request["status"]) < 300
         or not isinstance(paths, Mapping)
-        or interaction
-        != {"fields_filled": 0, "files_uploaded": 0, "submit_clicks": 0}
+        or interaction != {"fields_filled": 0, "files_uploaded": 0, "submit_clicks": 0}
     ):
         raise ValueError("provider success observation collector evidence is invalid")
     observed_url = str(request.get("url", ""))
@@ -218,9 +218,10 @@ def validate_greenhouse_success_observation(
     confirmation_path = paths.get("confirmationPath")
     submit_path = paths.get("submitPath")
     message = paths.get("confirmation_message")
-    if not all(isinstance(item, str) and item for item in (
-        confirmation_path, submit_path, message
-    )):
+    if not all(
+        isinstance(item, str) and item
+        for item in (confirmation_path, submit_path, message)
+    ):
         raise ValueError("provider success observation lacks provider loader semantics")
     observed_confirmation = urljoin(application_url, str(confirmation_path))
     if _canonical_https_route(observed_confirmation) != _canonical_https_route(
@@ -236,13 +237,18 @@ def validate_greenhouse_success_observation(
     if (
         submit.scheme != "https"
         or submit.hostname not in allowed_submit_hosts
-        or not re.search(rf"(?:^|/)jobs/{re.escape(application_id)}(?:/|$)", submit.path)
+        or not re.search(
+            rf"(?:^|/)jobs/{re.escape(application_id)}(?:/|$)", submit.path
+        )
     ):
         raise ValueError("provider submit route is not vacancy-bound")
     visible_message = " ".join(
         re.sub(r"<[^>]+>", " ", html.unescape(str(message))).casefold().split()
     )
-    if any(marker.casefold() not in visible_message for marker in evidence.required_visible_markers):
+    if any(
+        marker.casefold() not in visible_message
+        for marker in evidence.required_visible_markers
+    ):
         raise ValueError("provider success marker was not observed in provider content")
     return document
 
@@ -274,18 +280,13 @@ class MaterializedValue:
             not isinstance(self.authorization_reference, str)
             or not self.authorization_reference.strip()
         ):
-            raise ValueError(
-                "materialized value requires an authorization reference"
-            )
+            raise ValueError("materialized value requires an authorization reference")
         if not isinstance(self.value, (str, Path)):
             raise TypeError("materialized value must be text or a file path")
-        if (
-            self.expected_sha256 is not None
-            and not re.fullmatch(r"[0-9a-f]{64}", self.expected_sha256)
+        if self.expected_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", self.expected_sha256
         ):
-            raise ValueError(
-                "materialized value hash must be lowercase SHA-256"
-            )
+            raise ValueError("materialized value hash must be lowercase SHA-256")
 
 
 @dataclass(frozen=True)
@@ -345,9 +346,7 @@ class ReleaseExecutionAuthority:
                 urlsplit(self.receipt_url).path
                 != f"/applications/{self.application_id}/receipt"
             ):
-                raise ValueError(
-                    "release receipt URL differs from its application"
-                )
+                raise ValueError("release receipt URL differs from its application")
         elif self.ats_provider == "greenhouse":
             _validate_greenhouse_routes(
                 self.application_url,
@@ -389,8 +388,7 @@ class ReleaseExecutionAuthority:
             len(dict(self.upload_field_names)) != len(self.upload_field_names)
             or len(set(dict(self.upload_field_names).values()))
             != len(self.upload_field_names)
-            or len(dict(self.field_authority_names))
-            != len(self.field_authority_names)
+            or len(dict(self.field_authority_names)) != len(self.field_authority_names)
             or len(dict(self.consent_states)) != len(self.consent_states)
         ):
             raise ValueError("release authority browser bindings are ambiguous")
@@ -406,8 +404,7 @@ class ReleaseExecutionAuthority:
             type(self.document_assurance_receipts) is not tuple
             or len(self.document_assurance_receipts) != 2
             or tuple(
-                receipt.document_kind
-                for receipt in self.document_assurance_receipts
+                receipt.document_kind for receipt in self.document_assurance_receipts
             )
             != ("cv", "cover_letter")
         ):
@@ -429,16 +426,9 @@ class ReleaseExecutionAuthority:
             intended_vacancy=intended_vacancy,
         )
         self.verify_archive_receipt()
-        if (
-            not self.application_id
-            or not self.jurisdiction
-            or not self.contract_type
-        ):
+        if not self.application_id or not self.jurisdiction or not self.contract_type:
             raise ValueError("release execution authority is incomplete")
-        if (
-            self.consumed_at.tzinfo is None
-            or self.consumed_at.utcoffset() is None
-        ):
+        if self.consumed_at.tzinfo is None or self.consumed_at.utcoffset() is None:
             raise ValueError("release consumption time must include a timezone")
 
     def sanity_review_package(self) -> SanityReviewPackage:
@@ -625,7 +615,9 @@ def _validate_greenhouse_routes(
         or receipt.path.rstrip("/") == application_path
         or not receipt.path.rstrip("/").startswith(application_path + "/")
     ):
-        raise ValueError("Greenhouse receipt route differs from its observed application")
+        raise ValueError(
+            "Greenhouse receipt route differs from its observed application"
+        )
 
 
 def _validate_workable_routes(
@@ -674,6 +666,7 @@ class LocalBrowserExecutor:
         store: BrowserWorkflowStore,
         *,
         repository_root: str | Path,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self.repository_root = Path(repository_root).resolve(strict=True)
@@ -681,9 +674,11 @@ class LocalBrowserExecutor:
             raise ValueError("repository root must be a directory")
         self._routed_pages: set[Page] = set()
         self._allowed_origins: dict[Page, tuple[str, str, int]] = {}
+        self.clock = clock or (lambda: datetime.now().astimezone())
 
     def _secure_page(self, page: Page) -> None:
         if page not in self._routed_pages:
+
             def local_route(route: Route) -> None:
                 allowed = self._allowed_origins.get(page)
                 if allowed is not None and _origin(route.request.url) == allowed:
@@ -714,9 +709,7 @@ class LocalBrowserExecutor:
         if strategy is SelectorStrategy.ROLE:
             role, separator, name = query.partition(":")
             if not separator or not role.strip() or not name.strip():
-                raise ValueError(
-                    "role selector must use '<role>:<accessible name>'"
-                )
+                raise ValueError("role selector must use '<role>:<accessible name>'")
             return page.get_by_role(
                 role.strip(),  # type: ignore[arg-type]
                 name=name.strip(),
@@ -747,9 +740,7 @@ class LocalBrowserExecutor:
                 continue
             outcomes.append(SelectorOutcome.MATCHED)
             return locator, action.selectors.assess(tuple(outcomes))
-        raise SelectorExecutionError(
-            action.selectors.assess(tuple(outcomes)).to_dict()
-        )
+        raise SelectorExecutionError(action.selectors.assess(tuple(outcomes)).to_dict())
 
     @staticmethod
     def _approved_materialized(
@@ -767,8 +758,7 @@ class LocalBrowserExecutor:
             )
         if not any(
             approval.reference == reference
-            and approval.authorization_reference
-            == materialized.authorization_reference
+            and approval.authorization_reference == materialized.authorization_reference
             for approval in approved_values
         ):
             raise ApprovalRequiredError(
@@ -786,9 +776,7 @@ class LocalBrowserExecutor:
             or resolved == self.repository_root
             or self.repository_root in resolved.parents
         ):
-            raise ValueError(
-                "browser uploads must be regular external artifact files"
-            )
+            raise ValueError("browser uploads must be regular external artifact files")
         content = resolved.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
         if (
@@ -797,9 +785,7 @@ class LocalBrowserExecutor:
             or not content.startswith(b"%PDF-")
             or len(content) > 1024 * 1024
         ):
-            raise ValueError(
-                "browser upload differs from its approved bounded PDF"
-            )
+            raise ValueError("browser upload differs from its approved bounded PDF")
         return resolved, digest
 
     @staticmethod
@@ -816,17 +802,13 @@ class LocalBrowserExecutor:
             "EV_PHONE": authority.contact.phone,
             "EV_CITY": authority.contact.city,
             "EV_WORK_AUTHORISATION": "authorised",
-            "EV_COVER_NOTE": (
-                authority.artifacts.editable.answers_text.strip()
-            ),
+            "EV_COVER_NOTE": (authority.artifacts.editable.answers_text.strip()),
         }
         reference_id = action.value_reference.reference_id
         if reference_id == "EV_CV":
             expected_hash = authority.artifacts.cv_pdf.pdf_sha256
         elif reference_id == "EV_COVER_LETTER":
-            expected_hash = (
-                authority.artifacts.cover_letter_pdf.pdf_sha256
-            )
+            expected_hash = authority.artifacts.cover_letter_pdf.pdf_sha256
         else:
             expected_hash = None
         if expected_hash is not None:
@@ -854,8 +836,7 @@ class LocalBrowserExecutor:
         if action.selectors is None:
             raise ValueError("selector failure lacks a selector plan")
         outcomes = tuple(
-            SelectorOutcome(str(row["outcome"]))
-            for row in report_data["attempts"]
+            SelectorOutcome(str(row["outcome"])) for row in report_data["attempts"]
         )
         report = action.selectors.assess(outcomes)
         self.store.record_selector_failure(
@@ -864,8 +845,7 @@ class LocalBrowserExecutor:
             step_id=action.step_id,
             report=report,
             idempotency_key=(
-                f"executor-{pending.action_index}-"
-                f"{action.selectors.content_hash}"
+                f"executor-{pending.action_index}-{action.selectors.content_hash}"
             ),
         )
 
@@ -876,9 +856,7 @@ class LocalBrowserExecutor:
         targets = (
             locator.get_attribute("href"),
             locator.get_attribute("formaction"),
-            locator.evaluate(
-                "(element) => element.form ? element.form.action : ''"
-            ),
+            locator.evaluate("(element) => element.form ? element.form.action : ''"),
         )
         for target in targets:
             if not isinstance(target, str) or not target:
@@ -937,18 +915,12 @@ class LocalBrowserExecutor:
                 "cv": {
                     "filename": "cv.pdf",
                     "sha256": authority.artifacts.cv_pdf.pdf_sha256,
-                    "size_bytes": len(
-                        authority.artifacts.cv_pdf.pdf_bytes
-                    ),
+                    "size_bytes": len(authority.artifacts.cv_pdf.pdf_bytes),
                 },
                 "cover_letter": {
                     "filename": "cover-letter.pdf",
-                    "sha256": (
-                        authority.artifacts.cover_letter_pdf.pdf_sha256
-                    ),
-                    "size_bytes": len(
-                        authority.artifacts.cover_letter_pdf.pdf_bytes
-                    ),
+                    "sha256": (authority.artifacts.cover_letter_pdf.pdf_sha256),
+                    "size_bytes": len(authority.artifacts.cover_letter_pdf.pdf_bytes),
                 },
             },
         }
@@ -971,8 +943,7 @@ class LocalBrowserExecutor:
         try:
             document = json.loads(str(dispatch["selector_report_json"]))
             outcomes = tuple(
-                SelectorOutcome(str(row["outcome"]))
-                for row in document["attempts"]
+                SelectorOutcome(str(row["outcome"])) for row in document["attempts"]
             )
         except (
             KeyError,
@@ -980,14 +951,10 @@ class LocalBrowserExecutor:
             json.JSONDecodeError,
             ValueError,
         ) as exc:
-            raise ValueError(
-                "durable submit selector report is invalid"
-            ) from exc
+            raise ValueError("durable submit selector report is invalid") from exc
         report = action.selectors.assess(outcomes)
         if report.to_dict() != document:
-            raise ValueError(
-                "durable submit selector report differs from its plan"
-            )
+            raise ValueError("durable submit selector report differs from its plan")
         return report
 
     def _restore_prior_state(
@@ -1000,13 +967,10 @@ class LocalBrowserExecutor:
         release_authority: ReleaseExecutionAuthority | None,
     ) -> None:
         dispatch = self.store.submit_dispatch(pending.run_id)
-        if (
-            dispatch is not None
-            and str(dispatch["state"]) not in {
-                "prepared",
-                "release_consumed",
-            }
-        ):
+        if dispatch is not None and str(dispatch["state"]) not in {
+            "prepared",
+            "release_consumed",
+        }:
             raise SubmissionIndeterminateError(
                 "started submit browser state cannot be reconstructed safely"
             )
@@ -1020,9 +984,7 @@ class LocalBrowserExecutor:
             )
         for action, prior_result in prefix:
             if action.kind is ActionKind.NAVIGATE:
-                if action.target_url is None or not _loopback_url(
-                    action.target_url
-                ):
+                if action.target_url is None or not _loopback_url(action.target_url):
                     raise LocalBrowserBoundaryError(
                         "replay navigation target is not loopback HTTP"
                     )
@@ -1046,9 +1008,7 @@ class LocalBrowserExecutor:
                     )
                 outputs: dict[str, object] = {
                     "navigation_status": response.status,
-                    "url_sha256": hashlib.sha256(
-                        page.url.encode()
-                    ).hexdigest(),
+                    "url_sha256": hashlib.sha256(page.url.encode()).hexdigest(),
                     "field_map_sha256": self._field_map_sha256(page),
                 }
             else:
@@ -1057,10 +1017,7 @@ class LocalBrowserExecutor:
                         "a submit checkpoint can never be replayed"
                     )
                 allowed_origin = self._allowed_origins.get(page)
-                if (
-                    allowed_origin is None
-                    or _origin(page.url) != allowed_origin
-                ):
+                if allowed_origin is None or _origin(page.url) != allowed_origin:
                     raise LocalBrowserBoundaryError(
                         "browser replay left the local fixture"
                     )
@@ -1093,28 +1050,19 @@ class LocalBrowserExecutor:
                     )
                     if action.kind is ActionKind.FILL:
                         if not isinstance(materialized.value, str):
-                            raise TypeError(
-                                "fill materialization must be text"
-                            )
+                            raise TypeError("fill materialization must be text")
                         locator.fill(materialized.value)
                         outputs = {"field_status": "filled"}
                     elif action.kind is ActionKind.SELECT_OPTION:
                         if not isinstance(materialized.value, str):
-                            raise TypeError(
-                                "select materialization must be text"
-                            )
+                            raise TypeError("select materialization must be text")
                         locator.select_option(materialized.value)
                         outputs = {"field_status": "selected"}
                     else:
                         upload, digest = self._upload_path(materialized)
                         locator.set_input_files(str(upload))
-                        if (
-                            hashlib.sha256(upload.read_bytes()).hexdigest()
-                            != digest
-                        ):
-                            raise ValueError(
-                                "browser upload changed during replay"
-                            )
+                        if hashlib.sha256(upload.read_bytes()).hexdigest() != digest:
+                            raise ValueError("browser upload changed during replay")
                         outputs = {
                             "field_status": "uploaded",
                             "upload_sha256": digest,
@@ -1161,13 +1109,8 @@ class LocalBrowserExecutor:
             raise ReleaseGateError(
                 "browser and JAA-08 authority must share one database"
             )
-        if (
-            authority.repository_root.resolve(strict=True)
-            != self.repository_root
-        ):
-            raise ReleaseGateError(
-                "browser and JAA-08 repository authority differ"
-            )
+        if authority.repository_root.resolve(strict=True) != self.repository_root:
+            raise ReleaseGateError("browser and JAA-08 repository authority differ")
         # This is intentionally repeated at the last consequential boundary.
         # A release token cannot authorize employer-facing bytes that fail the
         # current policy, even if an earlier validator or cached receipt passed.
@@ -1179,9 +1122,7 @@ class LocalBrowserExecutor:
         )
         current_assurance = assert_application_artifacts(
             cv_pdf_bytes=authority.artifacts.cv_pdf.pdf_bytes,
-            cover_letter_pdf_bytes=(
-                authority.artifacts.cover_letter_pdf.pdf_bytes
-            ),
+            cover_letter_pdf_bytes=(authority.artifacts.cover_letter_pdf.pdf_bytes),
             answers_text=authority.artifacts.editable.answers_text,
             intended_vacancy=intended_vacancy,
         )
@@ -1209,10 +1150,8 @@ class LocalBrowserExecutor:
         ):
             outputs = pending.prior_outputs.get(step_id, {})
             if (
-                outputs.get("release_materialization_status")
-                != "verified"
-                or outputs.get("release_manifest_sha256")
-                != release_manifest_sha256
+                outputs.get("release_materialization_status") != "verified"
+                or outputs.get("release_manifest_sha256") != release_manifest_sha256
             ):
                 raise ApprovalRequiredError(
                     "submit lacks exact JAA-08 field materialization"
@@ -1243,9 +1182,7 @@ class LocalBrowserExecutor:
                 "",
             )
             if not field_map_sha256:
-                raise WorkflowError(
-                    "submit requires a prior field-map checkpoint"
-                )
+                raise WorkflowError("submit requires a prior field-map checkpoint")
             self.store.prepare_submit_dispatch(
                 pending.run_id,
                 worker_id,
@@ -1272,10 +1209,7 @@ class LocalBrowserExecutor:
         }
         if state in {"prepared", "release_consumed"} and locator is None:
             allowed_origin = self._allowed_origins.get(page)
-            if (
-                allowed_origin is None
-                or _origin(page.url) != allowed_origin
-            ):
+            if allowed_origin is None or _origin(page.url) != allowed_origin:
                 raise SubmissionIndeterminateError(
                     "pre-click browser state cannot be reconstructed safely"
                 )
@@ -1306,9 +1240,7 @@ class LocalBrowserExecutor:
             )
             dispatch = self.store.submit_dispatch(pending.run_id)
             if dispatch is None:
-                raise WorkflowError(
-                    "consumed release dispatch was not persisted"
-                )
+                raise WorkflowError("consumed release dispatch was not persisted")
             state = str(dispatch["state"])
             if (
                 returned_consumed_at is not None
@@ -1352,18 +1284,14 @@ class LocalBrowserExecutor:
             certified_final_submit_click(
                 locator,
                 authority,
-                verified_at=datetime.now().astimezone(),
+                verified_at=self.clock(),
             )
             if _origin(page.url) != _origin(authority.receipt_url):
-                raise LocalBrowserBoundaryError(
-                    "submit action left the local fixture"
-                )
+                raise LocalBrowserBoundaryError("submit action left the local fixture")
         else:
             receipt_origin = _origin(authority.receipt_url)
             if receipt_origin is None:
-                raise LocalBrowserBoundaryError(
-                    "fixture receipt origin is invalid"
-                )
+                raise LocalBrowserBoundaryError("fixture receipt origin is invalid")
             self._allowed_origins[page] = receipt_origin
             response = page.goto(
                 authority.receipt_url,
@@ -1374,9 +1302,7 @@ class LocalBrowserExecutor:
                     "started submit has no recoverable official receipt"
                 )
         receipt_id = page.get_by_test_id("receipt-id").inner_text().strip()
-        payload_sha256 = page.get_by_test_id(
-            "payload-hash"
-        ).inner_text().strip()
+        payload_sha256 = page.get_by_test_id("payload-hash").inner_text().strip()
         receipt = FixtureReceipt(
             receipt_id=receipt_id,
             application_id=authority.application_id,
@@ -1384,16 +1310,11 @@ class LocalBrowserExecutor:
             payload_sha256=payload_sha256,
         )
         receipt.verify()
-        if (
-            receipt.payload_sha256
-            != self._expected_fixture_payload_sha256(authority)
-        ):
+        if receipt.payload_sha256 != self._expected_fixture_payload_sha256(authority):
             raise ValueError(
                 "fixture receipt payload differs from exact JAA-08 authority"
             )
-        screenshot_sha256 = hashlib.sha256(
-            page.screenshot(full_page=True)
-        ).hexdigest()
+        screenshot_sha256 = hashlib.sha256(page.screenshot(full_page=True)).hexdigest()
         field_map_sha256 = str(dispatch["field_map_hash"])
         release_manifest_sha256 = str(dispatch["release_manifest_hash"])
         token_sha256 = str(dispatch["release_token_hash"])
@@ -1474,8 +1395,7 @@ class LocalBrowserExecutor:
             )
             and (
                 dispatch is None
-                or str(dispatch["state"])
-                in {"prepared", "release_consumed"}
+                or str(dispatch["state"]) in {"prepared", "release_consumed"}
             )
         ):
             self._restore_prior_state(
@@ -1497,17 +1417,13 @@ class LocalBrowserExecutor:
                 release_authority,
             )
         if action.kind is ActionKind.NAVIGATE:
-            if action.target_url is None or not _loopback_url(
-                action.target_url
-            ):
+            if action.target_url is None or not _loopback_url(action.target_url):
                 raise LocalBrowserBoundaryError(
                     "browser navigation target is not loopback HTTP"
                 )
             target_origin = _origin(action.target_url)
             if target_origin is None:
-                raise LocalBrowserBoundaryError(
-                    "browser navigation origin is invalid"
-                )
+                raise LocalBrowserBoundaryError("browser navigation origin is invalid")
             self._allowed_origins[page] = target_origin
             response = page.goto(
                 action.target_url,
@@ -1528,9 +1444,7 @@ class LocalBrowserExecutor:
                 result=StepResult(
                     {
                         "navigation_status": response.status,
-                        "url_sha256": hashlib.sha256(
-                            page.url.encode()
-                        ).hexdigest(),
+                        "url_sha256": hashlib.sha256(page.url.encode()).hexdigest(),
                         "field_map_sha256": self._field_map_sha256(page),
                     }
                 ),
@@ -1544,9 +1458,7 @@ class LocalBrowserExecutor:
             )
         allowed_origin = self._allowed_origins.get(page)
         if allowed_origin is None or _origin(page.url) != allowed_origin:
-            raise LocalBrowserBoundaryError(
-                "browser page is outside the local fixture"
-            )
+            raise LocalBrowserBoundaryError("browser page is outside the local fixture")
         try:
             locator, report = self._resolve(page, action)
         except SelectorExecutionError as error:
@@ -1612,9 +1524,11 @@ class LocalBrowserExecutor:
         elif action.kind is ActionKind.ASSERT:
             outputs = {"assertion_status": "matched"}
         elif action.kind is ActionKind.EXTRACT:
-            outputs = {"extracted_text_sha256": hashlib.sha256(
-                locator.inner_text().encode()
-            ).hexdigest()}
+            outputs = {
+                "extracted_text_sha256": hashlib.sha256(
+                    locator.inner_text().encode()
+                ).hexdigest()
+            }
         else:
             raise ConsequentialActionError(
                 f"{action.kind.value} is not enabled in this executor increment"
@@ -1629,18 +1543,14 @@ class LocalBrowserExecutor:
             and release_authority is not None
         ):
             outputs["release_materialization_status"] = "verified"
-            outputs["release_manifest_sha256"] = (
-                release_authority.release_token.split(".")[1]
-            )
+            outputs["release_manifest_sha256"] = release_authority.release_token.split(
+                "."
+            )[1]
         if _origin(page.url) != allowed_origin:
-            raise LocalBrowserBoundaryError(
-                "browser action left the local fixture"
-            )
+            raise LocalBrowserBoundaryError("browser action left the local fixture")
         for key in action.required_output_keys:
             if key not in outputs:
-                raise ValueError(
-                    f"executor cannot produce required output {key}"
-                )
+                raise ValueError(f"executor cannot produce required output {key}")
         created = self.store.complete_step(
             run_id,
             worker_id,

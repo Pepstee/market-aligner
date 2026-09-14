@@ -48,19 +48,24 @@ from test_jaa09_independent_acceptance import (
     NONCE,
     _released_browser_inputs,
 )
+from test_jaa08_independent_acceptance import _fixture_now
 from test_jaa09_real_vacancy_acceptance import (
     _real_issued_release_inputs,
     _write_evidence_receipt_if_requested,
 )
+from testing_repository import operator_control_path
 
 
 ROOT = Path(__file__).resolve().parent
 CERTIFIED_CORPUS = Path(
     os.environ.get(
         "JAA_CERTIFIED_CORPUS_ROOT",
-        "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
-        "runtime/.jaa04-corpus-v3-a4f4490-releases/"
-        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        operator_control_path(
+            "jaa-12h-supervisor-20260727",
+            "runtime",
+            ".jaa04-corpus-v3-a4f4490-releases",
+            "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        ),
     )
 )
 TRACKED_SEED = ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"
@@ -149,8 +154,7 @@ def _valid_receipt() -> dict[str, object]:
             "candidate_projection": "fixture",
             "projection_content_sha256": digest,
             "disclosure": (
-                "deterministic approved fixture candidate projection; "
-                "not a real person"
+                "deterministic approved fixture candidate projection; not a real person"
             ),
         },
         "release_binding": {
@@ -189,9 +193,7 @@ def _valid_receipt() -> dict[str, object]:
                 "in_process_fixture_receipt_forgery_residual"
             ),
             "ats_scope": "local_simulated_ats_only",
-            "filesystem_trust_limit": (
-                "operator_control_root_local_filesystem"
-            ),
+            "filesystem_trust_limit": ("operator_control_root_local_filesystem"),
             "real_application_submitted": False,
             "external_authority_granted": False,
         },
@@ -396,10 +398,13 @@ def test_verified_real_vacancy_path_still_refuses_external_navigation(
     ) as fixture:
         store = BrowserWorkflowStore(tmp_path / "external.sqlite3")
         run_id = store.create_run(workflow)
-        assert store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=run_id,
-        ) is not None
+        assert (
+            store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=run_id,
+            )
+            is not None
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -454,17 +459,24 @@ def test_tampered_jaa08_token_on_real_vacancy_produces_no_receipt(
         )
         store = BrowserWorkflowStore(database.path)
         run_id = store.create_run(workflow)
-        assert store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=run_id,
-        ) is not None
+        assert (
+            store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=run_id,
+            )
+            is not None
+        )
         store.authorize_release(
             run_id,
             token=invalid_token,
             authorization_reference="JAA08:REAL_VACANCY_INVALID_TOKEN",
             idempotency_key="jaa09-real-vacancy-invalid-token",
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: _fixture_now(database),
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -522,10 +534,13 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
         )
         first_store = BrowserWorkflowStore(database.path)
         first_run = first_store.create_run(first_workflow)
-        assert first_store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=first_run,
-        ) is not None
+        assert (
+            first_store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=first_run,
+            )
+            is not None
+        )
         first_store.authorize_release(
             first_run,
             token=issued.release_token,
@@ -537,7 +552,11 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
-            executor = LocalBrowserExecutor(first_store, repository_root=ROOT)
+            executor = LocalBrowserExecutor(
+                first_store,
+                repository_root=ROOT,
+                clock=lambda: _fixture_now(database),
+            )
             for _action in first_workflow.actions:
                 executor.execute_next(
                     page,
@@ -579,10 +598,13 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
             second_workflow,
             idempotency_key="jaa09-real-vacancy-second-run",
         )
-        assert second_store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=second_run,
-        ) is not None
+        assert (
+            second_store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=second_run,
+            )
+            is not None
+        )
         second_store.authorize_release(
             second_run,
             token=issued.release_token,
@@ -594,7 +616,11 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
-            executor = LocalBrowserExecutor(second_store, repository_root=ROOT)
+            executor = LocalBrowserExecutor(
+                second_store,
+                repository_root=ROOT,
+                clock=lambda: _fixture_now(database),
+            )
             for _action in second_workflow.actions[:-1]:
                 executor.execute_next(
                     page,

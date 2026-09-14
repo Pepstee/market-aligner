@@ -10,6 +10,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from market_aligner.applications.handoff import (
@@ -47,6 +48,11 @@ class HandoffReference:
     issued_at: str
     valid_until: str | None
     issuer_id: str = "market-aligner"
+
+    def __post_init__(self) -> None:
+        """Freeze supplied evidence before publication, as retained issuance did."""
+        object.__setattr__(self, "exact_bytes", bytes(self.exact_bytes))
+        object.__setattr__(self, "subject", MappingProxyType(dict(self.subject)))
 
 
 @dataclass(frozen=True)

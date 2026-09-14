@@ -120,6 +120,11 @@ def _jsonable(value: Any, *, depth: int = 0) -> Any:
 
 
 def _response_to_dict(response: Any, *, include_related: bool = True) -> dict[str, Any]:
+    # Provider response objects can carry cookies, authorization headers,
+    # redirects, browser metadata and captured XHR bodies.  None of those are
+    # public vacancy evidence, so the process boundary emits only exact body
+    # bytes and the minimum decoding/status metadata.
+    del include_related
     body = bytes(response.body)
     encoding = str(getattr(response, "encoding", "utf-8") or "utf-8")
     try:
@@ -127,28 +132,13 @@ def _response_to_dict(response: Any, *, include_related: bool = True) -> dict[st
     except LookupError:
         encoding = "utf-8"
         text = body.decode(encoding, errors="replace")
-    result = {
+    return {
         "status": int(response.status),
-        "reason": str(response.reason),
-        "url": str(response.url),
         "encoding": encoding,
-        "method": str(getattr(response, "method", "GET")),
-        "headers": _jsonable(response.headers),
-        "request_headers": _jsonable(response.request_headers),
-        "cookies": _jsonable(response.cookies),
-        "meta": _jsonable(response.meta),
         "body_bytes": len(body),
         "body_base64": base64.b64encode(body).decode("ascii"),
         "text": text,
     }
-    if include_related:
-        result["history"] = [
-            _response_to_dict(item, include_related=False) for item in response.history
-        ]
-        result["captured_xhr"] = [
-            _response_to_dict(item, include_related=False) for item in response.captured_xhr
-        ]
-    return result
 
 
 def _fetch(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -316,11 +306,10 @@ def main() -> int:
     request = json.load(sys.stdin)
     try:
         payload = {"ok": True, "result": execute(request)}
-    except Exception as exc:
+    except Exception:
         payload = {
             "ok": False,
-            "error": type(exc).__name__,
-            "message": str(exc),
+            "error": "worker_error",
         }
     print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     return 0 if payload["ok"] else 1

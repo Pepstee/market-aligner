@@ -23,13 +23,17 @@ from career_automation.production_runner import (
 
 
 ROOT = Path(__file__).resolve().parent
-AUTHORITY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/candidate-authorities/"
-    "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
+PRIVATE_AUTHORITY_ROOT = ROOT.parents[1] / ".market-aligner-data" / "authority-inputs"
+AUTHORITY_PATH = (
+    PRIVATE_AUTHORITY_ROOT
+    / "candidate-authorities"
+    / ("85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json")
 )
-DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
-    "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
+DISCOVERY_PATH = (
+    PRIVATE_AUTHORITY_ROOT
+    / "objects"
+    / "39"
+    / ("39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47")
 )
 
 
@@ -88,6 +92,12 @@ def _package(
 def _generate_owned(
     sink: GeneratedRevisionSink,
 ) -> CandidateApplicationPackage:
+    if not AUTHORITY_PATH.is_file() or not DISCOVERY_PATH.is_file():
+        pytest.skip(
+            "requires the exact private Gigabyte candidate-authority and "
+            "discovery artifacts; synthetic substitution would not test the "
+            "certified binding"
+        )
     authority = json.loads(AUTHORITY_PATH.read_bytes())
     discovery = json.loads(DISCOVERY_PATH.read_bytes())
     decision = next(
@@ -153,6 +163,12 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
     class FakeRecorder:
         attempt = FakeAttempt()
 
+        def attach_page_evidence(self, _page):
+            calls.append("attach_evidence")
+
+        def record_navigation(self, _navigation):
+            calls.append("record_navigation")
+
         def record_prefill(self, _page):
             calls.append("record_prefill")
 
@@ -205,6 +221,9 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
         questions=None,
         document_assurance_receipts=object(),
         sanity_review_receipt=object(),
+        ats_application_authority=object(),
+        quality_input=object(),
+        quality_review=object(),
         production_identity=object(),
         attached_roles=("cv",),
         upload_field_names=(("cv", "resume"),),
@@ -222,6 +241,7 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
         jurisdiction="GB",
         contract_type="employee",
         consumed_at=datetime.now(timezone.utc),
+        vacancy_review_material=object(),
         vacancy_requirements=("essential: requirement",),
         submit_button_name="Submit Application",
         timeout_ms=1000,
@@ -240,8 +260,10 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
     )
     assert result is receipt
     assert calls == [
-        "open_vacancy",
         "create_attempt",
+        "attach_evidence",
+        "open_vacancy",
+        "record_navigation",
         "record_prefill",
         "prepare_release",
         "validate_generation",
@@ -370,6 +392,16 @@ def test_runner_archives_returned_revisions_before_inventory_rejection(
 
     monkeypatch.setattr(
         GreenhouseAttemptRecorder, "record_prefill", lambda self, _page: None
+    )
+    monkeypatch.setattr(
+        GreenhouseAttemptRecorder,
+        "attach_page_evidence",
+        lambda self, _page: None,
+    )
+    monkeypatch.setattr(
+        GreenhouseAttemptRecorder,
+        "record_navigation",
+        lambda self, _navigation: None,
     )
     monkeypatch.setattr(
         GreenhouseAttemptRecorder,
@@ -614,6 +646,12 @@ def test_runner_terminalizes_after_sink_archives_generator_crash(
     class FakeRecorder:
         attempt = FakeAttempt()
 
+        def attach_page_evidence(self, _page):
+            return None
+
+        def record_navigation(self, _navigation):
+            return None
+
         def record_prefill(self, _page):
             return None
 
@@ -673,6 +711,12 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
 
     class FakeRecorder:
         attempt = FakeAttempt()
+
+        def attach_page_evidence(self, _page):
+            return None
+
+        def record_navigation(self, _navigation):
+            return None
 
         def finalize_provider_boundary(self, _page, **kwargs):
             calls.append("terminal_boundary")
