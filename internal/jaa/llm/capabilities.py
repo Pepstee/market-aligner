@@ -130,6 +130,7 @@ def rate_axes(
 def assess_portfolio(
     items: list[dict[str, Any]],
     client: Optional[LLMClient] = None,
+    *, mode: str = "evidence",
 ) -> dict[str, Any]:
     """Rough read of candidate portfolio items → per-field evidence (profiler-facing).
 
@@ -137,9 +138,15 @@ def assess_portfolio(
     whole profiler/data tree (privacy rule).
     """
     client = client or _client
-    prompt = load_prompt("assess_portfolio")
-    schema = load_schema("portfolio_assess")
-    user = prompt.render_user(json.dumps({"items": items}, ensure_ascii=False, sort_keys=True))
+    if mode not in {"evidence", "creative"}:
+        raise ValueError("portfolio mode must be evidence or creative")
+    prefix = "creative_" if mode == "creative" else ""
+    prompt = load_prompt(prefix + "assess_portfolio")
+    schema = load_schema(prefix + "portfolio_assess")
+    payload = {"items": items}
+    if mode == "creative":
+        payload["_scoring_mode"] = "creative"
+    user = prompt.render_user(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return client.complete_json(prompt.system, user, schema=schema, task="assess_portfolio")
 
 
@@ -565,9 +572,12 @@ def _mock_assess_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
     items = payload.get("items", []) if isinstance(payload, dict) else []
     text = _text_of({"items": items})
 
+    creative = payload.get("_scoring_mode") == "creative"
+    career_hints = _CREATIVE_CAREER_HINTS if creative else _CAREER_HINTS
+    skill_hints = _CREATIVE_SKILL_HINTS if creative else _SKILL_HINTS
     per_field: list[dict[str, Any]] = []
     detected: set[str] = set()
-    for career, hints in _CAREER_HINTS:
+    for career, hints in career_hints:
         hits = sum(1 for h in hints if h in text)
         if hits:
             per_field.append(
@@ -577,7 +587,7 @@ def _mock_assess_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
                     "note": f"Portfolio text references {career.replace('_', ' ')} work.",
                 }
             )
-    for cid, hints in _SKILL_HINTS.items():
+    for cid, hints in skill_hints.items():
         if any(h in text for h in hints):
             detected.add(cid)
 

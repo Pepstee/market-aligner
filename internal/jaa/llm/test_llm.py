@@ -272,3 +272,16 @@ def test_creative_extraction_and_ratings_use_separate_validated_contracts(tmp_pa
     assert set(axes) == {"visualization", "spatial_relevance", "cs_usefulness", "english_usefulness",
                          "freelance_potential", "market_demand", "barrier_to_entry"}
     assert caps.extract_job(FIXTURE_RAW, client=client)["mapped_career"] == "AI_Automation_Engineer"
+
+
+def test_creative_portfolio_assessment_preserves_advisory_fields(tmp_path):
+    client, backend = _fresh_client(tmp_path)
+    result = caps.assess_portfolio([{"title": "UX UI exhibition", "description": "Figma Blender prototype"}],
+                                   client=client, mode="creative")
+    validate_json(result, load_schema("creative_portfolio_assess"))
+    assert {r["career"] for r in result["per_field"]} == {"UX_UI", "Exhibition"}
+    assert result["detected_skills"] == ["blender", "figma"]
+    assert caps.assess_portfolio([], client=client, mode="creative")["per_field"] == []
+    import pytest
+    with pytest.raises(ValueError, match="portfolio mode"):
+        caps.assess_portfolio([], client=client, mode="unknown")
