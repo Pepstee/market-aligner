@@ -2410,3 +2410,72 @@ def test_discovery_only_rejects_nonboolean_before_creating_state(tmp_path):
             Collector({"boards": {"enabled": ["injected"]},
                        "collection": {"discover_only": value}}, root)
         assert not root.exists()
+
+
+def test_saved_trusted_url_fetched_when_not_rediscovered(tmp_path):
+    calls = []
+
+    class Adapter:
+        def __init__(self):
+            self.runs = 0
+
+        def discover(self, _terms, live=False):
+            self.runs += 1
+            if self.runs == 1:
+                yield JobUrl("injected", "one", "https://example.test/one")
+
+        def fetch(self, row, live=False):
+            calls.append(row.key)
+            return RawPosting(row.board, row.job_id, row.url,
+                              "2026-09-22T00:00:00Z", raw_text="synthetic posting")
+
+    adapter = Adapter()
+    kwargs = {"log": lambda _: None, "adapter_loader": lambda *a, **kw: adapter}
+    discovery = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"discover_only": True,
+                                          "source_workers": 1, "fetch_workers": 1}},
+                          tmp_path, **kwargs)
+    assert discovery.cycle()["fetched"] == 0
+
+    resume = Collector({"boards": {"enabled": ["injected"]},
+                        "collection": {"source_workers": 1, "fetch_workers": 1}},
+                       tmp_path, **kwargs)
+    result = resume.cycle()
+    assert result["seen"] == 0 and result["fetched"] == 1
+    assert len(calls) == 1
+    assert resume.db.pending_discoveries(["injected"]) == []
+
+
+def test_untrusted_imported_row_is_never_fetched(tmp_path):
+    calls = []
+
+    class Adapter:
+        def discover(self, _terms, live=False):
+            return iter(())
+
+        def fetch(self, row, live=False):
+            calls.append(row.key)
+            return RawPosting(row.board, row.job_id, row.url,
+                              "2026-09-22T00:00:00Z", raw_text="synthetic posting")
+
+    collector = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"source_workers": 1, "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None,
+                          adapter_loader=lambda *a, **kw: Adapter())
+    collector.db.upsert_discovered(JobUrl("injected", "one", "https://example.test/one"))
+    assert collector.db.pending_discoveries(["injected"]) == []
+    result = collector.cycle()
+    assert result["fetched"] == 0
+    assert calls == []
+
+
+def test_saved_pending_selection_requires_exact_trust_and_board(tmp_path):
+    db = JobDatabase(tmp_path / "state.sqlite3")
+    trusted = JobUrl("injected", "one", "https://example.test/one",
+                     discovered_at="2026-09-21T00:00:00Z")
+    db.upsert_discovered(trusted, release_trusted=True)
+    assert [row.key for row in db.pending_discoveries(["injected"])] == [trusted.key]
+    assert db.pending_discoveries([]) == []
+    assert db.pending_discoveries(["disabled"]) == []
+    db.upsert_discovered(JobUrl("injected", "one", "https://example.test/changed"))
+    assert db.pending_discoveries(["injected"]) == []

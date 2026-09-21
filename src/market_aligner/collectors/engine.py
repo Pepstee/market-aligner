@@ -850,6 +850,24 @@ class Collector:
                             pending_by_board.setdefault(board, deque()).append(
                                 (adapter, observed)
                             )
+                    if not self.discover_only:
+                        saved_seen = {row.key for _, row in pending_by_board.get(board, ())}
+                        for saved in self.db.pending_discoveries([board]):
+                            if saved.key in saved_seen or self.db.has_raw(saved.key):
+                                continue
+                            try:
+                                validate_public_listing_url(saved.url)
+                            except ContractValidationError:
+                                errors += 1
+                                self.log(
+                                    f"[resume] {board} rejected an unsafe saved listing URL"
+                                )
+                                continue
+                            saved_seen.add(saved.key)
+                            pending_by_board.setdefault(board, deque()).append(
+                                (adapters[board], saved)
+                            )
+
                     self.db.mark_source(
                         board, repr(discovery_error) if discovery_error else None
                     )

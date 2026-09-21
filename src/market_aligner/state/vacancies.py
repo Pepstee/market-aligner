@@ -2873,6 +2873,43 @@ class JobDatabase:
             ).fetchall()
         return {str(row[0]) for row in rows}
 
+    def pending_discoveries(self, boards: Iterable[str]) -> list[JobUrl]:
+        """Saved URLs still needing fetch, only when the exact current URL has a
+        trusted discovery observation. Imported/untrusted rows never qualify."""
+        selected = [str(board) for board in boards]
+        if not selected:
+            return []
+        placeholders = ",".join("?" for _ in selected)
+        with closing(self.connect()) as conn, conn:
+            rows = conn.execute(
+                f"""SELECT p.board,p.job_id,p.url,p.posted_at,
+                           (SELECT d.discovered_at
+                            FROM posting_discovery_observations d
+                            WHERE d.job_key=p.key AND d.canonical_url=p.url
+                              AND d.release_trusted=1
+                            ORDER BY d.discovered_at DESC LIMIT 1)
+                    FROM postings p
+                    WHERE p.fetch_status!='fetched'
+                      AND p.board IN ({placeholders})
+                      AND EXISTS(
+                        SELECT 1 FROM posting_discovery_observations d
+                        WHERE d.job_key=p.key AND d.canonical_url=p.url
+                          AND d.release_trusted=1
+                      )
+                    ORDER BY p.first_seen_at,p.key""",
+                selected,
+            ).fetchall()
+        return [
+            JobUrl(
+                board=r[0],
+                job_id=r[1],
+                url=r[2],
+                posted_at=r[3],
+                discovered_at=r[4],
+            )
+            for r in rows
+        ]
+
     def export_urls(self, path: str | Path) -> int:
         with closing(self.connect()) as conn, conn:
             rows = [
