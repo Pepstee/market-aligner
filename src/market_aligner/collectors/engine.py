@@ -375,6 +375,7 @@ class Collector:
         self.terms = list(cfg.get("search_terms") or [])
         self.boards = plan["boards"]
         collection = plan["collection"]
+        self.discover_only = collection.get("discover_only", False)
         self.source_workers = int(
             collection.get("source_workers", len(self.boards) or 1)
         )
@@ -410,6 +411,10 @@ class Collector:
         if collection is None:
             collection = {}
         _shape(isinstance(collection, dict), "collection must be a mapping")
+        _shape(
+            isinstance(collection.get("discover_only", False), bool),
+            "collection.discover_only must be a boolean",
+        )
 
         boards_cfg = cfg.get("boards")
         _shape(isinstance(boards_cfg, dict), "boards must be a mapping")
@@ -841,7 +846,7 @@ class Collector:
                             observed, release_trusted=True
                         )
                         new += int(is_new)
-                        if not self.db.has_raw(observed.key):
+                        if not self.discover_only and not self.db.has_raw(observed.key):
                             pending_by_board.setdefault(board, deque()).append(
                                 (adapter, observed)
                             )

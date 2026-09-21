@@ -2370,3 +2370,43 @@ class CollectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_discovery_only_persists_without_fetch_and_resumes(tmp_path):
+    calls = []
+
+    class Adapter:
+        def discover(self, _terms, live=False):
+            yield JobUrl("injected", "one", "https://example.test/one")
+
+        def fetch(self, row, live=False):
+            calls.append(row.key)
+            return RawPosting(row.board, row.job_id, row.url,
+                              "2026-09-22T00:00:00Z", raw_text="synthetic posting")
+
+    cfg = {"boards": {"enabled": ["injected"]},
+           "collection": {"discover_only": True, "source_workers": 1, "fetch_workers": 1}}
+    kwargs = {"log": lambda _: None, "adapter_loader": lambda *a, **kw: Adapter()}
+    discovery = Collector(cfg, tmp_path, **kwargs)
+    result = discovery.cycle()
+    assert result["new"] == 1 and result["fetched"] == 0
+    assert calls == []
+    assert discovery.urls_path.is_file()
+    assert discovery.db.boards_with_pending_discoveries(["injected"]) == {"injected"}
+    assert discovery.cycle()["fetched"] == 0
+    assert calls == []
+    resumed = Collector({**cfg, "collection": {"source_workers": 1, "fetch_workers": 1}},
+                        tmp_path, **kwargs)
+    assert resumed.cycle()["fetched"] == 1
+    assert len(calls) == 1
+    assert resumed.db.boards_with_pending_discoveries(["injected"]) == set()
+
+
+def test_discovery_only_rejects_nonboolean_before_creating_state(tmp_path):
+    import pytest
+    for index, value in enumerate(["false", "true", 0, 1, None, [], {}]):
+        root = tmp_path / str(index)
+        with pytest.raises(ValueError, match="discover_only"):
+            Collector({"boards": {"enabled": ["injected"]},
+                       "collection": {"discover_only": value}}, root)
+        assert not root.exists()
