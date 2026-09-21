@@ -10,7 +10,7 @@ import stat
 import tempfile
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -569,14 +569,21 @@ class Collector:
             )
 
     def _discover_board(
-        self, board: str
+        self, board: str, *, deadline: float | None = None
     ) -> tuple[str, Any, list[JobUrl], Exception | None]:
+        if deadline is not None and self.monotonic() >= deadline:
+            return board, None, [], None
         adapter_loader = self.adapter_loader or load_adapter
         adapter = adapter_loader(board, config=dict(self.cfg.get(board, {}) or {}))
         rows: list[JobUrl] = []
         try:
-            for row in adapter.discover(self.terms, live=True):
-                rows.append(row)
+            iterator = iter(adapter.discover(self.terms, live=True))
+            while deadline is None or self.monotonic() < deadline:
+                try:
+                    row = next(iterator)
+                except StopIteration:
+                    break
+                rows.append(row)  # preserve the response that crossed the deadline
         except SourceUnavailable:
             raise
         except Exception as exc:  # preserve pages yielded before a late failure
@@ -781,11 +788,15 @@ class Collector:
         self.crash_injector("after_cache_pre_receipt")
         return {**sealed, "raw_cache_path_absolute": str(raw_path)}
 
-    def cycle(self) -> dict[str, int]:
+    def cycle(self, *, deadline: float | None = None) -> dict[str, int]:
         adapters: dict[str, Any] = {}
         fetch_queue: list[tuple[Any, JobUrl]] = []
         pending_by_board: dict[str, deque[tuple[Any, JobUrl]]] = {}
         discovered = new = errors = 0
+
+        def past_deadline() -> bool:
+            return deadline is not None and self.monotonic() >= deadline
+
         pending = self.db.boards_with_pending_discoveries(self.boards)
         due = [
             b
@@ -798,6 +809,8 @@ class Collector:
                 ),
             )
         ]
+        if past_deadline():
+            due = []
         if not due:
             self.log("[cycle] no source is due yet")
             return {
@@ -812,12 +825,16 @@ class Collector:
             ThreadPoolExecutor(max_workers=max(1, self.source_workers)) as source_pool,
             ThreadPoolExecutor(max_workers=max(1, self.fetch_workers)) as fetch_pool,
         ):
-            futures = {source_pool.submit(self._discover_board, b): b for b in due}
+            futures = {
+                source_pool.submit(self._discover_board, b, deadline=deadline): b for b in due
+            }
             fetch_futures: dict[Any, JobUrl] = {}
             for future in as_completed(futures):
                 board = futures[future]
                 try:
                     _, adapter, rows, discovery_error = future.result()
+                    if adapter is None:
+                        continue
                     adapters[board] = adapter
                     discovered += len(rows)
                     for row in rows:
@@ -888,6 +905,9 @@ class Collector:
                     self.db.mark_source(board, repr(exc))
                     self.log(f"[discover] {board} failed: {exc}")
 
+            if past_deadline():
+                pending_by_board.clear()
+
             # Round-robin the per-board queues before submission. A board with
             # thousands of matches must not occupy the executor's entire FIFO
             # queue while smaller direct national sources wait behind it.
@@ -901,26 +921,45 @@ class Collector:
                     if queue:
                         next_active.append(board)
                 active = next_active
-            for adapter, row in fetch_queue:
-                fetch_futures[fetch_pool.submit(self._fetch_row, adapter, row)] = row
 
-            for future in as_completed(fetch_futures):
-                row = fetch_futures[future]
-                try:
-                    raw, fallback_engine = future.result()
-                    self.db.store_raw(raw, release_trusted=True)
-                    _save_raw(self.raw_cache, raw)
-                    fetched += 1
-                    if fallback_engine:
-                        self.log(
-                            f"[fetch] {row.key} recovered by Scrapling {fallback_engine}"
-                        )
-                    if fetched % 25 == 0:
-                        self.log(f"[fetch] {fetched}/{len(fetch_queue)} stored")
-                except Exception:
-                    errors += 1
-                    self.db.record_error(row.key, "fetch_error")
-                    self.log(f"[fetch] {row.key} failed: fetch_error")
+            queued = iter(fetch_queue)
+
+            def submit_next() -> None:
+                if past_deadline():
+                    return
+                pair = next(queued, None)
+                if pair is None:
+                    return
+                adapter, row = pair
+                fetch_futures[fetch_pool.submit(self._bounded_fetch, adapter, row, deadline)] = row
+
+            for _ in range(max(1, self.fetch_workers)):
+                submit_next()
+
+            while fetch_futures:
+                done, _ = wait(set(fetch_futures), return_when=FIRST_COMPLETED)
+                for future in done:
+                    row = fetch_futures.pop(future)
+                    try:
+                        outcome = future.result()
+                        if outcome is None:
+                            # past deadline at worker entry: skipped, stays pending, not an error
+                            continue
+                        raw, fallback_engine = outcome
+                        self.db.store_raw(raw, release_trusted=True)
+                        _save_raw(self.raw_cache, raw)
+                        fetched += 1
+                        if fallback_engine:
+                            self.log(
+                                f"[fetch] {row.key} recovered by Scrapling {fallback_engine}"
+                            )
+                        if fetched % 25 == 0:
+                            self.log(f"[fetch] {fetched}/{len(fetch_queue)} stored")
+                    except Exception:
+                        errors += 1
+                        self.db.record_error(row.key, "fetch_error")
+                        self.log(f"[fetch] {row.key} failed: fetch_error")
+                    submit_next()
         total = self.db.export_urls(self.urls_path)
         result = {
             "seen": discovered,
@@ -931,6 +970,13 @@ class Collector:
         }
         self.log(f"[cycle] {result}")
         return result
+
+    def _bounded_fetch(
+        self, adapter: Any, row: JobUrl, deadline: float | None
+    ) -> tuple[RawPosting, str | None] | None:
+        if deadline is not None and self.monotonic() >= deadline:
+            return None
+        return self._fetch_row(adapter, row)
 
     def run(
         self, hours: float = 0, poll_minutes: float = 15, once: bool = False
@@ -943,8 +989,8 @@ class Collector:
         started = self.monotonic()
         deadline = started + hours * 3600 if hours > 0 else None
         cycles: list[dict[str, int]] = []
-        while True:
-            cycles.append(self.cycle())
+        while deadline is None or self.monotonic() < deadline:
+            cycles.append(self.cycle(deadline=deadline))
             if once:
                 return cycles
             assert deadline is not None
@@ -952,3 +998,4 @@ class Collector:
             if remaining <= 0:
                 return cycles
             self.sleeper(min(max(1, poll_minutes * 60), remaining))
+        return cycles

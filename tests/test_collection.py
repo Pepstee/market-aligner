@@ -2382,7 +2382,7 @@ def test_discovery_only_persists_without_fetch_and_resumes(tmp_path):
         def fetch(self, row, live=False):
             calls.append(row.key)
             return RawPosting(row.board, row.job_id, row.url,
-                              "2026-09-22T00:00:00Z", raw_text="synthetic posting")
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), raw_text="synthetic posting")
 
     cfg = {"boards": {"enabled": ["injected"]},
            "collection": {"discover_only": True, "source_workers": 1, "fetch_workers": 1}}
@@ -2427,7 +2427,7 @@ def test_saved_trusted_url_fetched_when_not_rediscovered(tmp_path):
         def fetch(self, row, live=False):
             calls.append(row.key)
             return RawPosting(row.board, row.job_id, row.url,
-                              "2026-09-22T00:00:00Z", raw_text="synthetic posting")
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), raw_text="synthetic posting")
 
     adapter = Adapter()
     kwargs = {"log": lambda _: None, "adapter_loader": lambda *a, **kw: adapter}
@@ -2456,7 +2456,7 @@ def test_untrusted_imported_row_is_never_fetched(tmp_path):
         def fetch(self, row, live=False):
             calls.append(row.key)
             return RawPosting(row.board, row.job_id, row.url,
-                              "2026-09-22T00:00:00Z", raw_text="synthetic posting")
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), raw_text="synthetic posting")
 
     collector = Collector({"boards": {"enabled": ["injected"]},
                            "collection": {"source_workers": 1, "fetch_workers": 1}},
@@ -2479,3 +2479,78 @@ def test_saved_pending_selection_requires_exact_trust_and_board(tmp_path):
     assert db.pending_discoveries(["disabled"]) == []
     db.upsert_discovered(JobUrl("injected", "one", "https://example.test/changed"))
     assert db.pending_discoveries(["injected"]) == []
+
+
+def test_deadline_preserves_pending_and_resumes_real_collector(tmp_path):
+    clock = [0.0]
+    calls = []
+
+    class Adapter:
+        def discover(self, _terms, live=False):
+            for n in range(3):
+                yield JobUrl("injected", str(n), f"https://example.test/{n}")
+
+        def fetch(self, row, live=False):
+            calls.append(row.key)
+            clock[0] += 30
+            return RawPosting(row.board, row.job_id, row.url,
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), raw_text="synthetic listing")
+
+    cfg = {"boards": {"enabled": ["injected"]},
+           "collection": {"source_workers": 1, "fetch_workers": 1}}
+    collector = Collector(cfg, tmp_path, log=lambda _: None,
+                          adapter_loader=lambda *a, **kw: Adapter(),
+                          monotonic=lambda: clock[0])
+    cycles = collector.run(hours=25 / 3600)
+    assert len(cycles) == 1
+    assert cycles[0]["fetched"] == 1
+    assert cycles[0]["errors"] == 0
+    assert cycles[0]["database_total"] == 3
+    assert len(collector.db.pending_discoveries(["injected"])) == 2
+    assert collector.cycle()["fetched"] == 2
+    assert len(calls) == len(set(calls)) == 3
+    assert collector.db.pending_discoveries(["injected"]) == []
+
+
+def test_discovery_deadline_preserves_response_crossing_deadline(tmp_path):
+    clock = [0.0]
+    yielded = []
+
+    class Adapter:
+        def discover(self, _terms, live=False):
+            for n in range(5):
+                clock[0] += 10
+                yielded.append(n)
+                yield JobUrl("injected", str(n), f"https://example.test/{n}")
+
+        def fetch(self, row, live=False):
+            raise AssertionError("deadline must prevent detail fetch")
+
+    collector = Collector({"boards": {"enabled": ["injected"]}}, tmp_path,
+                          log=lambda _: None, monotonic=lambda: clock[0],
+                          adapter_loader=lambda *a, **kw: Adapter())
+    result = collector.cycle(deadline=25)
+    assert yielded == [0, 1, 2]
+    assert result["seen"] == result["database_total"] == 3
+    assert result["fetched"] == result["errors"] == 0
+
+
+def test_run_does_not_start_new_discovery_after_window_sleep(tmp_path):
+    clock = [0.0]
+    calls = []
+
+    class Adapter:
+        def discover(self, _terms, live=False):
+            calls.append("discover")
+            return iter(())
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    collector = Collector({"boards": {"enabled": ["injected"]}}, tmp_path,
+                          log=lambda _: None, monotonic=lambda: clock[0], sleeper=sleep,
+                          adapter_loader=lambda *a, **kw: Adapter())
+    assert len(collector.run(hours=10 / 3600)) == 1
+    assert calls == ["discover"]
+    assert collector.cycle(deadline=clock[0])["seen"] == 0
+    assert calls == ["discover"]

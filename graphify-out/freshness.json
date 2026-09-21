@@ -1,11 +1,11 @@
 {
   "community_count": 994,
-  "edge_count": 141152,
-  "node_count": 71345,
+  "edge_count": 141133,
+  "node_count": 71376,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "35af440ccebf1491202d86c8140eae8d63b895d2fb497ae04ca8970bb2881b0a"
+    "graph.json": "8765e76c857682289fc1b11ea36093445376eb895bb47f4c97fa404ce68d6ad6"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "a21ffba554576c224bca31688e60f1da4b06ef08",
+  "source_base_commit": "c3a0172b0a0f99c76a43df9004553ddeb70fee36",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "899c73e699abc698366ca76792c4a746f25ccd26baea0399f4364b303f843238",
+    "docs/migration/CAPABILITY_INVENTORY.md": "80e3141533c3a950acb090d976d596f09241256caa98382d894b9f3bba678e81",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "5b6781e09e27f538aa7e01c15b391b463bee2a00f7a842603850d8353650b947",
-    "docs/migration/capability-inventory.jsonl": "ee154174b7b8203d82e530c713ce99b52ebfcc4256b62956540955a090a1767a",
-    "docs/migration/ledger.jsonl": "1e780f7771e9bb473e49e7104ac4eab629eb4882b1f08e249222315f913d1d0b",
+    "docs/migration/capability-dispositions.jsonl": "36a92994adeca39d5d807b3f97829c685b7e383edc17d4cc46b280079b131836",
+    "docs/migration/capability-inventory.jsonl": "e81bf07a220c6d35ac30e63e1da341b59cc5137fb739b6acfe74dbddff21634e",
+    "docs/migration/ledger.jsonl": "c060847e5ae0ed43abb5b94e9e8a35a7e1d82729f0e4021df81690e1ef814230",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -736,7 +736,7 @@
     "src/market_aligner/collectors/adapters/weworkremotely.py": "2c68ed4848fdfb25adb724871c4f3f9d89ce00b846ef49f7a81dbb6a480a7316",
     "src/market_aligner/collectors/adapters/workable.py": "402da722031250877cc9a6f8deb6a8c31ca84b1c8ea25d58350aa361c1293229",
     "src/market_aligner/collectors/adapters/workday.py": "d88c6dc6a204e6a92cd44a9c92bd04350692a6649981d290569a6315949a078e",
-    "src/market_aligner/collectors/engine.py": "3423f80e2ba153b161a0cd2d6fd6dbdc34559351d0f4a25e52e6d71210b2b187",
+    "src/market_aligner/collectors/engine.py": "99c94e31afe32fcdbf65c46593857c8736fa72755580022f38f289baf94a82a2",
     "src/market_aligner/collectors/evidence.py": "1eee753865d31342ec66925c5e597aad38535dc9babcd43a874de2c9eefd2a63",
     "src/market_aligner/collectors/fetch_control.py": "5c34e881ca7f4db0ae99d54ba847ee9c7daeb65d43b02f2682f8510e79fbfc53",
     "src/market_aligner/collectors/scrapling_client.py": "d25aea05c7b7775e1b553491a8187e547133d97b7088da747fea9bd5a6734b9f",
@@ -797,7 +797,7 @@
     "tests/test_assessment.py": "cce883efbad9f0f2e79b013daba5ccebb5c63f6e603abfe3bcae3dac2e87e590",
     "tests/test_candidate_intent.py": "2734a0d95a65500606dfc709924cb5d3a99aadc644e80e2cfb523c577531767d",
     "tests/test_capability_inventory.py": "ee43f004b64aa2b69bd27e4c9e2b2a7dfbcadd430e46631a64f2f58e39eb155f",
-    "tests/test_collection.py": "b04229e3e2225f56acb902aad090a3843f7f38d3027da4b1b074f97e06823c2c",
+    "tests/test_collection.py": "13c99e316c72d9b5c396491bbed097ee045b458141dcaaaf3abff1612877e828",
     "tests/test_collector_evidence.py": "1a5dee12fee3bc27927fe39944b9b8a97c2673a15441f86ca11e4246c9866e9b",
     "tests/test_config.py": "400ceb33c9fb686c583ade4a1301127c19a662ebe2445a8836a7036b78f1bfa4",
     "tests/test_fetch_control.py": "3fc4cca7d40442812ae51ea7f3b0cef8ed814fbbbbf270772bd06f4939308ea3",
