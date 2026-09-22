@@ -2860,3 +2860,94 @@ def test_browser_detail_union_with_real_chromium(tmp_path):
     if os.environ.get("MARKET_ALIGNER_BROWSER_CANARY") != "1":
         pytest.skip("Set MARKET_ALIGNER_BROWSER_CANARY=1 with installed Playwright Chromium")
     _browser_detail_canary(tmp_path)
+
+
+def _saramin_detail_canary(tmp_path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+    import pytest
+    from market_aligner.collectors.adapters.saramin import SaraminAdapter
+
+    calls = []
+
+    class API(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            calls.append(self.path)
+            body = json.dumps({"jobs": {"job": [
+                {"id": "other", "title": "Other"},
+                {"id": "42", "title": "API metadata"}]}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), API)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    results = {}
+    try:
+        for mode in (None, "api"):
+            cfg = {"base_url": f"http://127.0.0.1:{server.server_port}",
+                   "access_key_env": "MA_SARAMIN_SYNTHETIC_KEY"}
+            if mode is not None:
+                cfg["detail_mode"] = mode
+            with mock.patch.dict(os.environ, {"MA_SARAMIN_SYNTHETIC_KEY": "synthetic"}):
+                row = SaraminAdapter(config=cfg).fetch(
+                    JobUrl("saramin", "42", "https://example.test/42"), live=True)
+            assert row.raw_json == {"id": "42", "title": "API metadata"}
+            assert not row.raw_text
+        assert len(calls) == 2
+        results["api"] = "default and explicit mode selected exact API record"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    adapter = SaraminAdapter(config={"detail_mode": "browser",
+                                     "access_key_env": "MA_SARAMIN_NO_KEY"})
+    with mock.patch.dict(os.environ, {}, clear=True):
+        for label, html in [("main", "<main>" + "Designer duties. " * 30 + "</main>"),
+                            ("legacy", '<div class="wrap_jv_cont">' + "Legacy duties. " * 30 + "</div>")]:
+            path = tmp_path / f"saramin-{label}.html"
+            path.write_text("<title>Synthetic role</title>" + html)
+            row = adapter.fetch(JobUrl("saramin", label, path.as_uri()), live=True)
+            assert "duties" in row.raw_text
+            assert row.raw_json["rendered_title"] == "Synthetic role"
+            assert row.raw_json["source"] == "saramin_open_api+playwright"
+            results[label] = {"raw_text": row.raw_text, "raw_json": row.raw_json}
+        short = tmp_path / "saramin-short.html"
+        short.write_text("<main>Short</main>")
+        with pytest.raises(RuntimeError, match="detail body missing"):
+            adapter.fetch(JobUrl("saramin", "short", short.as_uri()), live=True)
+        with pytest.raises(RuntimeError, match="missing access key"):
+            list(adapter.discover(["design"], live=True))
+        results["rejections"] = ["missing body", "missing discovery key"]
+    return results
+
+
+def test_saramin_api_and_browser_detail_with_real_transports(tmp_path):
+    import pytest
+    if os.environ.get("MARKET_ALIGNER_BROWSER_CANARY") != "1":
+        pytest.skip("Set MARKET_ALIGNER_BROWSER_CANARY=1 with installed Playwright Chromium")
+    _saramin_detail_canary(tmp_path)
+
+
+def test_saramin_mode_validation_and_preflight_browser_dependency(tmp_path):
+    import pytest
+    from market_aligner.collectors.adapters.saramin import SaraminAdapter
+
+    adapter = SaraminAdapter(config={"detail_mode": "unknown"})
+    with pytest.raises(ValueError, match="detail_mode"):
+        adapter.fetch(JobUrl("saramin", "42", "https://example.test/42"), live=True)
+    cfg = {"boards": {"enabled": ["saramin"]}, "saramin": {"detail_mode": "unknown"}}
+    report = Collector.preflight(tmp_path, cfg)
+    assert not next(c for c in report["checks"] if c["name"] == "saramin:detail_mode")["ok"]
+    cfg["saramin"]["detail_mode"] = "browser"
+    with mock.patch("market_aligner.collectors.engine.importlib.util.find_spec",
+                    side_effect=lambda n: None if n == "playwright" else object()):
+        report = Collector.preflight(tmp_path, cfg)
+    assert not next(c for c in report["checks"] if c["name"] == "dependency:playwright")["ok"]

@@ -545,7 +545,20 @@ class Collector:
             except Exception as exc:
                 _add(f"dependency:{module}", False, type(exc).__name__)
 
-        needs_playwright = any(b in ("jobkorea", "notefolio") for b in boards)
+        saramin_browser = False
+        if "saramin" in boards:
+            from .adapters.saramin import SaraminAdapter
+
+            try:
+                mode = SaraminAdapter(config=cfg.get("saramin") or {})._detail_mode()
+                saramin_browser = mode == "browser"
+                _add("saramin:detail_mode", True, mode)
+            except ValueError as exc:
+                _add("saramin:detail_mode", False, str(exc))
+
+        needs_playwright = saramin_browser or any(
+            b in ("jobkorea", "notefolio") for b in boards
+        )
         if needs_playwright:
             try:
                 spec = importlib.util.find_spec("playwright")
