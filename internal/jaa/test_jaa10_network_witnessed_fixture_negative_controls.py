@@ -594,7 +594,7 @@ def test_runtime_tmp_contract_literals_and_schema_versions_are_pinned() -> None:
     ).read_text(encoding="utf-8")
 
     assert (
-        'os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", str(Path.home()))'
+        'os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", "/tmp")'
         in witness_source
     )
     assert 'RUNTIME_TMP_HOME_ANCHOR = Path("/home/gutua")' not in witness_source
@@ -722,7 +722,7 @@ def test_worker_revalidates_python_identity_before_corpus(tmp_path, monkeypatch,
         raise ReachedAuthority()
 
     monkeypatch.setattr(fixture_module, "verify_graphcore_corpus", sentinel)
-    if mutation in ("valid", "alias"):
+    if mutation == "valid":
         with pytest.raises(ReachedAuthority):
             fixture_module._execute_worker(root / "request.json", output, root)
         assert calls == [True]

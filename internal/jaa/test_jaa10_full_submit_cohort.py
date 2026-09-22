@@ -242,7 +242,7 @@ def test_production_cohort_has_no_test_module_imports() -> None:
     assert tuple(MUTATION_TEST_NODES) == REQUIRED_MUTATION_CONTROLS
 
 
-@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort", "cohort_fit"])
+@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort", "cohort_fit", "network_fit"])
 def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, release_builder):
     """Run the canonical cohort browser builder with an actual synthetic release."""
     from playwright.sync_api import sync_playwright
@@ -256,10 +256,12 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
         rows = _issued_release_inputs(tmp_path)
         database, _, contact, questions, source, artifacts, artifact_root, publication, _, gate, _, issued = rows
         inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
-    elif release_builder == "cohort_fit":
+    elif release_builder in ("cohort_fit", "network_fit"):
         from types import SimpleNamespace
         from test_jaa06_independent_acceptance import _CapturedResearch
         from career_automation.jaa04_corpus_authority import RawRequirementAnchor
+        from career_automation import network_witnessed_fixture as network
+        builder = network if release_builder == "network_fit" else cohort
         body = (b"<p>Example product service platform provides documented public "
                 b"value to customers through reliable engineering technology.</p>")
         digest = hashlib.sha256(body).hexdigest()
@@ -272,14 +274,16 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
             inventory_sha256=digest, inventory_files_sha256=digest, dossier_sha256=digest,
             queue_body_content_sha256=digest, admitted_queue_payload_sha256=digest,
             tracked_seed_payload_sha256=digest, requirement_anchors=anchors,
+            dossier={"sources": [{"captured_at": datetime.now(timezone.utc).isoformat()}]},
         )
         # Only captured research and its expected digest are synthetic. The canonical
         # fit builder, SQLite transitions, compiler, release gate and browser all run.
         with monkeypatch.context() as synthetic_research:
-            synthetic_research.setattr(cohort, "_FrozenCorpusResearch", lambda cache, authority: _CapturedResearch(cache))
-            synthetic_research.setattr(cohort, "RAW_RESPONSE_SHA256", digest)
-            inputs = cohort._release_inputs(tmp_path, frozen)
-        source = inputs[3]
+            synthetic_research.setattr(builder, "_FrozenCorpusResearch", lambda cache, authority: _CapturedResearch(cache))
+            synthetic_research.setattr(builder, "RAW_RESPONSE_SHA256", digest)
+            inputs = (network._issued_release_inputs(tmp_path, cohort.ROOT, frozen)
+                      if release_builder == "network_fit" else cohort._release_inputs(tmp_path, frozen))
+        source = inputs[4] if release_builder == "network_fit" else inputs[3]
     else:
         # Substitute only frozen-corpus ingestion with a real synthetic fit database.
         # Compilation, PDFs, publication, release issuance and browser execution are real.
@@ -310,9 +314,14 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
     vacancy = FixtureVacancy("synthetic-cohort", source.job_key, source.role_title,
                              source.company_name, source.answers[0].question)
     with LocalATSFixture(vacancy, nonce=lambda: cohort.NONCE, form_token=cohort.FORM_TOKEN) as fixture:
-        database, workflow, approvals, values, authority, issued = cohort._browser_inputs(
-            fixture, tmp_path, inputs
-        )
+        if release_builder == "network_fit":
+            database, workflow, approvals, values, authority, issued = network._browser_inputs(
+                fixture, inputs, cohort.ROOT
+            )
+        else:
+            database, workflow, approvals, values, authority, issued = cohort._browser_inputs(
+                fixture, tmp_path, inputs
+            )
         store = BrowserWorkflowStore(database.path)
         run_id = store.create_run(workflow)
         assert store.claim_run("cohort_worker", run_id=run_id) is not None

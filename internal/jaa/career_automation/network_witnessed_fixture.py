@@ -1642,10 +1642,10 @@ def _execute_worker(
         chromium_executable = Path(str(chromium_document["path"])).resolve(strict=True)
         node_driver = Path(str(driver_document["path"])).resolve(strict=True)
         requested_python = Path(str(python_document["path"]))
+        worker_python = Path(os.path.abspath(os.fspath(sys.executable)))
         identities_match = (
-            Path(sys.executable).resolve(strict=True)
-            == requested_python.resolve(strict=True)
-            and _path_identity(requested_python) == python_document
+            requested_python == worker_python
+            and _path_identity(worker_python) == python_document
             and _sha256_file(chromium_executable) == chromium_document["sha256"]
             and _sha256_file(node_driver) == driver_document["sha256"]
         )
