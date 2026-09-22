@@ -69,6 +69,14 @@ class ScraplingProtocolTests(unittest.TestCase):
         thread.start()
         try:
             url = f"http://127.0.0.1:{server.server_port}/vacancy"
+            chain_client = ScraplingClient(runtime.parent.parent, {
+                "runtime_python": str(runtime), "minimum_body_bytes": 1,
+                "fallback_chain": [{"engine": "http", "kwargs": {}}],
+            })
+            recovered = chain_client.fetch_with_chain(url)
+            self.assertEqual("static", recovered.engine)
+            self.assertEqual("static", recovered.attempts[0]["engine"])
+            self.assertEqual(exact, base64.b64decode(recovered.response["body_base64"], validate=True))
             static = client.fetch("static", url)
             legacy = client.fetch("http", url)
             batch = client.execute({"operation": "session_batch", "engine": "http",

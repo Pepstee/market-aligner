@@ -53,7 +53,12 @@ class ScraplingClient:
         self.protected_roots = tuple(
             dict.fromkeys((self.root, *(Path(value).resolve() for value in protected_roots)))
         )
-        configured = self.config.get("runtime_python", ".venv-scrapling/bin/python")
+        if "runtime_python" in self.config:
+            configured = self.config["runtime_python"]
+        elif runtime_directory := os.environ.get("AGENTIC_SCRAPLING_RUNTIME_DIR"):
+            configured = Path(runtime_directory) / "bin" / "python"
+        else:
+            configured = ".venv-scrapling/bin/python"
         runtime = Path(str(configured))
         self.runtime = runtime if runtime.is_absolute() else self.root / runtime
         self.worker_module = str(self.config.get("worker_module", "market_aligner.collectors.scrapling_worker"))

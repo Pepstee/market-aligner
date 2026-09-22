@@ -56,3 +56,16 @@ per board. Optional `fetch_attempts` (1–10, default 1) and `fetch_retry_backof
 before the existing Scrapling fallback. Retries respect the collection deadline;
 unfetched rows remain available for the next operation. Invalid captured content is
 not retried as a transport failure.
+
+The Scrapling sidecar uses explicit `scrapling.runtime_python` first, then
+`AGENTIC_SCRAPLING_RUNTIME_DIR/bin/python`, then `.venv-scrapling/bin/python`
+relative to its configured runtime root. The legacy `http` engine name is accepted
+and recorded as `static` in fallback receipts.
+
+For the donor’s full Saramin job-description capture, set `saramin.detail_mode: browser`.
+The default `api` mode remains available for metadata collection; discovery needs the
+configured API key in either mode. Notefolio’s donor job-list route remains selectable
+with `notefolio.recruit_url: https://notefolio.net/service/job`; its current default is
+`https://notefolio.net/recruit`. These are retained adapter configurations, not a claim
+that the external sites have been revalidated recently. Browser resources are scoped
+to each call rather than shared across collector threads.

@@ -412,6 +412,8 @@ def sanitized_fetch_engine(value: Any) -> str:
     engine = value.casefold()
     if engine == "stealthy":
         engine = "stealth"
+    elif engine == "http":
+        engine = "static"
     if engine not in _FETCH_ENGINES:
         raise ContractValidationError("fetch engine is unsupported")
     return engine
