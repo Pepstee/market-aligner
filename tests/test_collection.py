@@ -2708,3 +2708,106 @@ def test_preflight_cli_low_disk_and_invalid_shapes(tmp_path):
         with __import__("pytest").raises(ValueError):
             Collector.preflight(root, {"boards": {"enabled": []}})
         lookup.assert_not_called()
+
+
+def test_target_collection_preserves_existing_and_deduplicates(tmp_path):
+    calls = []
+    cfg = {"boards": {"enabled": ["injected"]},
+           "collection": {"target_per_board": 2, "fetch_workers": 1}}
+
+    class Adapter:
+        def discover(self, _terms, live=False):
+            calls.append("discover")
+            for n in [0, 0, 1, 2]:
+                yield JobUrl("injected", str(n), f"https://example.test/{n}")
+
+        def fetch(self, row, live=False):
+            calls.append(row.key)
+            return RawPosting(row.board, row.job_id, row.url,
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              raw_text="synthetic listing")
+
+    collector = Collector({**cfg, "collection": {**cfg["collection"], "discover_only": True}},
+                          tmp_path, log=lambda _: None,
+                          adapter_loader=lambda *a, **kw: Adapter())
+    first = collector.cycle()
+    assert first["database_total"] == 2 and first["fetched"] == 0
+    resumed = Collector(cfg, tmp_path, log=lambda _: None,
+                        adapter_loader=lambda *a, **kw: Adapter())
+    assert resumed.cycle()["fetched"] == 2
+    assert len(calls) == 3  # discovery + exactly two distinct detail fetches
+    # A smaller subsequent target never truncates saved inventory or raw files.
+    smaller = Collector({**cfg, "collection": {"target_per_board": 1}}, tmp_path,
+                        log=lambda _: None, adapter_loader=lambda *a, **kw: Adapter())
+    assert smaller.cycle()["database_total"] == 2
+    assert len(calls) == 3
+    assert len(list(collector.raw_cache.rglob("*.json"))) == 2
+
+
+def test_target_config_and_discovery_depth_are_bounded_and_copied(tmp_path):
+    import pytest
+    for n, value in enumerate([True, -1, 1.5, "2", None]):
+        root = tmp_path / str(n)
+        with pytest.raises(ValueError, match="target_per_board"):
+            Collector({"boards": {"enabled": ["wanted"]},
+                       "collection": {"target_per_board": value}}, root)
+        assert not root.exists()
+    cfg = {"boards": {"enabled": ["wanted", "jobkorea", "notefolio"]},
+           "collection": {"target_per_board": 500},
+           "wanted": {"list_limit": 20, "max_pages": 1}}
+    collector = Collector(cfg, tmp_path / "valid", log=lambda _: None)
+    assert collector._board_config("wanted")["max_pages"] == 30
+    assert collector._board_config("jobkorea")["max_pages"] == 8
+    assert collector._board_config("notefolio")["max_scrolls"] == 100
+    assert cfg["wanted"]["max_pages"] == 1
+    assert "jobkorea" not in cfg and "notefolio" not in cfg
+
+
+def _browser_discovery_canary(tmp_path):
+    from market_aligner.collectors.adapters.jobkorea import JobKoreaAdapter
+    from market_aligner.collectors.adapters.notefolio import NotefolioAdapter
+
+    jobkorea = tmp_path / "jobkorea.html"
+    jobkorea.write_text('''<!doctype html><meta charset="utf-8"><main></main><script>
+const page = new URLSearchParams(location.search).get('Page_No') || '1';
+for (const [id,sc,text] of [[page==='1'?'100':'200','630','Designer 신입'],['900','630','Senior 경력'],['800','551','Promoted 신입']]) {
+const div=document.createElement('div');div.className='w-full';
+const a=document.createElement('a');a.className='max-w-[700px]';a.href='https://example.test/Recruit/GI_Read/'+id+'?sc='+sc;a.innerText=text;div.appendChild(a);document.querySelector('main').appendChild(div);
+}</script>''')
+    cfg = {"search_url": jobkorea.as_uri() + "?kw={kw}", "max_pages": 2,
+           "rate_limit_seconds": 0, "entry_only": True}
+    entry = list(JobKoreaAdapter(config=cfg).discover(["graphic design"], live=True))
+    organic = list(JobKoreaAdapter(config={**cfg, "entry_only": False}).discover(["graphic design"], live=True))
+    assert [r.job_id for r in entry] == ["100", "200"]
+    assert [r.job_id for r in organic] == ["100", "900", "200"]
+
+    notefolio = tmp_path / "notefolio.html"
+    notefolio.write_text('''<!doctype html><meta charset="utf-8"><body style="height:3000px">
+<a href="https://notefolio.net/recruit/fallback-id">Legacy anchor</a>
+<a class="banner-link" href="https://example.test/jobs/one?utm_source=synthetic">External one</a>
+<a class="banner-link" href="javascript:void(0)">Invalid link</a>
+<script>
+if(new URLSearchParams(location.search).get('search')==='embedded')
+window.__NEXT_DATA__={props:{pageProps:{results:[{id:'embedded-id',created_at:'2026-01-01'}]}}};
+window.addEventListener('scroll',()=>{if(document.querySelector('#extra'))return;
+const a=document.createElement('a');a.id='extra';a.className='banner-link';a.href='https://example.test/jobs/two?ref=synthetic';a.innerText='External two';document.body.appendChild(a);});
+</script></body>''')
+    rows = list(NotefolioAdapter(config={"recruit_url": notefolio.as_uri(),
+                                         "max_scrolls": 5, "scroll_wait_ms": 250}).discover(
+                                             ["embedded", "fallback"], live=True))
+    ids = {r.job_id for r in rows}
+    assert {"embedded-id", "fallback-id"} <= ids
+    assert len(rows) == 4 and len(ids) == 4
+    assert any(r.url == "https://example.test/jobs/one?utm_source=synthetic" for r in rows)
+    assert any(r.url == "https://example.test/jobs/two?ref=synthetic" for r in rows)
+    assert next(r for r in rows if r.job_id == "embedded-id").posted_at == "2026-01-01"
+    return {"jobkorea_entry": [r.job_id for r in entry],
+            "jobkorea_organic": [r.job_id for r in organic],
+            "notefolio": [{"key": r.key, "url": r.url} for r in rows]}
+
+
+def test_browser_discovery_union_with_real_chromium(tmp_path):
+    import pytest
+    if os.environ.get("MARKET_ALIGNER_BROWSER_CANARY") != "1":
+        pytest.skip("Set MARKET_ALIGNER_BROWSER_CANARY=1 with installed Playwright Chromium")
+    _browser_discovery_canary(tmp_path)

@@ -2855,6 +2855,15 @@ class JobDatabase:
             datetime.now(timezone.utc) - last
         ).total_seconds() >= minimum_minutes * 60
 
+    def discovered_keys(self, board: str) -> set[str]:
+        """Every stored posting key for one board, regardless of fetch status."""
+        with closing(self.connect()) as conn, conn:
+            rows = conn.execute(
+                "SELECT key FROM postings WHERE board=?",
+                (str(board),),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
     def boards_with_pending_discoveries(self, boards: Iterable[str]) -> set[str]:
         """Boards whose discovered URLs still need their complete detail page.
 

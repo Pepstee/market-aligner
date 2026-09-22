@@ -381,6 +381,7 @@ class Collector:
         self.boards = plan["boards"]
         collection = plan["collection"]
         self.discover_only = collection.get("discover_only", False)
+        self.target_per_board = int(collection.get("target_per_board", 0))
         self.inter_fetch_delay = float(collection.get("delay_seconds", 0))
         self._board_locks = {board: threading.Lock() for board in self.boards}
         self._next_fetch_start = {board: float("-inf") for board in self.boards}
@@ -431,6 +432,15 @@ class Collector:
             and math.isfinite(delay_value)
             and delay_value >= 0,
             "collection.delay_seconds must be a finite nonnegative real number",
+        )
+
+        target_value = collection.get("target_per_board", 0)
+        _shape(
+            isinstance(target_value, int)
+            and not isinstance(target_value, bool)
+            and target_value >= 0,
+            "collection.target_per_board must be an exact nonnegative integer "
+            "(0 means uncapped)",
         )
 
         boards_cfg = cfg.get("boards")
@@ -671,14 +681,53 @@ class Collector:
                 f"[migrate] preserved {added} discovered and {fetched} fetched legacy rows"
             )
 
+    def _board_config(self, board: str) -> dict[str, Any]:
+        """Per-board adapter config; in TARGET mode raise discovery depth only.
+
+        Returns a copy: the configured board mapping is never mutated, and a
+        ``None`` board config is corrected to an empty mapping. Configured
+        values already meeting the floor are kept unchanged, as are all other
+        board settings and all non-TARGET behavior.
+        """
+        config = dict(self.cfg.get(board) or {})
+        target = self.target_per_board
+        if target <= 0:
+            return config
+        if board == "wanted":
+            list_limit = config.get("list_limit")
+            list_limit = list_limit if isinstance(list_limit, int) and not isinstance(list_limit, bool) and list_limit > 0 else 20
+            floor_pages = ((target + list_limit - 1) // list_limit) + 5
+            max_pages = config.get("max_pages")
+            if not (isinstance(max_pages, int) and not isinstance(max_pages, bool) and max_pages >= floor_pages):
+                config["max_pages"] = floor_pages
+        elif board == "jobkorea":
+            max_pages = config.get("max_pages")
+            if not (isinstance(max_pages, int) and not isinstance(max_pages, bool) and max_pages >= 8):
+                config["max_pages"] = 8
+            config["entry_only"] = False
+        elif board == "notefolio":
+            max_scrolls = config.get("max_scrolls")
+            if not (isinstance(max_scrolls, int) and not isinstance(max_scrolls, bool) and max_scrolls >= 100):
+                config["max_scrolls"] = 100
+        return config
+
     def _discover_board(
         self, board: str, *, deadline: float | None = None
     ) -> tuple[str, Any, list[JobUrl], Exception | None]:
         if deadline is not None and self.monotonic() >= deadline:
             return board, None, [], None
         adapter_loader = self.adapter_loader or load_adapter
-        adapter = adapter_loader(board, config=dict(self.cfg.get(board, {}) or {}))
+        adapter = adapter_loader(board, config=self._board_config(board))
+        target = self.target_per_board
+        known: set[str] = set()
+        if target > 0:
+            known = self.db.discovered_keys(board)
+            if len(known) >= target:
+                # Target already met by stored postings: skip live discovery
+                # but still return the adapter so saved pending rows resume.
+                return board, adapter, [], None
         rows: list[JobUrl] = []
+        observed_keys: set[str] = set()
         try:
             iterator = iter(adapter.discover(self.terms, live=True))
             while deadline is None or self.monotonic() < deadline:
@@ -686,7 +735,23 @@ class Collector:
                     row = next(iterator)
                 except StopIteration:
                     break
+                # Preserve every yielded row, including rediscoveries of keys
+                # already known or seen this run (useful to trust upgrades);
+                # only new unique keys count against the target budget.
+                if target > 0 and row.key in observed_keys:
+                    continue
+                observed_keys.add(row.key)
                 rows.append(row)  # preserve the response that crossed the deadline
+                if target > 0:
+                    try:
+                        validate_public_listing_url(row.url)
+                    except ContractValidationError:
+                        continue  # rejected by cycle; never consume target budget
+                    key = row.key
+                    if key not in known:
+                        known.add(key)
+                        if len(known) >= target:
+                            break
         except SourceUnavailable:
             raise
         except Exception as exc:  # preserve pages yielded before a late failure
