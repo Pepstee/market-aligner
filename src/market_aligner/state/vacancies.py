@@ -2980,6 +2980,50 @@ class JobDatabase:
                 count += 1
         return count
 
+    @staticmethod
+    def collection_status(database_path: Path, boards: Iterable[str]) -> dict:
+        """Read saved counts without creating or updating a collection database.
+
+        States describe saved postings, not current worker activity. SQLite may
+        manage WAL sidecars while opening an existing database read-only.
+        """
+        database_path = Path(database_path)
+        if not database_path.exists():
+            return {
+                "exists": False,
+                "boards": [
+                    {"board": b, "discovered": 0, "fetched": 0, "failed": 0,
+                     "pending": 0, "state": "not_started"}
+                    for b in boards
+                ],
+            }
+        rows: list[dict] = []
+        with closing(sqlite3.connect(
+            database_path.resolve().as_uri() + "?mode=ro", uri=True
+        )) as conn:
+            conn.execute("BEGIN")
+            for board in boards:
+                total, fetched, error = conn.execute(
+                    "SELECT COUNT(*), "
+                    "SUM(CASE WHEN fetch_status='fetched' THEN 1 ELSE 0 END), "
+                    "SUM(CASE WHEN fetch_status='error' THEN 1 ELSE 0 END) "
+                    "FROM postings WHERE board = ?",
+                    (board,),
+                ).fetchone()
+                total, fetched, error = int(total or 0), int(fetched or 0), int(error or 0)
+                pending = total - fetched - error
+                if total > 0 and fetched == total:
+                    state = "complete"
+                elif error > 0:
+                    state = "partial"
+                else:
+                    state = "pending"
+                rows.append({
+                    "board": board, "discovered": total, "fetched": fetched,
+                    "failed": error, "pending": pending, "state": state,
+                })
+        return {"exists": True, "boards": rows}
+
     def stats(self) -> dict[str, int]:
         with closing(self.connect()) as conn, conn:
             total = conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0]

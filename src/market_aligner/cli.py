@@ -11,6 +11,7 @@ from pathlib import Path
 from market_aligner import __version__
 from market_aligner import processing as processing_module
 from market_aligner.collectors.engine import Collector
+from market_aligner.state.vacancies import JobDatabase
 from market_aligner.config import ProductPaths
 from market_aligner.config_loader import closure_identity, snapshot_config
 from market_aligner.applications.producer import write_handoff
@@ -218,6 +219,15 @@ def _collect_command(args: argparse.Namespace) -> int:
     )
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
+
+
+def _collect_status_command(args: argparse.Namespace) -> int:
+    cfg, _ = snapshot_config(args.config)
+    paths = ProductPaths.resolve(args.data_home)
+    plan = Collector.plan(paths.root, cfg)
+    status = JobDatabase.collection_status(plan["database"], plan["boards"])
+    print(json.dumps(status, ensure_ascii=False, sort_keys=True))
+    return 0 if status["exists"] else 1
 
 
 def _refresh_vacancy_command(args: argparse.Namespace) -> int:
@@ -974,6 +984,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_data_home(collect)
     collect.set_defaults(handler=_collect_command)
+
+    collect_status = commands.add_parser(
+        "collect-status",
+        help="Read-only snapshot of offline collector status; reports saved postings without collecting.",
+    )
+    collect_status.add_argument("--config", type=Path, required=True)
+    _add_data_home(collect_status)
+    collect_status.set_defaults(handler=_collect_status_command)
 
     refresh = commands.add_parser(
         "refresh-vacancy",

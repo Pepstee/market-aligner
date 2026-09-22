@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
+import threading
+
 import hashlib
 import os
 import secrets
@@ -376,6 +379,9 @@ class Collector:
         self.boards = plan["boards"]
         collection = plan["collection"]
         self.discover_only = collection.get("discover_only", False)
+        self.inter_fetch_delay = float(collection.get("delay_seconds", 0))
+        self._board_locks = {board: threading.Lock() for board in self.boards}
+        self._next_fetch_start = {board: float("-inf") for board in self.boards}
         self.source_workers = int(
             collection.get("source_workers", len(self.boards) or 1)
         )
@@ -414,6 +420,15 @@ class Collector:
         _shape(
             isinstance(collection.get("discover_only", False), bool),
             "collection.discover_only must be a boolean",
+        )
+
+        delay_value = collection.get("delay_seconds", 0)
+        _shape(
+            isinstance(delay_value, (int, float))
+            and not isinstance(delay_value, bool)
+            and math.isfinite(delay_value)
+            and delay_value >= 0,
+            "collection.delay_seconds must be a finite nonnegative real number",
         )
 
         boards_cfg = cfg.get("boards")
@@ -971,10 +986,41 @@ class Collector:
         self.log(f"[cycle] {result}")
         return result
 
+    def _respect_inter_fetch_delay(self, board: str, deadline: float | None) -> bool:
+        """Space this board's fetch starts by ``delay_seconds``.
+
+        Returns False when the deadline expires while waiting; callers skip
+        the row (no error). Boards are independent; other boards unaffected.
+        """
+        lock = self._board_locks[board]
+        with lock:
+            now = self.monotonic()
+            if deadline is not None and now >= deadline:
+                return False
+            wait = self._next_fetch_start[board] - now
+            while wait > 0:
+                if deadline is not None:
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        return False
+                    wait = min(wait, remaining)
+                self.sleeper(wait)
+                now = self.monotonic()
+                if deadline is not None and now >= deadline:
+                    return False
+                wait = self._next_fetch_start[board] - now
+            self._next_fetch_start[board] = max(now, self._next_fetch_start[board]) + self.inter_fetch_delay
+            return True
+
     def _bounded_fetch(
-        self, adapter: Any, row: JobUrl, deadline: float | None
+        self,
+        adapter: Any,
+        row: JobUrl,
+        deadline: float | None,
     ) -> tuple[RawPosting, str | None] | None:
         if deadline is not None and self.monotonic() >= deadline:
+            return None
+        if not self._respect_inter_fetch_delay(row.board, deadline):
             return None
         return self._fetch_row(adapter, row)
 

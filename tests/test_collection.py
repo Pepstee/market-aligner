@@ -2554,3 +2554,119 @@ def test_run_does_not_start_new_discovery_after_window_sleep(tmp_path):
     assert calls == ["discover"]
     assert collector.cycle(deadline=clock[0])["seen"] == 0
     assert calls == ["discover"]
+
+
+def test_collector_delay_and_deadline_resume(tmp_path):
+    clock = [0.0]
+    starts = []
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    class Adapter:
+        def discover(self, _terms, live=False):
+            for n in range(3):
+                yield JobUrl("injected", str(n), f"https://example.test/{n}")
+
+        def fetch(self, row, live=False):
+            starts.append(clock[0])
+            return RawPosting(row.board, row.job_id, row.url,
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              raw_text="synthetic listing")
+
+    collector = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"delay_seconds": 5, "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None, monotonic=lambda: clock[0],
+                          sleeper=sleep, adapter_loader=lambda *a, **kw: Adapter())
+    result = collector.cycle(deadline=7)
+    assert result["fetched"] == 2 and result["errors"] == 0
+    assert starts == [0, 5] and sleeps == [5, 2]
+    assert len(collector.db.pending_discoveries(["injected"])) == 1
+    assert collector.cycle()["fetched"] == 1
+    assert starts == [0, 5, 10]
+
+
+def test_collector_delay_rejects_invalid_before_creating_state(tmp_path):
+    import pytest
+    for n, value in enumerate([True, False, -1, float("nan"), float("inf"), "5", None]):
+        root = tmp_path / str(n)
+        with pytest.raises(ValueError, match="delay_seconds"):
+            Collector({"boards": {"enabled": ["injected"]},
+                       "collection": {"delay_seconds": value}}, root)
+        assert not root.exists()
+
+
+def test_collector_delay_keeps_boards_independent(tmp_path):
+    clock = [0.0]
+    starts = {}
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    class Adapter:
+        def __init__(self, board):
+            self.board = board
+
+        def discover(self, _terms, live=False):
+            for n in range(2):
+                yield JobUrl(self.board, str(n), f"https://example.test/{self.board}/{n}")
+
+        def fetch(self, row, live=False):
+            starts.setdefault(row.board, []).append(clock[0])
+            return RawPosting(row.board, row.job_id, row.url,
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              raw_text="synthetic listing")
+
+    collector = Collector({"boards": {"enabled": ["a", "b"]},
+                           "collection": {"delay_seconds": 5, "source_workers": 1,
+                                          "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None, monotonic=lambda: clock[0],
+                          sleeper=sleep, adapter_loader=lambda board, **kw: Adapter(board))
+    assert collector.cycle()["fetched"] == 4
+    assert starts == {"a": [0, 5], "b": [0, 5]}
+
+
+def test_offline_collection_status_real_cli(tmp_path):
+    data = tmp_path / "data"
+    cfg = tmp_path / "collection.yaml"
+    cfg.write_text(yaml.safe_dump({"boards": {"enabled": ["a", "b", "c"]}}))
+    db_path = data / "state" / "vacancies.sqlite3"
+    db = JobDatabase(db_path)
+    for board, ids in [("a", range(3)), ("b", range(1))]:
+        for n in ids:
+            job = JobUrl(board, str(n), f"https://example.test/{board}/{n}")
+            db.upsert_discovered(job)
+            if n == 0:
+                db.store_raw(RawPosting(board, str(n), job.url,
+                                        "2026-01-01T00:00:00Z", raw_text="synthetic listing"))
+            elif n == 1:
+                db.record_error(job.key, "fetch_error")
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    output = io.StringIO()
+    with mock.patch("market_aligner.collectors.engine.load_adapter", side_effect=AssertionError("network forbidden")):
+        with redirect_stdout(output):
+            rc = main(["collect-status", "--config", str(cfg), "--data-home", str(data)])
+    assert rc == 0
+    status = json.loads(output.getvalue())
+    rows = {r["board"]: r for r in status["boards"]}
+    assert rows["a"] == {"board": "a", "discovered": 3, "fetched": 1,
+                         "failed": 1, "pending": 1, "state": "partial"}
+    assert rows["b"]["state"] == "complete"
+    assert rows["c"]["discovered"] == 0
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
+
+
+def test_offline_collection_status_absent_database(tmp_path):
+    data = tmp_path / "absent"
+    cfg = tmp_path / "collection.yaml"
+    cfg.write_text(yaml.safe_dump({"boards": {"enabled": ["a"]}}))
+    output = io.StringIO()
+    with redirect_stdout(output):
+        rc = main(["collect-status", "--config", str(cfg), "--data-home", str(data)])
+    assert rc == 1 and not data.exists()
+    status = json.loads(output.getvalue())
+    assert status == {"exists": False, "boards": [
+        {"board": "a", "discovered": 0, "fetched": 0, "failed": 0,
+         "pending": 0, "state": "not_started"}]}
