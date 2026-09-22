@@ -352,11 +352,10 @@ def test_v2_direct_cooperative_result_binding(
     worker_output = execution_root / "worker-output"
     worker_output.mkdir(mode=0o700)
     request_path = execution_root / "integration-request.json"
-    chromium = next(
-        Path("/home/gutua/.cache/ms-playwright").glob(
-            "chromium-*/chrome-linux64/chrome"
-        )
-    ).resolve(strict=True)
+    from career_automation.runtime_compatibility import inspect_runtime
+    from test_jaa10_network_witnessed_fixture_negative_controls import _sealed_projection
+
+    chromium = Path(inspect_runtime(launch=False).chromium_executable).resolve(strict=True)
     source = _synthetic_source()
     monkeypatch.setattr(witness_module, "_source_identity", lambda _root: source)
     runtime_tmp_root, derivation, socket_budget = (
@@ -370,6 +369,7 @@ def test_v2_direct_cooperative_result_binding(
         python_executable=Path(sys.executable).resolve(strict=True),
         chromium_executable=chromium,
         integration_nonce=nonce,
+        protected_corpus_binding=_sealed_projection(source),
     )
     request_payload = _canonical_json(request)
     request_path.write_bytes(request_payload)

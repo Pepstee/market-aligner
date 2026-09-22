@@ -468,3 +468,53 @@ def test_mandatory_runner_rejects_real_skipped_execution(tmp_path, body, accepte
     assert (result.returncode == 0) is accepted, result.stdout + result.stderr
     if not accepted:
         assert "MANDATORY SKIP:" in result.stderr
+
+
+def test_environment_gate_requires_installed_protected_binding_only_when_requested(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "environment_gate", REPOSITORY / "scripts/verify-gate-environment.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from career_automation import protected_corpus_binding as binding
+
+    for name in ("requirements-bootstrap.lock", "requirements-test.lock", "jaa.whl", "market.whl"):
+        (tmp_path / name).write_bytes(b"synthetic gate input")
+    monkeypatch.setattr(module, "_clean_head", lambda root: ("a" * 40, "b" * 40, 1))
+    monkeypatch.setattr(module, "_installed_manifest", lambda: ("1.0.0", "c" * 64))
+    monkeypatch.setattr(module, "_market_manifest", lambda: "d" * 64)
+    receipt = tmp_path / "receipt.json"
+    monkeypatch.setattr(module, "_receipt_path", lambda: receipt)
+    document = module._expected(tmp_path, wheel=tmp_path / "jaa.whl",
+                                market_wheel=tmp_path / "market.whl", browser_cache=None)
+    receipt.write_bytes(module._canonical(document))
+    calls = []
+    def reject(root):
+        calls.append(root)
+        raise binding.ProtectedCorpusBindingError("synthetic_missing_binding", "missing")
+    monkeypatch.setattr(binding, "load_installed_protected_corpus_binding", reject)
+    assert module.verify(tmp_path, None) == document
+    assert not calls
+    with pytest.raises(SystemExit, match="synthetic_missing_binding"):
+        module.verify(tmp_path, None, require_protected_corpus=True)
+    assert calls == [tmp_path]
+
+
+@pytest.mark.parametrize("configuration", ["environment", "installed-binding"])
+def test_generic_environment_gate_refuses_protected_configuration_before_receipt(tmp_path, monkeypatch, configuration):
+    spec = importlib.util.spec_from_file_location(
+        "isolated_environment_gate", REPOSITORY / "scripts/verify-gate-environment.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from career_automation import protected_corpus_binding as binding
+    pin = tmp_path / "synthetic-binding"
+    monkeypatch.setattr(binding, "_COMPILED_BINDING_PATH", pin)
+    for name in (*binding.FORBIDDEN_RUNTIME_LOCATORS, "JAA09_EVIDENCE_CONTROL_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    if configuration == "environment":
+        monkeypatch.setenv("JAA_CERTIFIED_CORPUS_ROOT", "synthetic-never-read")
+    else:
+        pin.write_bytes(b"synthetic never-read binding")
+    with pytest.raises(SystemExit, match="generic gate refuses"):
+        module.verify(tmp_path, None, forbid_protected_corpus=True)

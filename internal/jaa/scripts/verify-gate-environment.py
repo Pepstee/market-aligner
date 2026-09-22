@@ -131,7 +131,24 @@ def write(root: Path, wheel: Path, market_wheel: Path, browser_cache: str | None
     print(f"gate environment receipt written: {path}")
 
 
-def verify(root: Path, browser_cache: str | None) -> None:
+def verify(
+    root: Path, browser_cache: str | None, *, require_protected_corpus: bool = False,
+    forbid_protected_corpus: bool = False
+) -> dict[str, object]:
+    if require_protected_corpus and forbid_protected_corpus:
+        raise SystemExit("protected corpus modes are mutually exclusive")
+    if forbid_protected_corpus:
+        from career_automation.protected_corpus_binding import (
+            FORBIDDEN_RUNTIME_LOCATORS, _COMPILED_BINDING_PATH,
+        )
+        if any(name in os.environ for name in (*FORBIDDEN_RUNTIME_LOCATORS, "JAA09_EVIDENCE_CONTROL_ROOT")):
+            raise SystemExit("generic gate refuses protected corpus configuration")
+        try:
+            _COMPILED_BINDING_PATH.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise SystemExit("generic gate refuses an installed protected corpus binding")
     path = _receipt_path()
     try:
         value = path.read_bytes()
@@ -182,10 +199,19 @@ def verify(root: Path, browser_cache: str | None) -> None:
         raise SystemExit("gate environment does not match its clean-head receipt")
     if not all(SHA256.fullmatch(str(document[key])) for key in ("wheel_sha256", "market_wheel_sha256")):
         raise SystemExit("gate environment wheel identity is invalid")
+    if require_protected_corpus:
+        from career_automation.protected_corpus_binding import (
+            ProtectedCorpusBindingError, load_installed_protected_corpus_binding,
+        )
+        try:
+            load_installed_protected_corpus_binding(root)
+        except ProtectedCorpusBindingError as exc:
+            raise SystemExit(exc.code) from None
     print(
         "gate environment verified: "
         f"{head} wheel sha256:{document['wheel_sha256']}"
     )
+    return document
 
 
 def main() -> int:
@@ -195,16 +221,22 @@ def main() -> int:
     parser.add_argument("--wheel", type=Path)
     parser.add_argument("--market-wheel", type=Path)
     parser.add_argument("--browser-cache")
+    corpus_mode = parser.add_mutually_exclusive_group()
+    corpus_mode.add_argument("--require-protected-corpus", action="store_true")
+    corpus_mode.add_argument("--forbid-protected-corpus", action="store_true")
     args = parser.parse_args()
     root = args.repository_root.resolve(strict=True)
     if args.write:
+        if args.require_protected_corpus or args.forbid_protected_corpus:
+            parser.error("protected corpus mode is valid only while verifying")
         if args.wheel is None or args.market_wheel is None:
             parser.error("--write requires --wheel and --market-wheel")
         write(root, args.wheel.resolve(strict=True), args.market_wheel.resolve(strict=True), args.browser_cache)
     else:
         if args.wheel is not None or args.market_wheel is not None:
             parser.error("--wheel is valid only with --write")
-        verify(root, args.browser_cache)
+        verify(root, args.browser_cache, require_protected_corpus=args.require_protected_corpus,
+               forbid_protected_corpus=args.forbid_protected_corpus)
     return 0
 
 
