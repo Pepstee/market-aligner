@@ -2041,3 +2041,37 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
         "submit_clicks": 0,
     }
     print("MARKET_JAA_LOCAL_GREENHOUSE " + json.dumps(evidence, sort_keys=True))
+
+
+def test_legacy_pipeline_cli_refuses_unlabelled_import_and_supported_cli_persists(tmp_path):
+    """The obsolete CLI must not create a DB; explicit legacy admission is durable."""
+    import subprocess
+
+    database = tmp_path / "legacy.sqlite3"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(SOURCE_ROOT), str(JAA_ROOT)))}
+    refused = subprocess.run(
+        [sys.executable, str(JAA_ROOT / "scripts/advance_career_pipeline.py"),
+         "--database", str(database), "bootstrap"],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert refused.returncode != 0
+    assert "jaa-handoff admit-legacy-scored-jsonl" in refused.stderr
+    assert not database.exists()
+
+    exact = canonical_json_bytes({
+        "board": "synthetic", "job_id": "legacy-cli", "opportunity": 0.8,
+        "extraction_confidence": 0.9,
+    }) + b"\n"
+    scored = tmp_path / "scores.jsonl"
+    scored.write_bytes(exact)
+    command = [sys.executable, "-m", "career_automation.handoff_cli",
+               "admit-legacy-scored-jsonl", "--database", str(database), str(scored)]
+    for _ in range(2):
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"admission_kind": "legacy_scored_jsonl", "admitted": 1}
+    application_id = "legacy_" + hashlib.sha256(exact).hexdigest()
+    stored = HandoffAdmissionStore(database).verify_stored(application_id)
+    assert stored.admission_kind == "legacy_scored_jsonl"
+    assert stored.authority_scope == "none"
+    assert not stored.release_capable

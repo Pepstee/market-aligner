@@ -8,10 +8,10 @@ exclusively beneath `internal/jaa`; donor copies never gain runtime authority.
 
 ## Status counts
 
-- `adopted_adapted`: 3137
+- `adopted_adapted`: 3159
 - `canonical`: 20874
 - `canonical_relocated_exact`: 949
-- `conflicting_variant_review`: 78
+- `conflicting_variant_review`: 59
 - `integration_required`: 107
 - `quarantined`: 327
 - `retained_evidence`: 2469
