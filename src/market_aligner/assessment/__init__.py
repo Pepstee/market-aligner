@@ -1,6 +1,12 @@
 """Eligibility, opportunity, evidence alignment, fit, and calibration boundaries."""
 
-from .eligibility import EligibilityDecision, EligibilityInput, EligibilityPolicy, assess_eligibility
+from .eligibility import (
+    EligibilityCheck,
+    EligibilityDecision,
+    EligibilityInput,
+    EligibilityPolicy,
+    assess_eligibility,
+)
 from .geography import (
     GeographyMatch,
     LocationFacts,
@@ -15,6 +21,7 @@ from .geography import (
 from .scoring import FitStatus, ScoreResult, ScoringParams, score
 
 __all__ = [
+    "EligibilityCheck",
     "EligibilityDecision",
     "EligibilityInput",
     "EligibilityPolicy",

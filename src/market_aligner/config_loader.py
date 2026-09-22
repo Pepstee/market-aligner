@@ -29,6 +29,17 @@ import yaml
 Reader = Callable[[Path], bytes]
 
 
+def parse_config_bytes(exact_bytes: bytes) -> dict[str, Any]:
+    """Parse one exact YAML document without following external indirection."""
+    try:
+        payload = yaml.safe_load(exact_bytes.decode("utf-8")) or {}
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("configuration must be valid UTF-8 YAML") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("configuration root must be a mapping")
+    return payload
+
+
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
@@ -76,13 +87,10 @@ def snapshot_config(
     except OSError as exc:
         raise ValueError(f"configuration {source} could not be read: {exc}") from exc
 
-    def parse(raw: bytes) -> dict[str, Any]:
-        payload = yaml.safe_load(raw.decode("utf-8")) or {}
-        if not isinstance(payload, dict):
-            raise ValueError(f"configuration root of {source} must be a mapping")
-        return payload
-
-    payload = parse(payload_bytes)
+    try:
+        payload = parse_config_bytes(payload_bytes)
+    except ValueError as exc:
+        raise ValueError(f"configuration {source}: {exc}") from exc
     parent = payload.pop("extends", None)
 
     child_identity = hashlib.sha256(payload_bytes).hexdigest()
@@ -119,9 +127,7 @@ def load_config(path: str | Path, _stack: tuple[Path, ...] = ()) -> dict[str, An
     if source in _stack:
         chain = " -> ".join(str(item) for item in (*_stack, source))
         raise ValueError(f"configuration extends cycle: {chain}")
-    payload = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
-    if not isinstance(payload, dict):
-        raise ValueError("configuration root must be a mapping")
+    payload = parse_config_bytes(source.read_bytes())
     parent = payload.pop("extends", None)
     if not parent:
         return payload

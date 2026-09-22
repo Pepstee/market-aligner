@@ -16,6 +16,39 @@ from market_aligner.config import (
 )
 
 
+def test_exact_config_bytes_and_recursive_loaders_share_parser(tmp_path):
+    import pytest
+    from market_aligner.config_loader import parse_config_bytes, load_config, snapshot_config
+
+    exact = b"extends: absent.yaml\ncollection:\n  fetch_workers: 2\n"
+    # Parsing bytes is independent of the filesystem and never follows extends.
+    assert parse_config_bytes(exact) == {
+        "extends": "absent.yaml", "collection": {"fetch_workers": 2}}
+    assert parse_config_bytes(b"") == {}
+    for malformed in (b"\xff", b"bad: [", b"- not-a-mapping"):
+        with pytest.raises(ValueError):
+            parse_config_bytes(malformed)
+        child = tmp_path / "bad.yaml"
+        child.write_bytes(malformed)
+        for loader in (load_config, snapshot_config):
+            with pytest.raises(ValueError):
+                loader(child)
+    parent = tmp_path / "parent.yaml"
+    parent.write_text("collection:\n  fetch_workers: 1\n  delay_seconds: 2\n")
+    child = tmp_path / "child.yaml"
+    child.write_bytes(exact.replace(b"absent.yaml", b"parent.yaml"))
+    expected = {"collection": {"fetch_workers": 2, "delay_seconds": 2}}
+    assert load_config(child) == snapshot_config(child)[0] == expected
+
+
+def test_assessment_package_preserves_eligibility_check_export():
+    from market_aligner.assessment import EligibilityCheck
+    from market_aligner.assessment.eligibility import EligibilityCheck as Owner
+
+    assert EligibilityCheck is Owner
+    assert EligibilityCheck("example", "pass").outcome == "pass"
+
+
 def _probe_umask() -> int:
     """Read the current umask without leaving it changed."""
     prior = os.umask(0o077)
