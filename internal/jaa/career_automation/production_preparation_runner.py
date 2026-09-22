@@ -643,10 +643,13 @@ def _normalized_device(value: int) -> int:
 
 def _require_descriptor_path_identity(descriptor: int, path: str) -> None:
     descriptor_metadata = os.fstat(descriptor)
-    path_descriptor = os.open(
-        path,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
-    )
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    # Linux exposes this exact already-owned descriptor through a kernel link.
+    # Ordinary caller paths must still reject symlinks; both routes verify inode
+    # and device against the original descriptor after opening.
+    if path != f"/proc/self/fd/{descriptor}":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    path_descriptor = os.open(path, flags)
     try:
         path_metadata = os.fstat(path_descriptor)
     finally:

@@ -965,3 +965,20 @@ def test_cli_help_bootstraps_from_unrelated_locked_working_directory(
     )
     assert completed.returncode == 0, completed.stderr
     assert "--application-id" in completed.stdout
+
+
+@pytest.mark.parametrize("substitution", ["symlink", "different-directory"])
+def test_directory_descriptor_rejects_path_substitution(tmp_path: Path, substitution: str) -> None:
+    original = tmp_path / "original"
+    original.mkdir()
+    target = tmp_path / "target"
+    if substitution == "symlink":
+        target.symlink_to(original, target_is_directory=True)
+    else:
+        target.mkdir()
+    descriptor = os.open(original, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError):
+            runner._require_descriptor_path_identity(descriptor, str(target))
+    finally:
+        os.close(descriptor)
