@@ -300,6 +300,26 @@ class BoundedSubprocessTests(unittest.TestCase):
         self.assertEqual(result.boundary_notice, PROCESS_BOUNDARY_NOTICE)
         self.assertIn("not a network sandbox", result.boundary_notice)
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX inherited timer")
+    def test_denied_group_signal_reaps_child_using_inherited_timer(self) -> None:
+        import signal
+        from unittest.mock import patch
+
+        runner = BoundedSubprocessRunner(
+            SubprocessPolicy(allowed_executables=(self.executable,), max_runtime_seconds=4)
+        )
+        started = time.monotonic()
+        with patch("career_automation.security.os.killpg", side_effect=PermissionError):
+            result = runner.run(
+                (self.executable, "-c", "import os,time; print(os.getpid(), flush=True); time.sleep(30)"),
+                timeout_seconds=2.2,
+            )
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.returncode, -signal.SIGALRM)
+        self.assertLess(time.monotonic() - started, 5)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(result.stdout_text.strip()), 0)
+
 
 def shutil_which(executable: str) -> str | None:
     # Local helper avoids importing the module just for one platform-dependent test.
