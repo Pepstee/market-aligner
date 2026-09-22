@@ -156,6 +156,12 @@ COMMAND_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
 }
 
+# Carry only the explicitly configured protected-fixture root across child processes.
+if "JAA_CERTIFIED_CORPUS_ROOT" in os.environ:
+    COMMAND_ENVIRONMENT["JAA_CERTIFIED_CORPUS_ROOT"] = os.environ[
+        "JAA_CERTIFIED_CORPUS_ROOT"
+    ]
+
 
 class NetworkWitnessError(RuntimeError):
     """The namespace witness could not satisfy its exact predicate."""

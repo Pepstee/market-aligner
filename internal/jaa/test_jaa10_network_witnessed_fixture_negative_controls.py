@@ -542,6 +542,7 @@ def test_preexisting_runtime_tmp_object_fails_before_browser(
         "b" * 40,
         "sha256:" + ("c" * 64),
     )
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(tmp_path.resolve()))
     anchor = tmp_path_factory.getbasetemp()
     monkeypatch.setattr(
         witness_module,
@@ -677,6 +678,7 @@ def test_worker_revalidates_python_identity_before_corpus(tmp_path, monkeypatch,
     import os
 
     root = tmp_path.resolve()
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(root))
     output = root / "worker-output"
     output.mkdir()
     executable = root / "python-real"
@@ -726,3 +728,55 @@ def test_worker_revalidates_python_identity_before_corpus(tmp_path, monkeypatch,
         with pytest.raises(NetworkWitnessedFixtureError, match="runtime executable changed"):
             fixture_module._execute_worker(root / "request.json", output, root)
         assert calls == []
+
+
+@pytest.mark.parametrize("case", ["valid", "missing", "relative", "file", "symlink", "parent"])
+def test_explicit_corpus_root_validation(tmp_path, monkeypatch, case):
+    root = tmp_path.resolve()
+    corpus = root / "synthetic-corpus"
+    corpus.mkdir()
+    file = root / "file"
+    file.write_text("synthetic")
+    alias = root / "alias"
+    alias.symlink_to(corpus, target_is_directory=True)
+    values = {"valid": str(corpus), "relative": "synthetic-corpus", "file": str(file),
+              "symlink": str(alias), "parent": str(corpus / ".." / "synthetic-corpus")}
+    monkeypatch.delitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", raising=False)
+    if case != "missing":
+        monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", values[case])
+    if case == "valid":
+        assert fixture_module._certified_corpus_root() == corpus
+    else:
+        with pytest.raises(NetworkWitnessedFixtureError, match="certified corpus root"):
+            fixture_module._certified_corpus_root()
+
+
+def test_corpus_configuration_survives_fixed_child_environment(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    root = tmp_path.resolve()
+    key = "JAA_CERTIFIED_CORPUS_ROOT"
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, key, str(root))
+    monkeypatch.setenv("UNRELATED_PRIVATE_SETTING", "must-not-propagate")
+    monkeypatch.setattr(fixture_module, "_playwright_runtime_identity", lambda *a: {})
+    source = SourceIdentity("a" * 40, "b" * 40, "sha256:" + "c" * 64)
+    request = fixture_module._request_document(
+        source=source, execution_root=Path("/tmp/synthetic-attempt"),
+        python_executable=Path(sys.executable), chromium_executable=Path("/synthetic"),
+        integration_nonce=b"x" * 32,
+    )
+    environment = request["environment"]
+    assert environment[key] == str(root)
+    assert "UNRELATED_PRIVATE_SETTING" not in environment
+    assert request["environment_sha256"] == _domain_hash(ENVIRONMENT_DOMAIN, _canonical_json(environment))
+    program = (
+        "import sys; sys.path.insert(0, " + repr(str(ROOT)) + "); "
+        "from career_automation.network_witnessed_fixture import _certified_corpus_root; "
+        "print(_certified_corpus_root())"
+    )
+    completed = subprocess.run([sys.executable, "-c", program], env=environment,
+                               capture_output=True, text=True, timeout=20)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == str(root)

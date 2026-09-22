@@ -155,14 +155,7 @@ MAX_ARTIFACT_BYTES = 64_000_000
 NONCE = "fixture-review-nonce-00000001"
 FORM_TOKEN = "fixture-form-token-00000000001"
 DISCLOSURE = "deterministic approved fixture candidate projection; not a real person"
-FIXED_CORPUS = Path(
-    os.environ.get(
-        "JAA_CERTIFIED_CORPUS_ROOT",
-        "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
-        "runtime/.jaa04-corpus-v3-a4f4490-releases/"
-        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
-    )
-)
+CERTIFIED_CORPUS_ENVIRONMENT_KEY = "JAA_CERTIFIED_CORPUS_ROOT"
 TRACKED_SEED_RELATIVE = Path("career_automation/fixtures/jaa04_admitted_queue.json")
 POLICY_DIGEST = hashlib.sha256(b"jaa10-network-witnessed-fixture").hexdigest()
 MATCHING_POLICY = MatchingPolicy()
@@ -438,6 +431,33 @@ def _source_identity(repository: Path) -> SourceIdentity:
     return SourceIdentity(identity.head, identity.tree, identity.content_revision)
 
 
+def _certified_corpus_root() -> Path:
+    value = COMMAND_ENVIRONMENT.get(CERTIFIED_CORPUS_ENVIRONMENT_KEY)
+    if not value:
+        raise NetworkWitnessedFixtureError(
+            "certified corpus root is required for the protected fixture"
+        )
+    root = Path(value)
+    try:
+        status = root.lstat()
+        resolved = root.resolve(strict=True)
+    except OSError as error:
+        raise NetworkWitnessedFixtureError(
+            "certified corpus root is unavailable"
+        ) from error
+    if (
+        not root.is_absolute()
+        or Path(os.path.abspath(os.fspath(root))) != root
+        or stat.S_ISLNK(status.st_mode)
+        or not stat.S_ISDIR(status.st_mode)
+        or resolved != root
+    ):
+        raise NetworkWitnessedFixtureError(
+            "certified corpus root must be an absolute lexical directory"
+        )
+    return root
+
+
 def _path_identity(path: Path) -> dict[str, object]:
     status = path.stat()
     return {
@@ -515,6 +535,7 @@ def _request_document(
     chromium_executable: Path,
     integration_nonce: bytes,
 ) -> dict[str, object]:
+    _certified_corpus_root()
     policy = _cooperative_policy()
     runtime_tmp_root, derivation, socket_budget = derive_runtime_tmp_binding(
         source,
@@ -1535,7 +1556,7 @@ def _execute_worker(
     if dict(os.environ) != expected_environment:
         raise NetworkWitnessedFixtureError("worker environment differs")
     authority = verify_graphcore_corpus(
-        FIXED_CORPUS,
+        _certified_corpus_root(),
         repository / TRACKED_SEED_RELATIVE,
     )
     release_inputs = _issued_release_inputs(output_root, repository, authority)
@@ -2174,6 +2195,7 @@ def run_network_witnessed_fixture(
     root = Path(execution_root)
     if not root.is_absolute() or root.exists() or root.is_symlink():
         raise NetworkWitnessedFixtureError("execution root must be a new absolute path")
+    _certified_corpus_root()
     repository = Path(repository_root).resolve(strict=True)
     python = Path(python_executable).absolute()
     if not python.is_file():
