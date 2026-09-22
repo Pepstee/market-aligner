@@ -256,7 +256,7 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
 
 
 def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
     fixture_bytes = (
         files("career_automation")
@@ -292,6 +292,28 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
             reference.subject["unexpected"] = "mutation"
 
     output_root = tmp_path / "external-data-home"
+    # A failed batch must publish nothing, preserve no partial temporary bundle,
+    # and permit an exact retry through the real publication entrypoint.
+    import market_aligner.applications.producer as producer
+    original_write = producer._write_exact
+    for fail_after in (1, 5):
+        writes = 0
+        def interrupted_write(path, value):
+            nonlocal writes
+            original_write(path, value)
+            writes += 1
+            if writes == fail_after:
+                raise OSError("injected batch write interruption")
+        with monkeypatch.context() as patch:
+            patch.setattr(producer, "_write_exact", interrupted_write)
+            with pytest.raises(OSError, match="injected batch write interruption"):
+                write_protected_handoff_bundle(
+                    output_root, handoff, references=references,
+                    environment="synthetic", trust_root_id="synthetic-market-root",
+                    issued_at="2026-08-10T10:04:00Z", source_job_key="workable:synthetic:42",
+                )
+        assert list((output_root / "bundles").iterdir()) == []
+        assert list(output_root.glob(".handoff-*")) == []
     first = write_protected_handoff_bundle(
         output_root,
         handoff,
