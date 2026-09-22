@@ -175,3 +175,28 @@ canonicalization gate authorises provider acceptance:
 
 This mode remains synthetic and has no browser, release, application or mailbox
 authority. Excavation and hermetic tests do not execute the provider command.
+
+
+## Protected outbox review material
+
+The existing `write_protected_handoff_bundle` API accepts optional
+`visible_listing_text_bytes`. This integration requires the paired JAA package.
+It preserves the exact original capture and adds a separate NFC/LF projection,
+both bound to the handoff, raw listing, snapshot and source expiry. Generated
+review references use the canonical `market-aligner` producer identity.
+No text is inferred from HTML and no additional database is created.
+
+`ProtectedOutboxReviewMaterialAccessor` wraps a configured `ProtectedLocalOutbox`
+and an explicit issuer allowlist. Supply it to the existing
+`ReviewMaterialAssembler` with the existing admission store, artifact accessor,
+PDF extractor and current-time witness. It reopens pinned objects and metadata,
+rejects changed request identities or source bytes, and authenticates the exact
+original capture as well as its projection. The assembler remains the owner of
+authenticated time consumption, replay rejection and archived review receipts.
+
+Existing bundles without a capture fail closed at review. The production
+handoff builder does not automatically acquire a capture, and the Greenhouse
+browser preparation path remains separately owned. The producer/accessor tests
+exercise concrete bundle publication, admission, assembly and reopened archive
+bytes using synthetic source and application fixtures. They do not certify a
+live application, private candidate material, or production deployment.

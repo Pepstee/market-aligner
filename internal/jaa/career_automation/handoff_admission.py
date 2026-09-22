@@ -612,11 +612,15 @@ class ProtectedLocalOutbox:
             raise HandoffAdmissionError("outbox_reference", "reference proof differs")
 
     def resolve(self, request: ReferenceRequest) -> ResolvedReference:
+        return self.resolve_by_key(request.spec.reference_key, request.sha256)
+
+    def resolve_by_key(self, reference_key: str, object_sha256: str) -> ResolvedReference:
+        """Read exact object/metadata bytes from the pinned source record."""
         try:
-            row = self._entries[request.spec.reference_key]
+            row = self._entries[reference_key]
         except KeyError as exc:
-            raise FileNotFoundError(request.spec.reference_key) from exc
-        if row["object_sha256"] != request.sha256:
+            raise FileNotFoundError(reference_key) from exc
+        if row["object_sha256"] != object_sha256:
             raise HandoffAdmissionError(
                 "outbox_reference", "reference object digest differs"
             )
@@ -626,7 +630,115 @@ class ProtectedLocalOutbox:
             raise HandoffAdmissionError(
                 "outbox_reference", "reference metadata digest differs"
             )
+        if hashlib.sha256(exact).hexdigest() != object_sha256:
+            raise HandoffAdmissionError("outbox_reference", "reference bytes differ")
         return ResolvedReference(exact, metadata)
+
+
+class ProtectedOutboxReviewMaterialAccessor:
+    """Resolve review captures through the existing pinned outbox trust boundary."""
+
+    def __init__(self, outbox: ProtectedLocalOutbox, *, trusted_issuer_ids: frozenset[str]):
+        from .review_material import _strict_identity
+        if type(trusted_issuer_ids) is not frozenset or not trusted_issuer_ids:
+            raise ValueError("review issuer allowlist must be a nonempty frozenset")
+        for issuer in trusted_issuer_ids:
+            _strict_identity(issuer, "review issuer")
+        self.outbox = outbox
+        self.trusted_issuer_ids = trusted_issuer_ids
+        context = outbox._decode(outbox.context_bytes, "outbox context")
+        outbox.authenticate(context_bytes=outbox.context_bytes,
+                            handoff_bytes=outbox.handoff_bytes, evaluated_at=context["issued_at"])
+        self.environment = context["environment"]
+        self.trust_root_id = context["trust_root_id"]
+        self.accessor_identity_sha256 = hashlib.sha256(canonical_json_bytes({
+            "kind": "protected-outbox-review-accessor.v1",
+            "resolver_identity_sha256": outbox.resolver_identity_sha256,
+            "trusted_issuer_ids": sorted(trusted_issuer_ids),
+        })).hexdigest()
+
+    def _reference(self, key):
+        try:
+            digest = self.outbox._entries[key]["object_sha256"]
+        except KeyError as exc:
+            raise HandoffAdmissionError("outbox_review_missing", f"review source absent: {key}") from exc
+        return self.outbox.resolve_by_key(key, digest)
+
+    def resolve(self, *, request_bytes: bytes):
+        from .review_material import (
+            REVIEW_MATERIAL_REQUEST_SCHEMA, REVIEW_TEXT_PROJECTION_ID,
+            REVIEW_TEXT_PROJECTION_SCHEMA, ResolvedReviewMaterial, ReviewMaterialError,
+            _project_visible_text, _validate_metadata, _timestamp,
+        )
+        request = self.outbox._decode(request_bytes, "review material request")
+        if set(request) != {
+            "schema_version", "admission_context_sha256", "evaluated_at",
+            "evaluation_time_receipt_sha256", "handoff_root_sha256", "job_key",
+            "raw_listing_sha256", "vacancy_snapshot_sha256",
+        } or request["schema_version"] != REVIEW_MATERIAL_REQUEST_SCHEMA:
+            raise ReviewMaterialError("review_request", "review request schema differs")
+        handoff = parse_handoff(self.outbox.handoff_bytes)
+        vacancy = handoff.payload["vacancy"]
+        expected = {
+            "admission_context_sha256": hashlib.sha256(self.outbox.context_bytes).hexdigest(),
+            "handoff_root_sha256": handoff.root_sha256,
+            "job_key": handoff.payload["job_key"],
+            "raw_listing_sha256": vacancy["raw_listing_sha256"],
+            "vacancy_snapshot_sha256": vacancy["vacancy_snapshot_sha256"],
+        }
+        if any(request[k] != v for k, v in expected.items()):
+            raise ReviewMaterialError("review_request", "review identity differs from pinned handoff")
+        _digest(request["evaluation_time_receipt_sha256"], "evaluation time receipt")
+        _timestamp(request["evaluated_at"], "review evaluated_at")
+        snapshot = self._reference("vacancy.snapshot")
+        raw = self._reference("vacancy.raw_listing")
+        visible = self._reference("vacancy.visible_listing_text")
+        projection = self._reference("vacancy.review_text_projection")
+        _, text_sha = _project_visible_text(visible.exact_bytes)
+        subject = {"job_key": expected["job_key"],
+                   "vacancy_snapshot_sha256": expected["vacancy_snapshot_sha256"]}
+        projection_bytes = canonical_json_bytes({
+            **subject, "raw_listing_sha256": expected["raw_listing_sha256"],
+            "review_text_sha256": text_sha, "schema_version": REVIEW_TEXT_PROJECTION_SCHEMA,
+            "projection_id": REVIEW_TEXT_PROJECTION_ID,
+        })
+        if (hashlib.sha256(snapshot.exact_bytes).hexdigest() != expected["vacancy_snapshot_sha256"]
+                or hashlib.sha256(raw.exact_bytes).hexdigest() != expected["raw_listing_sha256"]
+                or projection.exact_bytes != projection_bytes):
+            raise ReviewMaterialError("source_digest", "review sources differ from pinned identities")
+        projection_subject = {**subject, "handoff_root_sha256": handoff.root_sha256,
+                              "raw_listing_sha256": expected["raw_listing_sha256"],
+                              "review_text_sha256": text_sha}
+        validity = None
+        for key, ref, type_id, schema, ref_subject in (
+            ("vacancy.snapshot", snapshot, "vacancy_snapshot", "market-aligner.vacancy-snapshot.v1", subject),
+            ("vacancy.raw_listing", raw, "raw_listing", "market-aligner.raw-listing-evidence.v1", subject),
+            ("vacancy.visible_listing_text", visible, "visible_listing_text", "market-aligner.visible-listing-text.v1", projection_subject),
+            ("vacancy.review_text_projection", projection, "review_text_projection", REVIEW_TEXT_PROJECTION_SCHEMA, projection_subject),
+        ):
+            evidence = _validate_metadata(
+                ref.metadata_bytes, exact_bytes=ref.exact_bytes, reference_key=key,
+                type_id=type_id, schema_version=schema, subject=ref_subject,
+                trust_root_id=self.trust_root_id, trusted_issuer_ids=self.trusted_issuer_ids,
+                evaluated_at=request["evaluated_at"],
+                handoff_created_at=handoff.payload["created_at"] if key in {"vacancy.snapshot", "vacancy.raw_listing"} else None,
+                expected_valid_until=validity,
+            )
+            validity = evidence.valid_until
+            self.outbox.authenticate(
+                metadata_bytes=ref.metadata_bytes, exact_bytes=ref.exact_bytes,
+                admission_context_bytes=self.outbox.context_bytes, evaluated_at=request["evaluated_at"],
+            )
+        return ResolvedReviewMaterial(snapshot.exact_bytes, raw.exact_bytes, visible.exact_bytes,
+                                      snapshot.metadata_bytes, raw.metadata_bytes, projection.metadata_bytes)
+
+    def authenticate(self, *, request_bytes, resolution, projection_bytes, admission_context_bytes):
+        from .review_material import ReviewMaterialError
+        if admission_context_bytes != self.outbox.context_bytes:
+            raise ReviewMaterialError("accessor_authentication", "review context differs from pinned bundle")
+        if (resolution != self.resolve(request_bytes=request_bytes)
+                or projection_bytes != self._reference("vacancy.review_text_projection").exact_bytes):
+            raise ReviewMaterialError("accessor_authentication", "review material differs from pinned bundle")
 
 
 @dataclass(frozen=True)

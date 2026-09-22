@@ -1072,3 +1072,126 @@ def test_wrong_review_archive_subject_is_refused_before_consuming_time(tmp_path)
     assert witness.issue_count == 0
     assert accessor.resolve_calls == []
     assert attempt._objects(attempt._events()) == ()
+
+
+def _protected_review_ready(tmp_path, *, include_capture=True):
+    import base64
+    from importlib.resources import files
+    from market_aligner.applications.producer import HandoffReference, write_protected_handoff_bundle
+    from career_automation.market_aligner_handoff import parse_handoff
+    from career_automation.handoff_admission import ProtectedLocalOutbox, ProtectedOutboxReviewMaterialAccessor
+
+    vector = json.loads(files("career_automation").joinpath("fixtures/market-aligner-v1-vectors.json").read_bytes())
+    handoff = parse_handoff(base64.b64decode(vector["handoff"]["canonical_base64"]))
+    references = {}
+    for row in vector["reference_bundle"]["value"]["entries"]:
+        m = row["metadata"]
+        references[m["reference_key"]] = HandoffReference(
+            exact_bytes=base64.b64decode(row["object_base64"]), type_id=m["type_id"],
+            schema_version=m["schema_version"], subject=m["subject"],
+            issued_at=m["issued_at"], valid_until=m["valid_until"], issuer_id=m["issuer_id"],
+        )
+    written = write_protected_handoff_bundle(
+        tmp_path / "outbox", handoff, references=references, environment="synthetic",
+        trust_root_id="synthetic-market-root", issued_at=ISSUED_AT,
+        source_job_key="synthetic-source", visible_listing_text_bytes=VISIBLE_TEXT if include_capture else None,
+    )
+    outbox = ProtectedLocalOutbox(written.path, repository_root=Path.cwd(),
+        expected_source_record_sha256=written.source_record_sha256,
+        allowed_producer_commits=frozenset({handoff.payload["producer"]["commit_sha"]}))
+    accessor = ProtectedOutboxReviewMaterialAccessor(outbox,
+        trusted_issuer_ids=frozenset({"synthetic-market-issuer", "market-aligner"}))
+    witness = SyntheticCurrentTimeWitness()
+    store = HandoffAdmissionStore(tmp_path / "review.sqlite3", context_authenticator=outbox,
+                                  resolver=outbox, current_time_witness=witness)
+    admission = store.admit_authenticated(outbox.handoff_bytes, outbox.context_bytes)
+    assembler = ReviewMaterialAssembler(store, accessor=accessor,
+        application_artifact_accessor=SyntheticApplicationArtifactAccessor(),
+        pdf_text_extractor=SyntheticPDFTextExtractor(), current_time_witness=witness)
+    return outbox, accessor, assembler, admission
+
+
+def test_protected_review_producer_to_assembler(tmp_path):
+    outbox, accessor, assembler, admission = _protected_review_ready(tmp_path)
+    result = assembler.assemble(admission.application_id,
+        application_source_identity=APPLICATION_SOURCE_IDENTITY,
+        application_package_bytes=_application_package())
+    assert result.visible_listing_text_bytes == VISIBLE_TEXT
+    assert result.projected_text_bytes == PROJECTED_TEXT
+    assert json.loads(result.request_bytes)["admission_context_sha256"] == _sha(outbox.context_bytes)
+    assert result.evaluation_time_receipt_sha256 == _sha(result.evaluation_time_receipt_bytes)
+    accessor.authenticate(request_bytes=result.request_bytes,
+        resolution=accessor.resolve(request_bytes=result.request_bytes),
+        projection_bytes=result.projection_bytes, admission_context_bytes=outbox.context_bytes)
+
+
+def test_protected_review_without_capture_fails_closed(tmp_path):
+    _, _, assembler, admission = _protected_review_ready(tmp_path, include_capture=False)
+    with pytest.raises(ReviewMaterialError, match="review accessor failed"):
+        assembler.assemble(admission.application_id,
+            application_source_identity=APPLICATION_SOURCE_IDENTITY,
+            application_package_bytes=_application_package())
+
+
+@pytest.mark.parametrize("field", ["admission_context_sha256", "handoff_root_sha256",
+    "job_key", "raw_listing_sha256", "vacancy_snapshot_sha256", "schema_version", "extra"])
+def test_protected_review_request_substitution(tmp_path, field):
+    _, accessor, assembler, admission = _protected_review_ready(tmp_path)
+    result = assembler.assemble(admission.application_id,
+        application_source_identity=APPLICATION_SOURCE_IDENTITY,
+        application_package_bytes=_application_package())
+    request = json.loads(result.request_bytes)
+    request[field] = "substituted"
+    with pytest.raises(ReviewMaterialError, match="review (identity|request schema) differs"):
+        accessor.resolve(request_bytes=canonical_json_bytes(request))
+
+
+@pytest.mark.parametrize("key", ["vacancy.snapshot", "vacancy.raw_listing",
+    "vacancy.visible_listing_text", "vacancy.review_text_projection"])
+def test_protected_review_pinned_source_tampering(tmp_path, key):
+    _, accessor, assembler, admission = _protected_review_ready(tmp_path)
+    result = assembler.assemble(admission.application_id,
+        application_source_identity=APPLICATION_SOURCE_IDENTITY,
+        application_package_bytes=_application_package())
+    ref = accessor.outbox._entries[key]
+    path = accessor.outbox.bundle_path / "objects" / ref["object_sha256"]
+    path.write_bytes(b"substituted")
+    from career_automation.handoff_admission import HandoffAdmissionError
+    with pytest.raises(HandoffAdmissionError, match="reference bytes differ"):
+        accessor.resolve(request_bytes=result.request_bytes)
+
+
+def test_protected_review_archive_reopens_exact_capture_and_time(tmp_path):
+    from career_automation.market_aligner_handoff import parse_handoff
+    from career_automation.application_archive import ApplicationArchive
+    outbox, _, assembler, admission = _protected_review_ready(tmp_path)
+    attempt = _review_archive(tmp_path, parse_handoff(outbox.handoff_bytes), admission)
+    archived = assembler.assemble_and_archive(admission.application_id,
+        application_source_identity=APPLICATION_SOURCE_IDENTITY,
+        application_package_bytes=_application_package(), archive=attempt)
+    reopened = ApplicationArchive(attempt.archive.root,
+        repository_root=Path(__file__).parent, create=False).open_attempt(archived.attempt_id)
+    objects = reopened._objects(reopened._events())
+    for field in fields(archived.material):
+        value = getattr(archived.material, field.name)
+        if not isinstance(value, bytes):
+            continue
+        artifact = next(o for o in objects if o.role == "review.material." + field.name)
+        assert reopened.read_artifact(artifact) == value
+    assert archived.material.visible_listing_text_bytes == VISIBLE_TEXT
+    assert archived.material.projected_text_bytes == PROJECTED_TEXT
+    with sqlite3.connect(assembler.admission_store.database) as connection:
+        row = connection.execute("SELECT receipt_bytes,consumer_id FROM authenticated_time_evidence WHERE receipt_sha256=?",
+            (archived.material.evaluation_time_receipt_sha256,)).fetchone()
+    assert row == (archived.material.evaluation_time_receipt_bytes, archived.material.request_sha256)
+
+
+def test_protected_review_capture_issuer_requires_explicit_allowlist(tmp_path):
+    from career_automation.handoff_admission import ProtectedOutboxReviewMaterialAccessor
+    outbox, _, assembler, admission = _protected_review_ready(tmp_path)
+    assembler.accessor = ProtectedOutboxReviewMaterialAccessor(outbox,
+        trusted_issuer_ids=frozenset({"synthetic-market-issuer"}))
+    with pytest.raises(ReviewMaterialError, match="issuer is not trusted"):
+        assembler.assemble(admission.application_id,
+            application_source_identity=APPLICATION_SOURCE_IDENTITY,
+            application_package_bytes=_application_package())
