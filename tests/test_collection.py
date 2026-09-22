@@ -2670,3 +2670,41 @@ def test_offline_collection_status_absent_database(tmp_path):
     assert status == {"exists": False, "boards": [
         {"board": "a", "discovered": 0, "fetched": 0, "failed": 0,
          "pending": 0, "state": "not_started"}]}
+
+
+def test_preflight_missing_browser_dependency_fails_without_mutation(tmp_path):
+    root = tmp_path / "not-created"
+    with mock.patch("market_aligner.collectors.engine.importlib.util.find_spec",
+                    side_effect=lambda name: None if name == "playwright" else object()):
+        report = Collector.preflight(root, {"boards": {"enabled": ["jobkorea"]}})
+    assert not report["ok"] and not root.exists()
+    assert any(c["name"] == "dependency:playwright" and not c["ok"] for c in report["checks"])
+
+
+def test_preflight_credential_presence_never_echoes_value(tmp_path):
+    cfg = {"boards": {"enabled": ["saramin"]},
+           "saramin": {"access_key_env": "MA_SYNTHETIC_PREFLIGHT_KEY"}}
+    with mock.patch.dict(os.environ, {"MA_SYNTHETIC_PREFLIGHT_KEY": "synthetic-secret-never-echo"}):
+        report = Collector.preflight(tmp_path / "not-created", cfg)
+    check = next(c for c in report["checks"] if c["name"].startswith("credential:"))
+    assert check["ok"] and check["detail"] == "set"
+    assert "synthetic-secret-never-echo" not in json.dumps(report)
+    assert not (tmp_path / "not-created").exists()
+
+
+def test_preflight_cli_low_disk_and_invalid_shapes(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump({"boards": {"enabled": ["wanted"]}}))
+    root = tmp_path / "not-created"
+    output = io.StringIO()
+    with mock.patch("market_aligner.collectors.engine.shutil.disk_usage", return_value=mock.Mock(free=1024)):
+        with redirect_stdout(output):
+            assert main(["collect-preflight", "--config", str(cfg), "--data-home", str(root)]) == 2
+    report = json.loads(output.getvalue())
+    assert not report["ok"]
+    assert next(c for c in report["checks"] if c["name"] == "disk-free")["ok"] is False
+    assert not root.exists()
+    with mock.patch("market_aligner.collectors.engine.importlib.util.find_spec") as lookup:
+        with __import__("pytest").raises(ValueError):
+            Collector.preflight(root, {"boards": {"enabled": []}})
+        lookup.assert_not_called()

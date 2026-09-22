@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import shutil
 import math
 import threading
 
@@ -505,6 +507,92 @@ class Collector:
             "boards": sorted({str(board) for board in enabled}),
             "collection": collection,
             "scrapling": scrapling,
+        }
+
+    @staticmethod
+    def preflight(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Report local collection prerequisites only.
+
+        Runs :meth:`plan` first so malformed configuration shapes and
+        data-home escapes are refused in the canonical collector seam.
+        This is a scope-limited static check: dependency presence, browser
+        executable availability, credential presence (never values) and a
+        read-only data-root inspection. It is NOT a live provider
+        verification and does not imply every adapter is supported.
+        """
+        plan = Collector.plan(root, cfg)
+        checks: list[dict[str, Any]] = []
+
+        def _add(name: str, ok: bool, detail: str) -> None:
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        boards: list[str] = plan["boards"]
+
+        for module in ("requests", "yaml"):
+            try:
+                ok = importlib.util.find_spec(module) is not None
+                _add(f"dependency:{module}", ok, "installed" if ok else "missing")
+            except Exception as exc:
+                _add(f"dependency:{module}", False, type(exc).__name__)
+
+        needs_playwright = any(b in ("jobkorea", "notefolio") for b in boards)
+        if needs_playwright:
+            try:
+                spec = importlib.util.find_spec("playwright")
+            except Exception as exc:
+                spec = None
+                _add("browser:chromium", False, type(exc).__name__)
+            _add("dependency:playwright", spec is not None,
+                 "installed" if spec is not None else "missing")
+            if spec is not None:
+                try:
+                    from playwright.sync_api import sync_playwright
+
+                    with sync_playwright() as p:
+                        executable = Path(p.chromium.executable_path)
+                        exists = executable.is_file() and os.access(executable, os.X_OK)
+                        _add(
+                            "browser:chromium",
+                            exists,
+                            str(executable) if exists else "chromium executable missing",
+                        )
+                except Exception as exc:
+                    _add("browser:chromium", False, type(exc).__name__)
+
+        if "saramin" in boards:
+            saramin_cfg = cfg.get("saramin") or {}
+            key_name = saramin_cfg.get("access_key_env") or "SARAMIN_ACCESS_KEY"
+            if not isinstance(key_name, str) or not key_name.isidentifier():
+                _add("credential:saramin", False, "invalid environment variable name")
+            else:
+                present = bool(os.environ.get(key_name))
+                _add(f"credential:{key_name}", present, "set" if present else "missing")
+
+        resolved_root = Path(root)
+        try:
+            probe = resolved_root
+            while not probe.exists():
+                if probe.parent == probe:
+                    break
+                probe = probe.parent
+            if not probe.is_dir():
+                _add("data-directory:writable", False, f"not a directory: {probe}")
+            else:
+                writable = os.access(probe, os.W_OK | os.X_OK)
+                _add("data-directory:writable", writable, str(probe))
+                free_bytes = shutil.disk_usage(probe).free
+                _add(
+                    "disk-free",
+                    free_bytes >= 2 * (1024 ** 3),
+                    f"{free_bytes / (1024 ** 3):.1f} GB free",
+                )
+        except Exception as exc:
+            _add("data-directory:writable", False, type(exc).__name__)
+
+        return {
+            "ok": all(check["ok"] for check in checks),
+            "scope": "local prerequisites only; not live provider verification",
+            "checks": checks,
         }
 
     @staticmethod

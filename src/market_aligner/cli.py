@@ -221,6 +221,14 @@ def _collect_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_preflight_command(args: argparse.Namespace) -> int:
+    cfg, _ = snapshot_config(args.config)
+    paths = ProductPaths.resolve(args.data_home)
+    report = Collector.preflight(paths.root, cfg)
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0 if report["ok"] else 2
+
+
 def _collect_status_command(args: argparse.Namespace) -> int:
     cfg, _ = snapshot_config(args.config)
     paths = ProductPaths.resolve(args.data_home)
@@ -984,6 +992,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_data_home(collect)
     collect.set_defaults(handler=_collect_command)
+
+    collect_preflight = commands.add_parser(
+        "collect-preflight",
+        help="Static local-prerequisite check for collection; no database, directories, browser launch or network.",
+    )
+    collect_preflight.add_argument("--config", type=Path, required=True)
+    _add_data_home(collect_preflight)
+    collect_preflight.set_defaults(handler=_collect_preflight_command)
 
     collect_status = commands.add_parser(
         "collect-status",
