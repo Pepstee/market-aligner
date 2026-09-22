@@ -709,7 +709,7 @@ def test_worker_revalidates_python_identity_before_corpus(tmp_path, monkeypatch,
     monkeypatch.setattr(fixture_module.sys, "executable", str(active))
     request = {"runtime_identities": runtime, "environment": dict(os.environ)}
     monkeypatch.setattr(fixture_module, "_read_canonical", lambda *a, **k: (request, b"{}"))
-    monkeypatch.setattr(fixture_module, "_validate_request", lambda *a, **k: (None, "nonce"))
+    monkeypatch.setattr(fixture_module, "_validate_request", lambda *a, **k: (None, "nonce", root))
     calls = []
 
     class ReachedAuthority(Exception):
@@ -780,3 +780,147 @@ def test_corpus_configuration_survives_fixed_child_environment(tmp_path, monkeyp
                                capture_output=True, text=True, timeout=20)
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == str(root)
+
+
+def _sealed_projection(source):
+    return {
+        "schema_version": fixture_module.BINDING_SCHEMA_VERSION,
+        "corpus_identity": fixture_module.CORPUS_IDENTITY,
+        "environment": fixture_module.PROTECTED_CORPUS_ENVIRONMENT,
+        "issuer_id": fixture_module.PROTECTED_CORPUS_ISSUER_ID,
+        "trust_root_id": fixture_module.PROTECTED_CORPUS_TRUST_ROOT_ID,
+        "source_head": source.git_revision,
+        "source_tree": source.tree,
+        **{key: "a" * 64 for key in (
+            "binding_sha256", "tree_sha256", "installed_manifest_sha256",
+            "verifier_public_key_sha256",
+        )},
+    }
+
+
+@pytest.mark.parametrize("mode", ["explicit", "sealed", "tampered", "downgraded", "worker"])
+def test_corpus_request_modes_revalidate_exact_authority(tmp_path, monkeypatch, mode):
+    import tempfile
+    import os
+    import sys
+
+    root = tmp_path.resolve()
+    source = SourceIdentity("a" * 40, "b" * 40, "sha256:" + "c" * 64)
+    projection = _sealed_projection(source)
+    for key in fixture_module.FORBIDDEN_RUNTIME_LOCATORS:
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delitem(fixture_module.COMMAND_ENVIRONMENT, key, raising=False)
+    calls = []
+
+    def installed(repository):
+        calls.append(repository)
+        return root, projection
+
+    monkeypatch.setattr(fixture_module, "load_installed_protected_corpus_binding", installed)
+    monkeypatch.setattr(fixture_module, "_source_identity", lambda _: source)
+    monkeypatch.setattr(fixture_module, "_playwright_runtime_identity", lambda *a: {})
+    if mode == "worker":
+        chromium = root / "chromium"
+        driver = root / "node"
+        chromium.write_bytes(b"synthetic-chromium")
+        driver.write_bytes(b"synthetic-node")
+        runtime = {"python": fixture_module._path_identity(Path(sys.executable)),
+                   "chromium": fixture_module._path_identity(chromium),
+                   "node_driver": fixture_module._path_identity(driver)}
+        monkeypatch.setattr(fixture_module, "_playwright_runtime_identity", lambda *a: runtime)
+    if mode == "explicit":
+        monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(root))
+    with tempfile.TemporaryDirectory(dir=Path("/tmp").resolve(), prefix="ms") as temp:
+        monkeypatch.setattr(witness_module, "RUNTIME_TMP_HOME_ANCHOR", Path(temp))
+        request = fixture_module._request_document(
+            source=source, execution_root=root, python_executable=Path("/unused"),
+            chromium_executable=Path("/unused"), integration_nonce=b"x" * 32,
+            protected_corpus_binding=None if mode == "explicit" else projection,
+        )
+        Path(request["runtime_tmp_root"]).mkdir(mode=0o700)
+        if mode == "explicit":
+            assert request["schema_version"] == fixture_module.REQUEST_SCHEMA_VERSION
+            assert "protected_corpus_binding" not in request
+        else:
+            assert request["schema_version"] == fixture_module.SEALED_REQUEST_SCHEMA_VERSION
+            assert "JAA_CERTIFIED_CORPUS_ROOT" not in request["environment"]
+        if mode == "tampered":
+            request["protected_corpus_binding"]["binding_sha256"] = "f" * 64
+        if mode == "downgraded":
+            request["schema_version"] = fixture_module.REQUEST_SCHEMA_VERSION
+        if mode in ("tampered", "downgraded"):
+            with pytest.raises(NetworkWitnessedFixtureError):
+                fixture_module._validate_request(request, request_path=root / "request.json", repository=root)
+        else:
+            result = fixture_module._validate_request(request, request_path=root / "request.json", repository=root)
+            assert result == (source, b"x" * 32, root)
+            assert len(calls) == (0 if mode == "explicit" else 1)
+
+        if mode == "worker":
+            request_path = root / "integration-request.json"
+            request_path.write_bytes(_canonical_json(request))
+            output = root / "worker-output"
+            output.mkdir(mode=0o700)
+            root.chmod(0o700)
+            request_path.chmod(0o444)
+            expectation = witness_module.CooperativeBrowserExpectation(
+                execution_root=root, request_path=request_path,
+                request_sha256=_domain_hash(REQUEST_DOMAIN, _canonical_json(request)),
+                result_path=output / "worker-result.json",
+                integration_nonce_sha256=request["integration_nonce_sha256"],
+                cooperative_policy_sha256=request["cooperative_policy_sha256"],
+                expected_source=source, runtime_tmp_root=Path(request["runtime_tmp_root"]),
+                runtime_tmp_root_derivation=request["runtime_tmp_root_derivation"],
+                socket_budget=request["socket_budget"],
+            )
+            identities = witness_module._cooperative_preflight(expectation, source, root / "network-evidence")
+            assert set(identities) == {"execution_root", "worker_output", "runtime_tmp_root"}
+            for key in list(os.environ):
+                monkeypatch.delenv(key, raising=False)
+            for key, value in request["environment"].items():
+                monkeypatch.setenv(key, value)
+            reached = []
+
+            class ReachedValidatedCorpus(Exception):
+                pass
+
+            def corpus_sentinel(corpus, seed):
+                reached.append((corpus, seed))
+                raise ReachedValidatedCorpus()
+
+            monkeypatch.setattr(fixture_module, "verify_graphcore_corpus", corpus_sentinel)
+            with pytest.raises(ReachedValidatedCorpus):
+                fixture_module._execute_worker(request_path, output, root)
+            assert reached == [(root, root / fixture_module.TRACKED_SEED_RELATIVE)]
+            assert len(calls) == 2
+
+
+@pytest.mark.parametrize("case", ["locator", "missing_binding"])
+def test_sealed_coordinator_failure_never_falls_back(tmp_path, monkeypatch, case):
+    import shutil
+    import sys
+
+    source = SourceIdentity("a" * 40, "b" * 40, "sha256:" + "c" * 64)
+    for key in fixture_module.FORBIDDEN_RUNTIME_LOCATORS:
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delitem(fixture_module.COMMAND_ENVIRONMENT, key, raising=False)
+    monkeypatch.setattr(fixture_module, "_source_identity", lambda _: source)
+
+    def fail_binding(_):
+        raise fixture_module.ProtectedCorpusBindingError("synthetic_missing", "synthetic fixture")
+
+    def forbidden_fallback():
+        raise AssertionError("sealed failure attempted explicit fallback")
+
+    monkeypatch.setattr(fixture_module, "load_installed_protected_corpus_binding", fail_binding)
+    monkeypatch.setattr(fixture_module, "_certified_corpus_root", forbidden_fallback)
+    if case == "locator":
+        monkeypatch.setenv("JAA_CERTIFIED_CORPUS_ROOT", str(tmp_path))
+    output = tmp_path.resolve() / "output"
+    with pytest.raises(NetworkWitnessedFixtureError):
+        run_network_witnessed_fixture(
+            repository_root=tmp_path, execution_root=output,
+            python_executable=sys.executable, chromium_executable=shutil.which("true"),
+            corpus_authority="sealed",
+        )
+    assert not output.exists()

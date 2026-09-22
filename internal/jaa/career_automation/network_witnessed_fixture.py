@@ -82,6 +82,7 @@ from .external_document_assurance import (
 )
 from .gap_optimizer import FitAssessmentStore
 from .jaa04_corpus_authority import (
+    CORPUS_IDENTITY,
     GRAPHCORE_JOB_KEY,
     RAW_RESPONSE_SHA256,
     ROBOTS_RESPONSE_SHA256,
@@ -92,6 +93,7 @@ from .linux_network_namespace_witness import (
     AF_UNIX_PATH_CAPACITY,
     CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES,
     COMMAND_ENVIRONMENT,
+    COOPERATIVE_SEALED_REQUEST_SCHEMA_VERSION,
     CooperativeBrowserExpectation,
     LinuxNetworkNamespaceWitness,
     NetworkNamespaceWitnessReceipt,
@@ -125,10 +127,18 @@ from .shadow_certification import (
 from .testing_sanity_review import fixture_pass_receipt
 
 
+from .protected_corpus_binding import (
+    BINDING_SCHEMA_VERSION, FORBIDDEN_RUNTIME_LOCATORS,
+    PROTECTED_CORPUS_ENVIRONMENT, PROTECTED_CORPUS_ISSUER_ID,
+    PROTECTED_CORPUS_TRUST_ROOT_ID, ProtectedCorpusBindingError,
+    load_installed_protected_corpus_binding,
+)
+
 REQUEST_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-request.v1"
 RESULT_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-worker-result.v1"
 COMPOSITE_SCHEMA_VERSION_V1 = "jaa10.network-witnessed-fixture-observation-receipt.v1"
 REQUEST_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-request.v2"
+SEALED_REQUEST_SCHEMA_VERSION = COOPERATIVE_SEALED_REQUEST_SCHEMA_VERSION
 RESULT_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-worker-result.v2"
 COMPOSITE_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-observation-receipt.v2"
 POLICY_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-policy.v1"
@@ -527,6 +537,61 @@ def _cooperative_policy() -> dict[str, object]:
     }
 
 
+def _protected_binding_projection(
+    binding: Mapping[str, object],
+    source: SourceIdentity,
+) -> dict[str, object]:
+    projection = {
+        "schema_version": binding.get("schema_version"),
+        "corpus_identity": binding.get("corpus_identity"),
+        "binding_sha256": binding.get("binding_sha256"),
+        "environment": binding.get("environment"),
+        "issuer_id": binding.get("issuer_id"),
+        "trust_root_id": binding.get("trust_root_id"),
+        "verifier_public_key_sha256": binding.get(
+            "verifier_public_key_sha256"
+        ),
+        "tree_sha256": binding.get("tree_sha256"),
+        "source_head": binding.get("source_head"),
+        "source_tree": binding.get("source_tree"),
+        "installed_manifest_sha256": binding.get(
+            "installed_manifest_sha256"
+        ),
+    }
+    digests = (
+        projection["binding_sha256"],
+        projection["tree_sha256"],
+        projection["installed_manifest_sha256"],
+        projection["verifier_public_key_sha256"],
+    )
+    if (
+        projection["schema_version"] != BINDING_SCHEMA_VERSION
+        or projection["corpus_identity"] != CORPUS_IDENTITY
+        or projection["environment"] != PROTECTED_CORPUS_ENVIRONMENT
+        or projection["issuer_id"] != PROTECTED_CORPUS_ISSUER_ID
+        or projection["trust_root_id"] != PROTECTED_CORPUS_TRUST_ROOT_ID
+        or projection["source_head"] != source.git_revision
+        or projection["source_tree"] != source.tree
+        or any(not isinstance(value, str) or not HEX_64.fullmatch(value) for value in digests)
+    ):
+        raise NetworkWitnessedFixtureError(
+            "protected corpus request binding differs"
+        )
+    return projection
+
+
+def _load_protected_binding(
+    repository: Path, source: SourceIdentity,
+) -> tuple[Path, dict[str, object]]:
+    if any(key in os.environ or key in COMMAND_ENVIRONMENT for key in FORBIDDEN_RUNTIME_LOCATORS):
+        raise NetworkWitnessedFixtureError("sealed corpus forbids caller-selected locators")
+    try:
+        root, binding = load_installed_protected_corpus_binding(repository)
+    except ProtectedCorpusBindingError as error:
+        raise NetworkWitnessedFixtureError("protected corpus bootstrap binding is unavailable") from error
+    return root, _protected_binding_projection(binding, source)
+
+
 def _request_document(
     *,
     source: SourceIdentity,
@@ -534,8 +599,12 @@ def _request_document(
     python_executable: Path,
     chromium_executable: Path,
     integration_nonce: bytes,
+    protected_corpus_binding: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    _certified_corpus_root()
+    if protected_corpus_binding is None:
+        _certified_corpus_root()
+    elif any(key in os.environ or key in COMMAND_ENVIRONMENT for key in FORBIDDEN_RUNTIME_LOCATORS):
+        raise NetworkWitnessedFixtureError("sealed corpus forbids caller-selected locators")
     policy = _cooperative_policy()
     runtime_tmp_root, derivation, socket_budget = derive_runtime_tmp_binding(
         source,
@@ -545,7 +614,7 @@ def _request_document(
         **COMMAND_ENVIRONMENT,
         "TMPDIR": str(runtime_tmp_root),
     }
-    return {
+    document = {
         "schema_version": REQUEST_SCHEMA_VERSION,
         "source": source.document(),
         "integration_nonce": integration_nonce.hex(),
@@ -594,6 +663,10 @@ def _request_document(
         "external_actions": 0,
         "real_applications_submitted": 0,
     }
+    if protected_corpus_binding is not None:
+        document["schema_version"] = SEALED_REQUEST_SCHEMA_VERSION
+        document["protected_corpus_binding"] = _protected_binding_projection(protected_corpus_binding, source)
+    return document
 
 
 def _validate_request(
@@ -601,7 +674,7 @@ def _validate_request(
     *,
     request_path: Path,
     repository: Path,
-) -> tuple[SourceIdentity, bytes]:
+) -> tuple[SourceIdentity, bytes, Path]:
     expected_keys = {
         "schema_version",
         "source",
@@ -623,6 +696,9 @@ def _validate_request(
         "external_actions",
         "real_applications_submitted",
     }
+    sealed = document.get("schema_version") == SEALED_REQUEST_SCHEMA_VERSION
+    if sealed:
+        expected_keys.add("protected_corpus_binding")
     if set(document) != expected_keys:
         raise NetworkWitnessedFixtureError("request field set differs")
     try:
@@ -637,7 +713,7 @@ def _validate_request(
     policy = document.get("cooperative_policy")
     environment = document.get("environment")
     if (
-        document.get("schema_version") != REQUEST_SCHEMA_VERSION
+        document.get("schema_version") not in (REQUEST_SCHEMA_VERSION, SEALED_REQUEST_SCHEMA_VERSION)
         or policy != _cooperative_policy()
         or document.get("cooperative_policy_sha256")
         != _domain_hash(POLICY_DOMAIN, _canonical_json(policy))
@@ -722,7 +798,13 @@ def _validate_request(
         "workflow_sha256": FROZEN_SHADOW_CONTRACT.workflow_sha256,
     }:
         raise NetworkWitnessedFixtureError("frozen contract identity differs")
-    return source, nonce
+    if sealed:
+        corpus_root, projection = _load_protected_binding(repository, source)
+        if document["protected_corpus_binding"] != projection:
+            raise NetworkWitnessedFixtureError("protected corpus request binding differs")
+    else:
+        corpus_root = _certified_corpus_root()
+    return source, nonce, corpus_root
 
 
 class _FrozenCorpusResearch:
@@ -1517,7 +1599,9 @@ def _execute_worker(
         request_path,
         maximum=MAX_REQUEST_BYTES,
     )
-    source, _nonce = _validate_request(
+    if dict(os.environ) != request.get("environment"):
+        raise NetworkWitnessedFixtureError("worker environment differs")
+    source, _nonce, corpus_root = _validate_request(
         request,
         request_path=request_path,
         repository=repository,
@@ -1556,7 +1640,7 @@ def _execute_worker(
     if dict(os.environ) != expected_environment:
         raise NetworkWitnessedFixtureError("worker environment differs")
     authority = verify_graphcore_corpus(
-        _certified_corpus_root(),
+        corpus_root,
         repository / TRACKED_SEED_RELATIVE,
     )
     release_inputs = _issued_release_inputs(output_root, repository, authority)
@@ -2185,6 +2269,7 @@ def run_network_witnessed_fixture(
     python_executable: str | Path,
     chromium_executable: str | Path,
     timeout_seconds: float = 180.0,
+    corpus_authority: str = "explicit",
 ) -> tuple[
     NetworkWitnessedFixtureObservationReceipt,
     LinuxNetworkNamespaceWitness,
@@ -2195,13 +2280,19 @@ def run_network_witnessed_fixture(
     root = Path(execution_root)
     if not root.is_absolute() or root.exists() or root.is_symlink():
         raise NetworkWitnessedFixtureError("execution root must be a new absolute path")
-    _certified_corpus_root()
+    if corpus_authority not in ("explicit", "sealed"):
+        raise NetworkWitnessedFixtureError("corpus authority is unsupported")
+    if corpus_authority == "explicit":
+        _certified_corpus_root()
     repository = Path(repository_root).resolve(strict=True)
     python = Path(python_executable).absolute()
     if not python.is_file():
         raise NetworkWitnessedFixtureError("Python executable is missing")
     chromium = Path(chromium_executable).resolve(strict=True)
     source = _source_identity(repository)
+    protected_binding = None
+    if corpus_authority == "sealed":
+        _corpus_root, protected_binding = _load_protected_binding(repository, source)
     try:
         runtime_tmp_root, runtime_tmp_derivation, socket_budget = (
             derive_runtime_tmp_binding(source, root)
@@ -2267,6 +2358,7 @@ def run_network_witnessed_fixture(
         python_executable=python,
         chromium_executable=chromium,
         integration_nonce=os.urandom(32),
+        protected_corpus_binding=protected_binding,
     )
     request_bytes = _canonical_json(request_document)
     request_path = root / "integration-request.json"

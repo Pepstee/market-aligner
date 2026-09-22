@@ -76,6 +76,7 @@ COOPERATIVE_WORKER_INVENTORY_DOMAIN_V1 = (
 COOPERATIVE_REQUEST_SCHEMA_VERSION = (
     "jaa10.network-witnessed-fixture-request.v2"
 )
+COOPERATIVE_SEALED_REQUEST_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-request.v3"
 RUNTIME_TMP_HOME_ANCHOR = Path(
     os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", "/tmp")
 )
@@ -1267,7 +1268,7 @@ def _cooperative_preflight(
     )
     if (
         request_mapping.get("schema_version")
-        != COOPERATIVE_REQUEST_SCHEMA_VERSION
+        not in (COOPERATIVE_REQUEST_SCHEMA_VERSION, COOPERATIVE_SEALED_REQUEST_SCHEMA_VERSION)
         or len(integration_nonce) != 32
         or request_mapping.get("integration_nonce_sha256")
         != expectation.integration_nonce_sha256
