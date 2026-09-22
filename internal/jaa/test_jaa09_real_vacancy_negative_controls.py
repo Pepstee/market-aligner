@@ -645,3 +645,61 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
             event["event_type"] == "submit_click_started"
             for event in second_store.events(second_run)
         )
+
+
+@pytest.mark.parametrize("schema", ["v1", "v2"])
+def test_noncertifying_receipt_versions_roundtrip(tmp_path: Path, schema: str) -> None:
+    from career_automation.runtime_compatibility import (
+        CERTIFIED_PYTHON_VERSION, PLAYWRIGHT_VERSION, CHROMIUM_REVISION,
+        CHROMIUM_BROWSER_VERSION,
+    )
+    receipt = _valid_receipt()
+    receipt["schema_version"] = f"jaa09.real-vacancy-local-receipt.{schema}"
+    if schema == "v2":
+        receipt["source_environment"].update(
+            interpreter_path="/usr/bin/python3.12", python_version=CERTIFIED_PYTHON_VERSION,
+            playwright_version=PLAYWRIGHT_VERSION, chromium_revision=CHROMIUM_REVISION,
+            chromium_version=CHROMIUM_BROWSER_VERSION,
+        )
+    validate_real_vacancy_receipt(receipt)
+    path = write_real_vacancy_receipt(receipt, tmp_path)
+    stored = json.loads(path.read_bytes())
+    validate_real_vacancy_receipt(stored)
+    assert stored == receipt
+    assert stored["certifies_slice"] is False
+
+
+@pytest.mark.parametrize("field,value", [
+    ("interpreter_path", "relative/python"), ("interpreter_path", "/usr/bin/notpython"),
+    ("python_version", "0.0.0"), ("playwright_version", "1.61.0"),
+    ("chromium_revision", "wrong"), ("chromium_version", "wrong"),
+])
+def test_v2_receipt_rejects_runtime_substitution(field: str, value: str) -> None:
+    from career_automation.runtime_compatibility import (
+        CERTIFIED_PYTHON_VERSION, PLAYWRIGHT_VERSION, CHROMIUM_REVISION,
+        CHROMIUM_BROWSER_VERSION,
+    )
+    receipt = _valid_receipt()
+    receipt["schema_version"] = "jaa09.real-vacancy-local-receipt.v2"
+    receipt["source_environment"].update(
+        interpreter_path="/usr/bin/python3.12", python_version=CERTIFIED_PYTHON_VERSION,
+        playwright_version=PLAYWRIGHT_VERSION, chromium_revision=CHROMIUM_REVISION,
+        chromium_version=CHROMIUM_BROWSER_VERSION,
+    )
+    receipt["source_environment"][field] = value
+    with pytest.raises(RealVacancyReceiptError, match="environment binding"):
+        validate_real_vacancy_receipt(receipt)
+
+
+@pytest.mark.parametrize("change", ["unknown_schema", "certifying", "legacy_new_runtime"])
+def test_receipt_compatibility_does_not_widen_authority(change: str) -> None:
+    receipt = _valid_receipt()
+    if change == "unknown_schema":
+        receipt["schema_version"] = "jaa09.real-vacancy-local-receipt.v3"
+    elif change == "certifying":
+        receipt["certifies_slice"] = True
+    else:
+        from career_automation.runtime_compatibility import PLAYWRIGHT_VERSION
+        receipt["source_environment"]["playwright_version"] = PLAYWRIGHT_VERSION
+    with pytest.raises(RealVacancyReceiptError):
+        validate_real_vacancy_receipt(receipt)
