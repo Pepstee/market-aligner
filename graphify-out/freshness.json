@@ -1,11 +1,11 @@
 {
   "community_count": 976,
-  "edge_count": 127928,
-  "node_count": 71839,
+  "edge_count": 127311,
+  "node_count": 71827,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "18f2c8d2a53daeff1e36850a9d6aff476f7e5bb518627697a1192193e113cbd9"
+    "graph.json": "2d227780ffcc3ce60478905d2419681ef5640d9100a896c058cdeac7ead561ae"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "597044c2729863f2275fffa5c367a005f779525b",
+  "source_base_commit": "7c9e8a026d3c6f10a0591a8d9de04a625b365ff7",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -26,12 +26,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "fc9742a5fbad685ef3a5cb660d171a524deabe26f6668a32e79e595e6ab9ee0a",
+    "docs/migration/CAPABILITY_INVENTORY.md": "62dc2ddd3de8dc40b52da15d6453d77eed75cbdf7d4b61feb844018bb9e07fc7",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "84d7ec5e2f054c0536d2fb15ac17d2d450eaaa3bee2cbee99fb6da3821a62286",
-    "docs/migration/capability-inventory.jsonl": "48f6fd83a526c45db774cfe48faa8d6d49df9cc9e9022097e11cae7d05e18df5",
-    "docs/migration/ledger.jsonl": "b84ed54c6208d606b9f7408412fb89565eb130f2f1ec321171bce76e761d2cd3",
+    "docs/migration/capability-dispositions.jsonl": "5d390af5ae6242ecf232c85d8289a148880d0f99cf90dc127fb60a19bc303e3a",
+    "docs/migration/capability-inventory.jsonl": "322f686eeb948b9deb41d208337ae98c2252d970007f38010abc9ff55d2dda7d",
+    "docs/migration/ledger.jsonl": "e0a31a013ad97d3a91b18063dc84c7aed478408d695dd587b224a494e77fea42",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -582,8 +582,8 @@
     "internal/jaa/test_jaa08_negative_controls.py": "a842370703f4f218f10539f80ba8663d4922ba90e8185459ab679fad26a8d41d",
     "internal/jaa/test_jaa09_independent_acceptance.py": "f7ab90d544b19b71d7cf50e1512329c98bfdf6853795f354191258a3049231a6",
     "internal/jaa/test_jaa09_negative_controls.py": "c87dd64d44985557dc83450f6a52cec96dac209e70a5388186ef212ccd9c81d9",
-    "internal/jaa/test_jaa09_real_vacancy_acceptance.py": "224aee9267088daee9ea9617dfc34ed743f2663a74dd7724456f8f62e2d575a5",
-    "internal/jaa/test_jaa09_real_vacancy_negative_controls.py": "4765c7f1a2072e734c6fffc904e9cded391d941ecef59223c6202a0b0c114432",
+    "internal/jaa/test_jaa09_real_vacancy_acceptance.py": "aabd6563ce4a39a62b451b4e75e0cb2ab42493591b8c5703d88a1d33c77ddc54",
+    "internal/jaa/test_jaa09_real_vacancy_negative_controls.py": "a23cf7c8e43f0db4fe4b75b39e69979294084f098a4ebc2aa02de14891de2352",
     "internal/jaa/test_jaa10_authenticated_time_witness.py": "13fdf132e8ea5be08529c7e62bd2d62888c0e3a10c50844ac4ec10aaf2da1e66",
     "internal/jaa/test_jaa10_authenticated_time_witness_negative_controls.py": "ac28303e511490070cffa7e3cf423c94120ca14a47c760b74696dc75c9d63b94",
     "internal/jaa/test_jaa10_certification_candidate_compiler.py": "34385a1aceaa500d744b144c05462d103c2ea06dd619b9117cf4d966ee7ee9ff",

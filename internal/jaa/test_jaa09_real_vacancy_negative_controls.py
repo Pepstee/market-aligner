@@ -703,3 +703,69 @@ def test_receipt_compatibility_does_not_widen_authority(change: str) -> None:
         receipt["source_environment"]["playwright_version"] = PLAYWRIGHT_VERSION
     with pytest.raises(RealVacancyReceiptError):
         validate_real_vacancy_receipt(receipt)
+
+
+def test_current_runtime_receipt_writer_roundtrip(tmp_path, monkeypatch):
+    """Exercise receipt emission only; synthetic authority is not corpus certification."""
+    import sys
+    from types import SimpleNamespace
+    from career_automation.runtime_compatibility import inspect_runtime
+
+    sample = _valid_receipt()
+    corpus = sample["corpus_binding"]
+    vacancy = sample["vacancy_identity"]
+    release = sample["release_binding"]
+    browser_evidence = sample["browser_evidence"]
+    raw = tmp_path / "synthetic-response"
+    raw.write_bytes(b"x" * corpus["official_response_size"])
+    raw.chmod(0o444)
+    authority = SimpleNamespace(
+        corpus_root=tmp_path / "synthetic-corpus",
+        inventory_sha256=corpus["corpus_inventory_sha256"],
+        inventory_files_sha256=corpus["files_hash"],
+        raw_response_sha256=corpus["official_response_sha256"],
+        raw_response_path=raw, dossier_sha256=corpus["dossier_sha256"],
+        queue_body_content_sha256=corpus["queue_content_sha256"],
+        admitted_queue_payload_sha256=corpus["queue_payload_hash"],
+        tracked_seed_payload_sha256=corpus["tracked_seed_payload_hash"],
+        job_key=vacancy["job_key"], company=vacancy["company"],
+        title=vacancy["title"], vacancy_url=vacancy["url"],
+        observed_at=vacancy["observed_at"],
+        opportunity_score_bp=vacancy["opportunity0_score_bp"],
+    )
+    inputs = [None] * 12
+    inputs[1] = SimpleNamespace(candidate_profile_hash=sample["candidate_boundary"]["projection_content_sha256"])
+    inputs[4] = SimpleNamespace(content_sha256=release["application_source_sha256"], vacancy_sha256=release["vacancy_sha256"])
+    inputs[5] = SimpleNamespace(artifact_set_sha256=release["artifact_set_sha256"])
+    inputs[7] = SimpleNamespace(receipt_sha256=release["artifact_receipt_sha256"])
+    inputs[11] = SimpleNamespace(
+        manifest=SimpleNamespace(release_manifest_sha256=release["release_manifest_sha256"]),
+        token_sha256=release["release_token_sha256"],
+    )
+    output_root = tmp_path / "receipts"
+    output_root.mkdir(mode=0o700)
+    monkeypatch.setenv("JAA09_EVIDENCE_CONTROL_ROOT", str(output_root))
+    for env, key in (
+        ("JAA09_SOURCE_GIT_REVISION", "source_git_revision"),
+        ("JAA09_SOURCE_TREE", "source_tree"),
+        ("JAA09_SOURCE_CONTENT_REVISION", "source_content_revision"),
+    ):
+        monkeypatch.setenv(env, sample["source_environment"][key])
+    runtime = inspect_runtime(launch=True)
+    target = _write_evidence_receipt_if_requested(
+        authority=authority, release_inputs=tuple(inputs),
+        workflow=SimpleNamespace(content_hash=browser_evidence["workflow_sha256"]),
+        run_id=browser_evidence["run_id"],
+        fixture_receipt=SimpleNamespace(receipt_id=browser_evidence["receipt_id"], payload_sha256=browser_evidence["receipt_payload_sha256"]),
+        outputs=browser_evidence, chromium_version=runtime.launched_browser_version,
+        submit_count=1, non_loopback_requests=0,
+    )
+    stored = json.loads(target.read_bytes())
+    validate_real_vacancy_receipt(stored)
+    assert stored["schema_version"] == "jaa09.real-vacancy-local-receipt.v2"
+    assert stored["source_environment"]["interpreter_path"] == sys.executable
+    assert stored["source_environment"]["chromium_revision"] == runtime.chromium_revision
+    assert stored["source_environment"]["chromium_version"] == runtime.launched_browser_version
+    assert stored["certifies_slice"] is False
+    assert stored["disclosures"]["real_application_submitted"] is False
+    assert target.stat().st_mode & 0o777 == 0o444

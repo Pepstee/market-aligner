@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
 import os
 import platform
 import stat
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -55,7 +55,9 @@ from career_automation.jaa04_corpus_authority import (
     FrozenVacancyAuthority,
     verify_graphcore_corpus,
 )
+from career_automation.runtime_compatibility import inspect_runtime
 from career_automation.jaa09_real_vacancy_certifier import (
+    RECEIPT_SCHEMA,
     write_real_vacancy_receipt,
 )
 from career_automation.release_gate import (
@@ -529,6 +531,7 @@ def _write_evidence_receipt_if_requested(
     source_git_revision = os.environ["JAA09_SOURCE_GIT_REVISION"]
     source_tree = os.environ["JAA09_SOURCE_TREE"]
     source_content_revision = os.environ["JAA09_SOURCE_CONTENT_REVISION"]
+    runtime = inspect_runtime()
     strategy = release_inputs[1]
     source = release_inputs[4]
     artifacts = release_inputs[5]
@@ -536,7 +539,7 @@ def _write_evidence_receipt_if_requested(
     issued = release_inputs[11]
     projection_sha256 = getattr(strategy, "candidate_profile_hash")
     document = {
-        "schema_version": "jaa09.real-vacancy-local-receipt.v1",
+        "schema_version": RECEIPT_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "certifies_slice": False,
         "corpus_binding": {
@@ -596,10 +599,11 @@ def _write_evidence_receipt_if_requested(
             "source_git_revision": source_git_revision,
             "source_tree": source_tree,
             "source_content_revision": source_content_revision,
-            "interpreter_path": str(ROOT / ".venv/bin/python"),
-            "implementation": platform.python_implementation(),
-            "python_version": platform.python_version(),
-            "playwright_version": importlib.metadata.version("playwright"),
+            "interpreter_path": sys.executable,
+            "implementation": runtime.python_implementation,
+            "python_version": runtime.python_version,
+            "playwright_version": runtime.playwright_version,
+            "chromium_revision": runtime.chromium_revision,
             "chromium_version": chromium_version,
             "platform": platform.platform(),
         },
