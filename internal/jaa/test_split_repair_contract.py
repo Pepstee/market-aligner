@@ -215,7 +215,9 @@ def test_bootstrap_script_uses_only_declared_locked_inputs() -> None:
     lock = (ROOT / "requirements-test.lock").read_text(encoding="utf-8")
     assert "PYTHON_BOOTSTRAP=${PYTHON_BOOTSTRAP:-python3.12}" in script
     assert '"$PYTHON_BOOTSTRAP" -m venv "$TEST_ENV"' in script
-    assert "--requirement requirements-test.lock" in script
-    assert "--no-deps --editable ." in script
+    assert "--requirement internal/jaa/requirements-test.lock" in script
+    assert "--editable" not in script
+    assert 'install --no-deps "$JAA_WHEEL" "$MARKET_WHEEL"' in script
+    assert 'cmp -s "$MARKET_WHEEL" "$SECOND_MARKET_WHEEL"' in script
     assert "CANDIDATE_" not in script and "profiler/data" not in script
     assert "pytest==9.0.3" in lock

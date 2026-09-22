@@ -449,3 +449,22 @@ def test_public_script_refuses_nonzero_exit_from_each_suite(tmp_path: Path, suit
     assert completed.returncode == 1
     assert "suite exited with status 9" in completed.stderr
     assert not (root / "runtime_evidence" / "pytest").exists()
+
+
+@pytest.mark.parametrize("body,accepted", [
+    ("def test_ok(): assert True", True),
+    ("import pytest\ndef test_skip(): pytest.skip('required case')", False),
+    ("import pytest\npytest.skip('module unavailable', allow_module_level=True)", False),
+    ("import pytest\n@pytest.mark.xfail(reason='known broken')\ndef test_xfail(): assert False", False),
+])
+def test_mandatory_runner_rejects_real_skipped_execution(tmp_path, body, accepted):
+    test_file = tmp_path / "test_mandatory_fixture.py"
+    test_file.write_text(body + "\n")
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY / "scripts/run-pytest-no-skips.py"),
+         "-q", str(test_file)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=20,
+    )
+    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
+    if not accepted:
+        assert "MANDATORY SKIP:" in result.stderr

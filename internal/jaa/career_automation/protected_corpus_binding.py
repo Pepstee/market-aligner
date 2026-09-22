@@ -100,19 +100,21 @@ def canonical_json_bytes(document: object, *, newline: bool = False) -> bytes:
     return payload + (b"\n" if newline else b"")
 
 
-def installed_distribution_manifest() -> tuple[str, str]:
+def installed_distribution_manifest(
+    *, distribution_name: str = "job-application-automation", expected_version: str = "1.0.0"
+) -> tuple[str, str]:
     """Return the exact installed version and RECORD-checked manifest hash."""
 
     try:
         distribution = importlib.metadata.distribution(
-            "job-application-automation"
+            distribution_name
         )
     except importlib.metadata.PackageNotFoundError as exc:
         raise ProtectedCorpusBindingError(
             "protected_installation_missing",
             "the installed JAA distribution is unavailable",
         ) from exc
-    if distribution.version != "1.0.0":
+    if distribution.version != expected_version:
         _fail(
             "protected_installation_version",
             "the installed JAA distribution version differs",

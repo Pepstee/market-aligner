@@ -113,6 +113,10 @@ def verify(source_roots: tuple[Path, ...]) -> None:
                 f"{module_name} resolved outside the installed {MARKET_DISTRIBUTION} root"
             )
 
+    installed_distribution_manifest(
+        distribution_name=MARKET_DISTRIBUTION, expected_version="0.1.0.dev0"
+    )
+
     entry_points = {
         entry.name: entry for entry in distribution.entry_points if entry.group == "console_scripts"
     }
