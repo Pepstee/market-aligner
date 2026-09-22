@@ -1647,7 +1647,7 @@ def test_admitted_market_package_real_chrome_readback_never_submits(
     )
     circuit = WorkableOneUseCircuit(tmp_path / "workable-chrome-no-submit.sqlite3")
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         fixture_html = """<!doctype html><html><body>
           <form>
@@ -1867,7 +1867,7 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
 
         def launch(self, **_kwargs):
             return RoutedBrowser(
-                self._chromium.launch(channel="chrome", headless=True)
+                self._chromium.launch(headless=True)
             )
 
     class RoutedPlaywright:
@@ -2004,7 +2004,7 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
         "event.preventDefault(); window.submitClicks += 1;});</script>",
     )
     with real_sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.route(
             "**/*",

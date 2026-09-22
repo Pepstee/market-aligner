@@ -9808,6 +9808,7 @@ def _eligibility_one_under_scope(
     descriptors: _DescriptorSet | None = None
     lease: _AdmissionLease | None = None
     result: bytes | None = None
+    snapshot = None
     caught: BaseException | None = None
     plan_holder: list[tuple[EligibilityProspectivePlan, dict[str, Any]]] = []
     try:
@@ -10012,10 +10013,14 @@ def _eligibility_one_under_scope(
     except BaseException as exc:
         caught = exc
     finally:
-        if lease is not None:
-            lease.close()
-        elif descriptors is not None:
-            descriptors.close()
+        try:
+            if lease is not None:
+                lease.close()
+            elif descriptors is not None:
+                descriptors.close()
+        finally:
+            if snapshot is not None:
+                snapshot.close()
     if caught is None:
         assert result is not None
         return result

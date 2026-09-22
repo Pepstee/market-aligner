@@ -15783,8 +15783,11 @@ class EligibilityFixture:
         profile_store.save(profile, evidence_items)
         snapshot = profile_store.coherent_snapshot(
             _PROFILE_ID, require_committed_generation=True)
-        self.snapshot_hashes = dict(snapshot.hashes)
-        self.profile_context = snapshot.context
+        try:
+            self.snapshot_hashes = dict(snapshot.hashes)
+            self.profile_context = snapshot.context
+        finally:
+            snapshot.close()
 
         self.vacancy_db = self.state / "vacancies.sqlite3"
         JobDatabase(self.vacancy_db)
@@ -17906,3 +17909,32 @@ class EligibilityCliPrecedenceTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertTrue(message.startswith(("invalid_operation_id:",
                                             "binding_cli_identity:")))
+
+
+class EligibilityDescriptorLifetimeTests(unittest.TestCase):
+    def test_fixture_success_failure_and_replay_release_snapshot_descriptors(self):
+        from market_aligner.processing import ProcessingRefused
+        with tempfile.TemporaryDirectory() as directory:
+            before = _fd_count()
+            fx = EligibilityFixture(Path(directory))
+            self.assertEqual(_fd_count(), before, "fixture leaked its profile snapshot")
+            payload = fx.envelope(operation_id="op-fd-lifetime-0001")
+            name = fx.stage(payload)
+            arguments = dict(
+                supplied_operation_id=payload["eligibility_operation_id"],
+                supplied_fit_operation_id=payload["fit_operation_id"],
+                supplied_config_path=fx.resolved_config_path,
+                supplied_profile_id=_PROFILE_ID, supplied_job_key=fx.job.key,
+                supplied_track="backend",
+            )
+            install_fault("elig_after_event_insert", ProcessingRefused("storage_full", "injected"))
+            try:
+                with self.assertRaisesRegex(ProcessingRefused, "storage_full"):
+                    eligibility_one(fx.root, name, **arguments)
+            finally:
+                clear_faults()
+            self.assertEqual(_fd_count(), before, "failed eligibility leaked its profile snapshot")
+            accepted = eligibility_one(fx.root, name, **arguments)
+            self.assertEqual(_fd_count(), before, "successful eligibility leaked its profile snapshot")
+            self.assertEqual(eligibility_one(fx.root, name, **arguments), accepted)
+            self.assertEqual(_fd_count(), before, "eligibility replay leaked descriptors")

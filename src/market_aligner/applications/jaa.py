@@ -1889,7 +1889,7 @@ def observe_ats_form_or_recover(
                 })
 
             try:
-                browser = playwright.chromium.launch(headless=True, channel="chrome")
+                browser = playwright.chromium.launch(headless=True)
                 context = browser.new_context()
                 context.add_init_script(
                     """(() => {
@@ -2156,7 +2156,7 @@ def execute_fixture_pre_submit_or_recover(
         recorder.checkpoint("blocked")
         return recorder.finalize(outcome="blocked", failure_class="observation_indeterminate")
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, channel="chrome")
+        browser = playwright.chromium.launch(headless=True)
         context = browser.new_context()
         context.add_init_script("""(() => {
           const attempts = []; window.__marketAlignerPreSubmit = {attempts};
