@@ -1,11 +1,11 @@
 {
   "community_count": 989,
-  "edge_count": 134362,
-  "node_count": 71433,
+  "edge_count": 134510,
+  "node_count": 71505,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "ac20d466949510854fa77fe523b8423c952c08507f13d3482d7abd62891860e6"
+    "graph.json": "2aa04937033506262fd1f3d62f14c500de0d24a2b06c3470e612be064cf12a08"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "deccec10aec2fd96af54d0830d4748a0e5524dbb",
+  "source_base_commit": "8760e8c19d59fdc16954b2bbedf21d99d1f1c83c",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "e7e881e6446d2358a678595f8974487abf342a9d26c4c9b5657e853218ced0c9",
+    "docs/migration/CAPABILITY_INVENTORY.md": "c854f983e9d89c45d6d5373a6e86216e3c37e4133a0ac627ee9e4bc04d8bdc84",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "14aa1d1d30f94c9df8260c96ad023ea07242569d0e396d9edd638bdfd3128d87",
-    "docs/migration/capability-inventory.jsonl": "0628280769735a91209d81c9c9a812fb28e0a9d0f77df7de78fe16e7c778957e",
-    "docs/migration/ledger.jsonl": "f5eb34cc9e0246903c57f426af545c65c9482bf22674f163d7d1924f7ae47475",
+    "docs/migration/capability-inventory.jsonl": "8b41bc71937e231e319f1d43f3c7b9f261e475bbd738fa6fad8971d8bd28d6fd",
+    "docs/migration/ledger.jsonl": "46b806c9a2ab6bd2fd41487bd1c44924ac4978deef1837bb67afaebc6184b77b",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -174,6 +174,7 @@
     "internal/jaa/career_automation/production_queue.py": "d4c386919d49c9cb48561b9d2fd1dca63412e2988b0c4adee9762b3668a5671c",
     "internal/jaa/career_automation/production_recruiter_assessor.py": "1855a2c93068aec02fdba78ce19cdf317ed18787a3c1e4b927d4f2506567897d",
     "internal/jaa/career_automation/production_runner.py": "996bc538562c81a21ce6c4c9eac1afdec38d3a177a1c3981732d4ea16ed9510c",
+    "internal/jaa/career_automation/protected_corpus_binding.py": "5f54fd147afa675dfd5ffbee7eb671a12529aca4fee5bdcc1521169fcf44c95a",
     "internal/jaa/career_automation/provider_observation_authority.py": "20ad422f1a9ec140f5ffe5c17a82a63267f77058c49eb2abd59c43d4d6fda289",
     "internal/jaa/career_automation/provider_observation_capture.py": "09402ad9bd6ef52946b8f1e19f31d0b6d418c7e091dd1830702e71a4485a1b53",
     "internal/jaa/career_automation/public_access.py": "138d65a20b04e73a140ceb1aec459b73f5b9cf1b57b1506a33059e8ac07571ae",
@@ -665,6 +666,7 @@
     "internal/jaa/test_production_preparation_runner.py": "d214f3f92e476c36e354612a6675bcc759dee16bd1fae2d6271bc7bad3c113ab",
     "internal/jaa/test_production_queue.py": "6ebbb39273adb58c7dfba9b6ac15b3b06046977a8f4b766d81769509703a8235",
     "internal/jaa/test_production_runner.py": "1db7f94f960e2f89e8d3a331658cae68a20b8cbcebbded99ba8635440b0c4fd3",
+    "internal/jaa/test_protected_corpus_binding.py": "f89867e487a336cd2cbba2af498d32677b2772bd6509ebcd52c7bb94b6af2b65",
     "internal/jaa/test_provider_observation_authority.py": "9025df08a47e560566056850b43082b739b51dd7c6107561ccf7a06f6aa8cf98",
     "internal/jaa/test_provider_observation_capture.py": "60e106a913b96cae13e4d27aede6693c5ebe231bf5fc10c5292f4be5af733dc1",
     "internal/jaa/test_review_material_accessor_contract.py": "50172c7fc903233f9f651ff48c3df7d1017ec6804caf6fc3188c8d318cecc450",
