@@ -1,11 +1,11 @@
 {
   "community_count": 991,
-  "edge_count": 137785,
-  "node_count": 71567,
+  "edge_count": 137843,
+  "node_count": 71597,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "c7d775f5ed995d7eaad14df443e038852b9fcb7718e667672d91b1c96c7aaedd"
+    "graph.json": "7cb2b7a0ea188b9e11bde17d2fbfba10dae9e8dd9833159caf512122ee04f6dd"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "0b338e33a655a38da1f86ce0ae3ab3b1ed47e4e5",
+  "source_base_commit": "31cad5c999a52227da1148aa6302297ed6adf7f6",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "17f1db53a560f160d5fcbb2dfd64ebabe1d89a9a305599ea75e1c6aa23a7ca91",
+    "docs/migration/CAPABILITY_INVENTORY.md": "3241c8cc039acdff491896c26193dc5af7169524e07dd968b12cffe27747185d",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "9b7f75f2ff49043ad1b880e1bb7d124b006d39b4138c65dff3f1456126cd50c2",
-    "docs/migration/capability-inventory.jsonl": "8da758e5927b45a854c27ce6dd7a8d9dc83c1e7b7d0d8407e3576533959b08a7",
-    "docs/migration/ledger.jsonl": "75b943e6fb23f784be772a531b611aeac842dc5e18cf1d8b6fea73bfffa01100",
+    "docs/migration/capability-dispositions.jsonl": "e317a1f038f75d58dedeebc168ee61dcf147efab232252e80626df94e4655a36",
+    "docs/migration/capability-inventory.jsonl": "2801361d0a1fd368869b0ed8d90256f8684fe50894133050636635ef14b4789d",
+    "docs/migration/ledger.jsonl": "9ae2cc34fd8765923c1c624f45dfe82fad580d6d750d04bc4b0894dfcd67e508",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
