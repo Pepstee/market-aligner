@@ -1,11 +1,11 @@
 {
   "community_count": 994,
-  "edge_count": 139687,
-  "node_count": 71570,
+  "edge_count": 139590,
+  "node_count": 71544,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "182e35b8dfaf96468dd2535698b4a2177b2ab191fe8fcfcc6e56c6bbe587b8b6"
+    "graph.json": "dbc20f5ed7a9889ab5c85c8465e92ac8891b92494d3a61fbe0f69294d71a9ed2"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "61a4cf86d9da457d6d2fab5bd2e713343cf8efd4",
+  "source_base_commit": "9390233ba74f4129b5c5cd1cb3ef59e696903173",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "f464708530bc460d9de222f93959a38887c4e4f8566cccc50648621ac2f1e238",
+    "docs/migration/CAPABILITY_INVENTORY.md": "ae2fe21cced5c8952f8bbd217fa15dd15ccf968ddc3d48a107217e1b0a9f228d",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "90675048ebcd3fe74793d353d313f444fa863f8b397ea72aa4c1ba183a272267",
-    "docs/migration/capability-inventory.jsonl": "ae3961c50318a4521541cd2cd180ce8808d4b81a488436b311fc6514004d749c",
-    "docs/migration/ledger.jsonl": "8012caee0a1b95fe7cbc1c8b10ecc42b8c203bc06d1e422bc9af4109c410935d",
+    "docs/migration/capability-dispositions.jsonl": "06fd27dc4f05928ca38a673ce2f57fd09fa384d764b8b97449e0a235985c1855",
+    "docs/migration/capability-inventory.jsonl": "bf6dd10ff240091b41d611e5076c5d18843dc35421db14d0b63cc2b5ad3ce9e5",
+    "docs/migration/ledger.jsonl": "32f884c02b80942a722aee30a2a2684978469bda87ccba6710144f0f70faf562",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -294,9 +294,9 @@
     "internal/jaa/profiler/candidate_profile.py": "55fbaa227eb6b9b2abbd440b643dbabeb76ed2a10be27bf2a2ac6720b6cc3dfe",
     "internal/jaa/profiler/instrument/__init__.py": "fbf2179b5480abd65883b9eb6fd21f4d24caded7d180b2f0da3757d553b0a44b",
     "internal/jaa/profiler/instrument/questions.py": "09f2a809e7530fb8d4f01b14ad772c6726e7aa0bdd6f8dbce9a7b167ae90b38a",
-    "internal/jaa/profiler/score_profile.py": "a35b7ac5f902085b922db9b9c9ae3392f873d0ace12597a7eecc73367ae77948",
+    "internal/jaa/profiler/score_profile.py": "76b7ed70ec23ce8fbf1a7fb0a7060a7f499678c1990c93da0de4e9554edc8090",
     "internal/jaa/profiler/test_candidate_profile.py": "a793f9c9958bd21fc0062ed0351d96d27b91e9e4d6b957946792dd7de504f37a",
-    "internal/jaa/profiler/test_profiler.py": "3dfa4f4b9e0e1ef711e05009d0a8de29cfe639c03c7cced9755d06fb07df5108",
+    "internal/jaa/profiler/test_profiler.py": "7ca61bfc20abe7b93f1d7d830a27f4e8dcde661c209b80a701f23f8bbbe61f1c",
     "internal/jaa/pyproject.toml": "278a82bdd1437de8c7a5596fa00eef9c1325421e11a7182f6047fcd314497b6a",
     "internal/jaa/requirements-scrapling-full.txt": "bccc6c760d37c8467173d198efe26bbbb0566584fdeefd98079b483bbd903cd6",
     "internal/jaa/requirements-test.lock": "30bf69548649791b81cae31aa94ebabd0ea5cdfd63f739fe27471594e822ec39",
