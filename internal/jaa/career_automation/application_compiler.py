@@ -1644,7 +1644,7 @@ class ProductionApplicationCompiler:
 
         answers: list[StructuredAnswer] = []
         for requirement_id, (question_id, question_text) in sorted(
-            question_rows.items()
+            question_rows.items(), key=lambda row: row[1][0]
         ):
             fact = answer_facts.get(requirement_id)
             if fact is None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from career_automation.ats_fixture import FixtureReceipt
@@ -240,7 +242,8 @@ def test_production_cohort_has_no_test_module_imports() -> None:
     assert tuple(MUTATION_TEST_NODES) == REQUIRED_MUTATION_CONTROLS
 
 
-def test_cohort_browser_inputs_execute_synthetic_release(tmp_path):
+@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort"])
+def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, release_builder):
     """Run the canonical cohort browser builder with an actual synthetic release."""
     from playwright.sync_api import sync_playwright
     from career_automation import shadow_full_submit_cohort as cohort
@@ -249,9 +252,37 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path):
     from career_automation.browser_workflows import BrowserWorkflowStore
     from test_jaa08_independent_acceptance import _issued_release_inputs
 
-    rows = _issued_release_inputs(tmp_path)
-    database, _, contact, questions, source, artifacts, artifact_root, publication, _, gate, _, issued = rows
-    inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
+    if release_builder == "acceptance_fixture":
+        rows = _issued_release_inputs(tmp_path)
+        database, _, contact, questions, source, artifacts, artifact_root, publication, _, gate, _, issued = rows
+        inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
+    else:
+        # Substitute only frozen-corpus ingestion with a real synthetic fit database.
+        # Compilation, PDFs, publication, release issuance and browser execution are real.
+        from types import SimpleNamespace
+        from test_jaa06_independent_acceptance import _fit_database
+        from career_automation.gap_optimizer import FitAssessmentStore
+        captured = []
+        assess = FitAssessmentStore.assess
+
+        def record_requirements(self, **kwargs):
+            captured.extend(kwargs["requirements"])
+            return assess(self, **kwargs)
+
+        with monkeypatch.context() as capture:
+            capture.setattr(FitAssessmentStore, "assess", record_requirements)
+            database, fit, _ = _fit_database(tmp_path, matched=True, claims=(
+                ("capability", "Build reliable services.", "capability"),
+                ("project", "Deliver tested projects.", "project"),
+                ("education", "Study software engineering.", "education"),
+            ))
+        with database.connection() as connection:
+            job = connection.execute("SELECT job_key,title,company FROM pipeline_jobs").fetchone()
+        frozen = SimpleNamespace(job_key=job["job_key"], title=job["title"], company=job["company"])
+        with monkeypatch.context() as synthetic_ingestion:
+            synthetic_ingestion.setattr(cohort, "_fit_database", lambda root, authority: (database, fit, tuple(captured)))
+            inputs = cohort._release_inputs(tmp_path, frozen)
+        source = inputs[3]
     vacancy = FixtureVacancy("synthetic-cohort", source.job_key, source.role_title,
                              source.company_name, source.answers[0].question)
     with LocalATSFixture(vacancy, nonce=lambda: cohort.NONCE, form_token=cohort.FORM_TOKEN) as fixture:
