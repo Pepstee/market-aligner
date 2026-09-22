@@ -6,6 +6,8 @@ import inspect
 import json
 import socket
 import sqlite3
+import sys
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -574,8 +576,8 @@ def test_preexisting_runtime_tmp_object_fails_before_browser(
             run_network_witnessed_fixture(
                 repository_root=ROOT,
                 execution_root=execution_root,
-                python_executable=Path("/usr/bin/python3"),
-                chromium_executable=Path("/bin/true"),
+                python_executable=Path(sys.executable),
+                chromium_executable=Path(shutil.which("true")),
             )
     finally:
         if endpoint is not None:
@@ -922,5 +924,38 @@ def test_sealed_coordinator_failure_never_falls_back(tmp_path, monkeypatch, case
             repository_root=tmp_path, execution_root=output,
             python_executable=sys.executable, chromium_executable=shutil.which("true"),
             corpus_authority="sealed",
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("launcher_case", ["active", "base", "alias", "relative", "nonlexical", "missing"])
+def test_coordinator_pins_active_environment_before_output(tmp_path, monkeypatch, launcher_case):
+    active = Path(sys.executable).absolute()
+    alias = tmp_path / "other-python"
+    alias.symlink_to(active.resolve(strict=True))
+    choices = {
+        "active": active,
+        "base": active.resolve(strict=True),
+        "alias": alias,
+        "relative": Path("python"),
+        "nonlexical": active.parent / ".." / active.parent.name / active.name,
+        "missing": tmp_path / "missing-python",
+    }
+    selected = choices[launcher_case]
+    if launcher_case == "base" and selected == active:
+        pytest.skip("active interpreter is already its resolved base")
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(tmp_path.resolve()))
+    output = tmp_path / "output"
+    class SourceBoundaryReached(Exception):
+        pass
+    def source_boundary(_):
+        assert not output.exists()
+        raise SourceBoundaryReached
+    monkeypatch.setattr(fixture_module, "_source_identity", source_boundary)
+    expected = SourceBoundaryReached if launcher_case == "active" else NetworkWitnessedFixtureError
+    with pytest.raises(expected):
+        run_network_witnessed_fixture(
+            repository_root=tmp_path, execution_root=output,
+            python_executable=selected, chromium_executable=shutil.which("true"),
         )
     assert not output.exists()

@@ -468,6 +468,23 @@ def _certified_corpus_root() -> Path:
     return root
 
 
+def _active_python_launcher(python_executable: str | Path) -> Path:
+    """Return the exact launcher for the environment running the coordinator."""
+
+    supplied = Path(python_executable)
+    active = Path(os.path.abspath(os.fspath(sys.executable)))
+    if (
+        not supplied.is_absolute()
+        or Path(os.path.abspath(os.fspath(supplied))) != supplied
+        or supplied != active
+        or not supplied.is_file()
+    ):
+        raise NetworkWitnessedFixtureError(
+            "Python executable must be the active environment launcher"
+        )
+    return supplied
+
+
 def _path_identity(path: Path) -> dict[str, object]:
     status = path.stat()
     return {
@@ -2285,9 +2302,7 @@ def run_network_witnessed_fixture(
     if corpus_authority == "explicit":
         _certified_corpus_root()
     repository = Path(repository_root).resolve(strict=True)
-    python = Path(python_executable).absolute()
-    if not python.is_file():
-        raise NetworkWitnessedFixtureError("Python executable is missing")
+    python = _active_python_launcher(python_executable)
     chromium = Path(chromium_executable).resolve(strict=True)
     source = _source_identity(repository)
     protected_binding = None
