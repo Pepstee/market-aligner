@@ -77,7 +77,7 @@ COOPERATIVE_REQUEST_SCHEMA_VERSION = (
     "jaa10.network-witnessed-fixture-request.v2"
 )
 RUNTIME_TMP_HOME_ANCHOR = Path(
-    os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", str(Path.home()))
+    os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", "/tmp")
 )
 AF_UNIX_PATH_CAPACITY = 107
 # Pinned Chromium's `/org.chromium.Chromium.XXXXXX/SingletonSocket` suffix.
@@ -1090,7 +1090,7 @@ def _descendants(pid: int) -> list[int]:
 def _source_identity(repository_root: Path) -> SourceIdentity:
     try:
         identity = exact_committed_source_identity(repository_root)
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         raise NetworkWitnessError(str(error)) from error
     return SourceIdentity(
         identity.head,

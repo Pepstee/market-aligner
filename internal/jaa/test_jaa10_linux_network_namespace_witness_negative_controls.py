@@ -86,6 +86,31 @@ def test_source_identity_rejects_nested_repository(tmp_path: Path) -> None:
         witness_module._source_identity(nested)
 
 
+def test_source_identity_wraps_missing_repository(tmp_path: Path) -> None:
+    with pytest.raises(NetworkWitnessError):
+        witness_module._source_identity(tmp_path / "missing")
+
+
+def test_default_runtime_anchor_does_not_inherit_long_home() -> None:
+    environment = dict(os.environ)
+    environment.pop("JAA_RUNTIME_TMP_HOME_ANCHOR", None)
+    environment["HOME"] = "/" + ("long-home" * 20)
+    completed = subprocess.run(
+        [sys.executable, "-c", (
+            "from pathlib import Path; "
+            "from career_automation.linux_network_namespace_witness import "
+            "SourceIdentity, derive_runtime_tmp_binding; "
+            "root, _, budget = derive_runtime_tmp_binding("
+            "SourceIdentity('a'*40, 'b'*40, 'sha256:'+'c'*64), "
+            "Path('/tmp/synthetic-attempt')); "
+            "assert root.parent == Path('/tmp'); "
+            "assert budget['observed_total_bytes'] <= 107"
+        )],
+        env=environment, capture_output=True, text=True, timeout=20,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.fixture(scope="module")
 def accepted(tmp_path_factory: pytest.TempPathFactory):
     root = tmp_path_factory.mktemp("network-negative-base") / "evidence"
