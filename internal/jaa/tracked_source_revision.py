@@ -10,6 +10,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
+GIT_EXECUTABLE = Path("/usr/bin/git")
+GIT_TIMEOUT_SECONDS = 10
+
 SOURCE_CONTENT_REVISION_DOMAIN = b"jaa-source-content-revision-v2\0"
 SOURCE_CONTENT_REVISION_EXCLUSIONS = (b"runtime_evidence/",)
 
@@ -40,15 +43,22 @@ def source_git_revision_contract() -> dict[str, str]:
 
 
 def _git(repository: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
-    completed = subprocess.run(
-        ("git", *arguments),
-        cwd=repository,
-        input=input_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if completed.returncode != 0:
+    environment = {
+        "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+    try:
+        completed = subprocess.run(
+            (str(GIT_EXECUTABLE), *arguments),
+            cwd=repository, input=input_bytes,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, close_fds=True, env=environment,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise TrackedSourceRevisionError("source Git execution is unavailable or timed out") from error
+    if completed.returncode != 0 or completed.stderr:
         detail = completed.stderr.decode(errors="replace").strip()
         raise TrackedSourceRevisionError(f"git {' '.join(arguments)} failed: {detail}")
     return completed.stdout

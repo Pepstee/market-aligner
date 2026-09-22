@@ -477,3 +477,33 @@ def test_source_content_revision_preserves_git_object_format(tmp_path: Path, obj
     (tmp_path / "text").write_bytes(b"changed")
     with pytest.raises(TrackedSourceRevisionError, match="dirty tracked source"):
         source_content_revision(tmp_path)
+
+
+def test_source_git_ignores_ambient_repository_and_global_configuration(tmp_path, monkeypatch):
+    import tracked_source_revision as revision
+    from test_jaa10_linux_network_namespace_witness_negative_controls import _clean_repository
+
+    source = _clean_repository(tmp_path / "repository")
+    expected = revision.source_git_revision(source)
+    global_config = tmp_path / "config"
+    global_config.write_text("[alias]\nsynthetic-probe = !exit 99\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "nonexistent"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "wrong-tree"))
+    assert revision.source_git_revision(source) == expected
+    with pytest.raises(revision.TrackedSourceRevisionError):
+        revision._git(source, "synthetic-probe")
+
+
+def test_source_git_timeout_has_domain_error(tmp_path, monkeypatch):
+    import tracked_source_revision as revision
+
+    def timed_out(*args, **kwargs):
+        assert args[0][0] == str(revision.GIT_EXECUTABLE)
+        assert kwargs["timeout"] == 10
+        assert kwargs["close_fds"] is True
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(revision.subprocess, "run", timed_out)
+    with pytest.raises(revision.TrackedSourceRevisionError, match="timed out"):
+        revision._git(tmp_path, "status")

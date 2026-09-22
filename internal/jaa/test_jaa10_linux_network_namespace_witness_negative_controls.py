@@ -668,3 +668,20 @@ def test_tool_inventory_requires_one_complete_pinned_profile(tmp_path, monkeypat
             witness_module._tool_inventory()
         if case in ("mixed", "changed"):
             assert not invoked
+
+
+def test_tool_pins_are_verified_before_git_source_reads(tmp_path, monkeypatch):
+    def reject_tools():
+        raise NetworkWitnessError("synthetic tool pin rejection")
+
+    def forbidden_source(_):
+        raise AssertionError("unverified Git was used before tool admission")
+
+    monkeypatch.setattr(witness_module, "_tool_inventory", reject_tools)
+    monkeypatch.setattr(witness_module, "_source_identity", forbidden_source)
+    with pytest.raises(NetworkWitnessError, match="synthetic tool pin rejection"):
+        run_isolated_network_witness(
+            (sys.executable, "-c", "pass"), repository_root=tmp_path,
+            evidence_directory=tmp_path / "evidence",
+        )
+    assert not (tmp_path / "evidence").exists()

@@ -599,3 +599,41 @@ def test_failure_capture_view_states_inventory_unavailable(tmp_path: Path) -> No
         "reason": "provider_route_changed",
         "sha256": None,
     }
+
+
+@pytest.mark.parametrize("case", ["loose", "packed", "linked", "commit_bytes", "tree", "oversized", "object_type"])
+def test_committed_identity_verifies_commit_bytes_and_tree(tmp_path, monkeypatch, case):
+    from test_jaa10_linux_network_namespace_witness_negative_controls import _clean_repository, _git
+
+    source = _clean_repository(tmp_path / "repository")
+    if case == "packed":
+        _git(source, "gc", "--prune=now")
+    if case == "linked":
+        linked = tmp_path / "linked"
+        _git(source, "worktree", "add", "--detach", str(linked), "HEAD")
+        source = linked / "internal/jaa"
+    original = capture_module._git
+
+    def observe(root, *args, **kwargs):
+        data = original(root, *args, **kwargs)
+        if case == "commit_bytes" and args[:2] == ("cat-file", "commit"):
+            return data + b"tampered"
+        if case == "tree" and args == ("rev-parse", "HEAD^{tree}"):
+            return b"b" * 40 + b"\n"
+        if args[0] == "cat-file" and args[1].startswith("--batch-check"):
+            fields = data.split()
+            if case == "oversized":
+                fields[2] = b"1048577"
+            if case == "object_type":
+                fields[1] = b"blob"
+            return b" ".join(fields) + b"\n"
+        return data
+
+    monkeypatch.setattr(capture_module, "_git", observe)
+    if case in ("commit_bytes", "tree", "oversized", "object_type"):
+        with pytest.raises(ValueError, match="commit (bytes|size) differ|tree differs|object metadata differs"):
+            capture_module.exact_committed_source_identity(source)
+    else:
+        identity = capture_module.exact_committed_source_identity(source)
+        assert identity.head == original(source, "rev-parse", "HEAD").decode().strip()
+        assert identity.content_revision.startswith("sha256:")

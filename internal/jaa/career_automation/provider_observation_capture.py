@@ -23,7 +23,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .application_archive import ApplicationArchive, VacancyArchiveIdentity
 from .evidence_matching import canonical_json
-from tracked_source_revision import source_content_revision
+from tracked_source_revision import (
+    source_content_revision, TrackedSourceRevisionError, _git as _source_git,
+)
 
 
 COLLECTOR_IDENTITY = "jaa.playwright-greenhouse-read-only-observer.v4"
@@ -258,15 +260,11 @@ class _ReadOnlyNetworkBoundary:
             )
 
 
-def _git(repository_root: Path, *arguments: str) -> bytes:
-    completed = subprocess.run(
-        ["git", "-C", str(repository_root), *arguments],
-        check=False,
-        capture_output=True,
-    )
-    if completed.returncode != 0:
-        raise ValueError("provider observer requires an exact Git repository")
-    return completed.stdout
+def _git(repository_root: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
+    try:
+        return _source_git(repository_root, *arguments, input_bytes=input_bytes)
+    except TrackedSourceRevisionError as error:
+        raise ValueError("provider observer requires an exact Git repository") from error
 
 
 def exact_clean_head(repository_root: str | Path) -> str:
@@ -329,6 +327,25 @@ def exact_committed_source_identity(
     tree = _git(source, "rev-parse", "HEAD^{tree}").decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", tree):
         raise ValueError("committed source tree identity is invalid")
+    metadata = _git(
+        source, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        input_bytes=(head + "\n").encode("ascii"),
+    )
+    try:
+        object_name, object_type, size_text = metadata.strip().split()
+        object_size = int(size_text)
+    except ValueError as error:
+        raise ValueError("committed source object metadata is invalid") from error
+    if object_name != head.encode("ascii") or object_type != b"commit" or not 1 <= object_size <= 1_048_576:
+        raise ValueError("committed source object metadata differs")
+    commit = _git(source, "cat-file", "commit", head)
+    if len(commit) != object_size:
+        raise ValueError("committed source commit size differs")
+    object_bytes = b"commit " + str(len(commit)).encode("ascii") + b"\0" + commit
+    if hashlib.sha1(object_bytes).hexdigest() != head:
+        raise ValueError("committed source commit bytes differ from HEAD")
+    if commit.split(b"\n", 1)[0] != b"tree " + tree.encode("ascii"):
+        raise ValueError("committed source tree differs from verified commit")
     return CommittedSourceIdentity(
         repository,
         source,

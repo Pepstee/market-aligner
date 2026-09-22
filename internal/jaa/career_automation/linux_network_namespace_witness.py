@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .provider_observation_capture import exact_committed_source_identity
+from tracked_source_revision import GIT_EXECUTABLE
 
 SCHEMA_VERSION_V1 = "jaa10.linux-network-namespace-witness.v1"
 RECEIPT_SCHEMA_VERSION_V1 = (
@@ -102,6 +103,11 @@ IP = Path("/usr/sbin/ip")
 SETPRIV = Path("/usr/bin/setpriv")
 
 PINNED_TOOLS = {
+    str(GIT_EXECUTABLE): {
+        "version": "git version 2.53.0",
+        "sha256": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+        "version_argv": ("--version",),
+    },
     str(UNSHARE): {
         "version": "unshare from util-linux 2.41.3",
         "sha256": (
@@ -131,6 +137,11 @@ PINNED_TOOLS = {
 # ArtVault Ubuntu 24.04: util-linux 2.39.3-9ubuntu6.6 and iproute2 6.1.0-1ubuntu6.2.
 # Verified package integrity and exact executable bytes before admission.
 ARTVAULT_PINNED_TOOLS = {
+    str(GIT_EXECUTABLE): {
+        "version": "git version 2.43.0",
+        "sha256": "2a8c18fbf43da9f692d75474c72bea9dfd796c260b0f3dfe456376abc3bbd668",
+        "version_argv": ("--version",),
+    },
     str(UNSHARE): {
         "version": "unshare from util-linux 2.39.3",
         "sha256": "a23c8863860669003dc4660039fe642f5795c8c2195898ebc5d01afa1ac3d11c",
@@ -1967,8 +1978,8 @@ def run_isolated_network_witness(
     if not 1.0 <= timeout_seconds <= 300.0:
         raise NetworkWitnessError("timeout must be between 1 and 300 seconds")
     repository = Path(repository_root).resolve(strict=True)
-    source = _source_identity(repository)
     tools = _tool_inventory()
+    source = _source_identity(repository)
     evidence_root = Path(evidence_directory)
     cooperative_identities = (
         _cooperative_preflight(
