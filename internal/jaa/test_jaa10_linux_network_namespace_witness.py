@@ -88,9 +88,12 @@ def test_exact_source_tool_and_schema_binding(accepted_witness) -> None:
     assert document["source"]["tree"]
     assert document["source"]["content_revision"].startswith("sha256:")
     assert set(document["tools"]) == set(PINNED_TOOLS)
-    for path, expected in PINNED_TOOLS.items():
-        assert document["tools"][path]["sha256"] == expected["sha256"]
-        assert document["tools"][path]["version"] == expected["version"]
+    assert any(
+        all(document["tools"][path]["sha256"] == pin["sha256"]
+            and document["tools"][path]["version"] == pin["version"]
+            for path, pin in profile.items())
+        for profile in (PINNED_TOOLS, witness_module.ARTVAULT_PINNED_TOOLS)
+    )
     assert COMMAND_ENVIRONMENT["PYTHONDONTWRITEBYTECODE"] == "1"
     assert (
         document["cooperative_browser_controls"]

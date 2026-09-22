@@ -128,6 +128,26 @@ PINNED_TOOLS = {
     },
 }
 
+# ArtVault Ubuntu 24.04: util-linux 2.39.3-9ubuntu6.6 and iproute2 6.1.0-1ubuntu6.2.
+# Verified package integrity and exact executable bytes before admission.
+ARTVAULT_PINNED_TOOLS = {
+    str(UNSHARE): {
+        "version": "unshare from util-linux 2.39.3",
+        "sha256": "a23c8863860669003dc4660039fe642f5795c8c2195898ebc5d01afa1ac3d11c",
+        "version_argv": ("--version",),
+    },
+    str(IP): {
+        "version": "ip utility, iproute2-6.1.0, libbpf 1.3.0",
+        "sha256": "81a95d97c70f3677d1883b9d8fe13b1771ab208d5bca56bc447aaaff0b0480e0",
+        "version_argv": ("-Version",),
+    },
+    str(SETPRIV): {
+        "version": "setpriv from util-linux 2.39.3",
+        "sha256": "62ec0120791f3afcfb689fed52384ec2b0accc6e118a6b9a1d6fcfa7450aaf37",
+        "version_argv": ("--version",),
+    },
+}
+
 CAPABILITY_FIELDS = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
 SOCKET_TABLES = (
     "tcp",
@@ -1107,8 +1127,22 @@ def _source_identity(repository_root: Path) -> SourceIdentity:
 
 
 def _tool_inventory() -> dict[str, dict[str, Any]]:
+    observed = {}
+    for raw_path in PINNED_TOOLS:
+        path = Path(raw_path)
+        try:
+            if not path.is_file():
+                raise OSError("not a regular file")
+            observed[raw_path] = _sha256_file(path)
+        except OSError as error:
+            raise NetworkWitnessError(f"required tool is missing: {path}") from error
+    profiles = (PINNED_TOOLS, ARTVAULT_PINNED_TOOLS)
+    selected = next((profile for profile in profiles if
+                     {path: pin["sha256"] for path, pin in profile.items()} == observed), None)
+    if selected is None:
+        raise NetworkWitnessError("required tool bytes differ: no complete pinned profile")
     inventory: dict[str, dict[str, Any]] = {}
-    for raw_path, expected in PINNED_TOOLS.items():
+    for raw_path, expected in selected.items():
         path = Path(raw_path)
         try:
             descriptor = path.stat()

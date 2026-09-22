@@ -486,6 +486,9 @@ def test_tool_byte_drift_fails_before_namespace(
     replacement = copy.deepcopy(witness_module.PINNED_TOOLS)
     replacement[str(witness_module.UNSHARE)]["sha256"] = "0" * 64
     monkeypatch.setattr(witness_module, "PINNED_TOOLS", replacement)
+    alternative = copy.deepcopy(witness_module.ARTVAULT_PINNED_TOOLS)
+    alternative[str(witness_module.UNSHARE)]["sha256"] = "0" * 64
+    monkeypatch.setattr(witness_module, "ARTVAULT_PINNED_TOOLS", alternative)
 
     with pytest.raises(NetworkWitnessError, match="tool bytes differ"):
         run_isolated_network_witness(
@@ -629,3 +632,39 @@ def test_expectation_rejects_tampered_runtime_tmp_binding(
             socket_budget,
             schema_version="jaa10.cooperative-browser-expectation.v1",
         )
+
+
+@pytest.mark.parametrize("case", ["original", "artvault", "mixed", "changed", "version"])
+def test_tool_inventory_requires_one_complete_pinned_profile(tmp_path, monkeypatch, case):
+    from types import SimpleNamespace
+
+    paths = [tmp_path / name for name in ("unshare", "ip", "setpriv")]
+    profiles = []
+    for prefix in ("original", "artvault"):
+        profiles.append({str(p): {"sha256": hashlib.sha256((prefix + p.name).encode()).hexdigest(),
+                                  "version": prefix + p.name, "version_argv": ("--version",)}
+                         for p in paths})
+    for i, path in enumerate(paths):
+        prefix = "artvault" if case == "artvault" or (case == "mixed" and i == 0) else "original"
+        path.write_bytes((prefix + path.name).encode())
+    if case == "changed":
+        paths[0].write_bytes(b"unapproved")
+    monkeypatch.setattr(witness_module, "PINNED_TOOLS", profiles[0])
+    monkeypatch.setattr(witness_module, "ARTVAULT_PINNED_TOOLS", profiles[1])
+    invoked = []
+
+    def version(argv, **kwargs):
+        invoked.append(argv[0])
+        text = Path(argv[0]).read_text() if case != "version" else "unexpected version"
+        return SimpleNamespace(returncode=0, stdout=text, stderr="")
+
+    monkeypatch.setattr(witness_module.subprocess, "run", version)
+    if case in ("original", "artvault"):
+        result = witness_module._tool_inventory()
+        assert set(result) == set(profiles[0])
+        assert len(invoked) == 3
+    else:
+        with pytest.raises(NetworkWitnessError, match="tool (bytes|version) differ"):
+            witness_module._tool_inventory()
+        if case in ("mixed", "changed"):
+            assert not invoked
