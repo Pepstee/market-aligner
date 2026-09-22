@@ -751,3 +751,102 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
     )
     assert result is None
     assert calls == ["create_attempt", "terminal_boundary"]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_private_worker_channel_archives_real_child_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: bool,
+) -> None:
+    """Real child/pipe/archive, synthetic generator only; no candidate corpus."""
+    import base64
+    import os
+    import subprocess
+    import sys
+
+    sink, _recorder = _durable_sink(tmp_path)
+    monkeypatch.setattr(sink, "_generator_source_identity", lambda: ("a" * 40, {}))
+    original_popen = subprocess.Popen
+    observed = {}
+    sentinel = "SYNTHETIC-PRIVATE-REVISION-AND-ERROR"
+    script = '''
+from types import SimpleNamespace
+from career_automation import candidate_generation_worker as worker
+from career_automation.candidate_application_factory import CandidateApplicationPackage
+
+def generate(**arguments):
+    for role in ("generation.inputs", "document.source_inputs", "document.cv.constraints",
+                 "document.cv.source", "document.cv.final_pdf", "document.cover_letter.source",
+                 "document.cover_letter.final_pdf", "form.answers"):
+        arguments["revision_writer"](role=role, value=SENTINEL.encode(), media_type="text/plain")
+        if FAIL:
+            raise ValueError(SENTINEL)
+    return CandidateApplicationPackage(source=SimpleNamespace(), artifacts=SimpleNamespace(),
+                                       vacancy_requirements=())
+worker.build_candidate_application_package = generate
+raise SystemExit(worker.main())
+'''.replace("SENTINEL", repr(sentinel)).replace("FAIL", repr(failure))
+
+    def launch(command, **kwargs):
+        if command == [sys.executable, "-m", "career_automation.candidate_generation_worker"]:
+            # Keep the real parent transport, substitute only the corpus-dependent
+            # generator inside the child. Paths are explicit since parent changes cwd.
+            kwargs["env"]["PYTHONPATH"] = os.pathsep.join(
+                [str(ROOT), str(ROOT.parents[1] / "src")]
+            )
+            observed["stdout"] = os.dup(kwargs["stdout"].fileno())
+            observed["stderr"] = os.dup(kwargs["stderr"].fileno())
+            return original_popen([sys.executable, "-c", script], **kwargs)
+        return original_popen(command, **kwargs)
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", launch)
+    arguments = dict(
+        decision_receipt={}, candidate_projection={}, job_key="synthetic", vacancy_sha256="a" * 64,
+        source_url="https://example.test/job", role_title="Synthetic", company_name="Example",
+        contact=CandidateContact(full_name="Alex Example", email="alex@example.test", phone=None,
+                                city="London", record_id="synthetic", record_version=1,
+                                provenance_sha256="a" * 64),
+    )
+    try:
+        if failure:
+            with pytest.raises(RuntimeError, match="^isolated candidate generator failed$"):
+                sink.generate_candidate_application(**arguments)
+            assert sink.authority is None
+        else:
+            assert type(sink.generate_candidate_application(**arguments)) is CandidateApplicationPackage
+            assert sink.authority is not None
+        durable = sink._verified_durable_revisions()
+        assert len(durable) == (1 if failure else 9)
+        assert durable[0].value == sentinel.encode()
+        for channel, descriptor in observed.items():
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            data = os.read(descriptor, 65536)
+            assert sentinel.encode() not in data
+            assert base64.b64encode(sentinel.encode()) not in data
+            if channel == "stderr":
+                assert data == b""
+            else:
+                message = json.loads(data)
+                assert message["kind"] == ("failure" if failure else "result")
+    finally:
+        for descriptor in observed.values():
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize("binding", [None, "1", "invalid", "9" * 5000])
+def test_private_worker_rejects_absent_or_invalid_channel_without_traceback(binding) -> None:
+    import os
+    import subprocess
+    import sys
+
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join([str(ROOT), str(ROOT.parents[1] / "src")])
+    environment.pop("JAA_GENERATION_OUTPUT_FD", None)
+    if binding is not None:
+        environment["JAA_GENERATION_OUTPUT_FD"] = binding
+    result = subprocess.run(
+        [sys.executable, "-m", "career_automation.candidate_generation_worker"],
+        input="{}", text=True, capture_output=True, env=environment,
+    )
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert json.loads(result.stdout)["kind"] == "failure"
