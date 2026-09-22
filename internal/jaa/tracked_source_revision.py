@@ -98,6 +98,11 @@ def source_content_revision(repository: str | Path) -> str:
     if not root.is_dir():
         raise TrackedSourceRevisionError("source repository is not a directory")
 
+    object_format = _git(root, "rev-parse", "--show-object-format").strip()
+    if object_format not in {b"sha1", b"sha256"}:
+        raise TrackedSourceRevisionError("unsupported Git object format")
+    object_hash = hashlib.sha1 if object_format == b"sha1" else hashlib.sha256
+
     entries: list[tuple[bytes, bytes, bytes]] = []
     seen: set[bytes] = set()
     for record in _git(root, "ls-files", "--stage", "-z").split(b"\0"):
@@ -189,13 +194,13 @@ def source_content_revision(repository: str | Path) -> str:
         )
         if identity_before != identity_after:
             raise TrackedSourceRevisionError("dirty tracked source tree")
-        # Git's loose-object identity is SHA-1 over the canonical blob header
-        # and payload.  Calculate it directly instead of starting one
+        # Git hashes the canonical blob header and payload using the repository's
+        # object format. Calculate it directly instead of starting one
         # ``git hash-object`` process per tracked file; large recovered trees
         # contain tens of thousands of files and the process-per-file form
         # made certification take tens of minutes without changing evidence.
         actual_object_id = (
-            hashlib.sha1(
+            object_hash(
                 b"blob " + str(len(payload)).encode("ascii") + b"\0" + payload,
                 usedforsecurity=False,
             )

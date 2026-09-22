@@ -458,3 +458,22 @@ def test_tampered_and_stale_source_revision_fields_are_rejected_by_independent_v
     )
     with pytest.raises(AssertionError):
         _assert_source_binding(isolated_repository, receipt, document)
+
+
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+def test_source_content_revision_preserves_git_object_format(tmp_path: Path, object_format: str) -> None:
+    from tracked_source_revision import source_content_revision, TrackedSourceRevisionError
+
+    _git(tmp_path, "init", f"--object-format={object_format}")
+    _git(tmp_path, "config", "user.name", "Synthetic test")
+    _git(tmp_path, "config", "user.email", "synthetic@example.invalid")
+    (tmp_path / "empty").write_bytes(b"")
+    (tmp_path / "binary").write_bytes(bytes(range(256)))
+    (tmp_path / "text").write_bytes(b"line one\r\nline two\n")
+    (tmp_path / "link").symlink_to("text")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "Synthetic source fixture")
+    assert source_content_revision(tmp_path) == _independent_source_revision(tmp_path)
+    (tmp_path / "text").write_bytes(b"changed")
+    with pytest.raises(TrackedSourceRevisionError, match="dirty tracked source"):
+        source_content_revision(tmp_path)

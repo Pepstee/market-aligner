@@ -98,31 +98,31 @@ class JobRow:
 
     job_title: str = ""
     company: str = ""
-    location: str = ""
-    salary_text: str = ""
-    contract_type: str = ""
-    experience_required: str = ""
-    sponsorship_signal: str = "unknown"
+    location: str = field(default='', kw_only=True)
+    salary_text: str = field(default='', kw_only=True)
+    contract_type: str = field(default='', kw_only=True)
+    experience_required: str = field(default='', kw_only=True)
+    sponsorship_signal: str = field(default='unknown', kw_only=True)
     mapped_career: str = "other"          # one of TARGET_TRACKS, or "other"
     entry_level: Optional[bool] = None
     required_software: list[str] = field(default_factory=list)  # canonical ids
-    job_description: str = ""
-    responsibilities: list[str] = field(default_factory=list)
-    required_skills: list[str] = field(default_factory=list)
-    preferred_skills: list[str] = field(default_factory=list)
-    education_required: str = ""
-    certifications_required: list[str] = field(default_factory=list)
-    benefits: list[str] = field(default_factory=list)
-    application_deadline: str = ""
+    job_description: str = field(default='', kw_only=True)
+    responsibilities: list[str] = field(default_factory=list, kw_only=True)
+    required_skills: list[str] = field(default_factory=list, kw_only=True)
+    preferred_skills: list[str] = field(default_factory=list, kw_only=True)
+    education_required: str = field(default='', kw_only=True)
+    certifications_required: list[str] = field(default_factory=list, kw_only=True)
+    benefits: list[str] = field(default_factory=list, kw_only=True)
+    application_deadline: str = field(default='', kw_only=True)
 
     # Optional candidate lifestyle constraints:
     remote_flag: Optional[bool] = None     # True if 재택/원격/하이브리드; False if explicit office-only; None unclear
     site_intensity: Optional[float] = None # 0-10: 0 = pure desk work, 10 = constant 현장/시공/설치 presence
 
     # Active UK candidate-fit axes (0-10, LLM or deterministic mock produced).
-    technical_alignment: Optional[float] = None
-    evidence_match: Optional[float] = None
-    growth_potential: Optional[float] = None
+    technical_alignment: Optional[float] = field(default=None, kw_only=True)
+    evidence_match: Optional[float] = field(default=None, kw_only=True)
+    growth_potential: Optional[float] = field(default=None, kw_only=True)
 
     # 0–10 axis ratings (LLM-produced; keep the arithmetic out of here)
     visualization: Optional[float] = None

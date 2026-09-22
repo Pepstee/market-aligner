@@ -544,3 +544,20 @@ def test_extraction_interruption_preserves_prefix_and_resumes_only_missing(tmp_d
     assert pipeline_run.stage_extract(ctx) == ctx.paths.jobs
     assert calls == ["1"]
     assert [r.key for r in pipeline_run.read_jsonl(ctx.paths.jobs, JobRow)] == ["fixture:0", "fixture:1"]
+
+
+def test_legacy_job_row_positional_fields_keep_their_meaning():
+    from contracts import to_dict, from_dict
+    row = JobRow(
+        "fixture", "legacy", "https://example.invalid/job", None, None,
+        "Engineer", "Example employer", "UX_UI", True, ["python"],
+        True, 2.0,
+        location="Synthetic city", responsibilities=["Build samples"],
+        technical_alignment=7.0,
+    )
+    assert row.mapped_career == "UX_UI"
+    assert row.entry_level is True
+    assert row.required_software == ["python"]
+    assert row.remote_flag is True and row.site_intensity == 2.0
+    assert row.location == "Synthetic city"
+    assert from_dict(JobRow, to_dict(row)) == row

@@ -1,0 +1,19 @@
+extends: config.yaml
+
+io:
+  raw_cache_roots:
+    - scraper/data/bulk_500/wanted/raw_cache
+    - scraper/data/bulk_500/jobkorea/raw_cache
+    - scraper/data/bulk_500/notefolio/raw_cache
+  jobs: scraper/data/bulk_500/jobs_terra.jsonl
+  jobs_scored: skeleton/data/bulk_500/jobs_scored_terra.jsonl
+  outputs_dir: outputs/bulk_500_terra
+
+llm:
+  backend: codex_cli
+  model: gpt-5.6-terra
+  codex_model: gpt-5.6-terra
+  cli_timeout_seconds: 300
+  temperature: 0.0
+  cache: true
+  max_retries: 2
