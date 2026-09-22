@@ -242,7 +242,7 @@ def test_production_cohort_has_no_test_module_imports() -> None:
     assert tuple(MUTATION_TEST_NODES) == REQUIRED_MUTATION_CONTROLS
 
 
-@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort"])
+@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort", "cohort_fit"])
 def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, release_builder):
     """Run the canonical cohort browser builder with an actual synthetic release."""
     from playwright.sync_api import sync_playwright
@@ -256,6 +256,30 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
         rows = _issued_release_inputs(tmp_path)
         database, _, contact, questions, source, artifacts, artifact_root, publication, _, gate, _, issued = rows
         inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
+    elif release_builder == "cohort_fit":
+        from types import SimpleNamespace
+        from test_jaa06_independent_acceptance import _CapturedResearch
+        from career_automation.jaa04_corpus_authority import RawRequirementAnchor
+        body = (b"<p>Example product service platform provides documented public "
+                b"value to customers through reliable engineering technology.</p>")
+        digest = hashlib.sha256(body).hexdigest()
+        anchors = tuple(RawRequirementAnchor(text, body.index(text.encode()), len(text), digest)
+                        for text in ("product service", "reliable engineering", "technology"))
+        frozen = SimpleNamespace(
+            job_key=cohort.GRAPHCORE_JOB_KEY, title="Synthetic Engineer", company="Example",
+            vacancy_url="https://jobs.example.test/synthetic", opportunity_score_bp=9000,
+            queue_payload={}, raw_response_bytes=body, raw_response_sha256=digest,
+            inventory_sha256=digest, inventory_files_sha256=digest, dossier_sha256=digest,
+            queue_body_content_sha256=digest, admitted_queue_payload_sha256=digest,
+            tracked_seed_payload_sha256=digest, requirement_anchors=anchors,
+        )
+        # Only captured research and its expected digest are synthetic. The canonical
+        # fit builder, SQLite transitions, compiler, release gate and browser all run.
+        with monkeypatch.context() as synthetic_research:
+            synthetic_research.setattr(cohort, "_FrozenCorpusResearch", lambda cache, authority: _CapturedResearch(cache))
+            synthetic_research.setattr(cohort, "RAW_RESPONSE_SHA256", digest)
+            inputs = cohort._release_inputs(tmp_path, frozen)
+        source = inputs[3]
     else:
         # Substitute only frozen-corpus ingestion with a real synthetic fit database.
         # Compilation, PDFs, publication, release issuance and browser execution are real.
