@@ -1040,7 +1040,10 @@ def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z",
 
     class Worker:
         def extract_vacancy(self, context):
-            value = SemanticVacancyExtraction(**fixture.extraction_output)
+            value = SemanticVacancyExtraction(**{
+                key: tuple(item) if isinstance(item, list) else item
+                for key, item in fixture.extraction_output.items()
+            })
             return value, LLMReceipt.bind(
                 receipt_id="rc-extr", task="semantic_vacancy_extraction",
                 model="fixture-model", prompt_version="pv-1", inputs=context,
