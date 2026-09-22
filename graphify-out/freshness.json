@@ -1,11 +1,11 @@
 {
   "community_count": 985,
-  "edge_count": 134301,
-  "node_count": 71531,
+  "edge_count": 131934,
+  "node_count": 71469,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "c44d79ac905d7a2414e62812f34033fa2659b3074fe620d51083733eb2fa4823"
+    "graph.json": "2ebbee2ec4405f797032384c06cee9346a344fe78649fdd6c5f9691a6ce17e53"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "b60222abb7db9dc1eb6a4ca435956029d5ab814d",
+  "source_base_commit": "d9ca113f4b21804fd5e055f14be1b544ace9a875",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "6be32c5a3ecfb839b093c4e0b437cd6f061f86c95001f33a649d8818d6464134",
+    "docs/migration/CAPABILITY_INVENTORY.md": "3efd166141903892a3d314ee6e3554fb1c39852832348e4f02772cbc0dba3e82",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "3f0943bec429b90de0babfa98dd6856f3448de917284116d8972c38d856a7c94",
-    "docs/migration/capability-inventory.jsonl": "0ee9c77df588c529976916cdab9277249d88cf2a35f5f755d95f3720d4b51c4b",
-    "docs/migration/ledger.jsonl": "c03f8d28c398bebe14053e19b5e5865e38498a6ebe3503653ac1cf0b0230a83c",
+    "docs/migration/capability-dispositions.jsonl": "cc1a1570cd9af2b9d2ba2b6f569a17f31e7f3dc7695e8ceda1f72c02dd0286c8",
+    "docs/migration/capability-inventory.jsonl": "567f043d6057ef14f21f828ff5a04d1268c0f4ab462eb3adcfe519b492e2e14d",
+    "docs/migration/ledger.jsonl": "8acba2fa1c88e58a57430ad834df022ada18254ce3380b5fc1d78846e0b5f3d6",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -190,7 +190,7 @@
     "internal/jaa/career_automation/shadow_certification.py": "646f4cdd110d0ea6789eda152a77d62e72a2af19be74940fe55b52eea114cb97",
     "internal/jaa/career_automation/shadow_elapsed_cohort.py": "d658cb48c71780f273c47ee7d5db2854af242a7d41664fa12f7a60d1eed97e49",
     "internal/jaa/career_automation/shadow_fixture_measures.py": "6fcc7c329fbff895e4b0b9830ce4aed14f601ec2be683cb601a1693aad620297",
-    "internal/jaa/career_automation/shadow_full_submit_cohort.py": "7f3767e214e40f7be10bbb7dad94e086b03b8638525da7e5c26d9672fc637a62",
+    "internal/jaa/career_automation/shadow_full_submit_cohort.py": "9156fe8d6a122da62312c4f6810b44e52e93e7aefea9b16f3f2ef634113c41a7",
     "internal/jaa/career_automation/shadow_mutation_runtime.py": "6b46367aaf7e00d48963db7870a0814278f8ca76139db738e234e479732470a9",
     "internal/jaa/career_automation/shadow_observation_ledger.py": "45b4b5f3258344ed96c0e37318b43033fc40d1bc58b96309a40e229ba4ca2038",
     "internal/jaa/career_automation/source_expansion.py": "4089ecade829748f2cc9a32cf8f34a968b829bd9497c7b14ec7358c335ccb55f",
@@ -584,7 +584,7 @@
     "internal/jaa/test_jaa10_frozen_replay_pair_recorder.py": "2a7e99cffccb80b269ab71bd2f1757b9cf2c5dc12ee1aec396b3ab0ed541b98d",
     "internal/jaa/test_jaa10_frozen_replay_pair_recorder_negative_controls.py": "8e60fcd335b6ff4415fff8727930e29ec69d7bf6e8a85147e477b10ea226b3ce",
     "internal/jaa/test_jaa10_full_submit_cohort.py": "a8bbce3ccaf878c908cc9d3a9090e2d29b8e3e8ca28da1091f4d8428b43e2a83",
-    "internal/jaa/test_jaa10_full_submit_cohort_negative_controls.py": "d15c3570c94b7e28a30bc0c52d4f6a4135dd2f589c7cc8e28933678573687c0a",
+    "internal/jaa/test_jaa10_full_submit_cohort_negative_controls.py": "c4078343f6a5652575d8524f12ffe8714b33e13e45b9d4192672a13e38cdd94d",
     "internal/jaa/test_jaa10_hard_metrics_evaluation.py": "4a1887a2324b205cd8272ee55e597c7d7091ef6c13089aad0f415f88848bc5d9",
     "internal/jaa/test_jaa10_hard_metrics_evaluation_negative_controls.py": "2b9f5baac1c51f31068d5d52c6da41e990d6496eed4ef6287dd3bc67f8f8cf9f",
     "internal/jaa/test_jaa10_hard_metrics_full_submit_integration.py": "03a983fdf8182a8f9fb1de547241ac0d60c2eacde4dfaa0bea2542d3902ed179",
