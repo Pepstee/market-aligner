@@ -8,7 +8,7 @@ from threading import Barrier
 
 import pytest
 
-from market_aligner.applications.canonical import ContractValidationError
+from market_aligner.applications.canonical import ContractValidationError, canonical_json_bytes
 from market_aligner.profiler.intent import (
     CandidateIntentDocument,
     serialize_candidate_intent,
@@ -131,6 +131,7 @@ def test_authority_store_is_append_only_and_current_head_is_monotonic(tmp_path: 
         stored = store.load(PROFILE_ID, document.candidate_intent_sha256)
         assert stored.document == document
         assert stored.authority_source_exact_bytes == AUTHORITY_SOURCE
+        assert stored.current is (document == revision_two)
         assert (root / "revisions" / document.candidate_intent_sha256 / "intent.json").is_file()
 
     conflicting = _document(authority_revision=2, role_track_ids=["different_track"])
@@ -150,3 +151,27 @@ def test_authority_store_refuses_wrong_source_bytes(tmp_path: Path) -> None:
             b"different-source",
             valid_until="2026-09-29T00:00:00Z",
         )
+
+
+@pytest.mark.parametrize("field,value", [
+    ("profile_id", "prf_11111111111111111111111111111111"),
+    ("profile_version", "different"),
+    ("authority_revision", 0),
+    ("authority_source_sha256", "0" * 64),
+    ("valid_until", "2027-09-29T00:00:00Z"),
+])
+def test_current_head_must_match_retained_manifest_before_load_or_advance(tmp_path, field, value):
+    store = CandidateIntentAuthorityStore(tmp_path)
+    first = _document()
+    store.register(first, AUTHORITY_SOURCE, valid_until="2026-09-29T00:00:00Z")
+    head = tmp_path / "profiles" / PROFILE_ID / "intents" / "current.json"
+    document = json.loads(head.read_bytes())
+    document[field] = value
+    corrupted = canonical_json_bytes(document)
+    head.write_bytes(corrupted)
+    with pytest.raises(ContractValidationError):
+        store.load(PROFILE_ID, first.candidate_intent_sha256)
+    with pytest.raises(ContractValidationError):
+        store.register(_document(authority_revision=2), AUTHORITY_SOURCE,
+                       valid_until="2026-09-29T00:00:00Z")
+    assert head.read_bytes() == corrupted

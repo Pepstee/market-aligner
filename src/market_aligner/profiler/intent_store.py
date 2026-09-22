@@ -105,6 +105,57 @@ class CandidateIntentAuthorityStore:
     def _root(self, profile_id: str) -> Path:
         return self.paths.profiles / validate_profile_id(profile_id) / "intents"
 
+    def _load_revision(
+        self, profile_id: str, candidate_intent_sha256: str
+    ) -> tuple[CandidateIntentDocument, dict, bytes, bytes]:
+        validate_profile_id(profile_id)
+        require_sha256(candidate_intent_sha256, "candidate_intent_sha256")
+        root = self._root(profile_id)
+        revision = root / "revisions" / candidate_intent_sha256
+        intent_bytes = (revision / "intent.json").read_bytes()
+        manifest_bytes = (revision / "manifest.json").read_bytes()
+        manifest = require_mapping(
+            parse_canonical_json(manifest_bytes), "candidate intent authority manifest"
+        )
+        require_exact_keys(manifest, _MANIFEST_KEYS, "candidate intent authority manifest")
+        if manifest["schema_version"] != "market-aligner.candidate-intent-authority-manifest.v1":
+            raise ContractValidationError("unsupported candidate-intent authority manifest")
+        require_timestamp(manifest["valid_until"], "candidate intent valid_until", strict_profile=True)
+        document = CandidateIntentDocument.parse(intent_bytes)
+        if (
+            document.profile_id != profile_id
+            or document.candidate_intent_sha256 != candidate_intent_sha256
+            or manifest["candidate_intent_sha256"] != candidate_intent_sha256
+            or manifest["profile_id"] != profile_id
+            or manifest["profile_version"] != document.profile_version
+            or manifest["authority_revision"] != document.value["authority_revision"]
+            or manifest["authority_source_sha256"] != document.authority_source_sha256
+        ):
+            raise ContractValidationError("candidate-intent authority manifest identity differs")
+        source = (
+            root
+            / "authority-sources"
+            / f"{document.authority_source_sha256}.bin"
+        ).read_bytes()
+        if digest_bytes(source) != document.authority_source_sha256:
+            raise ContractValidationError("candidate-intent authority-source bytes differ")
+        return document, manifest, manifest_bytes, source
+
+    def _current_manifest(self, root: Path) -> tuple[dict, bytes]:
+        current_bytes = (root / "current.json").read_bytes()
+        current = require_mapping(
+            parse_canonical_json(current_bytes), "current candidate intent"
+        )
+        require_exact_keys(current, _MANIFEST_KEYS, "current candidate intent")
+        return current, current_bytes
+
+    @staticmethod
+    def _validate_head_binding(current_bytes: bytes, manifest_bytes: bytes) -> None:
+        if current_bytes != manifest_bytes:
+            raise ContractValidationError(
+                "current candidate-intent head is not bound to its retained revision manifest"
+            )
+
     def register(
         self,
         document: CandidateIntentDocument,
@@ -142,14 +193,16 @@ class CandidateIntentAuthorityStore:
         current_path = root / "current.json"
         with _current_head_lock(root):
             if current_path.exists():
-                current = require_mapping(
-                    parse_canonical_json(current_path.read_bytes()),
-                    "current candidate intent",
-                )
-                require_exact_keys(current, _MANIFEST_KEYS, "current candidate intent")
+                current, current_bytes = self._current_manifest(root)
                 current_revision = current["authority_revision"]
                 if isinstance(current_revision, bool) or not isinstance(current_revision, int):
                     raise ContractValidationError("current candidate-intent revision is invalid")
+                _, _, head_manifest_bytes, _ = self._load_revision(
+                    document.profile_id, current["candidate_intent_sha256"]
+                )
+                self._validate_head_binding(
+                    current_bytes, head_manifest_bytes
+                )
                 if current_revision > manifest["authority_revision"]:
                     return self.load(document.profile_id, digest)
                 if (
@@ -163,45 +216,19 @@ class CandidateIntentAuthorityStore:
         return self.load(document.profile_id, digest)
 
     def load(self, profile_id: str, candidate_intent_sha256: str) -> StoredCandidateIntent:
-        validate_profile_id(profile_id)
-        require_sha256(candidate_intent_sha256, "candidate_intent_sha256")
         root = self._root(profile_id)
-        revision = root / "revisions" / candidate_intent_sha256
-        intent_bytes = (revision / "intent.json").read_bytes()
-        manifest_bytes = (revision / "manifest.json").read_bytes()
-        manifest = require_mapping(
-            parse_canonical_json(manifest_bytes), "candidate intent authority manifest"
+        document, manifest, manifest_bytes, source = self._load_revision(
+            profile_id, candidate_intent_sha256
         )
-        require_exact_keys(manifest, _MANIFEST_KEYS, "candidate intent authority manifest")
-        if manifest["schema_version"] != "market-aligner.candidate-intent-authority-manifest.v1":
-            raise ContractValidationError("unsupported candidate-intent authority manifest")
-        require_timestamp(manifest["valid_until"], "candidate intent valid_until", strict_profile=True)
-        document = CandidateIntentDocument.parse(intent_bytes)
-        if (
-            document.profile_id != profile_id
-            or document.candidate_intent_sha256 != candidate_intent_sha256
-            or manifest["candidate_intent_sha256"] != candidate_intent_sha256
-            or manifest["profile_id"] != profile_id
-            or manifest["profile_version"] != document.profile_version
-            or manifest["authority_revision"] != document.value["authority_revision"]
-            or manifest["authority_source_sha256"] != document.authority_source_sha256
-        ):
-            raise ContractValidationError("candidate-intent authority manifest identity differs")
-        source = (
-            root
-            / "authority-sources"
-            / f"{document.authority_source_sha256}.bin"
-        ).read_bytes()
-        if digest_bytes(source) != document.authority_source_sha256:
-            raise ContractValidationError("candidate-intent authority-source bytes differ")
-        current = require_mapping(
-            parse_canonical_json((root / "current.json").read_bytes()),
-            "current candidate intent",
-        )
-        require_exact_keys(current, _MANIFEST_KEYS, "current candidate intent")
+        current, current_bytes = self._current_manifest(root)
+        is_current = current["candidate_intent_sha256"] == candidate_intent_sha256
+        if is_current:
+            self._validate_head_binding(
+                current_bytes, manifest_bytes
+            )
         return StoredCandidateIntent(
             document,
             source,
             str(manifest["valid_until"]),
-            current["candidate_intent_sha256"] == candidate_intent_sha256,
+            is_current,
         )
