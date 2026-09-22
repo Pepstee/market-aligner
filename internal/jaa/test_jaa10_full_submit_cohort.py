@@ -238,3 +238,47 @@ def test_production_cohort_has_no_test_module_imports() -> None:
     assert "from test_" not in source
     assert "import test_" not in source
     assert tuple(MUTATION_TEST_NODES) == REQUIRED_MUTATION_CONTROLS
+
+
+def test_cohort_browser_inputs_execute_synthetic_release(tmp_path):
+    """Run the canonical cohort browser builder with an actual synthetic release."""
+    from playwright.sync_api import sync_playwright
+    from career_automation import shadow_full_submit_cohort as cohort
+    from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
+    from career_automation.browser_executor import LocalBrowserExecutor
+    from career_automation.browser_workflows import BrowserWorkflowStore
+    from test_jaa08_independent_acceptance import _issued_release_inputs
+
+    rows = _issued_release_inputs(tmp_path)
+    database, _, contact, questions, source, artifacts, artifact_root, publication, _, gate, _, issued = rows
+    inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
+    vacancy = FixtureVacancy("synthetic-cohort", source.job_key, source.role_title,
+                             source.company_name, source.answers[0].question)
+    with LocalATSFixture(vacancy, nonce=lambda: cohort.NONCE, form_token=cohort.FORM_TOKEN) as fixture:
+        database, workflow, approvals, values, authority, issued = cohort._browser_inputs(
+            fixture, tmp_path, inputs
+        )
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("cohort_worker", run_id=run_id) is not None
+        store.authorize_release(run_id, token=issued.release_token,
+                                authorization_reference=f"JAA08:{issued.manifest.release_manifest_sha256}",
+                                idempotency_key=issued.manifest.release_manifest_sha256)
+        executor = LocalBrowserExecutor(store, repository_root=cohort.ROOT,
+                                        clock=lambda: authority.consumed_at)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                for action in workflow.actions:
+                    assert executor.execute_next(page, run_id=run_id, worker_id="cohort_worker",
+                                                 approved_values=approvals, materialized_values=values,
+                                                 release_authority=authority) is not None
+                assert page.get_by_role("heading", name="Application received").is_visible()
+            finally:
+                browser.close()
+        assert fixture.receipt is not None
+        assert store.run_snapshot(run_id)["status"] == "completed"
+        assert store.submit_dispatch(run_id)["state"] == "receipt_recorded"
+        assert authority.sanity_review_receipt is not None
+        assert authority.archive_receipt is not None
