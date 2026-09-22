@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from packaging.version import Version
 from pathlib import Path
 
 from market_aligner.collectors.scrapling_client import ScraplingClient
@@ -37,7 +38,9 @@ class ScraplingProtocolTests(unittest.TestCase):
             {"runtime_python": str(runtime), "command_timeout_seconds": 120},
         )
         capabilities = client.capabilities()
-        self.assertEqual("0.4.11", capabilities["scrapling_version"])
+        self.assertGreaterEqual(Version(capabilities["scrapling_version"]), Version("0.4.11"))
+        self.assertEqual({"http": "static"}, capabilities["engine_aliases"])
+        self.assertEqual(capabilities["static_methods"], capabilities["http_methods"])
         self.assertEqual(["static", "dynamic", "stealth"], capabilities["engines"])
         self.assertEqual(
             {"fetch", "session_batch", "parse", "spider", "call", "capabilities"},
@@ -46,6 +49,37 @@ class ScraplingProtocolTests(unittest.TestCase):
         self.assertIn("$proxy_rotator", capabilities["typed_json"])
         self.assertIn("mcp", capabilities["upstream_cli"])
         self.assertTrue(any("AsyncStealthySession" in item for item in capabilities["exports"]))
+
+        # Exercise the legacy engine spelling through the actual worker process,
+        # against a local public-shaped fixture rather than an external site.
+        import base64
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        exact = b"<html><body><main>Synthetic vacancy details</main></body></html>"
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(exact)
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/vacancy"
+            static = client.fetch("static", url)
+            legacy = client.fetch("http", url)
+            batch = client.execute({"operation": "session_batch", "engine": "http",
+                                    "requests": [{"url": url}]})
+            for response in (static, legacy, batch[0]):
+                self.assertEqual(200, response["status"])
+                self.assertEqual(exact, base64.b64decode(response["body_base64"], validate=True))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

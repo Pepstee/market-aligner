@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from market_aligner import __version__
@@ -207,12 +208,30 @@ def _promote_assessment_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collection_hours_until(clock: str, *, now: datetime | None = None) -> float:
+    """Translate the donor local-clock deadline into the sole monotonic run bound."""
+    try:
+        hour_text, minute_text = clock.split(":")
+        if len(hour_text) != 2 or len(minute_text) != 2:
+            raise ValueError
+        hour, minute = int(hour_text), int(minute_text)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("--stop-at must use 24-hour HH:MM") from exc
+    current = now if now is not None else datetime.now().astimezone()
+    deadline = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if deadline <= current:
+        deadline += timedelta(days=1)
+    return (deadline.timestamp() - current.timestamp()) / 3600
+
+
 def _collect_command(args: argparse.Namespace) -> int:
     service = CollectionService(args.data_home)
     receipt = service.collect(
         args.config,
         once=bool(args.once),
-        hours=float(args.hours or 0),
+        hours=(_collection_hours_until(args.stop_at) if args.stop_at else float(args.hours or 0)),
         poll_minutes=float(args.poll_minutes),
         operation_id=args.operation_id,
         log=lambda message: print(message, file=sys.stderr),
@@ -234,6 +253,14 @@ def _collect_status_command(args: argparse.Namespace) -> int:
     paths = ProductPaths.resolve(args.data_home)
     plan = Collector.plan(paths.root, cfg)
     status = JobDatabase.collection_status(plan["database"], plan["boards"])
+    target = int(plan["collection"].get("target_per_board", 0))
+    if target:
+        for row in status["boards"]:
+            row["target"] = target
+            if status["exists"] and row["fetched"] >= target:
+                row["state"] = "complete"
+            elif status["exists"] and row["discovered"] < target and row["pending"] == 0 and row["failed"] == 0:
+                row["state"] = "inventory_shortfall"
     print(json.dumps(status, ensure_ascii=False, sort_keys=True))
     return 0 if status["exists"] else 1
 
@@ -984,6 +1011,7 @@ def build_parser() -> argparse.ArgumentParser:
     duration = collect.add_mutually_exclusive_group(required=True)
     duration.add_argument("--once", action="store_true")
     duration.add_argument("--hours", type=float)
+    duration.add_argument("--stop-at", metavar="HH:MM", help="Stop starting work at the next local-clock time.")
     collect.add_argument("--poll-minutes", type=float, default=15.0)
     collect.add_argument(
         "--operation-id",

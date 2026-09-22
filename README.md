@@ -9,9 +9,8 @@ Profile data, credentials, generated applications, collected data, caches, and r
 receipts live outside this repository under `MARKET_ALIGNER_DATA_HOME`.
 
 The application-automation component is logically inside the product boundary but is
-separately certifiable. This repository currently contains only its versioned interface;
-the active implementation will be imported after its protected upstream freezes and is
-sealed.
+separately certifiable. Its implementation lives in `internal/jaa` and is packaged separately with
+shared, versioned contracts. Final migration qualification remains in progress.
 
 ## Development status
 
@@ -47,3 +46,13 @@ Live collection configuration is external and injected into adapters. The automa
 fallback uses static then dynamic fetching; stealth/challenge-solving capabilities require an
 explicit source policy. Final submission and legal consent are never authorized by Market
 Aligner.
+
+Collection uses `market-aligner collect --config CONFIG --operation-id ID --once`
+(or `--hours N` / `--stop-at HH:MM` in the machine’s local time). `collect-preflight` and `collect-status` use the same config and data
+home. In the external config, `collection.target_per_board` defaults to zero (uncapped),
+`discover_only` saves discoveries without fetching, and `delay_seconds` spaces fetches
+per board. Optional `fetch_attempts` (1–10, default 1) and `fetch_retry_backoff`
+(0–60 seconds, default 5) retry direct adapter failures with capped exponential waits
+before the existing Scrapling fallback. Retries respect the collection deadline;
+unfetched rows remain available for the next operation. Invalid captured content is
+not retried as a transport failure.

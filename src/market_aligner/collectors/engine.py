@@ -383,6 +383,8 @@ class Collector:
         self.discover_only = collection.get("discover_only", False)
         self.target_per_board = int(collection.get("target_per_board", 0))
         self.inter_fetch_delay = float(collection.get("delay_seconds", 0))
+        self.fetch_attempts = int(collection.get("fetch_attempts", 1))
+        self.fetch_retry_backoff = float(collection.get("fetch_retry_backoff", 5.0))
         self._board_locks = {board: threading.Lock() for board in self.boards}
         self._next_fetch_start = {board: float("-inf") for board in self.boards}
         self.source_workers = int(
@@ -432,6 +434,19 @@ class Collector:
             and math.isfinite(delay_value)
             and delay_value >= 0,
             "collection.delay_seconds must be a finite nonnegative real number",
+        )
+
+        attempts = collection.get("fetch_attempts", 1)
+        _shape(
+            isinstance(attempts, int) and not isinstance(attempts, bool)
+            and 1 <= attempts <= 10,
+            "collection.fetch_attempts must be an integer in [1,10]",
+        )
+        backoff = collection.get("fetch_retry_backoff", 5.0)
+        _shape(
+            isinstance(backoff, (int, float)) and not isinstance(backoff, bool)
+            and math.isfinite(backoff) and 0 <= backoff <= 60,
+            "collection.fetch_retry_backoff must be finite and in [0,60] seconds",
         )
 
         target_value = collection.get("target_per_board", 0)
@@ -646,13 +661,30 @@ class Collector:
         )
         return path
 
-    def _fetch_row(self, adapter: Any, row: JobUrl) -> tuple[RawPosting, str | None]:
+    def _fetch_row(
+        self, adapter: Any, row: JobUrl, *, deadline: float | None = None,
+    ) -> tuple[RawPosting, str | None] | None:
         try:
-            raw, _ = bind_public_listing(
-                adapter.fetch(row, True), protected_roots=(self.root,)
-            )
+            for attempt in range(self.fetch_attempts):
+                if deadline is not None and self.monotonic() >= deadline:
+                    return None
+                try:
+                    posting = adapter.fetch(row, True)
+                    break
+                except Exception:
+                    if attempt + 1 == self.fetch_attempts:
+                        raise
+                    delay = min(60.0, self.fetch_retry_backoff * (2 ** attempt))
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - self.monotonic()))
+                    if delay:
+                        self.sleeper(delay)
+            # Integrity/privacy failures are not network retries.
+            raw, _ = bind_public_listing(posting, protected_roots=(self.root,))
             return raw, None
         except Exception:
+            if deadline is not None and self.monotonic() >= deadline:
+                return None
             if self.scrapling is None:
                 raise
             try:
@@ -1188,7 +1220,7 @@ class Collector:
             return None
         if not self._respect_inter_fetch_delay(row.board, deadline):
             return None
-        return self._fetch_row(adapter, row)
+        return self._fetch_row(adapter, row, deadline=deadline)
 
     def run(
         self, hours: float = 0, poll_minutes: float = 15, once: bool = False

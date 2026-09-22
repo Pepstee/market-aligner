@@ -2656,6 +2656,16 @@ def test_offline_collection_status_real_cli(tmp_path):
     assert rows["b"]["state"] == "complete"
     assert rows["c"]["discovered"] == 0
     assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
+    cfg.write_text(yaml.safe_dump({"boards": {"enabled": ["a", "b", "c"]},
+                                   "collection": {"target_per_board": 5}}))
+    output = io.StringIO()
+    with redirect_stdout(output):
+        assert main(["collect-status", "--config", str(cfg), "--data-home", str(data)]) == 0
+    rows = {r["board"]: r for r in json.loads(output.getvalue())["boards"]}
+    assert rows["b"]["state"] == "inventory_shortfall" and rows["b"]["target"] == 5
+    assert rows["a"]["state"] == "partial"
+    assert rows["c"]["state"] == "inventory_shortfall"
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
 
 
 def test_offline_collection_status_absent_database(tmp_path):
@@ -2951,3 +2961,220 @@ def test_saramin_mode_validation_and_preflight_browser_dependency(tmp_path):
                     side_effect=lambda n: None if n == "playwright" else object()):
         report = Collector.preflight(tmp_path, cfg)
     assert not next(c for c in report["checks"] if c["name"] == "dependency:playwright")["ok"]
+
+
+def test_transient_adapter_failure_retries_to_success(tmp_path):
+    clock = [0.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    class Adapter:
+        def __init__(self):
+            self.calls = 0
+
+        def discover(self, _terms, live=False):
+            yield JobUrl("injected", "one", "https://example.test/one")
+
+        def fetch(self, row, live=False):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("synthetic transient outage")
+            return RawPosting(row.board, row.job_id, row.url,
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              raw_text="synthetic posting")
+
+    adapter = Adapter()
+    collector = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"fetch_attempts": 3, "fetch_retry_backoff": 5,
+                                          "source_workers": 1, "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None, monotonic=lambda: clock[0],
+                          sleeper=sleep, adapter_loader=lambda *a, **kw: adapter)
+    result = collector.cycle()
+    assert result["fetched"] == 1 and result["errors"] == 0
+    assert adapter.calls == 3
+    assert sleeps == [5.0, 10.0]
+    assert collector.db.pending_discoveries(["injected"]) == []
+
+
+def test_retry_backoff_is_exponential_and_capped_at_sixty(tmp_path):
+    clock = [0.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    class Adapter:
+        def __init__(self):
+            self.calls = 0
+
+        def discover(self, _terms, live=False):
+            yield JobUrl("injected", "one", "https://example.test/one")
+
+        def fetch(self, row, live=False):
+            self.calls += 1
+            raise RuntimeError("synthetic permanent outage")
+
+    adapter = Adapter()
+    collector = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"fetch_attempts": 5, "fetch_retry_backoff": 20,
+                                          "source_workers": 1, "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None, monotonic=lambda: clock[0],
+                          sleeper=sleep, adapter_loader=lambda *a, **kw: adapter)
+    from market_aligner.collectors.scrapling_client import ScraplingFetchError
+    fallback_calls = []
+    class Fallback:
+        def fetch_with_chain(self, url):
+            fallback_calls.append((url, adapter.calls))
+            raise ScraplingFetchError("synthetic exhausted fallback", [])
+    collector.scrapling = Fallback()
+    result = collector.cycle()
+    assert fallback_calls == [("https://example.test/one", 5)]
+    assert result["fetched"] == 0 and result["errors"] == 1
+    assert adapter.calls == 5
+    assert sleeps == [20.0, 40.0, 60.0, 60.0]
+
+
+def test_retry_exhaustion_records_fetch_error(tmp_path):
+    clock = [0.0]
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    class Adapter:
+        def __init__(self):
+            self.calls = 0
+
+        def discover(self, _terms, live=False):
+            yield JobUrl("injected", "one", "https://example.test/one")
+
+        def fetch(self, row, live=False):
+            self.calls += 1
+            raise RuntimeError("synthetic permanent outage")
+
+    adapter = Adapter()
+    collector = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"fetch_attempts": 3, "fetch_retry_backoff": 1,
+                                          "source_workers": 1, "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None, monotonic=lambda: clock[0],
+                          sleeper=sleep, adapter_loader=lambda *a, **kw: adapter)
+    result = collector.cycle()
+    assert result["fetched"] == 0 and result["errors"] == 1
+    assert result["database_total"] == 1
+    status = JobDatabase.collection_status(collector.db.path, ["injected"])
+    assert status["boards"][0]["failed"] == 1
+    assert adapter.calls == 3
+
+
+def test_integrity_failure_after_fetch_is_not_retried(tmp_path):
+    clock = [0.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    class Adapter:
+        def __init__(self):
+            self.calls = 0
+
+        def discover(self, _terms, live=False):
+            yield JobUrl("injected", "one", "https://example.test/one")
+
+        def fetch(self, row, live=False):
+            self.calls += 1
+            return None  # fails bind_public_listing integrity validation
+
+    adapter = Adapter()
+    collector = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"fetch_attempts": 3, "fetch_retry_backoff": 5,
+                                          "source_workers": 1, "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None, monotonic=lambda: clock[0],
+                          sleeper=sleep, adapter_loader=lambda *a, **kw: adapter)
+    result = collector.cycle()
+    assert result["fetched"] == 0 and result["errors"] == 1
+    assert adapter.calls == 1
+    assert sleeps == []
+
+
+def test_retry_deadline_stops_backoff_and_resumes(tmp_path):
+    clock = [0.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    class Adapter:
+        def __init__(self):
+            self.calls = 0
+
+        def discover(self, _terms, live=False):
+            yield JobUrl("injected", "one", "https://example.test/one")
+
+        def fetch(self, row, live=False):
+            self.calls += 1
+            if self.calls <= 2:
+                raise RuntimeError("synthetic transient outage")
+            return RawPosting(row.board, row.job_id, row.url,
+                              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              raw_text="synthetic posting")
+
+    adapter = Adapter()
+    collector = Collector({"boards": {"enabled": ["injected"]},
+                           "collection": {"fetch_attempts": 3, "fetch_retry_backoff": 5,
+                                          "source_workers": 1, "fetch_workers": 1}},
+                          tmp_path, log=lambda _: None, monotonic=lambda: clock[0],
+                          sleeper=sleep, adapter_loader=lambda *a, **kw: adapter)
+    result = collector.cycle(deadline=8)
+    assert result["fetched"] == 0 and result["errors"] == 0
+    assert adapter.calls == 2
+    assert sleeps == [5.0, 3.0]
+    pending = collector.db.pending_discoveries(["injected"])
+    assert [row.key for row in pending] == ["injected:one"]
+    resumed = collector.cycle()
+    assert resumed["fetched"] == 1 and resumed["errors"] == 0
+    assert adapter.calls == 3
+    assert collector.db.pending_discoveries(["injected"]) == []
+
+
+def test_retry_config_rejected_before_creating_state(tmp_path):
+    import pytest
+    cases = [
+        ("fetch_attempts", True), ("fetch_attempts", 0), ("fetch_attempts", 11),
+        ("fetch_attempts", "3"), ("fetch_attempts", None), ("fetch_attempts", 3.0),
+        ("fetch_retry_backoff", True), ("fetch_retry_backoff", -1),
+        ("fetch_retry_backoff", float("nan")), ("fetch_retry_backoff", float("inf")),
+        ("fetch_retry_backoff", 61), ("fetch_retry_backoff", "5"),
+        ("fetch_retry_backoff", None),
+    ]
+    for n, (key, value) in enumerate(cases):
+        root = tmp_path / str(n)
+        with pytest.raises(ValueError, match=key):
+            Collector({"boards": {"enabled": ["injected"]},
+                       "collection": {key: value}}, root)
+        assert not root.exists()
+
+
+def test_collection_stop_at_reuses_bounded_hours_and_validates_clock(tmp_path):
+    import pytest
+    from market_aligner.cli import _collection_hours_until
+    now = datetime(2026, 9, 22, 23, 30, tzinfo=timezone.utc)
+    assert _collection_hours_until("00:30", now=now) == 1
+    assert _collection_hours_until("23:30", now=now) == 24
+    for bad in ("24:00", "12:60", "noon", "1:00", "12:00:01", "-1:00"):
+        with pytest.raises(ValueError, match="HH:MM"):
+            _collection_hours_until(bad, now=now)
+    with mock.patch("market_aligner.cli.CollectionService") as service, \
+         mock.patch("market_aligner.cli._collection_hours_until", return_value=1.5) as deadline, \
+         redirect_stdout(io.StringIO()):
+        service.return_value.collect.return_value = {"synthetic": True}
+        assert main(["collect", "--config", str(tmp_path / "config.yaml"),
+                     "--operation-id", "synthetic-stop-at", "--stop-at", "00:30",
+                     "--data-home", str(tmp_path / "data")]) == 0
+        deadline.assert_called_once_with("00:30")
+        call = service.return_value.collect.call_args
+        assert call.kwargs["hours"] == 1.5 and call.kwargs["once"] is False
