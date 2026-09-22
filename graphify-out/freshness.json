@@ -1,11 +1,11 @@
 {
   "community_count": 994,
-  "edge_count": 139648,
-  "node_count": 71575,
+  "edge_count": 138686,
+  "node_count": 71544,
   "outputs": {
     ".graphify_labels.json": "a6331389fa362dfc4076f35ffde4d9781cb4697d59889740078540cc4242e9ac",
     "GRAPH_REPORT.md": "ec926c9b8df4f39a6fba42c64da08bd75c6778eb5decc9692788d7e57a481f7f",
-    "graph.json": "4087c15480220923770f9e5953f5455a221d5d929226d0e7eb2fa04d5a120dbf"
+    "graph.json": "55a3164cc71df66f4a419b87becb3118ff71adf5f0b2db076462c3287c15e23e"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "e744720e92daaf87db6aa94a186c07dac1c2e875",
+  "source_base_commit": "89d9e7d2665a22ac2959e1649da216d4945e13ae",
   "sources": {
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
@@ -25,12 +25,12 @@
     "docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": "245b9ac0d19f5da58b4cb580f513e6b7c1d9731e6a9944d4a0e64124c661e4da",
     "docs/collection/SOURCE_POLICY.md": "3866320fa2a136569fab582fc493b64c5e245a0573c16ea2535fcf090504e92b",
     "docs/eligibility/ELIGIBILITY-001_EVIDENCE_BOUND_DECISION_CONTRACT.md": "a1803755a47045e07499cdaba1f5f485a0dfbfaadcd4e940d0030dcfd184bce9",
-    "docs/migration/CAPABILITY_INVENTORY.md": "d2b064abd086d1698fe7d0ed7c2e68e5c5c49ef2437fedfef2570bc076f96d72",
+    "docs/migration/CAPABILITY_INVENTORY.md": "1ebefbf2194a17cec89f3928146b7a40d9f10ccb3711c3cfcec96e9c44183f19",
     "docs/migration/CERTIFICATION_2026-08-01.json": "0e2e4bd612bef4cb3dbeb6124f0a9ca53e62c86026f6392197ed1702096e3568",
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
-    "docs/migration/capability-dispositions.jsonl": "26fd2f39d6f41b2d5abdf24efb02803f13a15f0762d0dbe42288a2cd62bdf583",
-    "docs/migration/capability-inventory.jsonl": "e3b1e643bcecf3c657cafac701867275156f93937d8d735b9458018189695948",
-    "docs/migration/ledger.jsonl": "42cd839147ccb9469708ddd7d2341bfa94042797377b04ba621c1c929185fe32",
+    "docs/migration/capability-dispositions.jsonl": "6f26ddf822fa7b6c7a388b80f1a3df3cc2efd4ff898b335092604b91ae54c08b",
+    "docs/migration/capability-inventory.jsonl": "ba0acfde8367bbae62b92fcee36a35a5f88bd284cca77664a32daeb72e8a256c",
+    "docs/migration/ledger.jsonl": "7fe1be581c00a7b859b258a913fa0f5b9990501ce40049fa94b95b82422f0b14",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -100,7 +100,7 @@
     "internal/jaa/career_automation/event_receipts.py": "114df3931afa2c08423b5be1cc711a633afeb6546decaa7c159acf39f5f0ea7c",
     "internal/jaa/career_automation/evidence_matching.py": "bfaa393e17ed4b51f0900a84ab5593e4b1de79175b8330b8c00d6d584bff1730",
     "internal/jaa/career_automation/evidence_proposals.py": "86d10fb21e6c42051bf756f061055202b77f16ea9b69898a1b534f6dc966f687",
-    "internal/jaa/career_automation/external_document_assurance.py": "c7f99449a48e3f10dfb7c7738ab0caf0a8744bdaab358ba35a520f07c7553413",
+    "internal/jaa/career_automation/external_document_assurance.py": "ae7ccd5eb862fe5c49bcb63337b895048252c646d6d7bf139fbb80ede45bea97",
     "internal/jaa/career_automation/external_observation_acquisition.py": "bd0d0de8f3903c7194e3baffd9510827688eae27a550b30257ffba0a72135991",
     "internal/jaa/career_automation/external_time_attestation.py": "52cf74428177ecb2312faefcaccc6a7b215658635eaf019f0b8a2bf6287953d8",
     "internal/jaa/career_automation/fetching.py": "f018feab6af8440b9448e5fa503a5023026a404e6bd000d5106b048bf8ff45a6",
@@ -506,7 +506,7 @@
     "internal/jaa/test_durable_live_evidence_separation.py": "2611e297d28835a89651a2ca5d3983d32876d21beadf8b82ef5043f36df7808c",
     "internal/jaa/test_employer_facing_framing.py": "43ba5b5cd787ed19dd51fe06ac1d937bf735975963592bb429dc3c9d680de880",
     "internal/jaa/test_event_receipts.py": "805446f67a009f82ee0a13737f59763c37a9be525ec6cd47efb48b57db7d3ea0",
-    "internal/jaa/test_external_document_assurance.py": "baa756ef22c493cd319a7329cc13dabc16b132d5b0eceb97921b07a1908eb908",
+    "internal/jaa/test_external_document_assurance.py": "a48634392e5654c63c76e58de5587df95eb92aa170fb7d6be0c2b3ae5c86ff87",
     "internal/jaa/test_form_filling_forensics.py": "6ed7b8bae150b7d52806e0c51288444925b7884e06961d4e0d1cce5d0abe6cdf",
     "internal/jaa/test_generate_test_evidence.py": "14e88632c75c2f041c95748d4190db3c3f3cc6dca616af8a6eab645e36848122",
     "internal/jaa/test_gigabyte_current_time_broker.py": "1f5f4453d0820772bafd6ead2b62ae266bf9ff68415515144c1dc19985d5048c",

@@ -308,3 +308,26 @@ def test_only_final_submit_click_has_immediate_semantic_reverification() -> None
     ]
     assert len(gate_lines) == len(click_lines) == 1
     assert gate_lines[0] < click_lines[0]
+
+
+def test_named_pipe_is_rejected_without_waiting_for_a_writer(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    pipe = tmp_path / "upload.pdf"
+    os.mkfifo(pipe)
+    code = (
+        "from career_automation.external_document_assurance import assure_pdf_path; "
+        "import sys; "
+        "assure_pdf_path(sys.argv[1], document_kind='cv', intended_vacancy=None)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(pipe)],
+        env=dict(os.environ, PYTHONPATH=str(ROOT)),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert "external document must be a regular file" in result.stderr
