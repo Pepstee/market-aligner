@@ -556,3 +556,350 @@ def test_materializer_discards_legacy_numeric_fit(tmp_path: Path) -> None:
         receipt["fit"] == fit_from_evidence_matrix(receipt["evidence_matrix"])
         for receipt in eligible
     )
+
+
+import career_automation.candidate_authority as cohort_authority
+
+_APPROVED = {"synthetic-alpha", "synthetic-beta"}
+_TERMINAL_REASONS = frozenset({"synthetic_vacancy_closed", "synthetic_identity_lost"})
+_THIS = cohort_authority
+
+
+class _SourceBoundarySentinel(RuntimeError):
+    pass
+
+
+def _synthetic_pending(job_key, sha):
+    return {
+        "job_key": job_key,
+        "vacancy_sha256": sha,
+        "source_url": f"https://synthetic.invalid/vacancies/{job_key}",
+        "role_title": f"Synthetic Role {job_key}",
+        "company_name": "Synthetic Company",
+    }
+
+
+def _synthetic_live_observation(job_key, sha):
+    return {
+        "job_key": job_key,
+        "body_sha256": sha,
+        "requested_url": f"https://synthetic.invalid/vacancies/{job_key}",
+        "role_title": f"Synthetic Role {job_key}",
+        "company_name": "Synthetic Company",
+        "verdict": {
+            "live": True,
+            "reason": "live_application_form_observed",
+            "requisition_bound": True,
+            "title_bound": True,
+        },
+    }
+
+
+def _synthetic_terminal_observation(job_key, sha, reason="synthetic_vacancy_closed"):
+    return {
+        "job_key": job_key,
+        "body_sha256": sha,
+        "requested_url": f"https://synthetic.invalid/vacancies/{job_key}",
+        "role_title": f"Synthetic Role {job_key}",
+        "company_name": "Synthetic Company",
+        "verdict": {
+            "live": False,
+            "reason": reason,
+            "requisition_bound": True,
+            "title_bound": True,
+            "closed_markers": ["synthetic_closed_banner"],
+        },
+    }
+
+
+def _synthetic_discovery(pending, observations, **overrides):
+    document = {
+        "schema_version": "jaa.greenhouse-live-discovery.v2",
+        "eligibility_authority": False,
+        "ranking_candidate_profile": "empty",
+        "live_pending_eligibility": pending,
+        "observations": observations,
+    }
+    document.update(overrides)
+    return document
+
+
+def _full_live_discovery():
+    return _synthetic_discovery(
+        pending=[
+            _synthetic_pending("synthetic-alpha", "a" * 64),
+            _synthetic_pending("synthetic-beta", "b" * 64),
+        ],
+        observations=[
+            _synthetic_live_observation("synthetic-alpha", "a" * 64),
+            _synthetic_live_observation("synthetic-beta", "b" * 64),
+        ],
+    )
+
+
+def _terminal_shrink_discovery():
+    return _synthetic_discovery(
+        pending=[_synthetic_pending("synthetic-alpha", "a" * 64)],
+        observations=[
+            _synthetic_live_observation("synthetic-alpha", "a" * 64),
+            _synthetic_terminal_observation("synthetic-beta", "b" * 64),
+        ],
+    )
+
+
+def _patch_cohort(monkeypatch):
+    monkeypatch.setattr(_THIS, "APPROVED_COHORT", _APPROVED)
+    monkeypatch.setattr(_THIS, "TERMINAL_DISCOVERY_REASONS", _TERMINAL_REASONS)
+
+
+def test_synthetic_cohort_valid_full_live_cohort_is_accepted(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    pending_by_key = cohort_authority._validated_pending_cohort(
+        discovery, discovery["live_pending_eligibility"]
+    )
+    assert set(pending_by_key) == _APPROVED
+
+
+def test_synthetic_cohort_full_live_cohort_tolerates_foreign_observations(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    discovery["observations"].append(
+        _synthetic_live_observation("synthetic-foreign", "f" * 64)
+    )
+    pending_by_key = cohort_authority._validated_pending_cohort(
+        discovery, discovery["live_pending_eligibility"]
+    )
+    assert set(pending_by_key) == _APPROVED
+
+
+def test_synthetic_cohort_terminal_shrink_is_accepted(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _terminal_shrink_discovery()
+    pending_by_key = cohort_authority._validated_pending_cohort(
+        discovery, discovery["live_pending_eligibility"]
+    )
+    assert set(pending_by_key) == {"synthetic-alpha"}
+
+
+def test_synthetic_cohort_terminal_shrink_via_identity_failure_is_accepted(monkeypatch):
+    _patch_cohort(monkeypatch)
+    observation = _synthetic_terminal_observation("synthetic-beta", "b" * 64)
+    observation["verdict"]["closed_markers"] = []
+    observation["verdict"]["requisition_bound"] = False
+    observation["verdict"]["reason"] = "synthetic_identity_lost"
+    discovery = _synthetic_discovery(
+        pending=[_synthetic_pending("synthetic-alpha", "a" * 64)],
+        observations=[
+            _synthetic_live_observation("synthetic-alpha", "a" * 64),
+            observation,
+        ],
+    )
+    assert cohort_authority._validated_pending_cohort(
+        discovery, discovery["live_pending_eligibility"]
+    ) == {"synthetic-alpha": discovery["live_pending_eligibility"][0]}
+
+
+def test_synthetic_cohort_duplicate_pending_rows_are_rejected(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    pending = list(discovery["live_pending_eligibility"])
+    pending.append(deepcopy(pending[0]))
+    with pytest.raises(ValueError, match="duplicate candidate vacancies"):
+        cohort_authority._validated_pending_cohort(discovery, pending)
+
+
+def test_synthetic_cohort_duplicate_observations_are_rejected(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    discovery["observations"].append(deepcopy(discovery["observations"][0]))
+    with pytest.raises(ValueError, match="duplicate observations"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+def test_synthetic_cohort_missing_observations_list_is_rejected(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    del discovery["observations"]
+    with pytest.raises(ValueError, match="observations are missing"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+def test_synthetic_cohort_omitted_observation_is_rejected(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    discovery["observations"] = [
+        row for row in discovery["observations"] if row["job_key"] != "synthetic-beta"
+    ]
+    with pytest.raises(ValueError, match="silently omits approved vacancies"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+def test_synthetic_cohort_silent_removal_with_live_observation_is_rejected(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    discovery["live_pending_eligibility"] = [
+        row
+        for row in discovery["live_pending_eligibility"]
+        if row["job_key"] != "synthetic-beta"
+    ]
+    with pytest.raises(ValueError, match="without terminal evidence"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+def test_synthetic_cohort_silent_removal_without_closed_markers_or_identity_failure_is_rejected(
+    monkeypatch,
+):
+    _patch_cohort(monkeypatch)
+    observation = _synthetic_terminal_observation("synthetic-beta", "b" * 64)
+    observation["verdict"]["closed_markers"] = []
+    discovery = _synthetic_discovery(
+        pending=[_synthetic_pending("synthetic-alpha", "a" * 64)],
+        observations=[
+            _synthetic_live_observation("synthetic-alpha", "a" * 64),
+            observation,
+        ],
+    )
+    with pytest.raises(ValueError, match="without terminal evidence"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+@pytest.mark.parametrize(
+    ("live", "reason"),
+    [
+        (True, "synthetic_vacancy_closed"),
+        (False, "unrecognized_synthetic_reason"),
+    ],
+)
+def test_synthetic_cohort_terminal_observation_with_wrong_live_or_reason_is_rejected(monkeypatch, live, reason):
+    _patch_cohort(monkeypatch)
+    observation = _synthetic_terminal_observation("synthetic-beta", "b" * 64)
+    observation["verdict"]["reason"] = reason
+    observation["verdict"]["live"] = live
+    discovery = _synthetic_discovery(
+        pending=[_synthetic_pending("synthetic-alpha", "a" * 64)],
+        observations=[
+            _synthetic_live_observation("synthetic-alpha", "a" * 64),
+            observation,
+        ],
+    )
+    with pytest.raises(ValueError, match="without terminal evidence"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+@pytest.mark.parametrize(
+    ("mutation", "field"),
+    [
+        (lambda row: row.update({"vacancy_sha256": "0" * 64}), "hash"),
+        (
+            lambda row: row.update({"source_url": "https://synthetic.invalid/other"}),
+            "url",
+        ),
+        (lambda row: row.update({"role_title": "Other Synthetic Role"}), "title"),
+        (lambda row: row.update({"company_name": "Other Synthetic Co"}), "company"),
+    ],
+)
+def test_synthetic_cohort_pending_observation_mismatch_is_rejected(monkeypatch, mutation, field):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    row = discovery["live_pending_eligibility"][0]
+    before = deepcopy(row)
+    mutation(row)
+    assert row != before
+    with pytest.raises(ValueError, match="differs from its network observation"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+def test_synthetic_cohort_pending_observation_company_casefold_mismatch_only_is_accepted(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    discovery["observations"][0]["company_name"] = "  SYNTHETIC COMPANY  "
+    assert set(
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+    ) == _APPROVED
+
+
+def test_synthetic_cohort_live_observation_verdict_not_mapping_is_rejected(monkeypatch):
+    _patch_cohort(monkeypatch)
+    discovery = _full_live_discovery()
+    discovery["observations"][0]["verdict"] = ["not", "a", "mapping"]
+    with pytest.raises(ValueError, match="verdict is malformed"):
+        cohort_authority._validated_pending_cohort(discovery, discovery["live_pending_eligibility"])
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        _full_live_discovery,
+        _terminal_shrink_discovery,
+    ],
+)
+def test_synthetic_cohort_entrypoint_valid_discovery_reaches_source_boundary(
+    tmp_path, monkeypatch, build
+):
+    _patch_cohort(monkeypatch)
+    archive_root = tmp_path / "archive"
+    repository_root = tmp_path / "repository"
+    archive_root.mkdir()
+    repository_root.mkdir()
+    discovery_path = tmp_path / "discovery.json"
+    discovery_path.write_bytes(cohort_authority._json_bytes(build()))
+
+    def _sentinel_source_bytes(sources):
+        raise _SourceBoundarySentinel("validated discovery reached private-source boundary")
+
+    monkeypatch.setattr(_THIS, "_source_bytes", _sentinel_source_bytes)
+    with pytest.raises(_SourceBoundarySentinel):
+        cohort_authority.build_candidate_authority_document(
+            discovery_path=discovery_path,
+            archive_root=archive_root,
+            repository_root=repository_root,
+        )
+
+
+def test_synthetic_cohort_entrypoint_duplicate_pending_rejected_before_boundary(tmp_path, monkeypatch):
+    _patch_cohort(monkeypatch)
+    archive_root = tmp_path / "archive"
+    repository_root = tmp_path / "repository"
+    archive_root.mkdir()
+    repository_root.mkdir()
+    discovery = _full_live_discovery()
+    discovery["live_pending_eligibility"].append(
+        deepcopy(discovery["live_pending_eligibility"][0])
+    )
+    discovery_path = tmp_path / "discovery.json"
+    discovery_path.write_bytes(cohort_authority._json_bytes(discovery))
+
+    def _sentinel_source_bytes(sources):
+        raise _SourceBoundarySentinel("must not reach private-source boundary")
+
+    monkeypatch.setattr(_THIS, "_source_bytes", _sentinel_source_bytes)
+    with pytest.raises(ValueError, match="duplicate candidate vacancies"):
+        cohort_authority.build_candidate_authority_document(
+            discovery_path=discovery_path,
+            archive_root=archive_root,
+            repository_root=repository_root,
+        )
+
+
+def test_synthetic_cohort_entrypoint_non_canonical_json_rejected_before_boundary(tmp_path, monkeypatch):
+    _patch_cohort(monkeypatch)
+    archive_root = tmp_path / "archive"
+    repository_root = tmp_path / "repository"
+    archive_root.mkdir()
+    repository_root.mkdir()
+    discovery_path = tmp_path / "discovery.json"
+    discovery_path.write_bytes(
+        json.dumps(_full_live_discovery(), indent=2).encode()
+    )
+
+    def _sentinel_source_bytes(sources):
+        raise _SourceBoundarySentinel("must not reach private-source boundary")
+
+    monkeypatch.setattr(_THIS, "_source_bytes", _sentinel_source_bytes)
+    with pytest.raises(ValueError, match="not canonical JSON"):
+        cohort_authority.build_candidate_authority_document(
+            discovery_path=discovery_path,
+            archive_root=archive_root,
+            repository_root=repository_root,
+        )
