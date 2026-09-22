@@ -182,15 +182,21 @@ class JobKoreaAdapter(Adapter):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(user_agent=USER_AGENT)
             try:
-                page.goto(job_url.url, wait_until="networkidle", timeout=45000)
-                # TODO: confirm selector in your env — the JD body container.
-                # ".detailArea" / ".tbCol" / ".dt" are the historical containers;
-                # fall back to the whole body if the specific block is absent.
+                page.goto(job_url.url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    page.wait_for_selector("main, .detailArea, #tab02, .secReadItem", timeout=30000)
+                except Exception:
+                    pass  # historical layouts may lack a main landmark
+                # The current detail page renders 모집요강, 지원자격, 스킬,
+                # 접수정보 and location under the main landmark. Historical
+                # selectors remain as fallbacks for older layouts.
                 html = None
-                for sel in (".detailArea", "#tab02", ".secReadItem", "body"):
+                for sel in ("main", ".detailArea", "#tab02", ".secReadItem", "body"):
                     try:
+                        if not page.locator(sel).count():
+                            continue
                         html = page.inner_html(sel)
-                        if html:
+                        if html and len(html) >= 200:
                             break
                     except Exception:
                         continue
@@ -202,11 +208,19 @@ class JobKoreaAdapter(Adapter):
             finally:
                 browser.close()
 
+        if not html or len(html) < 200:
+            raise RuntimeError(f"JobKorea detail body missing for {job_url.job_id}")
+
         return RawPosting(
             board=self.board,
             job_id=job_url.job_id,
             url=job_url.url,
             fetched_at=contracts_now(),
             raw_text=html,                                    # HTML board -> raw_text
-            raw_json={"id": job_url.job_id, "url": job_url.url, "title": title},
+            raw_json={
+                "id": job_url.job_id,
+                "url": job_url.url,
+                "title": title,
+                "source": "playwright",
+            },
         )

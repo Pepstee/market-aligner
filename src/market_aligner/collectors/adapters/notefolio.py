@@ -244,9 +244,11 @@ class NotefolioAdapter(Adapter):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(user_agent=USER_AGENT)
             detail: dict[str, Any] = {"id": job_url.job_id, "url": job_url.url}
+            html = None
+            embedded = False
             try:
-                page.goto(job_url.url, wait_until="networkidle", timeout=45000)
-                # Prefer the embedded SPA state; fall back to rendered text.
+                page.goto(job_url.url, wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(1000)
                 try:
                     raw = page.evaluate(
                         "() => (window.__NEXT_DATA__ "
@@ -254,20 +256,41 @@ class NotefolioAdapter(Adapter):
                     )
                     if raw:
                         props = _json.loads(raw).get("props", {}).get("pageProps", {})
-                        # TODO: confirm selector in your env — the recruit record key.
                         rec = props.get("recruit") or props.get("data") or {}
                         if isinstance(rec, dict) and rec:
                             detail.update(rec)
+                            embedded = any(
+                                key not in {"id", "url"} and value not in (None, "", [], {})
+                                for key, value in rec.items()
+                            )
                 except Exception:
                     pass
                 if "description" not in detail:
                     try:
-                        # TODO: confirm selector in your env — the JD container.
-                        detail["description_text"] = page.inner_text("main")
+                        if page.locator("main").count():
+                            detail["description_text"] = page.inner_text("main")
                     except Exception:
                         pass
+                for selector in ("main", "article", "body"):
+                    try:
+                        if not page.locator(selector).count():
+                            continue
+                        candidate = page.inner_html(selector)
+                        if candidate and len(candidate) >= 200:
+                            html = candidate
+                            break
+                    except Exception:
+                        continue
+                if html:
+                    detail["rendered_title"] = page.title()
+                    detail["source"] = "playwright"
             finally:
                 browser.close()
+
+        description = detail.get("description_text")
+        has_description = isinstance(description, str) and bool(description.strip())
+        if not embedded and not html and not has_description:
+            raise RuntimeError(f"Notefolio detail body missing for {job_url.job_id}")
 
         return RawPosting(
             board=self.board,
@@ -275,4 +298,5 @@ class NotefolioAdapter(Adapter):
             url=job_url.url,
             fetched_at=contracts_now(),
             raw_json=detail,      # clean JSON board -> raw_json
+            raw_text=html,
         )

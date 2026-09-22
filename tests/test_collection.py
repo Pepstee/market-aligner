@@ -2811,3 +2811,52 @@ def test_browser_discovery_union_with_real_chromium(tmp_path):
     if os.environ.get("MARKET_ALIGNER_BROWSER_CANARY") != "1":
         pytest.skip("Set MARKET_ALIGNER_BROWSER_CANARY=1 with installed Playwright Chromium")
     _browser_discovery_canary(tmp_path)
+
+
+def _browser_detail_canary(tmp_path):
+    import pytest
+    from market_aligner.collectors.adapters.jobkorea import JobKoreaAdapter
+    from market_aligner.collectors.adapters.notefolio import NotefolioAdapter
+
+    results = {}
+    cases = [
+        ("jobkorea", "main", "<main>" + "Design responsibilities. " * 20 + "</main>"),
+        ("jobkorea", "historical", '<div class="detailArea">' + "Old responsibilities. " * 20 + "</div>"),
+        ("notefolio", "embedded", '<script>window.__NEXT_DATA__={props:{pageProps:{recruit:{description:"Embedded role"}}}}</script>'),
+        ("notefolio", "short", "<main>Short role description</main>"),
+        ("notefolio", "rendered", '<title>Rendered role</title><article>' + "Rendered duties. " * 30 + "</article>"),
+    ]
+    for board, label, content in cases:
+        path = tmp_path / f"{board}-{label}.html"
+        path.write_text("<!doctype html><meta charset=utf-8>" + content)
+        cls = JobKoreaAdapter if board == "jobkorea" else NotefolioAdapter
+        row = cls().fetch(JobUrl(board, label, path.as_uri()), live=True)
+        assert row.board == board and row.job_id == label and row.url == path.as_uri()
+        if board == "jobkorea":
+            assert "responsibilities" in row.raw_text
+            assert row.raw_json["source"] == "playwright"
+        elif label == "embedded":
+            assert row.raw_json["description"] == "Embedded role"
+        elif label == "short":
+            assert row.raw_json["description_text"] == "Short role description"
+        else:
+            assert "Rendered duties" in row.raw_text
+            assert row.raw_json["rendered_title"] == "Rendered role"
+        results[f"{board}-{label}"] = {"raw_text": row.raw_text, "raw_json": row.raw_json}
+
+    for board, content in [("jobkorea", "<main></main>"),
+                           ("notefolio", '<script>window.__NEXT_DATA__={props:{pageProps:{recruit:{id:"only-id"}}}}</script>')]:
+        path = tmp_path / f"{board}-missing.html"
+        path.write_text(content)
+        cls = JobKoreaAdapter if board == "jobkorea" else NotefolioAdapter
+        with pytest.raises(RuntimeError, match="detail body missing"):
+            cls().fetch(JobUrl(board, "missing", path.as_uri()), live=True)
+        results[f"{board}-missing"] = "rejected"
+    return results
+
+
+def test_browser_detail_union_with_real_chromium(tmp_path):
+    import pytest
+    if os.environ.get("MARKET_ALIGNER_BROWSER_CANARY") != "1":
+        pytest.skip("Set MARKET_ALIGNER_BROWSER_CANARY=1 with installed Playwright Chromium")
+    _browser_detail_canary(tmp_path)
