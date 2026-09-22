@@ -32,6 +32,7 @@ PLAYWRIGHT_BROWSERS_PATH="$GENERIC_BROWSER_SENTINEL"
 export PLAYWRIGHT_BROWSERS_PATH
 
 cd "$REPOSITORY_ROOT"
+"$JAA_TEST_PYTHON" scripts/generate_jaa_event_golden.py --check
 # Private materialization belongs to the protected gate; the pinned Linux link
 # acceptance belongs to the Linux witness gate. Neither is a generic contract.
 exec "$JAA_TEST_PYTHON" scripts/run-pytest-no-skips.py -q \

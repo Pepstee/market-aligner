@@ -58,6 +58,7 @@ def _event(
     *,
     operator_approval_sha256: str | None = None,
     external_receipt_sha256: str | None = None,
+    occurred_at: str = "2026-08-10T10:10:00Z",
 ):
     detail_value = deepcopy(dict(detail))
     payload = {
@@ -67,7 +68,7 @@ def _event(
         "external_receipt_sha256": external_receipt_sha256,
         "handoff_root_sha256": handoff.root_sha256,
         "job_key": handoff.payload["job_key"],
-        "occurred_at": "2026-08-10T10:10:00Z",
+        "occurred_at": occurred_at,
         "operator_approval_sha256": operator_approval_sha256,
         "payload_sha256": digest_bytes(canonical_json_bytes(detail_value)),
         "profile_id": handoff.payload["profile_id"],
@@ -549,3 +550,128 @@ def test_jaa_binding_bridge_rejects_reverse_receipt_substitution(tmp_path, mode)
     with store.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM v1_event_inbox").fetchone()[0] == 6
         assert connection.execute("SELECT COUNT(*) FROM v1_event_references").fetchone()[0] == 5
+
+
+def _golden_corpus():
+    from scripts.generate_jaa_event_golden import build_corpus, DEFAULT_OUTPUT
+    exact = build_corpus()
+    assert DEFAULT_OUTPUT.read_bytes() == exact
+    return json.loads(exact)
+
+
+def _golden_events(rows):
+    for row in rows:
+        exact = base64.b64decode(row["envelope_base64"], validate=True)
+        detail = base64.b64decode(row["detail_base64"], validate=True)
+        assert digest_bytes(exact) == row["envelope_root_sha256"]
+        assert digest_bytes(detail) == row["detail_sha256"]
+        event = parse_event_v1(exact, detail)
+        assert event.event_id == row["event_id"]
+        assert event.transition_sequence == row["transition_sequence"]
+        yield event
+
+
+def test_golden_streams_replay_restart_and_preserve_every_donor_negative(subtests):
+    document = _golden_corpus()
+    events = list(_golden_events(document["events"]))
+    assert len(events) == 9
+    projector = EventProjector(_handoff(), _Resolver())
+    for event in events:
+        projector.consume(event)
+    assert projector.state.terminal and projector.state.outcome_code == "rejected"
+    assert [event.detail["new_state"] for event in events if event.payload["event_type"] == "status_changed"] == ["under_review", "rejected"]
+    blocked = EventProjector(_handoff(), _Resolver())
+    for event in _golden_events(document["release_blocked_branch"]):
+        blocked.consume(event)
+    assert blocked.state.last_sequence == 6
+    assert blocked.state.last_event_type == "release_blocked"
+    assert not blocked.state.terminal
+    assert digest_bytes(base64.b64decode(document["form_answers"]["canonical_base64"], validate=True)) == events[1].detail["answers_sha256"]
+    vectors = document["negative_vectors"]
+    assert len(vectors) == 26 and len({v["id"] for v in vectors}) == 26
+    for vector in vectors:
+        if vector["kind"] == "reverse_receipt_registry":
+            continue
+        with subtests.test(vector=vector["id"]):
+            state = EventProjector(_handoff(), _Resolver())
+            for prior in events[:vector.get("prior_sequence", 0)]:
+                state.consume(prior)
+            with pytest.raises(ContractValidationError):
+                if vector["kind"] == "event_identity":
+                    payload = dict(events[0].payload)
+                    payload.update(vector["value"])
+                    payload["event_id"] = event_id_for(payload, events[0].detail)
+                    state.consume(encode_event_v1(payload, events[0].detail))
+                else:
+                    detail = vector["value"]
+                    event_type = detail["schema_version"].removeprefix("jaa.event-detail.").removesuffix(".v1")
+                    event = _event(_handoff(), event_type, detail,
+                        occurred_at=vector.get("occurred_at", "2026-08-10T12:00:00Z"),
+                        operator_approval_sha256=detail.get("operator_approval_receipt_sha256"),
+                        external_receipt_sha256=detail.get("external_receipt_sha256"))
+                    if "event_id" in vector:
+                        assert event.event_id == vector["event_id"]
+                    state.consume(event)
+
+
+def test_golden_reverse_receipts_authenticate_and_every_registry_mutation_refuses(subtests):
+    from career_automation.event_receipts import (
+        EventReceiptError, EventReceiptEvidence, EventReceiptReference,
+        EventReceiptRegistryEntry, validate_event_receipt_registry,
+    )
+    document = _golden_corpus()
+    events = list(_golden_events(document["events"]))
+    chain = {"application_id": events[0].payload["application_id"],
+             "handoff_root_sha256": events[0].payload["handoff_root_sha256"],
+             "grant_sha256": events[3].detail["grant_sha256"],
+             "attempt_id": events[4].detail["attempt_id"],
+             "external_receipt_sha256": events[5].detail["external_receipt_sha256"]}
+    references = []
+    for event in events[6:]:
+        state = event.payload["event_type"] == "status_changed"
+        subject = {**chain, **({"previous_state": event.detail["previous_state"], "new_state": event.detail["new_state"]}
+                              if state else {"outcome_code": event.detail["outcome_code"]})}
+        references.append(EventReceiptReference(event.event_id, str(event.payload["event_type"]),
+            event.transition_sequence, str(event.payload["occurred_at"]), "state" if state else "outcome",
+            str(event.detail["state_receipt_sha256" if state else "outcome_receipt_sha256"]), subject))
+    approved = {(row["exact_base64"], row["metadata_base64"]) for row in document["reverse_receipts"]}
+    class SyntheticAuthenticator:
+        event_resolver_identity_sha256 = document["reverse_receipts"][0]["resolver_identity_sha256"]
+        def authenticate_event_receipt(self, **values):
+            assert values["environment"] == "synthetic"
+            assert (base64.b64encode(values["exact_bytes"]).decode(), base64.b64encode(values["metadata_bytes"]).decode()) in approved
+    def registry(rows):
+        return [EventReceiptRegistryEntry(row["event_id"], row["event_type"], row["transition_sequence"],
+            row["occurred_at"], row["kind"], row["object_sha256"], row["metadata_sha256"], row["subject"],
+            EventReceiptEvidence(base64.b64decode(row["exact_base64"], validate=True),
+                base64.b64decode(row["metadata_base64"], validate=True), "synthetic", row["resolver_identity_sha256"]))
+            for row in rows]
+    assert len(validate_event_receipt_registry(references, registry(document["reverse_receipts"]), authenticator=SyntheticAuthenticator())) == 3
+    for vector in document["negative_vectors"]:
+        if vector["kind"] != "reverse_receipt_registry":
+            continue
+        with subtests.test(vector=vector["id"]):
+            with pytest.raises(EventReceiptError) as rejected:
+                validate_event_receipt_registry(references, registry(vector["value"]), authenticator=SyntheticAuthenticator())
+            assert rejected.value.code == vector["expected_error"]
+
+
+def test_golden_cli_is_deterministic_and_check_is_read_only(tmp_path):
+    import os
+    import subprocess
+    import sys
+    root = Path(__file__).resolve().parents[1]
+    script = root / "internal/jaa/scripts/generate_jaa_event_golden.py"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(root / "src"), str(root / "internal/jaa")))}
+    output = tmp_path / "golden.json"
+    command = [sys.executable, str(script), "--output", str(output)]
+    first = subprocess.run(command, env=env, capture_output=True, text=True, check=True, timeout=20)
+    exact = output.read_bytes()
+    second = subprocess.run(command, env=env, capture_output=True, text=True, check=True, timeout=20)
+    assert output.read_bytes() == exact and first.stdout == second.stdout
+    assert first.stdout.strip() == digest_bytes(exact)
+    subprocess.run(command + ["--check"], env=env, capture_output=True, check=True, timeout=20)
+    output.write_bytes(exact + b"\n")
+    stale = subprocess.run(command + ["--check"], env=env, capture_output=True, text=True, timeout=20)
+    assert stale.returncode != 0 and "stale" in stale.stderr
+    assert output.read_bytes() == exact + b"\n"

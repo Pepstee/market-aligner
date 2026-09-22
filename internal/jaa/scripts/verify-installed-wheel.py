@@ -59,6 +59,11 @@ RESOURCES = (
 RESOURCE_HASHES = (
     (
         "career_automation",
+        "fixtures/jaa-event-golden-corpus-v1.json",
+        "926dd5924713f24bbad8af5a35a224b0a32db5ce2eaf753725c04de9f35e874f",
+    ),
+    (
+        "career_automation",
         "fixtures/market-aligner-v1-vectors.json",
         "421d39504c4828c928389d5c30c2147fb7c01249b299972a11e204e956350160",
     ),
