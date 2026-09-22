@@ -670,3 +670,59 @@ def test_worker_inventory_sidecar_exclusion_is_root_exact(
     assert "workflow.sqlite3-wal" not in relative_paths
     assert "workflow.sqlite3-shm" not in relative_paths
     assert "sub/workflow.sqlite3-wal" in relative_paths
+
+
+@pytest.mark.parametrize("mutation", ["valid", "alias", "hash", "size", "mode", "missing", "malformed"])
+def test_worker_revalidates_python_identity_before_corpus(tmp_path, monkeypatch, mutation):
+    import os
+
+    root = tmp_path.resolve()
+    output = root / "worker-output"
+    output.mkdir()
+    executable = root / "python-real"
+    executable.write_bytes(b"synthetic-python")
+    launcher = root / "python"
+    launcher.symlink_to(executable)
+    chromium = root / "chromium"
+    chromium.write_bytes(b"synthetic-chromium")
+    driver = root / "node"
+    driver.write_bytes(b"synthetic-driver")
+    identity = fixture_module._path_identity(launcher)
+    runtime = {
+        "python": identity,
+        "chromium": fixture_module._path_identity(chromium),
+        "node_driver": fixture_module._path_identity(driver),
+    }
+    if mutation == "hash":
+        identity["sha256"] = "0" * 64
+    elif mutation == "size":
+        identity["size"] += 1
+    elif mutation == "mode":
+        identity["mode"] = "0000"
+    elif mutation == "missing":
+        chromium.unlink()
+    elif mutation == "malformed":
+        del identity["path"]
+    active = executable if mutation == "alias" else launcher
+    monkeypatch.setattr(fixture_module.sys, "executable", str(active))
+    request = {"runtime_identities": runtime, "environment": dict(os.environ)}
+    monkeypatch.setattr(fixture_module, "_read_canonical", lambda *a, **k: (request, b"{}"))
+    monkeypatch.setattr(fixture_module, "_validate_request", lambda *a, **k: (None, "nonce"))
+    calls = []
+
+    class ReachedAuthority(Exception):
+        pass
+
+    def sentinel(*args):
+        calls.append(True)
+        raise ReachedAuthority()
+
+    monkeypatch.setattr(fixture_module, "verify_graphcore_corpus", sentinel)
+    if mutation in ("valid", "alias"):
+        with pytest.raises(ReachedAuthority):
+            fixture_module._execute_worker(root / "request.json", output, root)
+        assert calls == [True]
+    else:
+        with pytest.raises(NetworkWitnessedFixtureError, match="runtime executable changed"):
+            fixture_module._execute_worker(root / "request.json", output, root)
+        assert calls == []

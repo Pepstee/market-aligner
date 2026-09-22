@@ -1516,14 +1516,20 @@ def _execute_worker(
         for value in (chromium_document, driver_document, python_document)
     ):
         raise NetworkWitnessedFixtureError("runtime executable identities differ")
-    chromium_executable = Path(str(chromium_document["path"])).resolve(strict=True)
-    node_driver = Path(str(driver_document["path"])).resolve(strict=True)
-    if (
-        Path(sys.executable).resolve(strict=True)
-        != Path(str(python_document["path"])).resolve(strict=True)
-        or _sha256_file(chromium_executable) != chromium_document["sha256"]
-        or _sha256_file(node_driver) != driver_document["sha256"]
-    ):
+    try:
+        chromium_executable = Path(str(chromium_document["path"])).resolve(strict=True)
+        node_driver = Path(str(driver_document["path"])).resolve(strict=True)
+        requested_python = Path(str(python_document["path"]))
+        identities_match = (
+            Path(sys.executable).resolve(strict=True)
+            == requested_python.resolve(strict=True)
+            and _path_identity(requested_python) == python_document
+            and _sha256_file(chromium_executable) == chromium_document["sha256"]
+            and _sha256_file(node_driver) == driver_document["sha256"]
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        identities_match = False
+    if not identities_match:
         raise NetworkWitnessedFixtureError("runtime executable changed")
     expected_environment = request["environment"]
     if dict(os.environ) != expected_environment:
