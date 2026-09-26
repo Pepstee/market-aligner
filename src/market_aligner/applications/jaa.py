@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -30,6 +31,7 @@ _ATS_AUTOMATION_ROLES = frozenset({"applicant", "honeypot", "provider_managed"})
 _ATS_PROVIDERS = frozenset({"ashby", "fixture", "greenhouse", "personio", "recruitee", "workable"})
 _ATS_CAPTURE_TIME = re.compile(r"^(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\dZ$", re.ASCII)
 _OBSERVATION_SCHEMA = "market-aligner.read-only-ats-observation.v1"
+_PUBLIC_OBSERVATION_SCHEMA = "market-aligner.public-read-only-ats-observation.v1"
 _OBSERVATION_CHECKPOINT = "read_only_ats_observation"
 _PRE_SUBMIT_CHECKPOINT = "fixture_pre_submit"
 MARKET_OBSERVATION_KEY_ID = "market-observation-operator-2026-08-27"
@@ -37,7 +39,79 @@ MARKET_OBSERVATION_PUBLIC_DER_SHA256 = "1f852ff70c3e7faf34e75c89e2dca9f067a04592
 _OBSERVATION_ACCEPTANCE_SCHEMA = "market-aligner.ats-observation-acceptance.v1"
 _OBSERVATION_ACCEPTANCE_RECEIPT_SCHEMA = "market-aligner.ats-observation-acceptance-receipt.v1"
 _OBSERVATION_ACCEPTANCE_DIRECTORY = "observation-acceptance-consumptions"
+_PUBLIC_OBSERVATION_ADMISSION_DIRECTORY = "public-observation-admissions"
+_PUBLIC_OBSERVATION_ADMISSION_SCHEMA = "market-aligner.public-observation-admission.v1"
 _ACCEPTANCE_NONCE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
+_READ_ONLY_ATTEMPTS = frozenset({
+    "click", "cookie", "download", "fill", "network", "popup", "redirect",
+    "storage", "submit", "type", "upload", "websocket",
+})
+_TEST_TLS_SPKI = re.compile(r"^[A-Za-z0-9+/]{43}=$", re.ASCII)
+
+_READ_ONLY_GUARD_SCRIPT = """(() => {
+  const attempts = [];
+  const record = (name) => { attempts.push(name); throw new Error(`market-aligner-read-only:${name}`); };
+  Object.defineProperty(window, '__marketAlignerReadOnly', {value: {attempts}, configurable: false});
+  const blockMethod = (prototype, name, kind) => {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (descriptor && typeof descriptor.value === 'function') Object.defineProperty(prototype, name, {...descriptor, value() { return record(kind); }});
+  };
+  const blockSetter = (prototype, name, kind) => {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (descriptor && typeof descriptor.set === 'function') Object.defineProperty(prototype, name, {...descriptor, set() { return record(kind); }});
+  };
+  blockMethod(HTMLElement.prototype, 'click', 'click');
+  blockMethod(HTMLFormElement.prototype, 'submit', 'submit');
+  blockMethod(HTMLFormElement.prototype, 'requestSubmit', 'submit');
+  blockMethod(EventTarget.prototype, 'dispatchEvent', 'click');
+  blockSetter(HTMLInputElement.prototype, 'value', 'fill');
+  blockSetter(HTMLInputElement.prototype, 'checked', 'fill');
+  blockSetter(HTMLTextAreaElement.prototype, 'value', 'type');
+  blockSetter(HTMLSelectElement.prototype, 'value', 'fill');
+  blockSetter(HTMLSelectElement.prototype, 'selectedIndex', 'fill');
+  blockSetter(HTMLInputElement.prototype, 'files', 'upload');
+  const elementSetAttribute = Element.prototype.setAttribute;
+  Object.defineProperty(Element.prototype, 'setAttribute', {value(name, value) {
+    if (/^(?:value|checked|selected|files|action|formaction)$/i.test(String(name))) return record('fill');
+    return elementSetAttribute.call(this, name, value);
+  }});
+  window.fetch = () => record('network');
+  if (navigator.sendBeacon) navigator.sendBeacon = () => record('network');
+  blockMethod(XMLHttpRequest.prototype, 'open', 'network');
+  const socket = window.WebSocket;
+  Object.defineProperty(window, 'WebSocket', {value: function() { void socket; return record('websocket'); }});
+  Object.defineProperty(window, 'open', {value() { return record('popup'); }});
+  const cookie = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+  if (cookie) Object.defineProperty(Document.prototype, 'cookie', {get() { return ''; }, set() { return record('cookie'); }});
+  for (const method of ['setItem', 'removeItem', 'clear']) blockMethod(Storage.prototype, method, 'storage');
+  if (window.indexedDB) {
+    window.indexedDB.open = () => record('storage');
+    window.indexedDB.deleteDatabase = () => record('storage');
+  }
+  if (window.caches) {
+    window.caches.open = () => record('storage');
+    window.caches.delete = () => record('storage');
+  }
+})()"""
+
+_ATS_BLOCKER_SCRIPT = """(elements) => ({
+  password: elements.some((element) => element.matches && element.matches('input[type=password]')),
+  captcha: elements.some((element) => {
+    const text = `${element.getAttribute('src') || ''} ${element.getAttribute('title') || ''} ${element.textContent || ''}`.toLowerCase();
+    return /captcha|turnstile|challenge|human verification/.test(text) && !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+  }),
+  login: elements.some((element) => /(?:sign|log)\\s*in|account\\s+required/i.test(element.textContent || '') && !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length))
+})"""
+
+_ATS_INVENTORY_SCRIPT = """(elements) => elements.map((element, index) => {
+  const tag = element.tagName.toLowerCase();
+  const inputType = (element.getAttribute('type') || 'text').toLowerCase();
+  const controlKind = tag === 'textarea' ? 'textarea' : (tag === 'select' ? 'select' : inputType);
+  const fieldId = element.id || element.getAttribute('name') || '';
+  const label = Array.from(element.labels || []).map((item) => (item.textContent || '').trim()).find(Boolean) || element.getAttribute('aria-label') || fieldId || `field-${index}`;
+  const options = tag === 'select' ? Array.from(element.options || []).map((option) => ({value: option.value || option.textContent || '', label: (option.textContent || '').trim() || option.value || ''})) : ((controlKind === 'radio' || controlKind === 'checkbox') ? [{value: element.getAttribute('value') || fieldId, label}] : []);
+  return {field_id: fieldId, control_kind: controlKind, label, required: Boolean(element.required) || element.getAttribute('aria-required') === 'true', visible: Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length), disabled: Boolean(element.disabled), read_only: Boolean(element.readOnly), multiple: Boolean(element.multiple), options};
+})"""
 
 
 def canonical_json(value: object) -> str:
@@ -593,14 +667,28 @@ def _inventory_from_document(value: object) -> AtsFormInventory:
 def _observation_payload(value: object) -> tuple[AtsFormInventory | None, str | None]:
     if not isinstance(value, dict):
         raise ValueError("ATS observation payload is malformed")
-    keys = {
+    base_keys = {
         "schema_version", "provider", "requested_application_url", "final_application_url",
         "job_key", "authority_sha256", "captured_at", "page_snapshot_sha256", "inventory", "inventory_sha256",
         "network_evidence_sha256", "network_event_count", "interaction_counts", "blocked_interaction_attempts",
         "terminal_failure_class", "diagnostic_only", "raw_payloads_persisted",
         "identity_authority", "release_authority", "submission_authority",
     }
-    if set(value) != keys or value["schema_version"] != _OBSERVATION_SCHEMA:
+    public_keys = {
+        "transport", "acceptance_receipt_sha256", "acceptance_envelope_sha256",
+        "acceptance_signature_sha256", "consumption_root_sha256",
+        "navigation_admission_sha256", "browser_policy_sha256",
+        "browser_revision_sha256", "allowed_origin_sha256", "navigation_admitted",
+        "browser_launch_performed", "recovered_without_renavigation",
+        "capture_complete", "blocked_request_counts", "context_postconditions",
+    }
+    schema = value.get("schema_version")
+    is_public = schema == _PUBLIC_OBSERVATION_SCHEMA
+    expected_keys = base_keys | public_keys if is_public else base_keys
+    if set(value) != expected_keys or schema not in {
+        _OBSERVATION_SCHEMA,
+        _PUBLIC_OBSERVATION_SCHEMA,
+    }:
         raise ValueError("ATS observation schema differs")
     if value["provider"] not in _ATS_PROVIDERS or _observation_url(value["requested_application_url"]) != value["requested_application_url"] or _observation_url(value["final_application_url"]) != value["final_application_url"]:
         raise ValueError("ATS observation route differs")
@@ -614,8 +702,11 @@ def _observation_payload(value: object) -> tuple[AtsFormInventory | None, str | 
     if value["interaction_counts"] != {"click": 0, "fill": 0, "submit": 0, "type": 0, "upload": 0}:
         raise ValueError("ATS observation interaction boundary differs")
     attempts = value["blocked_interaction_attempts"]
+    allowed_attempts = _READ_ONLY_ATTEMPTS if is_public else {
+        "click", "fill", "submit", "type", "upload", "network"
+    }
     if not isinstance(attempts, list) or len(attempts) > 32 or any(
-        attempt not in {"click", "fill", "submit", "type", "upload", "network"}
+        attempt not in allowed_attempts
         for attempt in attempts
     ):
         raise ValueError("ATS observation blocked interaction evidence differs")
@@ -624,8 +715,75 @@ def _observation_payload(value: object) -> tuple[AtsFormInventory | None, str | 
     failure = value["terminal_failure_class"]
     if failure is not None and failure not in _FAILURES:
         raise ValueError("ATS observation terminal state differs")
-    if (failure == "read_only_interaction_attempted") != bool(attempts):
+    if not is_public and (failure == "read_only_interaction_attempted") != bool(attempts):
         raise ValueError("ATS observation interaction terminal differs")
+    if is_public:
+        if value["transport"] != "public_https":
+            raise ValueError("public ATS observation transport differs")
+        for name in (
+            "acceptance_receipt_sha256", "acceptance_envelope_sha256",
+            "acceptance_signature_sha256", "consumption_root_sha256",
+            "navigation_admission_sha256", "browser_policy_sha256",
+            "browser_revision_sha256", "allowed_origin_sha256",
+        ):
+            _digest(value[name], name)
+        for name in (
+            "navigation_admitted", "browser_launch_performed",
+            "recovered_without_renavigation", "capture_complete",
+        ):
+            if type(value[name]) is not bool:
+                raise ValueError(f"public ATS observation {name} differs")
+        if value["navigation_admitted"] is not True:
+            raise ValueError("public ATS observation lacks navigation admission")
+        blocked_counts = value["blocked_request_counts"]
+        blocked_keys = {
+            "cookie", "cross_origin", "download", "method", "network",
+            "popup", "redirect", "storage", "submit", "websocket",
+        }
+        if (
+            not isinstance(blocked_counts, dict)
+            or set(blocked_counts) != blocked_keys
+            or any(
+                isinstance(count, bool) or not isinstance(count, int) or count < 0
+                for count in blocked_counts.values()
+            )
+        ):
+            raise ValueError("public ATS observation blocked request counts differ")
+        postconditions = value["context_postconditions"]
+        postcondition_keys = {
+            "cookie_count", "download_count", "local_storage_count",
+            "page_count", "session_storage_count",
+        }
+        if (
+            not isinstance(postconditions, dict)
+            or set(postconditions) != postcondition_keys
+            or any(
+                isinstance(count, bool) or not isinstance(count, int) or count < 0
+                for count in postconditions.values()
+            )
+        ):
+            raise ValueError("public ATS observation context postconditions differ")
+        if value["recovered_without_renavigation"] and value["browser_launch_performed"]:
+            raise ValueError("public ATS observation recovery launched a browser")
+        if failure is None:
+            if (
+                attempts
+                or any(blocked_counts.values())
+                or value["capture_complete"] is not True
+                or value["browser_launch_performed"] is not True
+                or value["recovered_without_renavigation"] is not False
+                or postconditions
+                != {
+                    "cookie_count": 0,
+                    "download_count": 0,
+                    "local_storage_count": 0,
+                    "page_count": 1,
+                    "session_storage_count": 0,
+                }
+            ):
+                raise ValueError("public ATS observation success postconditions differ")
+        elif value["capture_complete"] is not False:
+            raise ValueError("blocked public ATS observation claims complete capture")
     if value["inventory"] is None:
         if value["inventory_sha256"] is not None or failure is None:
             raise ValueError("ATS observation inventory binding differs")
@@ -886,6 +1044,8 @@ class _AcceptanceStore:
     root_fd: int
     directory_fd: int
     directory_identity: tuple[int, int]
+    directory_name: str = _OBSERVATION_ACCEPTANCE_DIRECTORY
+    label: str = "ATS observation acceptance store"
 
     def verify(self) -> None:
         root_path = os.lstat(self.root)
@@ -899,7 +1059,7 @@ class _AcceptanceStore:
         ):
             raise ValueError("ATS observation consumption root identity changed")
         directory = os.stat(
-            _OBSERVATION_ACCEPTANCE_DIRECTORY,
+            self.directory_name,
             dir_fd=self.root_fd,
             follow_symlinks=False,
         )
@@ -911,7 +1071,7 @@ class _AcceptanceStore:
             or directory.st_uid != os.geteuid()
             or stat.S_IMODE(directory.st_mode) != 0o700
         ):
-            raise ValueError("ATS observation acceptance store identity changed")
+            raise ValueError(f"{self.label} identity changed")
 
     def close(self) -> None:
         os.close(self.directory_fd)
@@ -924,6 +1084,24 @@ def _open_acceptance_store(
     *,
     create: bool,
 ) -> _AcceptanceStore | None:
+    return _open_owned_store(
+        root,
+        root_identity,
+        directory_name=_OBSERVATION_ACCEPTANCE_DIRECTORY,
+        label="ATS observation acceptance store",
+        create=create,
+    )
+
+
+def _open_owned_store(
+    root: Path,
+    root_identity: tuple[int, int],
+    *,
+    directory_name: str,
+    label: str,
+    create: bool,
+) -> _AcceptanceStore | None:
+    _id(directory_name, "owned store directory")
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     directory_fd = -1
     try:
@@ -932,7 +1110,7 @@ def _open_acceptance_store(
             raise ValueError("ATS observation consumption root changed while opening")
         try:
             directory = os.stat(
-                _OBSERVATION_ACCEPTANCE_DIRECTORY,
+                directory_name,
                 dir_fd=root_fd,
                 follow_symlinks=False,
             )
@@ -941,12 +1119,12 @@ def _open_acceptance_store(
                 os.close(root_fd)
                 return None
             try:
-                os.mkdir(_OBSERVATION_ACCEPTANCE_DIRECTORY, mode=0o700, dir_fd=root_fd)
+                os.mkdir(directory_name, mode=0o700, dir_fd=root_fd)
                 os.fsync(root_fd)
             except FileExistsError:
                 pass
             directory = os.stat(
-                _OBSERVATION_ACCEPTANCE_DIRECTORY,
+                directory_name,
                 dir_fd=root_fd,
                 follow_symlinks=False,
             )
@@ -955,9 +1133,9 @@ def _open_acceptance_store(
             or directory.st_uid != os.geteuid()
             or stat.S_IMODE(directory.st_mode) != 0o700
         ):
-            raise ValueError("ATS observation acceptance store is unsafe")
+            raise ValueError(f"{label} is unsafe")
         directory_fd = os.open(
-            _OBSERVATION_ACCEPTANCE_DIRECTORY,
+            directory_name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             dir_fd=root_fd,
         )
@@ -971,6 +1149,8 @@ def _open_acceptance_store(
             root_fd=root_fd,
             directory_fd=directory_fd,
             directory_identity=directory_identity,
+            directory_name=directory_name,
+            label=label,
         )
         store.verify()
         return store
@@ -1385,6 +1565,286 @@ def verify_and_consume_market_observation_acceptance(
         envelope_file.close()
 
 
+def verify_consumed_market_observation_acceptance(
+    authority: AtsObservationAuthority,
+    acceptance_receipt: AtsObservationAcceptanceReceipt,
+    *,
+    envelope_path: str | Path,
+    public_key_path: str | Path,
+    consumption_root: str | Path,
+) -> AtsObservationAcceptanceReceipt:
+    """Reverify a previously consumed capability without consuming a new nonce."""
+
+    if type(acceptance_receipt) is not AtsObservationAcceptanceReceipt:
+        raise TypeError("public ATS observation requires an exact acceptance receipt")
+    root, root_identity = _root(consumption_root, create=False)
+    if root_identity != acceptance_receipt.root_identity:
+        raise ValueError("ATS observation acceptance receipt root differs")
+    store = _open_acceptance_store(root, root_identity, create=False)
+    if store is None:
+        raise PermissionError("ATS observation acceptance was not consumed")
+    try:
+        if store.directory_identity != acceptance_receipt.store_identity:
+            raise ValueError("ATS observation acceptance receipt store differs")
+        try:
+            stored_raw = _read_acceptance_at(store, f"{acceptance_receipt.nonce}.json")
+        except FileNotFoundError:
+            raise PermissionError("ATS observation acceptance was not consumed") from None
+        stored = _acceptance_receipt_from_document(_canonical(stored_raw))
+        if stored != acceptance_receipt:
+            raise ValueError("ATS observation supplied acceptance receipt differs")
+    finally:
+        store.close()
+    verified = verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_key_path,
+        consumption_root=consumption_root,
+    )
+    if verified != acceptance_receipt:
+        raise ValueError("ATS observation acceptance revalidation differs")
+    return verified
+
+
+@dataclass(frozen=True)
+class _PublicObservationAdmission:
+    attempt_id: str
+    application_id: str
+    operation_sha256: str
+    request_sha256: str
+    acceptance_receipt_sha256: str
+    acceptance_envelope_sha256: str
+    acceptance_signature_sha256: str
+    consumption_root_sha256: str
+    source_sha256: str
+    sanity_receipt_sha256: str
+    ats_name: str
+    job_key: str
+    application_url: str
+    admitted_at: str
+    root_identity: tuple[int, int]
+    store_identity: tuple[int, int]
+    admission_sha256: str
+    schema_version: str = _PUBLIC_OBSERVATION_ADMISSION_SCHEMA
+    diagnostic_only: bool = True
+    raw_payloads_persisted: bool = False
+    identity_authority: bool = False
+    release_authority: bool = False
+    submission_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if self.schema_version != _PUBLIC_OBSERVATION_ADMISSION_SCHEMA:
+            raise ValueError("public ATS observation admission schema differs")
+        _id(self.attempt_id, "attempt ID")
+        _id(self.application_id, "application ID")
+        for name in (
+            "operation_sha256", "request_sha256", "acceptance_receipt_sha256",
+            "acceptance_envelope_sha256", "acceptance_signature_sha256",
+            "consumption_root_sha256", "source_sha256", "sanity_receipt_sha256",
+            "admission_sha256",
+        ):
+            _digest(getattr(self, name), name)
+        _id(self.ats_name, "ATS name")
+        _job_key(self.job_key)
+        if _observation_url(self.application_url) != self.application_url:
+            raise ValueError("public ATS observation admission URL differs")
+        _ats_time(self.admitted_at)
+        for name in ("root_identity", "store_identity"):
+            identity = getattr(self, name)
+            if (
+                not isinstance(identity, tuple)
+                or len(identity) != 2
+                or any(
+                    isinstance(item, bool) or not isinstance(item, int) or item < 0
+                    for item in identity
+                )
+            ):
+                raise ValueError(f"public ATS observation {name.replace('_', ' ')} differs")
+        exact = {
+            "diagnostic_only": True,
+            "raw_payloads_persisted": False,
+            "identity_authority": False,
+            "release_authority": False,
+            "submission_authority": False,
+        }
+        if any(type(getattr(self, name)) is not bool for name in exact):
+            raise TypeError("public ATS observation admission authority fields must be bool")
+        if any(getattr(self, name) is not expected for name, expected in exact.items()):
+            raise ValueError("public ATS observation admission exceeds read-only scope")
+        if self.admission_sha256 != sha256(
+            canonical_json(self.document(include_hash=False)).encode()
+        ):
+            raise ValueError("public ATS observation admission identity differs")
+
+    def document(self, *, include_hash: bool = True) -> dict[str, object]:
+        value = {
+            "schema_version": self.schema_version,
+            "attempt_id": self.attempt_id,
+            "application_id": self.application_id,
+            "operation_sha256": self.operation_sha256,
+            "request_sha256": self.request_sha256,
+            "acceptance_receipt_sha256": self.acceptance_receipt_sha256,
+            "acceptance_envelope_sha256": self.acceptance_envelope_sha256,
+            "acceptance_signature_sha256": self.acceptance_signature_sha256,
+            "consumption_root_sha256": self.consumption_root_sha256,
+            "source_sha256": self.source_sha256,
+            "sanity_receipt_sha256": self.sanity_receipt_sha256,
+            "ats_name": self.ats_name,
+            "job_key": self.job_key,
+            "application_url": self.application_url,
+            "admitted_at": self.admitted_at,
+            "root_identity": list(self.root_identity),
+            "store_identity": list(self.store_identity),
+            "diagnostic_only": self.diagnostic_only,
+            "raw_payloads_persisted": self.raw_payloads_persisted,
+            "identity_authority": self.identity_authority,
+            "release_authority": self.release_authority,
+            "submission_authority": self.submission_authority,
+        }
+        if include_hash:
+            value["admission_sha256"] = self.admission_sha256
+        return value
+
+
+def _public_observation_admission_from_document(
+    value: object,
+) -> _PublicObservationAdmission:
+    keys = {
+        "schema_version", "attempt_id", "application_id", "operation_sha256",
+        "request_sha256", "acceptance_receipt_sha256", "acceptance_envelope_sha256",
+        "acceptance_signature_sha256", "consumption_root_sha256", "source_sha256",
+        "sanity_receipt_sha256", "ats_name", "job_key", "application_url",
+        "admitted_at", "root_identity", "store_identity", "diagnostic_only",
+        "raw_payloads_persisted", "identity_authority", "release_authority",
+        "submission_authority", "admission_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != keys
+        or not isinstance(value["root_identity"], list)
+        or not isinstance(value["store_identity"], list)
+    ):
+        raise ValueError("public ATS observation admission schema is not closed")
+    admission = _PublicObservationAdmission(
+        **(
+            value
+            | {
+                "root_identity": tuple(value["root_identity"]),
+                "store_identity": tuple(value["store_identity"]),
+            }
+        )
+    )
+    if admission.document() != value:
+        raise ValueError("public ATS observation admission is non-canonical")
+    return admission
+
+
+def _public_observation_lock(store: _AcceptanceStore, attempt_id: str) -> int:
+    name = f".{_id(attempt_id, 'attempt ID')}.lock"
+    fd = os.open(
+        name,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=store.directory_fd,
+    )
+    try:
+        before = os.stat(name, dir_fd=store.directory_fd, follow_symlinks=False)
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise ValueError("public ATS observation operation lock is unsafe")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        after = os.stat(name, dir_fd=store.directory_fd, follow_symlinks=False)
+        if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ValueError("public ATS observation operation lock changed")
+        store.verify()
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _public_observation_admit(
+    store: _AcceptanceStore,
+    *,
+    attempt_id: str,
+    application_id: str,
+    operation_sha256: str,
+    source: ApplicationSource,
+    sanity: SanityReviewReceipt,
+    ats_name: str,
+    authority: AtsObservationAuthority,
+    acceptance: AtsObservationAcceptanceReceipt,
+) -> tuple[_PublicObservationAdmission, bool]:
+    name = f"{_id(attempt_id, 'attempt ID')}.json"
+    expected = {
+        "attempt_id": attempt_id,
+        "application_id": _id(application_id, "application ID"),
+        "operation_sha256": operation_sha256,
+        "request_sha256": authority.authority_sha256,
+        "acceptance_receipt_sha256": acceptance.receipt_sha256,
+        "acceptance_envelope_sha256": acceptance.envelope_sha256,
+        "acceptance_signature_sha256": acceptance.signature_sha256,
+        "consumption_root_sha256": acceptance.consumption_root_sha256,
+        "source_sha256": source.source_sha256,
+        "sanity_receipt_sha256": sanity.receipt_sha256,
+        "ats_name": ats_name,
+        "job_key": authority.job_key,
+        "application_url": authority.application_url,
+        "root_identity": store.root_identity,
+        "store_identity": store.directory_identity,
+    }
+    try:
+        raw = _read_acceptance_at(store, name)
+    except FileNotFoundError:
+        raw = None
+    if raw is not None:
+        admission = _public_observation_admission_from_document(_canonical(raw))
+        if any(getattr(admission, key) != value for key, value in expected.items()):
+            raise ValueError("public ATS observation attempt is bound to different evidence")
+        return admission, False
+    now = _utc_now()
+    if not acceptance.not_before <= now < acceptance.expires_at:
+        raise ValueError("public ATS observation acceptance is outside its validity window")
+    fields: dict[str, object] = {
+        "schema_version": _PUBLIC_OBSERVATION_ADMISSION_SCHEMA,
+        **expected,
+        "admitted_at": now,
+        "root_identity": list(store.root_identity),
+        "store_identity": list(store.directory_identity),
+        "diagnostic_only": True,
+        "raw_payloads_persisted": False,
+        "identity_authority": False,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    admission = _PublicObservationAdmission(
+        **(
+            fields
+            | {
+                "root_identity": store.root_identity,
+                "store_identity": store.directory_identity,
+                "admission_sha256": sha256(canonical_json(fields).encode()),
+            }
+        )
+    )
+    stored = _write_acceptance_once(
+        store,
+        name,
+        (canonical_json(admission.document()) + "\n").encode(),
+        prepublish_check=store.verify,
+    )
+    recovered = _public_observation_admission_from_document(_canonical(stored))
+    if recovered != admission:
+        raise ValueError("public ATS observation admission collision differs")
+    return recovered, True
+
+
 @dataclass(frozen=True)
 class ApplicationSource:
     profile_id: str
@@ -1700,6 +2160,10 @@ class AtsReadOnlyObservation:
     observation_authority_sha256: str
     network_evidence_sha256: str
     network_event_count: int
+    transport: str = "local_fixture"
+    acceptance_receipt_sha256: str | None = None
+    navigation_admission_sha256: str | None = None
+    blocked_interaction_attempts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.receipt) is not ATSForensicReceipt:
@@ -1711,6 +2175,16 @@ class AtsReadOnlyObservation:
         _digest(self.network_evidence_sha256, "ATS observation network evidence SHA-256")
         if isinstance(self.network_event_count, bool) or not isinstance(self.network_event_count, int) or self.network_event_count < 0:
             raise ValueError("ATS observation network event count differs")
+        object.__setattr__(self, "blocked_interaction_attempts", tuple(self.blocked_interaction_attempts))
+        if self.transport not in {"local_fixture", "public_https"}:
+            raise ValueError("ATS observation transport differs")
+        if self.transport == "public_https":
+            _digest(self.acceptance_receipt_sha256, "ATS acceptance receipt SHA-256")
+            _digest(self.navigation_admission_sha256, "ATS navigation admission SHA-256")
+        elif self.acceptance_receipt_sha256 is not None or self.navigation_admission_sha256 is not None:
+            raise ValueError("local ATS observation carries public authority evidence")
+        if any(attempt not in _READ_ONLY_ATTEMPTS for attempt in self.blocked_interaction_attempts):
+            raise ValueError("ATS observation blocked interaction evidence differs")
 
 
 def _network_route_sha256(value: object) -> str:
@@ -1805,6 +2279,18 @@ def _observation_from_receipt(
         observation_authority_sha256=str(payload["authority_sha256"]),
         network_evidence_sha256=str(payload["network_evidence_sha256"]),
         network_event_count=int(payload["network_event_count"]),
+        transport=str(payload.get("transport", "local_fixture")),
+        acceptance_receipt_sha256=(
+            str(payload["acceptance_receipt_sha256"])
+            if "acceptance_receipt_sha256" in payload
+            else None
+        ),
+        navigation_admission_sha256=(
+            str(payload["navigation_admission_sha256"])
+            if "navigation_admission_sha256" in payload
+            else None
+        ),
+        blocked_interaction_attempts=tuple(payload["blocked_interaction_attempts"]),
     )
 
 
@@ -1819,17 +2305,51 @@ def observe_ats_form_or_recover(
     authority: AtsObservationAuthority,
     captured_at: str,
     fixture_html: str | None = None,
+    acceptance_receipt: AtsObservationAcceptanceReceipt | None = None,
+    acceptance_envelope_path: str | Path | None = None,
+    acceptance_public_key_path: str | Path | None = None,
+    acceptance_consumption_root: str | Path | None = None,
+    _test_tls_spki_sha256_b64: str | None = None,
+    _test_crash_after_navigation: bool = False,
 ) -> AtsReadOnlyObservation:
     """Observe one authority-bound route without input, upload, click, or submission.
 
-    This increment implements only the accepted ``localhost`` fixture transport.
-    The content-addressed authority shape intentionally remains suitable for a
-    separately approved public adapter without granting it here.
+    The default transport remains the accepted ``localhost`` fixture. A public
+    HTTPS target is observed only when an externally signed, fully consumed
+    market-observation acceptance receipt is supplied and reverified through
+    the canonical verifier; there is no second, weaker authority path.
     """
     if type(authority) is not AtsObservationAuthority:
         raise TypeError("ATS observation requires exact typed authority")
+    acceptance_arguments = (
+        acceptance_receipt,
+        acceptance_envelope_path,
+        acceptance_public_key_path,
+        acceptance_consumption_root,
+    )
     if authority.local_fixture_only is not True:
-        raise PermissionError("public ATS observation requires an external verified operator capability")
+        if any(value is None for value in acceptance_arguments):
+            raise PermissionError("public ATS observation requires an external verified operator capability")
+        if fixture_html is not None:
+            raise ValueError("public ATS observation cannot use fixture HTML")
+        return _observe_public_ats_form_or_recover(
+            root=root,
+            attempt_id=attempt_id,
+            application_id=application_id,
+            source=source,
+            sanity=sanity,
+            ats_name=ats_name,
+            authority=authority,
+            captured_at=captured_at,
+            acceptance_receipt=acceptance_receipt,
+            acceptance_envelope_path=acceptance_envelope_path,
+            acceptance_public_key_path=acceptance_public_key_path,
+            acceptance_consumption_root=acceptance_consumption_root,
+            test_tls_spki_sha256_b64=_test_tls_spki_sha256_b64,
+            crash_after_navigation=_test_crash_after_navigation,
+        )
+    if any(value is not None for value in acceptance_arguments) or _test_tls_spki_sha256_b64 is not None or _test_crash_after_navigation:
+        raise ValueError("local ATS fixture cannot consume public observation authority")
     authority.require_local_fixture()
     if authority.job_key != source.job_key:
         raise ValueError("ATS observation authority job differs from application source")
@@ -1891,31 +2411,7 @@ def observe_ats_form_or_recover(
             try:
                 browser = playwright.chromium.launch(headless=True)
                 context = browser.new_context()
-                context.add_init_script(
-                    """(() => {
-                      const attempts = [];
-                      const block = (name) => { attempts.push(name); throw new Error(`market-aligner-read-only:${name}`); };
-                      Object.defineProperty(window, '__marketAlignerReadOnly', {value: {attempts}, configurable: false});
-                      const blockMethod = (prototype, name, kind) => {
-                        const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
-                        if (descriptor && typeof descriptor.value === 'function') Object.defineProperty(prototype, name, {...descriptor, value() { return block(kind); }});
-                      };
-                      const blockSetter = (prototype, name, kind) => {
-                        const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
-                        if (descriptor && typeof descriptor.set === 'function') Object.defineProperty(prototype, name, {...descriptor, set() { return block(kind); }});
-                      };
-                      blockMethod(HTMLElement.prototype, 'click', 'click');
-                      blockMethod(HTMLFormElement.prototype, 'submit', 'submit');
-                      blockMethod(HTMLFormElement.prototype, 'requestSubmit', 'submit');
-                      blockSetter(HTMLInputElement.prototype, 'value', 'fill');
-                      blockSetter(HTMLTextAreaElement.prototype, 'value', 'type');
-                      blockSetter(HTMLSelectElement.prototype, 'value', 'fill');
-                      blockSetter(HTMLInputElement.prototype, 'files', 'upload');
-                      window.fetch = () => block('network');
-                      if (navigator.sendBeacon) navigator.sendBeacon = () => block('network');
-                      blockMethod(XMLHttpRequest.prototype, 'open', 'network');
-                    })()"""
-                )
+                context.add_init_script(_READ_ONLY_GUARD_SCRIPT)
                 page = context.new_page()
                 page.route("**/*", route_handler)
                 page.on("response", record_response)
@@ -1928,40 +2424,16 @@ def observe_ats_form_or_recover(
                 snapshot = sha256(raw_snapshot)
                 if len(raw_snapshot) > authority.max_snapshot_bytes or network_overflow:
                     failure = "observation_indeterminate"
-                blockers = page.locator("input[type=password], iframe").evaluate_all(
-                    """(elements) => ({
-                      password: elements.some((element) => element.matches('input[type=password]')),
-                      captcha: elements.some((element) => {
-                        const text = `${element.getAttribute('src') || ''} ${element.getAttribute('title') || ''}`.toLowerCase();
-                        return /captcha|turnstile|challenge/.test(text) && !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
-                      })
-                    })"""
+                blockers = page.locator("body, input[type=password], iframe").evaluate_all(
+                    _ATS_BLOCKER_SCRIPT
                 )
                 if blockers["password"]:
                     failure = "identity_required"
-                elif blockers["captcha"]:
+                elif blockers["captcha"] or blockers["login"]:
                     failure = "human_verification"
                 elif failure is None:
                     rows = page.locator("form input, form textarea, form select").evaluate_all(
-                        """(elements) => elements.map((element, index) => {
-                          const tag = element.tagName.toLowerCase();
-                          const inputType = (element.getAttribute('type') || 'text').toLowerCase();
-                          const controlKind = tag === 'textarea' ? 'textarea' : (tag === 'select' ? 'select' : inputType);
-                          const fieldId = element.id || element.getAttribute('name') || '';
-                          const label = Array.from(element.labels || []).map((label) => (label.textContent || '').trim()).find(Boolean) || element.getAttribute('aria-label') || fieldId || `field-${index}`;
-                          const options = tag === 'select' ? Array.from(element.options || []).map((option) => ({value: option.value || option.textContent || '', label: (option.textContent || '').trim() || option.value || ''})) : ((controlKind === 'radio' || controlKind === 'checkbox') ? [{value: element.getAttribute('value') || fieldId, label}] : []);
-                          return {
-                            field_id: fieldId,
-                            control_kind: controlKind,
-                            label,
-                            required: Boolean(element.required) || element.getAttribute('aria-required') === 'true',
-                            visible: Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length),
-                            disabled: Boolean(element.disabled),
-                            read_only: Boolean(element.readOnly),
-                            multiple: Boolean(element.multiple),
-                            options,
-                          };
-                        })"""
+                        _ATS_INVENTORY_SCRIPT
                     )
                     inventory = AtsFormInventory(
                         provider="fixture",
@@ -1973,7 +2445,7 @@ def observe_ats_form_or_recover(
                     )
                 attempts = page.evaluate("() => window.__marketAlignerReadOnly.attempts.slice()")
                 if not isinstance(attempts, list) or any(
-                    attempt not in {"click", "fill", "submit", "type", "upload", "network"}
+                    attempt not in _READ_ONLY_ATTEMPTS
                     for attempt in attempts
                 ):
                     raise ValueError("read-only browser guard evidence is malformed")
@@ -2019,6 +2491,590 @@ def observe_ats_form_or_recover(
             raise
         receipt = load_forensic_receipt(root, attempt_id=attempt_id, application_id=application_id, binding_sha256=binding)
     return _observation_from_receipt(root, receipt)
+
+
+def _public_observation_policy() -> tuple[dict[str, object], str]:
+    """Describe the bounded browser policy truthfully for the default launch.
+
+    The observer launches Playwright's default bundled Chromium (no channel
+    override). WebSocket, storage, cookie, popup and download denial is
+    enforced by page-script guards and recorded event accounting, not by a
+    claim of total network mediation.
+    """
+    policy: dict[str, object] = {
+        "schema_version": "market-aligner.public-ats-browser-policy.v1",
+        "browser_family": "chromium",
+        "browser_channel": "default",
+        "ephemeral_context": True,
+        "accepted_methods": ["GET", "HEAD"],
+        "allowed_document_count": 1,
+        "allowed_static_resource_types": ["font", "image", "script", "stylesheet"],
+        "same_origin_only": True,
+        "downloads": False,
+        "extensions": False,
+        "inherited_storage": False,
+        "popups": False,
+        "proxy_credentials": False,
+        "service_workers": False,
+        "websockets": False,
+        "identity_authority": False,
+        "submission_authority": False,
+    }
+    return policy, sha256(canonical_json(policy).encode())
+
+
+def _public_observation_payload(
+    *,
+    ats_name: str,
+    authority: AtsObservationAuthority,
+    acceptance: AtsObservationAcceptanceReceipt,
+    admission: _PublicObservationAdmission,
+    captured_at: str,
+    final_url: str,
+    page_snapshot_sha256: str,
+    inventory: AtsFormInventory | None,
+    network_events: list[dict[str, object]],
+    blocked_attempts: list[str],
+    blocked_counts: dict[str, int],
+    context_postconditions: dict[str, int],
+    browser_policy_sha256: str,
+    browser_revision_sha256: str,
+    allowed_origin_sha256: str,
+    browser_launch_performed: bool,
+    recovered_without_renavigation: bool,
+    failure: str | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": _PUBLIC_OBSERVATION_SCHEMA,
+        "provider": ats_name,
+        "requested_application_url": authority.application_url,
+        "final_application_url": final_url,
+        "job_key": authority.job_key,
+        "authority_sha256": authority.authority_sha256,
+        "captured_at": captured_at,
+        "page_snapshot_sha256": page_snapshot_sha256,
+        "inventory": None if inventory is None else inventory.document(),
+        "inventory_sha256": None if inventory is None else inventory.content_sha256,
+        "network_evidence_sha256": sha256(
+            canonical_json(sorted(network_events, key=canonical_json)).encode()
+        ),
+        "network_event_count": len(network_events),
+        "interaction_counts": {"click": 0, "fill": 0, "submit": 0, "type": 0, "upload": 0},
+        "blocked_interaction_attempts": sorted(set(blocked_attempts)),
+        "terminal_failure_class": failure,
+        "transport": "public_https",
+        "acceptance_receipt_sha256": acceptance.receipt_sha256,
+        "acceptance_envelope_sha256": acceptance.envelope_sha256,
+        "acceptance_signature_sha256": acceptance.signature_sha256,
+        "consumption_root_sha256": acceptance.consumption_root_sha256,
+        "navigation_admission_sha256": admission.admission_sha256,
+        "browser_policy_sha256": browser_policy_sha256,
+        "browser_revision_sha256": browser_revision_sha256,
+        "allowed_origin_sha256": allowed_origin_sha256,
+        "navigation_admitted": True,
+        "browser_launch_performed": browser_launch_performed,
+        "recovered_without_renavigation": recovered_without_renavigation,
+        "capture_complete": failure is None,
+        "blocked_request_counts": blocked_counts,
+        "context_postconditions": context_postconditions,
+        "diagnostic_only": True,
+        "raw_payloads_persisted": False,
+        "identity_authority": False,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    _observation_payload(payload)
+    return payload
+
+
+def _observe_public_ats_form_or_recover(
+    *,
+    root: str | Path,
+    attempt_id: str,
+    application_id: str,
+    source: ApplicationSource,
+    sanity: SanityReviewReceipt,
+    ats_name: str,
+    authority: AtsObservationAuthority,
+    captured_at: str,
+    acceptance_receipt: AtsObservationAcceptanceReceipt,
+    acceptance_envelope_path: str | Path,
+    acceptance_public_key_path: str | Path,
+    acceptance_consumption_root: str | Path,
+    test_tls_spki_sha256_b64: str | None,
+    crash_after_navigation: bool,
+) -> AtsReadOnlyObservation:
+    """Run one authenticated, GET-only public observation in the existing owner."""
+
+    if type(source) is not ApplicationSource or type(sanity) is not SanityReviewReceipt:
+        raise TypeError("public ATS observation requires exact application authority types")
+    if authority.authority_state != "pending" or authority.local_fixture_only is not False:
+        raise ValueError("public ATS observation requires a pending public request descriptor")
+    if authority.job_key != source.job_key or sanity.source_sha256 != source.source_sha256:
+        raise ValueError("public ATS observation source binding differs")
+    _ats_time(captured_at)
+    _id(attempt_id, "attempt ID")
+    _id(application_id, "application ID")
+    _id(ats_name, "ATS name")
+    if ats_name not in _ATS_PROVIDERS or ats_name == "fixture":
+        raise ValueError("public ATS observation provider differs")
+    if type(crash_after_navigation) is not bool:
+        raise TypeError("public ATS observation crash injection must be bool")
+    hostname = urlsplit(authority.application_url).hostname
+    if test_tls_spki_sha256_b64 is not None:
+        if hostname != "localhost" or not _TEST_TLS_SPKI.fullmatch(test_tls_spki_sha256_b64):
+            raise ValueError("test TLS exception must bind one localhost SPKI identity")
+    if crash_after_navigation and hostname != "localhost":
+        raise ValueError("crash injection is restricted to the localhost transport test")
+    acceptance = verify_consumed_market_observation_acceptance(
+        authority,
+        acceptance_receipt,
+        envelope_path=acceptance_envelope_path,
+        public_key_path=acceptance_public_key_path,
+        consumption_root=acceptance_consumption_root,
+    )
+    policy, policy_sha256 = _public_observation_policy()
+    del policy
+    parsed_target = urlsplit(authority.application_url)
+    allowed_origin = urlunsplit((parsed_target.scheme, parsed_target.netloc, "", "", ""))
+    allowed_origin_sha256 = sha256(allowed_origin.encode())
+    operation_sha256 = sha256(canonical_json({
+        "schema_version": "market-aligner.public-ats-operation.v1",
+        "attempt_id": attempt_id,
+        "application_id": application_id,
+        "source_sha256": source.source_sha256,
+        "sanity_receipt_sha256": sanity.receipt_sha256,
+        "ats_name": ats_name,
+        "job_key": authority.job_key,
+        "application_url": authority.application_url,
+        "authority_sha256": authority.authority_sha256,
+        "acceptance_receipt_sha256": acceptance.receipt_sha256,
+        "acceptance_envelope_sha256": acceptance.envelope_sha256,
+        "acceptance_signature_sha256": acceptance.signature_sha256,
+        "consumption_root_sha256": acceptance.consumption_root_sha256,
+        "browser_policy_sha256": policy_sha256,
+        "allowed_origin_sha256": allowed_origin_sha256,
+    }).encode())
+    consumption_path, consumption_identity = _root(
+        acceptance_consumption_root,
+        create=False,
+    )
+    if consumption_identity != acceptance.root_identity:
+        raise ValueError("public ATS observation replay root differs")
+    now = _utc_now()
+    _ats_time(now)
+    store = _open_owned_store(
+        consumption_path,
+        consumption_identity,
+        directory_name=_PUBLIC_OBSERVATION_ADMISSION_DIRECTORY,
+        label="public ATS observation admission store",
+        create=False,
+    )
+    if store is None:
+        if not acceptance.not_before <= now < acceptance.expires_at:
+            raise ValueError("public ATS observation acceptance is outside its validity window")
+        store = _open_owned_store(
+            consumption_path,
+            consumption_identity,
+            directory_name=_PUBLIC_OBSERVATION_ADMISSION_DIRECTORY,
+            label="public ATS observation admission store",
+            create=True,
+        )
+    elif not acceptance.not_before <= now < acceptance.expires_at:
+        try:
+            _read_acceptance_at(store, f"{attempt_id}.json")
+        except FileNotFoundError:
+            store.close()
+            raise ValueError(
+                "public ATS observation acceptance is outside its validity window"
+            ) from None
+    assert store is not None
+    lock_fd = _public_observation_lock(store, attempt_id)
+    try:
+        admission, created = _public_observation_admit(
+            store,
+            attempt_id=attempt_id,
+            application_id=application_id,
+            operation_sha256=operation_sha256,
+            source=source,
+            sanity=sanity,
+            ats_name=ats_name,
+            authority=authority,
+            acceptance=acceptance,
+        )
+        binding_sha256 = sha256(canonical_json({
+            "operation_sha256": operation_sha256,
+            "navigation_admission_sha256": admission.admission_sha256,
+        }).encode())
+        try:
+            existing = load_forensic_receipt(
+                root,
+                attempt_id=attempt_id,
+                application_id=application_id,
+                binding_sha256=binding_sha256,
+            )
+        except KeyError:
+            existing = None
+        if existing is not None:
+            return _observation_from_receipt(root, existing)
+        recorder = ATSForensicRecorder(
+            root,
+            attempt_id=attempt_id,
+            application_id=application_id,
+            binding_sha256=binding_sha256,
+        )
+        blocked_counts = {
+            "cookie": 0,
+            "cross_origin": 0,
+            "download": 0,
+            "method": 0,
+            "network": 0,
+            "popup": 0,
+            "redirect": 0,
+            "storage": 0,
+            "submit": 0,
+            "websocket": 0,
+        }
+        postconditions = {
+            "cookie_count": 0,
+            "download_count": 0,
+            "local_storage_count": 0,
+            "page_count": 0,
+            "session_storage_count": 0,
+        }
+        if not created:
+            payload = _public_observation_payload(
+                ats_name=ats_name,
+                authority=authority,
+                acceptance=acceptance,
+                admission=admission,
+                captured_at=captured_at,
+                final_url=authority.application_url,
+                page_snapshot_sha256=sha256(b""),
+                inventory=None,
+                network_events=[],
+                blocked_attempts=[],
+                blocked_counts=blocked_counts,
+                context_postconditions=postconditions,
+                browser_policy_sha256=policy_sha256,
+                browser_revision_sha256=sha256(b"not-observed"),
+                allowed_origin_sha256=allowed_origin_sha256,
+                browser_launch_performed=False,
+                recovered_without_renavigation=True,
+                failure="observation_indeterminate",
+            )
+            recorder.checkpoint(_OBSERVATION_CHECKPOINT, observation=payload)
+            receipt = recorder.finalize(
+                outcome="blocked",
+                failure_class="observation_indeterminate",
+            )
+            return _observation_from_receipt(root, receipt)
+
+        network_events: list[dict[str, object]] = []
+        blocked_attempts: list[str] = []
+        final_url = authority.application_url
+        snapshot_sha256 = sha256(b"")
+        inventory: AtsFormInventory | None = None
+        failure: str | None = None
+        browser_revision_sha256 = sha256(b"not-observed")
+        browser_launch_performed = False
+        network_overflow = False
+        document_request_seen = False
+        non_guard_page_error = False
+
+        def mark(category: str, attempt: str) -> None:
+            blocked_counts[category] += 1
+            blocked_attempts.append(attempt)
+
+        def network_event(value: dict[str, object]) -> bool:
+            nonlocal network_overflow
+            if len(network_events) >= authority.max_network_events:
+                network_overflow = True
+                return False
+            network_events.append(value)
+            return True
+
+        try:
+            from playwright.sync_api import (
+                Error as PlaywrightError,
+                TimeoutError as PlaywrightTimeoutError,
+                sync_playwright,
+            )
+        except ImportError:
+            failure = "observation_indeterminate"
+        else:
+            try:
+                with sync_playwright() as playwright:
+                    browser = None
+                    context = None
+                    page = None
+                    try:
+                        launch_args = [
+                            "--disable-background-networking",
+                            "--disable-component-update",
+                            "--disable-extensions",
+                            "--disable-sync",
+                            "--no-proxy-server",
+                        ]
+                        if test_tls_spki_sha256_b64 is not None:
+                            launch_args.append(
+                                "--ignore-certificate-errors-spki-list="
+                                f"{test_tls_spki_sha256_b64}"
+                            )
+                        browser = playwright.chromium.launch(
+                            headless=True,
+                            args=launch_args,
+                        )
+                        browser_launch_performed = True
+                        browser_revision_sha256 = sha256(
+                            f"chromium:{browser.version}".encode()
+                        )
+                        context = browser.new_context(
+                            accept_downloads=False,
+                            service_workers="block",
+                        )
+                        context.clear_cookies()
+                        context.clear_permissions()
+                        if context.cookies():
+                            raise ValueError("public ATS browser context inherited cookies")
+                        context.add_init_script(_READ_ONLY_GUARD_SCRIPT)
+                        page = context.new_page()
+
+                        def route_handler(route) -> None:
+                            nonlocal document_request_seen
+                            request = route.request
+                            method = request.method.upper()
+                            resource_type = request.resource_type
+                            request_url = request.url
+                            parsed = urlsplit(request_url)
+                            request_origin = urlunsplit(
+                                (parsed.scheme.casefold(), parsed.netloc.casefold(), "", "", "")
+                            )
+                            is_navigation = request.is_navigation_request()
+                            disposition = "allowed"
+                            category: str | None = None
+                            attempt = "network"
+                            if method not in {"GET", "HEAD"}:
+                                disposition = "blocked_method"
+                                category = "method"
+                                attempt = "submit" if is_navigation else "network"
+                                if is_navigation:
+                                    blocked_counts["submit"] += 1
+                            elif request_origin != allowed_origin:
+                                disposition = "blocked_cross_origin"
+                                category = "cross_origin"
+                            elif is_navigation:
+                                if (
+                                    request_url != authority.application_url
+                                    or request.frame != page.main_frame
+                                    or document_request_seen
+                                ):
+                                    disposition = "blocked_redirect"
+                                    category = "redirect"
+                                    attempt = "redirect"
+                                else:
+                                    document_request_seen = True
+                            elif resource_type not in {"font", "image", "script", "stylesheet"}:
+                                disposition = "blocked_resource_type"
+                                category = "network"
+                            if not network_event({
+                                "phase": "request",
+                                "method": method,
+                                "resource_type": resource_type,
+                                "route_sha256": _network_route_sha256(request_url),
+                                "disposition": disposition,
+                            }):
+                                category = "network"
+                                attempt = "network"
+                            if category is not None:
+                                mark(category, attempt)
+                                route.abort("blockedbyclient")
+                            else:
+                                route.continue_()
+
+                        def response_handler(response) -> None:
+                            if 300 <= response.status < 400:
+                                mark("redirect", "redirect")
+                            network_event({
+                                "phase": "response",
+                                "method": response.request.method.upper(),
+                                "resource_type": response.request.resource_type,
+                                "route_sha256": _network_route_sha256(response.url),
+                                "status": response.status,
+                            })
+
+                        def page_error_handler(error) -> None:
+                            nonlocal non_guard_page_error
+                            if "market-aligner-read-only:" not in str(error):
+                                non_guard_page_error = True
+
+                        def popup_handler(popup) -> None:
+                            mark("popup", "popup")
+                            try:
+                                popup.close()
+                            except PlaywrightError:
+                                pass
+
+                        def download_handler(download) -> None:
+                            postconditions["download_count"] += 1
+                            mark("download", "download")
+                            try:
+                                download.cancel()
+                            except PlaywrightError:
+                                pass
+
+                        def websocket_handler(_socket) -> None:
+                            mark("websocket", "websocket")
+
+                        context.route("**/*", route_handler)
+                        page.on("response", response_handler)
+                        page.on("pageerror", page_error_handler)
+                        page.on("popup", popup_handler)
+                        page.on("download", download_handler)
+                        page.on("websocket", websocket_handler)
+                        page.goto(
+                            authority.application_url,
+                            wait_until="domcontentloaded",
+                            timeout=authority.timeout_ms,
+                        )
+                        if crash_after_navigation:
+                            raise RuntimeError(
+                                "injected crash after public ATS navigation"
+                            )
+                        page.wait_for_timeout(min(100, authority.timeout_ms))
+                        try:
+                            final_url = _observation_url(page.url)
+                        except ValueError:
+                            final_url = authority.application_url
+                            mark("redirect", "redirect")
+                        if final_url != authority.application_url:
+                            mark("redirect", "redirect")
+                        snapshot = page.content().encode()
+                        snapshot_sha256 = sha256(snapshot)
+                        if len(snapshot) > authority.max_snapshot_bytes:
+                            failure = "observation_indeterminate"
+                        guard_attempts = page.evaluate(
+                            "() => window.__marketAlignerReadOnly.attempts.slice()"
+                        )
+                        if not isinstance(guard_attempts, list) or any(
+                            attempt not in _READ_ONLY_ATTEMPTS
+                            for attempt in guard_attempts
+                        ):
+                            raise ValueError("public ATS browser guard evidence is malformed")
+                        blocked_attempts.extend(guard_attempts)
+                        for attempt in guard_attempts:
+                            if attempt in {"cookie", "storage", "websocket", "popup"}:
+                                blocked_counts[attempt] += 1
+                            elif attempt == "submit":
+                                blocked_counts["submit"] += 1
+                            elif attempt == "network":
+                                blocked_counts["network"] += 1
+                        cookies = context.cookies()
+                        postconditions["cookie_count"] = len(cookies)
+                        if cookies:
+                            mark("cookie", "cookie")
+                            context.clear_cookies()
+                        storage = page.evaluate(
+                            "() => ({local: localStorage.length, session: sessionStorage.length})"
+                        )
+                        if not isinstance(storage, dict) or set(storage) != {"local", "session"}:
+                            raise ValueError("public ATS browser storage evidence is malformed")
+                        postconditions["local_storage_count"] = int(storage["local"])
+                        postconditions["session_storage_count"] = int(storage["session"])
+                        if storage["local"] or storage["session"]:
+                            mark("storage", "storage")
+                        postconditions["page_count"] = len(context.pages)
+                        if postconditions["page_count"] != 1:
+                            mark("popup", "popup")
+                        blockers = page.locator(
+                            "body, input[type=password], iframe"
+                        ).evaluate_all(_ATS_BLOCKER_SCRIPT)
+                        if not isinstance(blockers, dict) or set(blockers) != {
+                            "password", "captcha", "login"
+                        }:
+                            raise ValueError("public ATS blocker evidence is malformed")
+                        if blockers["password"] or blockers["login"]:
+                            failure = "identity_required"
+                        elif blockers["captcha"]:
+                            failure = "human_verification"
+                        elif blocked_counts["redirect"] or blocked_counts["cross_origin"]:
+                            failure = "redirect_detected"
+                        elif blocked_attempts or any(blocked_counts.values()):
+                            failure = "read_only_interaction_attempted"
+                        elif network_overflow or non_guard_page_error:
+                            failure = "observation_indeterminate"
+                        elif failure is None:
+                            rows = page.locator(
+                                "form input, form textarea, form select"
+                            ).evaluate_all(_ATS_INVENTORY_SCRIPT)
+                            inventory = AtsFormInventory(
+                                provider=ats_name,
+                                application_url=final_url,
+                                captured_at=captured_at,
+                                page_snapshot_sha256=snapshot_sha256,
+                                screenshot_sha256s=(),
+                                fields=_observed_fields(rows),
+                            )
+                    finally:
+                        if context is not None:
+                            context.close()
+                        if browser is not None:
+                            browser.close()
+            except PlaywrightTimeoutError:
+                failure = "provider_timeout"
+            except PlaywrightError:
+                if blocked_attempts or any(blocked_counts.values()):
+                    failure = (
+                        "redirect_detected"
+                        if blocked_counts["redirect"] or blocked_counts["cross_origin"]
+                        else "read_only_interaction_attempted"
+                    )
+                else:
+                    raise
+        if failure is not None:
+            inventory = None
+        payload = _public_observation_payload(
+            ats_name=ats_name,
+            authority=authority,
+            acceptance=acceptance,
+            admission=admission,
+            captured_at=captured_at,
+            final_url=final_url,
+            page_snapshot_sha256=snapshot_sha256,
+            inventory=inventory,
+            network_events=network_events,
+            blocked_attempts=blocked_attempts,
+            blocked_counts=blocked_counts,
+            context_postconditions=postconditions,
+            browser_policy_sha256=policy_sha256,
+            browser_revision_sha256=browser_revision_sha256,
+            allowed_origin_sha256=allowed_origin_sha256,
+            browser_launch_performed=browser_launch_performed,
+            recovered_without_renavigation=False,
+            failure=failure,
+        )
+        recorder.checkpoint(_OBSERVATION_CHECKPOINT, observation=payload)
+        try:
+            receipt = recorder.finalize(
+                outcome="prepared" if failure is None else "blocked",
+                failure_class=failure,
+            )
+        except FileExistsError as exc:
+            if str(exc) != "forensic attempt ID already has evidence":
+                raise
+            receipt = load_forensic_receipt(
+                root,
+                attempt_id=attempt_id,
+                application_id=application_id,
+                binding_sha256=binding_sha256,
+            )
+        return _observation_from_receipt(root, receipt)
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+            store.close()
 
 
 _PRE_SUBMIT_ACTIONS = frozenset({"fill", "select", "check", "upload"})

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import datetime
 import hashlib
+import http.server
 import importlib.util
+import ipaddress
 import json
 import os
+import ssl
 import subprocess
 import sys
+import threading
 import builtins
 from dataclasses import replace
 from pathlib import Path
@@ -1025,3 +1031,271 @@ def test_signed_observation_acceptance_parent_swap_refuses_before_publication(tm
     receipts = runtime_root / "observation-acceptance-consumptions"
     assert not (receipts / f"{envelope['nonce']}.json").exists()
     assert not list(receipts.glob("*.tmp"))
+
+
+_CLEAN_PUBLIC_ATS_HTML = """<!doctype html><html><head>
+  <link rel="icon" href="data:,"><title>Apply</title></head>
+  <body><form id='application'>
+    <label for='full_name'>Full name</label><input id='full_name' required>
+    <label for='team'>Team</label><select id='team'><option value='eng'>Engineering</option></select>
+  </form></body></html>"""
+
+_HOSTILE_PUBLIC_ATS_HTML = """<!doctype html><html><head>
+  <link rel="icon" href="data:,"><title>Role</title></head>
+  <body><form><label for='full_name'>Full name</label><input id='full_name' value='private@example.test'></form>
+  <script>
+    const attempt = (action) => { try { action(); } catch (_error) {} };
+    attempt(() => fetch('/leak'));
+    attempt(() => new WebSocket('wss://localhost/echo'));
+    attempt(() => localStorage.setItem('token', 'private-access-token'));
+    attempt(() => document.forms[0].submit());
+  </script></body></html>"""
+
+
+@contextlib.contextmanager
+def _local_tls_ats_fixture(tmp_path: Path):
+    """Serve local-TLS-only ATS pages; yield (base_url, SPKI exception digest)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+            ]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    certificate_path = tmp_path / "fixture-ats.crt"
+    key_path = tmp_path / "fixture-ats.key"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ))
+    spki = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    spki_sha256_b64 = base64.b64encode(hashlib.sha256(spki).digest()).decode("ascii")
+    pages = {"/apply": _CLEAN_PUBLIC_ATS_HTML, "/apply-hostile": _HOSTILE_PUBLIC_ATS_HTML}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = pages.get(self.path)
+            if body is None:
+                self.send_error(404)
+                return
+            payload = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate_path, key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"https://localhost:{port}", spki_sha256_b64
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_real_tls_public_observation_admits_consumed_acceptance_and_blocks_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("playwright.sync_api")
+    pytest.importorskip("cryptography")
+    with _local_tls_ats_fixture(tmp_path) as (base_url, spki_sha256_b64):
+        _run_public_tls_observation_assertions(tmp_path, monkeypatch, base_url, spki_sha256_b64)
+
+
+def _run_public_tls_observation_assertions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    spki_sha256_b64: str,
+) -> None:
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    application = source()
+    runtime_root = tmp_path / "runtime"
+
+    with pytest.raises(ValueError, match="cannot consume public observation authority"):
+        observe_ats_form_or_recover(
+            root=tmp_path / "forensics", attempt_id="attempt-fixture-scope-refused",
+            application_id="application-fixture-scope-refused", source=application,
+            sanity=sanity(application), ats_name="fixture",
+            authority=observation_authority(application),
+            captured_at="2026-08-27T12:00:00Z",
+            fixture_html="<form><input id='x'></form>",
+            acceptance_receipt=None,
+            acceptance_envelope_path=public_path,
+            acceptance_public_key_path=public_path,
+            acceptance_consumption_root=runtime_root,
+        )
+
+    authority = public_observation_request(application, url=f"{base_url}/apply")
+    envelope_path, _envelope = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+        nonce="5" * 64,
+    )
+    consumed = verify_and_consume_market_observation_acceptance(
+        authority,
+        envelope_path=envelope_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+    observation_kwargs = {
+        "root": tmp_path / "forensics",
+        "attempt_id": "attempt-public-tls-0001",
+        "application_id": "application-public-tls-0001",
+        "source": application,
+        "sanity": sanity(application),
+        "ats_name": "greenhouse",
+        "authority": authority,
+        "captured_at": "2026-08-27T12:00:00Z",
+        "acceptance_receipt": consumed,
+        "acceptance_envelope_path": envelope_path,
+        "acceptance_public_key_path": public_path,
+        "acceptance_consumption_root": runtime_root,
+        "_test_tls_spki_sha256_b64": spki_sha256_b64,
+    }
+    observed = observe_ats_form_or_recover(**observation_kwargs)
+
+    assert observed.transport == "public_https"
+    assert observed.receipt.outcome == "prepared"
+    assert observed.receipt.failure_class is None
+    assert observed.inventory is not None
+    assert {field.field_id for field in observed.inventory.fields} == {"full_name", "team"}
+    assert observed.blocked_interaction_attempts == ()
+    assert observed.network_event_count >= 1
+    assert observed.acceptance_receipt_sha256 == consumed.receipt_sha256
+    manifest_path = tmp_path / "forensics" / "manifests" / "attempt-public-tls-0001.json"
+    manifest = json.loads(manifest_path.read_text())
+    payload = manifest["events"][0]["observation"]
+    assert payload["transport"] == "public_https"
+    assert payload["acceptance_receipt_sha256"] == consumed.receipt_sha256
+    assert payload["consumption_root_sha256"] == consumed.consumption_root_sha256
+    assert payload["navigation_admission_sha256"] == observed.navigation_admission_sha256
+    assert payload["navigation_admitted"] is True
+    assert payload["browser_launch_performed"] is True
+    assert payload["recovered_without_renavigation"] is False
+    assert payload["capture_complete"] is True
+    assert payload["blocked_request_counts"] == {
+        "cookie": 0, "cross_origin": 0, "download": 0, "method": 0, "network": 0,
+        "popup": 0, "redirect": 0, "storage": 0, "submit": 0, "websocket": 0,
+    }
+    assert payload["context_postconditions"] == {
+        "cookie_count": 0, "download_count": 0, "local_storage_count": 0,
+        "page_count": 1, "session_storage_count": 0,
+    }
+    admission_path = (
+        runtime_root / "public-observation-admissions" / "attempt-public-tls-0001.json"
+    )
+    admission = json.loads(admission_path.read_text())
+    assert admission["acceptance_receipt_sha256"] == consumed.receipt_sha256
+    assert admission["acceptance_envelope_sha256"] == consumed.envelope_sha256
+    assert admission["acceptance_signature_sha256"] == consumed.signature_sha256
+    assert admission["consumption_root_sha256"] == consumed.consumption_root_sha256
+    assert admission["job_key"] == authority.job_key
+    assert admission["application_url"] == authority.application_url
+    assert admission["submission_authority"] is False
+
+    import playwright.sync_api
+    with pytest.MonkeyPatch.context() as replay_guard:
+        replay_guard.setattr(
+            playwright.sync_api,
+            "sync_playwright",
+            lambda: (_ for _ in ()).throw(AssertionError("public replay launched browser")),
+        )
+        assert observe_ats_form_or_recover(**observation_kwargs) == observed
+
+    drifted_authority = public_observation_request(
+        application, url=f"{base_url}/apply-another-target"
+    )
+    with pytest.raises(ValueError, match="does not bind the exact request"):
+        observe_ats_form_or_recover(
+            root=tmp_path / "forensics", attempt_id="attempt-public-tls-rejected",
+            application_id="application-public-tls-rejected", source=application,
+            sanity=sanity(application), ats_name="greenhouse",
+            authority=drifted_authority, captured_at="2026-08-27T12:00:00Z",
+            acceptance_receipt=consumed,
+            acceptance_envelope_path=envelope_path,
+            acceptance_public_key_path=public_path,
+            acceptance_consumption_root=runtime_root,
+            _test_tls_spki_sha256_b64=spki_sha256_b64,
+        )
+    assert not (tmp_path / "forensics" / "manifests" / "attempt-public-tls-rejected.json").exists()
+
+    hostile_authority = public_observation_request(application, url=f"{base_url}/apply-hostile")
+    hostile_envelope_path, _hostile_envelope = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        hostile_authority,
+        consumption_root=runtime_root,
+        acceptance_id="observation-acceptance-hostile",
+        nonce="6" * 64,
+    )
+    hostile_consumed = verify_and_consume_market_observation_acceptance(
+        hostile_authority,
+        envelope_path=hostile_envelope_path,
+        public_key_path=public_path,
+        consumption_root=runtime_root,
+    )
+    hostile = observe_ats_form_or_recover(
+        root=tmp_path / "forensics",
+        attempt_id="attempt-public-tls-0002",
+        application_id="application-public-tls-0002",
+        source=application,
+        sanity=sanity(application),
+        ats_name="greenhouse",
+        authority=hostile_authority,
+        captured_at="2026-08-27T12:00:00Z",
+        acceptance_receipt=hostile_consumed,
+        acceptance_envelope_path=hostile_envelope_path,
+        acceptance_public_key_path=public_path,
+        acceptance_consumption_root=runtime_root,
+        _test_tls_spki_sha256_b64=spki_sha256_b64,
+    )
+    assert (hostile.receipt.outcome, hostile.receipt.failure_class) == (
+        "blocked", "read_only_interaction_attempted"
+    )
+    assert hostile.inventory is None
+    assert set(hostile.blocked_interaction_attempts) >= {"network", "storage", "submit", "websocket"}
+    hostile_manifest = (
+        tmp_path / "forensics" / "manifests" / "attempt-public-tls-0002.json"
+    ).read_text()
+    assert hostile_manifest.count("read_only_interaction_attempted") >= 1
+    blocked_counts = json.loads(hostile_manifest)["events"][0]["observation"]["blocked_request_counts"]
+    assert any(blocked_counts[name] >= 1 for name in ("network", "storage", "submit", "websocket"))
+    assert "private@example.test" not in hostile_manifest
+    assert "private-access-token" not in hostile_manifest

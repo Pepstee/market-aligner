@@ -90,7 +90,7 @@
         "path": "career_automation/application_compiler.py",
         "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
         "historical_git_blob": "c46fae1c4a55d6fcdff6bdc4362dfd526ebc0f20",
-        "current_git_blob": "e015aa4eb598c61d4429baa43db71f4c9630f866",
+        "current_git_blob": "8313e676009b87e8dda3b1ec70a048c7d7ee4330",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -130,7 +130,7 @@
         "path": "test_jaa09_real_vacancy_acceptance.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "3806b931bfbc8b14729e3e17917b69a6f1fdbd34",
-        "current_git_blob": "6163e66b7d505c2017aa8ac52cfd080ebd16f917",
+        "current_git_blob": "b7d34cf578e3d223b0e8ec5f9106ee2be2dcf17a",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -138,7 +138,7 @@
         "path": "test_jaa09_real_vacancy_negative_controls.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "e31da690112b5948bb79c1bfe056211a5a4c7af5",
-        "current_git_blob": "60bb1d0e1b9216f7ea0d93913469ed1488ee344d",
+        "current_git_blob": "136cb949fc5843e28d7f86e3edaeb937f2635931",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -170,7 +170,7 @@
         "path": "test_jaa07_negative_controls.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "be4c88a0737591ff1eb59d244c4de9b6c94795c4",
-        "current_git_blob": "8be0e02f0b66cebab185d9dca44f7058d7635455",
+        "current_git_blob": "b0282ec9c5e5163a84f7dc9c0e40d4bd48754aa4",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
