@@ -4,6 +4,8 @@ import json
 import inspect
 import hashlib
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,11 @@ import pytest
 from playwright.sync_api import Route, sync_playwright
 
 import career_automation.production_ats_executor as production_module
+from career_automation.production_ats_executor import (
+    capture_greenhouse_forensic_observation,
+    capture_or_recover_greenhouse_forensic_observation,
+)
+from form_filling.ats_forensics import verify_forensic_receipt
 import career_automation.provider_observation_authority as observation_authority
 from career_automation.application_archive import (
     VacancyArchiveIdentity,
@@ -183,6 +190,167 @@ def _install_routes(page, *, navigate: bool = True, include_cover: bool = True) 
             )
 
     page.route("**/*", handler)
+
+
+def test_greenhouse_forensic_observation_is_no_submit_and_verifiable(
+    tmp_path: Path,
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_routes(page)
+        page.goto(APPLICATION_URL)
+        private_cover_letter = "This cover letter text must not enter forensic evidence."
+        page.locator('textarea[name="cover_note"]').fill(private_cover_letter)
+        page.locator("body").evaluate(
+            "(body, text) => { const node = document.createElement('p'); node.textContent = text; body.appendChild(node); }",
+            "visible private operator note must not be written as screenshot evidence",
+        )
+        receipt = capture_greenhouse_forensic_observation(
+            page,
+            forensic_root=tmp_path / "forensics",
+            attempt_id="greenhouse-observation-1",
+            application_id=APPLICATION_ID,
+            application_url=APPLICATION_URL,
+            runtime={"runtime_sha256": "f" * 64, "headless": True},
+            release_manifest_sha256="e" * 64,
+            artifact_set_sha256="d" * 64,
+        )
+        browser.close()
+    verified = verify_forensic_receipt(tmp_path / "forensics", receipt)
+    assert receipt.outcome == "prepared"
+    assert verified["diagnostic_only"] is True
+    assert verified["release_authority"] is False
+    assert verified["submission_authority"] is False
+    checkpoints = [
+        event for event in verified["events"]
+        if event["kind"] == "checkpoint"
+        and event["payload"]["name"] == "greenhouse_preflight_inventory"
+    ]
+    assert checkpoints and checkpoints[0]["payload"]["details"]["inventory_sha256"]
+    assert any(event["kind"] == "screenshot" for event in verified["events"])
+    assert private_cover_letter not in json.dumps(verified, sort_keys=True)
+    assert "visible private operator note" not in json.dumps(verified, sort_keys=True)
+    stored_pngs = {
+        path.relative_to(tmp_path / "forensics").as_posix()
+        for path in (tmp_path / "forensics").rglob("*.png")
+    }
+    verified_pngs = {
+        str(event["payload"]["object_path"])
+        for event in verified["events"]
+        if event["kind"] == "screenshot"
+    }
+    assert stored_pngs == verified_pngs  # only hash-verified masked objects persist
+
+
+def test_greenhouse_forensic_observation_requires_the_open_vacancy_page(
+    tmp_path: Path,
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_routes(page)
+        page.goto(APPLICATION_URL + "/confirmation")
+        with pytest.raises(ProductionATSBoundaryError):
+            capture_greenhouse_forensic_observation(
+                page,
+                forensic_root=tmp_path / "forensics",
+                attempt_id="greenhouse-observation-wrong-page",
+                application_id=APPLICATION_ID,
+                application_url=APPLICATION_URL,
+                runtime={"runtime_sha256": "f" * 64},
+            )
+        browser.close()
+    assert not list((tmp_path / "forensics").rglob("*.json"))
+
+
+def test_forensic_capture_or_recover_requires_page_only_for_exact_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+
+    def capture(page, **kwargs):
+        calls.append(page)
+        recorder = production_module.ATSForensicRecorder(
+            kwargs["forensic_root"],
+            attempt_id=kwargs["attempt_id"],
+            application_id=kwargs["application_id"],
+            ats_name="greenhouse",
+            application_url=kwargs["application_url"],
+            runtime=kwargs["runtime"],
+            release_manifest_sha256=kwargs["release_manifest_sha256"],
+            artifact_set_sha256=kwargs["artifact_set_sha256"],
+        )
+        recorder.record_checkpoint("ready")
+        return recorder.finalize(outcome="prepared")
+
+    monkeypatch.setattr(
+        production_module, "capture_greenhouse_forensic_observation", capture
+    )
+    arguments = {
+        "forensic_root": tmp_path / "forensics",
+        "attempt_id": "greenhouse-observation-recovery",
+        "application_id": APPLICATION_ID,
+        "application_url": APPLICATION_URL,
+        "runtime": {"runtime_sha256": "f" * 64},
+        "release_manifest_sha256": "e" * 64,
+        "artifact_set_sha256": "d" * 64,
+    }
+    with pytest.raises(ValueError, match="page is required"):
+        capture_or_recover_greenhouse_forensic_observation(None, **arguments)
+    first = capture_or_recover_greenhouse_forensic_observation(object(), **arguments)
+    recovered = capture_or_recover_greenhouse_forensic_observation(None, **arguments)
+    assert recovered == first
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match="binding differs"):
+        capture_or_recover_greenhouse_forensic_observation(
+            object(), **{**arguments, "application_id": "changed"}
+        )
+
+
+def test_forensic_capture_or_recover_concurrent_same_binding_converges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    barrier = threading.Barrier(2)
+
+    def capture(_page, **kwargs):
+        recorder = production_module.ATSForensicRecorder(
+            kwargs["forensic_root"],
+            attempt_id=kwargs["attempt_id"],
+            application_id=kwargs["application_id"],
+            ats_name="greenhouse",
+            application_url=kwargs["application_url"],
+            runtime=kwargs["runtime"],
+            release_manifest_sha256=kwargs["release_manifest_sha256"],
+            artifact_set_sha256=kwargs["artifact_set_sha256"],
+        )
+        recorder.record_checkpoint("ready")
+        barrier.wait(timeout=5)
+        return recorder.finalize(outcome="prepared")
+
+    monkeypatch.setattr(
+        production_module, "capture_greenhouse_forensic_observation", capture
+    )
+    arguments = {
+        "forensic_root": tmp_path / "forensics",
+        "attempt_id": "greenhouse-observation-concurrent",
+        "application_id": APPLICATION_ID,
+        "application_url": APPLICATION_URL,
+        "runtime": {"runtime_sha256": "f" * 64},
+        "release_manifest_sha256": "e" * 64,
+        "artifact_set_sha256": "d" * 64,
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(
+            pool.map(
+                lambda page: capture_or_recover_greenhouse_forensic_observation(
+                    page, **arguments
+                ),
+                (object(), object()),
+            )
+        )
+    assert results[0] == results[1]
+    assert verify_forensic_receipt(tmp_path / "forensics", results[0])["outcome"] == "prepared"
 
 
 def _prepared_authority(

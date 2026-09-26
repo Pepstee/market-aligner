@@ -47,6 +47,11 @@ from .browser_workflows import ReleaseGateError
 from .candidate_release_gate import CandidateAuthorityReleaseGate
 from .evidence_matching import canonical_json
 from .external_document_assurance import IntendedVacancy, verify_receipt_for_pdf
+from form_filling.ats_forensics import (
+    ATSForensicReceipt,
+    ATSForensicRecorder,
+    load_forensic_receipt,
+)
 from form_filling.service import approved_form_mapping_bytes
 from .production_queue import ProductionCheckpointLedger
 
@@ -1891,6 +1896,111 @@ class CertifiedGreenhouseSubmitExecutor:
         )
 
 
+def capture_greenhouse_forensic_observation(
+    page: Page,
+    *,
+    forensic_root: str | Path,
+    attempt_id: str,
+    application_id: str,
+    application_url: str,
+    runtime: Mapping[str, object],
+    release_manifest_sha256: str | None = None,
+    artifact_set_sha256: str | None = None,
+) -> ATSForensicReceipt:
+    """Capture a no-submit Greenhouse preflight through the canonical executor.
+
+    This helper only attaches passive listeners, inventories the current form,
+    masks form controls in the screenshot, and writes a diagnostic-only receipt.
+    It neither fills a field nor obtains release or submission authority, and
+    it never navigates: the caller supplies an already-open page that must
+    already sit on the vacancy-bound application URL.
+    """
+
+    if _normal_url(page.url) != _normal_url(application_url):
+        raise ProductionATSBoundaryError(
+            "browser is not on the vacancy-bound Greenhouse application"
+        )
+    recorder = ATSForensicRecorder(
+        Path(forensic_root),
+        attempt_id=attempt_id,
+        application_id=application_id,
+        ats_name="greenhouse",
+        application_url=application_url,
+        runtime=runtime,
+        release_manifest_sha256=release_manifest_sha256,
+        artifact_set_sha256=artifact_set_sha256,
+    )
+    recorder.attach_playwright(page)
+    inventory = collect_greenhouse_form_inventory(page)
+    signals = CertifiedGreenhouseSubmitExecutor.boundary_signals(page)
+    signals_bytes = _json_bytes(tuple(sorted(signals)))
+    recorder.record_checkpoint(
+        "greenhouse_preflight_inventory",
+        inventory_bytes=len(inventory),
+        inventory_sha256=_sha256(inventory),
+        boundary_signal_count=len(signals),
+        boundary_signals_sha256=_sha256(signals_bytes),
+    )
+    recorder.capture_page(page, label="preflight")
+    if signals:
+        recorder.record_checkpoint(
+            "human_verification_boundary",
+            boundary_signal_count=len(signals),
+            boundary_signals_sha256=_sha256(signals_bytes),
+        )
+        return recorder.finalize(outcome="blocked", failure_class="human_verification")
+    return recorder.finalize(outcome="prepared")
+
+
+def capture_or_recover_greenhouse_forensic_observation(
+    page: Page | None,
+    *,
+    forensic_root: str | Path,
+    attempt_id: str,
+    application_id: str,
+    application_url: str,
+    runtime: Mapping[str, object],
+    release_manifest_sha256: str | None = None,
+    artifact_set_sha256: str | None = None,
+) -> ATSForensicReceipt:
+    """Return an exact existing passive observation, or capture it once.
+
+    Replay is admitted only when the stored manifest fully reverifies under
+    the exact caller binding (application, URL, ATS, runtime, artifact and
+    release identities); any difference refuses instead of recapturing.
+    """
+
+    arguments = {
+        "forensic_root": forensic_root,
+        "attempt_id": attempt_id,
+        "application_id": application_id,
+        "application_url": application_url,
+        "runtime": runtime,
+        "release_manifest_sha256": release_manifest_sha256,
+        "artifact_set_sha256": artifact_set_sha256,
+    }
+    try:
+        return load_forensic_receipt(
+            Path(forensic_root),
+            attempt_id=attempt_id,
+            application_id=application_id,
+            application_url=application_url,
+            ats_name="greenhouse",
+            runtime_sha256=runtime.get("runtime_sha256"),
+            artifact_set_sha256=artifact_set_sha256,
+            release_manifest_sha256=release_manifest_sha256,
+        )
+    except KeyError:
+        if page is None:
+            raise ValueError("page is required for a missing forensic attempt") from None
+    try:
+        return capture_greenhouse_forensic_observation(page, **arguments)
+    except FileExistsError:
+        # A concurrent writer published this exact attempt first; converge on
+        # its verified evidence or refuse if the stored bytes differ.
+        return capture_or_recover_greenhouse_forensic_observation(None, **arguments)
+
+
 __all__ = [
     "CertifiedGreenhouseSubmitExecutor",
     "GreenhouseSubmissionPlan",
@@ -1900,5 +2010,7 @@ __all__ = [
     "ProductionSubmissionIndeterminate",
     "ProductionSubmissionReceipt",
     "canonical_non_secret_form_state",
+    "capture_greenhouse_forensic_observation",
+    "capture_or_recover_greenhouse_forensic_observation",
     "collect_greenhouse_form_inventory",
 ]

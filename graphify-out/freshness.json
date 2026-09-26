@@ -1,11 +1,11 @@
 {
   "community_count": 30091,
-  "edge_count": 145065,
-  "node_count": 72523,
+  "edge_count": 145189,
+  "node_count": 72548,
   "outputs": {
     ".graphify_labels.json": "a545880d83c95f86923a7687af90c9c2107fb28bb26b401c6fa2689d9c75ddf9",
     "GRAPH_REPORT.md": "78737e17544537a5ae04eed27c9d262efc43928bc662261f40add22ee1673dc8",
-    "graph.json": "d2a38f8c75091bce86d2f161ca8c5650fdb803a748ff812488ca2359b9b9e1ba"
+    "graph.json": "630d324d642654b09d0c96d5699e6d5b8cdb816ba5ad552521d28743fc24f62a"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "4d038fe466fc78ceb907d6c5ea08c29636e6ec1f",
+  "source_base_commit": "2fd2e7409bb02212302a9f1a102ec8b20d78395a",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -31,7 +31,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "d439157643765b3b6def77d434f8acfd2feb5b58a1e8626ffdbe91b91130f3d7",
     "docs/migration/capability-inventory.jsonl": "b3d9d78d63bbcfcc21aaacaab0612f55a9a2e789ffed46d52b75746768af9233",
-    "docs/migration/ledger.jsonl": "9dec44ba8e24dad36ea807ee1e505226a6e078e373eb0cc6782a303d94ba9218",
+    "docs/migration/ledger.jsonl": "93952e1e7c750e0518c21583872a7dd5184d6244c023849399410c19c433ec65",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -168,7 +168,7 @@
     "internal/jaa/career_automation/outcome_feedback.py": "019f4796f8af8a15d94428a4d44179670bc38e16750dddc3cab02193288d6448",
     "internal/jaa/career_automation/outcome_feedback_live.py": "adfd62b70e749a2f1d88f8d77d60507769bbbfce486401b5cc929428a655f567",
     "internal/jaa/career_automation/personio_live_adapter.py": "d22c6d2da660c00caaaa09ad81049ce0fba82df15ac30e664ff08f6b7893a0cd",
-    "internal/jaa/career_automation/production_ats_executor.py": "d975b06e6bae84493fe22e85313010433813d0e2ec78686e49562794eb87f748",
+    "internal/jaa/career_automation/production_ats_executor.py": "1bc77f15cf479764f13bd3953991bf57af9e61512178c80bcae99b4c4c4901df",
     "internal/jaa/career_automation/production_attempt.py": "bfe0deedc1567622976c4a6f9db104470fe84265d57e2cff1a9e39ad87cca2c7",
     "internal/jaa/career_automation/production_form_binding.py": "e7b78a0290b8cb137a8c9394cf6af98ecfea7adba1041739ccccc528ced13206",
     "internal/jaa/career_automation/production_handoff_admission_runner.py": "09a7a0562490fb99def487a690057b8da9b0d63670d3327ab20f5ebaee69c274",
@@ -266,7 +266,7 @@
     "internal/jaa/docs/applications/cloudcops-rank-32/release_manifest.prepared.json": "74f5f2ca99135689a50a1a699475c17546f4fde89e25c283eb3921e71e74e1f9",
     "internal/jaa/docs/applications/cloudcops-rank-32/release_manifest.prepared.tombstone.json": "7640e8f5901ae70822f5dd5577d86ef1eac43f7c645cf9de98c3258bccb88235",
     "internal/jaa/form_filling/__init__.py": "8c2f2e466cdb2d4f6c376b0090648dcbe6d669058146c85c360f1a64c0dea435",
-    "internal/jaa/form_filling/ats_forensics.py": "b009a707fdb18e0407435f8c32f7723ea5c74c21aded4e257751ca446edf8453",
+    "internal/jaa/form_filling/ats_forensics.py": "6f89dc20d011891362a269aacd7a74cdfbdad6fad69181e781c89ec35388eda7",
     "internal/jaa/form_filling/provider_diagnostics.py": "2c8f6c337c0b554b43ff3b558ed536b80c66fcc33780a61cf1e0d51128f9fa5b",
     "internal/jaa/form_filling/service.py": "65494056928a018b84d36bb60fde75375b3e95e6bb1451004119e03d1b330247",
     "internal/jaa/jaa_core/__init__.py": "4503c65705278556bb173ebc152bdeccbab234d06a59b3fadb989909fd9b3257",
@@ -522,7 +522,7 @@
     "internal/jaa/test_employer_facing_framing.py": "43ba5b5cd787ed19dd51fe06ac1d937bf735975963592bb429dc3c9d680de880",
     "internal/jaa/test_event_receipts.py": "805446f67a009f82ee0a13737f59763c37a9be525ec6cd47efb48b57db7d3ea0",
     "internal/jaa/test_external_document_assurance.py": "a48634392e5654c63c76e58de5587df95eb92aa170fb7d6be0c2b3ae5c86ff87",
-    "internal/jaa/test_form_filling_forensics.py": "6ed7b8bae150b7d52806e0c51288444925b7884e06961d4e0d1cce5d0abe6cdf",
+    "internal/jaa/test_form_filling_forensics.py": "bf9ccbf39e0281332e48af655821097c0fb0956fdc6e8993c6535a03ce3f0b4a",
     "internal/jaa/test_generate_test_evidence.py": "65b1854e259ba9b8cc9ef3b9f5cbd47321f09de85a8a1d5a50671e6efe194649",
     "internal/jaa/test_gigabyte_current_time_broker.py": "1f5f4453d0820772bafd6ead2b62ae266bf9ff68415515144c1dc19985d5048c",
     "internal/jaa/test_gigabyte_current_time_service.py": "7d77ccca9a84a6d11343e0b28dcc7dde6c1d0ba9513b7890d78d5e29b0e029c1",
@@ -673,7 +673,7 @@
     "internal/jaa/test_portable_acceptance_runtime_config.py": "8b433dab1f5bdda3edc10a4ba756acf9e3b2a252d48b75eb33cf17c38c0d6a5b",
     "internal/jaa/test_portable_lock_verification.py": "e1622645ca387ee3eb053533fdc62fecfd54192a25648538f6be4eec55aece1b",
     "internal/jaa/test_preview_candidate_selection.py": "5b4708be9f818836b1b4be39996e68b1a2938421f489e6dd8f63ca556fa4af47",
-    "internal/jaa/test_production_ats_executor.py": "4d721c5dfc5d598bb721ae873d54bde6de21f2590bdb850cb93ceec26adfdbd4",
+    "internal/jaa/test_production_ats_executor.py": "9f117d1127b5c7675feedd91bb30e4c223c337d3aa7427c887d2b21778e92334",
     "internal/jaa/test_production_handoff_runner.py": "2439114cf43c80a77fc8ccede3f66a9b1621c98b10f719897e8421860bc6962e",
     "internal/jaa/test_production_operational_surfaces.py": "6ba2d2722fb94d866f683c3bc2a582387e29f8222f41089a302b7dac90d519bb",
     "internal/jaa/test_production_preparation_runner.py": "ff1c7f35659c8d7d14716f4e40bd30f5e365599c354dbdff3dbd1d569f7cb88d",
