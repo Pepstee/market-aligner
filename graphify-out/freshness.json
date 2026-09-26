@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "406230533283000127f62aae4ec4cd98a6601104",
+  "source_base_commit": "7f484f6e18fa762f47a94bbbda10a8d7dd063359",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -31,7 +31,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "d439157643765b3b6def77d434f8acfd2feb5b58a1e8626ffdbe91b91130f3d7",
     "docs/migration/capability-inventory.jsonl": "b3d9d78d63bbcfcc21aaacaab0612f55a9a2e789ffed46d52b75746768af9233",
-    "docs/migration/ledger.jsonl": "bbda8deb320245b8b45e87847494a2c332abd1af909f0973025d4a4d1bb32ce5",
+    "docs/migration/ledger.jsonl": "f218c6878ca2c526bc940e4ea89ae6d3f3ebcff53fb889852ba1ad4ee8be697c",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -303,7 +303,7 @@
     "internal/jaa/pyproject.toml": "278a82bdd1437de8c7a5596fa00eef9c1325421e11a7182f6047fcd314497b6a",
     "internal/jaa/requirements-bootstrap.lock": "81c1739d859b2c36f2c86cd3f0cfa20643dcaa2c34019290351b8f7088396b97",
     "internal/jaa/requirements-scrapling-full.txt": "bccc6c760d37c8467173d198efe26bbbb0566584fdeefd98079b483bbd903cd6",
-    "internal/jaa/requirements-test.lock": "fa1f6fc6af45a76478d67050967dfa3e89d0ed10bf423b58fb20386b6f402529",
+    "internal/jaa/requirements-test.lock": "9a8697cb79a792b0fe8afcb4af17d3beaa58207c37c602435970cb83f5c8f122",
     "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml": "bf4a9726c9d0608f21fadcf2591bcc8ba92516cca9659288fc28e7b9452ed161",
     "internal/jaa/runtime_evidence/application_resume/attempt-ledger.json": "be8c7695eaa6424d66d60079f8b1bdc66b6fac872d6b56358e4b41367bc8f51b",
     "internal/jaa/runtime_evidence/application_sanity_review/live-smoke-20260806.json": "31d58e0f2c47db0a03f500a36f56accf68805e7542e714f55038e053336e3b50",
