@@ -58,10 +58,12 @@ from .gmail_confirmation import ACCESS_TOKEN_ENV, GmailAPIConfirmationChecker
 from .live_vacancy_discovery import verify_vacancy_body_equivalence
 from .production_attempt import GreenhouseAttemptRecorder, ProductionIdentity
 from .production_ats_executor import ProductionATSBoundaryError
+from .production_ats_executor import capture_or_recover_greenhouse_forensic_observation
 from .production_ats_executor import compile_greenhouse_ats_plans
 from .production_ats_executor import collect_greenhouse_form_inventory
 from .production_ats_executor import greenhouse_ats_inventory_from_capture
 from .production_ats_executor import is_greenhouse_auxiliary_field
+from form_filling.ats_forensics import runtime_fingerprint, verify_forensic_receipt
 from form_filling.service import approved_authority_values
 from .production_queue import LiveVacancy, QueueItem
 from .production_runner import (
@@ -1028,6 +1030,56 @@ class GutuaGreenhouseSession:
                     rejection_codes=(exc.code,),
                 )
             raise
+        # Passive, no-interaction ATS diagnostic: captured after the sanity
+        # review passes but before any release gate issue or page mutation,
+        # preserving the donor pre-release timing. Diagnostic-only; it grants
+        # no release or submission authority.
+        forensic_root = self.archive_root / "passive-forensics"
+        forensic_runtime = runtime_fingerprint(
+            browser_name=self._browser.browser_type.name,
+            browser_version=self._browser.version,
+            headless=True,
+            user_agent=page.evaluate("navigator.userAgent"),
+        )
+        forensic_receipt = capture_or_recover_greenhouse_forensic_observation(
+            page,
+            forensic_root=forensic_root,
+            attempt_id=recorder.attempt.attempt_id,
+            application_id=vacancy.source_url.rstrip("/").rsplit("/", 1)[-1],
+            application_url=vacancy.source_url,
+            runtime=forensic_runtime,
+            release_manifest_sha256=None,
+            artifact_set_sha256=publication.artifact_set_sha256,
+        )
+        forensic_document = verify_forensic_receipt(forensic_root, forensic_receipt)
+        if (
+            forensic_document.get("diagnostic_only") is not True
+            or forensic_document.get("release_authority") is not False
+            or forensic_document.get("submission_authority") is not False
+        ):
+            raise ProductionATSBoundaryError(
+                "passive ATS forensics did not retain the no-submit boundary"
+            )
+        recorder.attempt.add_artifact(
+            "review.ats_passive_forensics",
+            _json_bytes(forensic_document),
+            media_type="application/json",
+            disposition="observed",
+            metadata={
+                "artifact_set_sha256": publication.artifact_set_sha256,
+                "forensic_attempt_id": forensic_receipt.attempt_id,
+                "forensic_manifest_path": forensic_receipt.manifest_path,
+                "forensic_manifest_sha256": forensic_receipt.manifest_sha256,
+                "forensic_root": forensic_root.name,
+                "outcome": forensic_receipt.outcome,
+                "release_manifest_sha256": None,
+            },
+        )
+        if forensic_receipt.outcome != "prepared":
+            raise ProductionATSBoundaryError(
+                "passive ATS observation blocked release before any gate issue: "
+                + str(forensic_document.get("failure_class"))
+            )
         gate_root = self.archive_root / "production-runtime"
         gate_root.mkdir(mode=0o700, exist_ok=True)
         gate = CandidateAuthorityReleaseGate(

@@ -95,12 +95,14 @@ def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode()
 
 
-def _contact_authority(directory: Path) -> Path:
+def _contact_authority(
+    directory: Path, *, issued_at: str = "2026-08-06T00:00:00+00:00"
+) -> Path:
     signed_payload = {
         "schema_version": SCHEMA_VERSION,
         "authority_kind": "ed25519_signed_explicit_operator_attestation",
         "operator_attestation": ATTESTATION,
-        "issued_at": "2026-08-06T00:00:00+00:00",
+        "issued_at": issued_at,
         "record_id": "operator-contact-primary",
         "record_version": 1,
         "contact": {
@@ -676,6 +678,375 @@ def test_repository_session_prepares_sink_bound_fixture_release(
         assert view["gaps"]["action_timeline"] is False
         assert "jordan.smith@proton.me" not in json.dumps(view, sort_keys=True)
         browser.close()
+
+
+_SYNTHETIC_SEAM_HTML = """<html><head><title>Graduate Engineer at Example</title></head><body>
+    <p>Build reliable Python data pipelines and tested cloud services for customers.</p>
+    <form>
+      <label>Full name <input name="full_name" required></label>
+      <label>Email <input name="email" type="email" required></label>
+      <label>Phone <input name="phone" required></label>
+      <label>City <input name="city" required></label>
+      <label>CV <input name="resume" type="file" required></label>
+      <label>Cover letter <input name="cover_letter" type="file"></label>
+      <label><input name="consent" type="checkbox" required>Privacy consent</label>
+      <button type="submit">Submit Application</button>
+    </form></body></html>"""
+
+
+class _SyntheticFillBoundaryReached(Exception):
+    """Raised by the fill stub once ordering through the seam is proven."""
+
+
+def _synthetic_seam_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    html: str,
+):
+    """Self-contained synthetic prepare_release seam; no private artifacts.
+
+    Only upstream identity/composition dependencies are stubbed (sink
+    generation, artifact publication/assurance, sanity reviewer, provider
+    observation archive, release-gate issue, and the downstream fill). The
+    passive forensic capture, its recorder archive write, vacancy equivalence,
+    review-material construction, contact-authority verification and the
+    contact enrolment remain real.
+    """
+    application_url = "https://job-boards.greenhouse.io/example/jobs/1234567"
+    vacancy_body = html.encode()
+    vacancy_sha256 = hashlib.sha256(vacancy_body).hexdigest()
+    decision = {
+        "decision": "eligible",
+        "job_key": "greenhouse:example:1234567",
+        "role_title": "Graduate Engineer",
+        "company_name": "Example",
+        "source_url": application_url,
+        "vacancy_sha256": vacancy_sha256,
+        "discovery_body_sha256": vacancy_sha256,
+        "duplicate_snapshot_sha256": "0" * 64,
+    }
+    decision_row = {
+        "job_key": decision["job_key"],
+        "receipt": decision,
+        "receipt_sha256": hashlib.sha256(_json_bytes(decision)).hexdigest(),
+    }
+    vacancy = VacancyArchiveIdentity(
+        decision["job_key"],
+        vacancy_sha256,
+        "Graduate Engineer",
+        "Example",
+        application_url,
+    )
+    live = LiveVacancy.create(
+        vacancy=vacancy,
+        provider="greenhouse",
+        fit_score="0.8",
+        live=True,
+        eligible=True,
+        duplicate=False,
+        live_verified_at=datetime.now(timezone.utc).isoformat(),
+        scoring_inputs_sha256=decision_row["receipt_sha256"],
+    )
+    item = QueueItem(live, 1, "new_attempt")
+    archive_root = tmp_path / "application-archive"
+    archive_root.mkdir()
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=archive_root,
+        repository_root=Path.cwd(),
+        vacancy=vacancy,
+        complete_vacancy=vacancy_body,
+        structured_vacancy={"job_key": vacancy.job_key},
+        assessment={"eligible": True, "fit_score": 0.8},
+    )
+    session = object.__new__(GutuaGreenhouseSession)
+    session.archive_root = archive_root
+    session.repository_root = Path.cwd().resolve()
+    session.candidate_projection = {"projection_sha256": "1" * 64}
+    session.decision_by_key = {vacancy.job_key: decision_row}
+    session.complete_vacancy_by_key = {vacancy.job_key: vacancy_body}
+    discovery_path = tmp_path / "synthetic-discovery.json"
+    discovery_path.write_text("{}")
+    session.discovery_path = discovery_path
+    eligibility_path = tmp_path / "synthetic-eligibility.json"
+    eligibility_path.write_text("{}")
+    session.eligibility_path = eligibility_path
+
+    contact_path = _contact_authority(tmp_path, issued_at=datetime.now(timezone.utc).isoformat())
+    contact_sha256 = contact_path.stem
+    monkeypatch.setenv("JAA_CANDIDATE_CONTACT_AUTHORITY", str(contact_path))
+    monkeypatch.setattr(
+        "career_automation.candidate_release_gate._verify_durable_candidate_authority",
+        lambda *_args, **_kwargs: {
+            "job_key": vacancy.job_key,
+            "role_title": vacancy.role_title,
+            "company_name": vacancy.company_name,
+            "vacancy_sha256": vacancy.vacancy_sha256,
+            "source_url": vacancy.source_url,
+            "candidate_authority_sha256": "2" * 64,
+            "candidate_decision_receipt_sha256": decision_row["receipt_sha256"],
+            "candidate_projection_sha256": session.candidate_projection[
+                "projection_sha256"
+            ],
+            "duplicate_snapshot_sha256": decision["duplicate_snapshot_sha256"],
+            "contact_authority_sha256": contact_sha256,
+        },
+    )
+    head = "a" * 40
+    monkeypatch.setattr(
+        "career_automation.candidate_release_gate.exact_clean_head", lambda _root: head
+    )
+    monkeypatch.setattr(
+        "career_automation.gutua_greenhouse_session.exact_clean_head",
+        lambda _root: head,
+    )
+    monkeypatch.setattr(
+        "career_automation.provider_observation_authority.exact_clean_head",
+        lambda _root: head,
+    )
+
+    from career_automation.candidate_application_factory import (
+        CandidateApplicationPackage,
+    )
+    from career_automation.application_artifacts import (
+        ARTIFACT_FILENAMES,
+        ArtifactFileReceipt,
+        PublishedArtifactReceipt,
+    )
+
+    package = CandidateApplicationPackage(
+        source=SimpleNamespace(
+            source_id=hashlib.sha256(b"synthetic-source").hexdigest(),
+            job_key=vacancy.job_key,
+            vacancy_sha256=vacancy.vacancy_sha256,
+            role_title=vacancy.role_title,
+            company_name=vacancy.company_name,
+            facts=(
+                SimpleNamespace(
+                    fact_kind="candidate",
+                    text="built tested cloud services",
+                    authority=SimpleNamespace(
+                        candidate_claim_id="claim-1",
+                        candidate_claim_version=1,
+                        candidate_evidence_id="evidence-1",
+                        candidate_evidence_version=1,
+                    ),
+                ),
+            ),
+            document=lambda: {"job_key": vacancy.job_key},
+        ),
+        artifacts=SimpleNamespace(
+            editable=SimpleNamespace(
+                cv_text="synthetic cv",
+                cover_letter_text="synthetic letter",
+                answers_text="synthetic answers",
+            ),
+            cv_pdf=SimpleNamespace(pdf_bytes=b"synthetic cv pdf"),
+            cover_letter_pdf=SimpleNamespace(pdf_bytes=b"synthetic letter pdf"),
+        ),
+        vacancy_requirements=("essential: tested cloud services",),
+    )
+    synthetic_artifact_set = hashlib.sha256(b"synthetic-artifact-set").hexdigest()
+    publication = PublishedArtifactReceipt(
+        artifact_set_sha256=synthetic_artifact_set,
+        source_id=hashlib.sha256(b"synthetic-source").hexdigest(),
+        relative_directory=synthetic_artifact_set,
+        files=tuple(
+            ArtifactFileReceipt(
+                filename=filename,
+                sha256=hashlib.sha256(filename.encode()).hexdigest(),
+                size_bytes=len(filename),
+            )
+            for filename in ARTIFACT_FILENAMES
+        ),
+        receipt_sha256=hashlib.sha256(b"synthetic-publication").hexdigest(),
+    )
+    success_observation = json.dumps(
+        {
+            "observed_at": "2026-08-27T12:00:00Z",
+            "provider_loader_paths": {
+                "confirmation_message": "<p>Thanks for applying</p>",
+                "confirmationPath": "/example/jobs/1234567/confirmation",
+            },
+        }
+    ).encode()
+
+    order: list[str] = []
+    observed: dict[str, object] = {}
+    original_capture = session_module.capture_or_recover_greenhouse_forensic_observation
+
+    def tracked_publish(source, artifacts, **kwargs):
+        return publication
+
+    def tracked_assurance(**kwargs):
+        return None
+
+    def tracked_observation_authority(**kwargs):
+        return success_observation, SimpleNamespace(observation_sha256="3" * 64)
+
+    def tracked_review(package_under_review, client):
+        order.append("sanity")
+        return SimpleNamespace(receipt_sha256="4" * 64, backend_identity="synthetic")
+
+    def tracked_generate(**kwargs):
+        return package
+
+    def tracked_capture(active_page, **kwargs):
+        order.append("forensics")
+        observed["capture_kwargs"] = kwargs
+        return original_capture(active_page, **kwargs)
+
+    def tracked_issue(self, **kwargs):
+        order.append("gate.issue")
+        return SimpleNamespace(release_token="synthetic-token", issued_at="2026-08-27T12:00:00Z")
+
+    def tracked_fill(active_session, *args, **kwargs):
+        order.append("fill")
+        raise _SyntheticFillBoundaryReached
+
+    monkeypatch.setattr(session_module, "publish_application_artifacts", tracked_publish)
+    monkeypatch.setattr(session_module, "assert_application_artifacts", tracked_assurance)
+    monkeypatch.setattr(
+        session_module, "load_provider_observation_authority", tracked_observation_authority
+    )
+    monkeypatch.setattr(
+        "career_automation.gutua_greenhouse_session.review_application_package",
+        tracked_review,
+    )
+    monkeypatch.setattr(
+        session_module, "capture_or_recover_greenhouse_forensic_observation", tracked_capture
+    )
+    monkeypatch.setattr(CandidateAuthorityReleaseGate, "issue", tracked_issue)
+    monkeypatch.setattr(GutuaGreenhouseSession, "_fill_supported_form", tracked_fill)
+    sink = SimpleNamespace(
+        generate_candidate_application=tracked_generate,
+        seal=lambda: SimpleNamespace(generator_identity="synthetic-seam"),
+    )
+    return SimpleNamespace(
+        session=session,
+        recorder=recorder,
+        item=item,
+        vacancy=vacancy,
+        archive_root=archive_root,
+        application_url=application_url,
+        html=html,
+        artifact_set_sha256=synthetic_artifact_set,
+        order=order,
+        observed=observed,
+        sink=sink,
+    )
+
+
+def test_synthetic_seam_passive_forensics_after_sanity_before_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _synthetic_seam_fixture(
+        tmp_path, monkeypatch, html=_SYNTHETIC_SEAM_HTML
+    )
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        fixture.session._browser = browser
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200, content_type="text/html", body=fixture.html
+            ),
+        )
+        page.goto(fixture.application_url)
+        fixture.recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": fixture.application_url}
+        )
+        fixture.recorder.record_prefill(page)
+        with pytest.raises(_SyntheticFillBoundaryReached):
+            fixture.session.prepare_release(
+                fixture.item, fixture.recorder, page, fixture.sink
+            )
+        browser.close()
+    assert fixture.order == ["sanity", "forensics", "gate.issue", "fill"]
+    capture_kwargs = fixture.observed["capture_kwargs"]
+    assert capture_kwargs["artifact_set_sha256"] == fixture.artifact_set_sha256
+    assert capture_kwargs["release_manifest_sha256"] is None
+    assert capture_kwargs["application_id"] == "1234567"
+    assert capture_kwargs["application_url"] == fixture.application_url
+    assert capture_kwargs["attempt_id"] == fixture.recorder.attempt.attempt_id
+    manifest = json.loads(
+        (
+            fixture.archive_root
+            / "passive-forensics"
+            / "manifests"
+            / f"{fixture.recorder.attempt.attempt_id}.json"
+        ).read_text()
+    )
+    assert manifest["outcome"] == "prepared"
+    assert manifest["artifact_set_sha256"] == fixture.artifact_set_sha256
+    assert manifest["diagnostic_only"] is True
+    assert manifest["release_authority"] is False
+    assert manifest["submission_authority"] is False
+    assert manifest["runtime"]["headless"] is True
+    assert manifest["runtime"]["runtime_sha256"]
+    from career_automation.application_archive import load_complete_attempt_view
+
+    view = load_complete_attempt_view(
+        fixture.recorder.attempt.attempt_id,
+        root=fixture.recorder.attempt.archive.root,
+        repository_root=fixture.recorder.attempt.archive.repository_root,
+    )
+    forensics_artifacts = [
+        row
+        for row in view["objects"]
+        if row.get("role") == "review.ats_passive_forensics"
+    ]
+    assert len(forensics_artifacts) == 1
+    assert forensics_artifacts[0]["disposition"] == "observed"
+
+
+def test_synthetic_seam_blocked_forensics_archives_then_refuses_before_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = _SYNTHETIC_SEAM_HTML.replace(
+        "<form>",
+        "<form><iframe width='300' height='60' "
+        "src='https://www.google.com/recaptcha/api2/bframe'></iframe>",
+    )
+    fixture = _synthetic_seam_fixture(tmp_path, monkeypatch, html=html)
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        fixture.session._browser = browser
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200, content_type="text/html", body=fixture.html
+            ),
+        )
+        page.goto(fixture.application_url)
+        fixture.recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": fixture.application_url}
+        )
+        fixture.recorder.record_prefill(page)
+        with pytest.raises(ProductionATSBoundaryError, match="blocked release"):
+            fixture.session.prepare_release(
+                fixture.item, fixture.recorder, page, fixture.sink
+            )
+        browser.close()
+    assert fixture.order == ["sanity", "forensics"]
+    manifest = json.loads(
+        (
+            fixture.archive_root
+            / "passive-forensics"
+            / "manifests"
+            / f"{fixture.recorder.attempt.attempt_id}.json"
+        ).read_text()
+    )
+    assert manifest["outcome"] == "blocked"
+    assert manifest["failure_class"] == "human_verification"
 
 
 @pytest.mark.parametrize(
