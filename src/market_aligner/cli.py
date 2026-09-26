@@ -469,17 +469,60 @@ def _process_job_command(args: argparse.Namespace) -> int:
 
 
 def _applications_command(args: argparse.Namespace) -> int:
-    result = MarketAlignerService.prepare_internal_jaa(
-        eligibility_receipt=args.eligibility_receipt.read_bytes(),
-        evidence_reference_sha256=args.evidence_reference_sha256,
-        contact_reference_sha256=args.contact_reference_sha256,
-        forensic_root=args.forensic_root,
-        attempt_id=args.attempt_id,
-        application_id=args.application_id,
-        ats_name=args.ats_name,
+    observation_requested = (
+        args.observation_request is not None
+        or args.captured_at is not None
+        or args.fixture_html is not None
+        or args.acceptance_envelope is not None
+        or args.acceptance_public_key is not None
+        or args.acceptance_consumption_root is not None
     )
+    try:
+        observation_request = None
+        if args.observation_request is not None:
+            observation_request = json.loads(args.observation_request.read_text())
+            if not isinstance(observation_request, dict):
+                raise ValueError("ATS observation request file must contain a JSON object")
+        elif observation_requested:
+            raise ValueError("ATS observation options require --observation-request")
+        fixture_html = (
+            args.fixture_html.read_text() if args.fixture_html is not None else None
+        )
+        if not observation_requested:
+            result = MarketAlignerService.prepare_internal_jaa(
+                eligibility_receipt=args.eligibility_receipt.read_bytes(),
+                evidence_reference_sha256=args.evidence_reference_sha256,
+                contact_reference_sha256=args.contact_reference_sha256,
+                forensic_root=args.forensic_root,
+                attempt_id=args.attempt_id,
+                application_id=args.application_id,
+                ats_name=args.ats_name,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        result = MarketAlignerService.prepare_internal_jaa(
+            eligibility_receipt=args.eligibility_receipt.read_bytes(),
+            evidence_reference_sha256=args.evidence_reference_sha256,
+            contact_reference_sha256=args.contact_reference_sha256,
+            forensic_root=args.forensic_root,
+            attempt_id=args.attempt_id,
+            application_id=args.application_id,
+            ats_name=args.ats_name,
+            observation_request=observation_request,
+            captured_at=args.captured_at,
+            fixture_html=fixture_html,
+            acceptance_envelope_path=args.acceptance_envelope,
+            acceptance_public_key_path=args.acceptance_public_key,
+            acceptance_consumption_root=args.acceptance_consumption_root,
+        )
+    except (ValueError, TypeError, PermissionError, OSError) as exc:
+        print(
+            json.dumps({"refused": str(exc), "schema_version": "market-aligner.internal-jaa-refusal.v1"}, sort_keys=True),
+            file=sys.stderr,
+        )
+        return 1
     print(json.dumps(result, sort_keys=True))
-    return 0
+    return 0 if result["status"] == "prepared" else 1
 
 def _write_exact_bytes(sink, payload: bytes) -> None:
     """Write one exact receipt to a binary or ordinary CLI stdout seam."""
@@ -1198,6 +1241,26 @@ def build_parser() -> argparse.ArgumentParser:
     applications.add_argument("--attempt-id", required=True)
     applications.add_argument("--application-id", required=True)
     applications.add_argument("--ats-name", default="fixture")
+    applications.add_argument(
+        "--observation-request",
+        type=Path,
+        default=None,
+        help="Optional signed read-only observation descriptor (JSON document).",
+    )
+    applications.add_argument(
+        "--captured-at",
+        default=None,
+        help="Observation capture timestamp (required with --observation-request).",
+    )
+    applications.add_argument(
+        "--fixture-html",
+        type=Path,
+        default=None,
+        help="Local fixture HTML; only valid when the authority is local_fixture_only.",
+    )
+    applications.add_argument("--acceptance-envelope", type=Path, default=None)
+    applications.add_argument("--acceptance-public-key", type=Path, default=None)
+    applications.add_argument("--acceptance-consumption-root", type=Path, default=None)
     applications.set_defaults(handler=_applications_command)
 
     canary = commands.add_parser(

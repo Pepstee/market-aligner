@@ -680,6 +680,265 @@ def test_real_market_eligibility_receipt_flows_through_service_and_cli(
     assert json.loads(capsys.readouterr().out)["status"] == "prepared"
 
 
+def _eligibility_receipt_and_references(tmp_path: Path) -> tuple[bytes, dict[str, str]]:
+    """Reuse the real FIT->eligibility fixture for the observation corridor."""
+    fixture_path = Path(__file__).with_name("test_process_one.py")
+    specification = importlib.util.spec_from_file_location("jaa_obs_fixture", fixture_path)
+    assert specification is not None and specification.loader is not None
+    fixture_module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(fixture_module)
+    fixture = fixture_module.EligibilityFixture(tmp_path)
+    candidate = fixture.candidate_facts()
+    candidate["authorised_jurisdictions"]["value"] = [
+        {"refs": [fixture.ref("ev-de")], "value": "NL"}
+    ]
+    candidate["current_residence"]["value"] = "NL"
+    candidate["maximum_years_required"]["value"] = 5.0
+    candidate["requires_sponsorship"]["value"] = False
+    vacancy = fixture.vacancy_facts()
+    vacancy["minimum_years_required"]["value"] = 3.0
+    payload = fixture.envelope(
+        candidate_overrides={
+            key: candidate[key]
+            for key in (
+                "authorised_jurisdictions",
+                "current_residence",
+                "maximum_years_required",
+                "requires_sponsorship",
+            )
+        },
+        vacancy_overrides={"minimum_years_required": vacancy["minimum_years_required"]},
+    )
+    envelope_name = fixture.stage(payload)
+    receipt = eligibility_one(
+        fixture.root,
+        envelope_name,
+        supplied_operation_id=payload["eligibility_operation_id"],
+        supplied_fit_operation_id=payload["fit_operation_id"],
+        supplied_config_path=fixture.resolved_config_path,
+        supplied_profile_id=fixture_module._PROFILE_ID,
+        supplied_job_key="board:42",
+        supplied_track="backend",
+    )
+    return receipt, {"evidence": "1" * 64, "contact": "2" * 64}
+
+
+def _observation_descriptor(
+    job_key: str, *, local_fixture_only: bool = True, url: str = "https://localhost/fixture-ats"
+) -> dict[str, object]:
+    fields = {
+        "schema_version": "market-aligner.ats-observation-authority.v1",
+        "job_key": job_key,
+        "application_url": url,
+        "timeout_ms": 2_000,
+        "max_network_events": 8,
+        "max_snapshot_bytes": 65_536,
+        "authority_state": "accepted" if local_fixture_only else "pending",
+        "local_fixture_only": local_fixture_only,
+        "diagnostic_only": True,
+        "raw_payloads_persisted": False,
+        "identity_authority": False,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    return fields | {"authority_sha256": sha256(canonical_json(fields).encode())}
+
+
+def _observation_cli_arguments(tmp_path: Path, receipt: bytes, references: dict[str, str]) -> list[str]:
+    receipt_path = tmp_path / "eligibility-observe.json"
+    receipt_path.write_bytes(receipt)
+    return [
+        "applications",
+        "--eligibility-receipt", str(receipt_path),
+        "--evidence-reference-sha256", references["evidence"],
+        "--contact-reference-sha256", references["contact"],
+    ]
+
+
+def test_local_fixture_observation_flows_through_service_and_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Real deterministic browser E2E through the actual CLI handler (no network)."""
+    pytest.importorskip("playwright.sync_api")
+    receipt, references = _eligibility_receipt_and_references(tmp_path)
+    descriptor_path = tmp_path / "observation-request.json"
+    descriptor_path.write_text(json.dumps(_observation_descriptor("board:42")))
+    html_path = tmp_path / "fixture.html"
+    html_path.write_text(
+        "<html><body><form><label>Full name<input id='name'></label></form></body></html>"
+    )
+    assert cli_main([
+        *_observation_cli_arguments(tmp_path, receipt, references),
+        "--forensic-root", str(tmp_path / "cli-observe-forensics"),
+        "--attempt-id", "attempt-observe-cli-0001",
+        "--application-id", "application-observe-cli-0001",
+        "--observation-request", str(descriptor_path),
+        "--captured-at", "2026-08-27T12:00:00Z",
+        "--fixture-html", str(html_path),
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "prepared"
+    assert payload["observation"]["transport"] == "local_fixture"
+    assert payload["observation"]["inventory"] is not None
+    assert payload["forensic_receipt"]["outcome"] == "prepared"
+    assert payload["identity_authority"] is False
+    assert payload["release_authority"] is False
+    assert payload["submission_authority"] is False
+    direct = MarketAlignerService.prepare_internal_jaa(
+        eligibility_receipt=receipt,
+        evidence_reference_sha256=references["evidence"],
+        contact_reference_sha256=references["contact"],
+        forensic_root=tmp_path / "cli-observe-forensics",
+        attempt_id="attempt-observe-cli-0001",
+        application_id="application-observe-cli-0001",
+        observation_request=_observation_descriptor("board:42"),
+        captured_at="2026-08-27T12:00:00Z",
+        fixture_html=html_path.read_text(),
+    )
+    assert direct == payload  # recover path replays the same observation
+
+
+def test_cli_rejects_observation_options_without_descriptor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
+) -> None:
+    receipt, references = _eligibility_receipt_and_references(tmp_path)
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("orphan observation option fell back to fixture capture")
+
+    monkeypatch.setattr(MarketAlignerService, "prepare_internal_jaa", unreachable)
+    assert cli_main([
+        *_observation_cli_arguments(tmp_path, receipt, references),
+        "--forensic-root", str(tmp_path / "orphan-forensics"),
+        "--attempt-id", "attempt-orphan-0001",
+        "--application-id", "application-orphan-0001",
+        "--captured-at", "2026-08-27T12:00:00Z",
+    ]) == 1
+    refusal = json.loads(capsys.readouterr().err)
+    assert "require --observation-request" in refusal["refused"]
+
+
+def test_cli_returns_structured_refusal_for_malformed_observation_descriptor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt, references = _eligibility_receipt_and_references(tmp_path)
+    descriptor_path = tmp_path / "observation-request.json"
+    descriptor_path.write_text("{")
+    assert cli_main([
+        *_observation_cli_arguments(tmp_path, receipt, references),
+        "--forensic-root", str(tmp_path / "bad-descriptor-forensics"),
+        "--attempt-id", "attempt-bad-descriptor-0001",
+        "--application-id", "application-bad-descriptor-0001",
+        "--observation-request", str(descriptor_path),
+    ]) == 1
+    refusal = json.loads(capsys.readouterr().err)
+    assert refusal["schema_version"] == "market-aligner.internal-jaa-refusal.v1"
+
+
+@pytest.mark.parametrize(
+    "invalid_argument",
+    [
+        {"attempt_id": "../attempt"},
+        {"application_id": "../application"},
+        {"captured_at": "not-a-time"},
+        {"ats_name": "fixture"},
+    ],
+)
+def test_public_observation_invalid_arguments_do_not_consume_acceptance(
+    tmp_path: Path, monkeypatch, invalid_argument: dict[str, object]
+) -> None:
+    receipt, references = _eligibility_receipt_and_references(tmp_path)
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("invalid public observation input consumed acceptance")
+
+    monkeypatch.setattr(jaa_module, "verify_and_consume_market_observation_acceptance", unreachable)
+    arguments: dict[str, object] = {
+        "eligibility_receipt": receipt,
+        "evidence_reference_sha256": references["evidence"],
+        "contact_reference_sha256": references["contact"],
+        "forensic_root": tmp_path / "invalid-input-forensics",
+        "attempt_id": "attempt-valid-0001",
+        "application_id": "application-valid-0001",
+        "observation_request": _observation_descriptor(
+            "board:42", local_fixture_only=False,
+            url="https://jobs.example.test/apply/1000001",
+        ),
+        "captured_at": "2026-08-27T12:00:00Z",
+        "ats_name": "greenhouse",
+        "acceptance_envelope_path": tmp_path / "acceptance.json",
+        "acceptance_public_key_path": tmp_path / "public-key.json",
+        "acceptance_consumption_root": tmp_path / "consumptions",
+    }
+    arguments.update(invalid_argument)
+    with pytest.raises(ValueError):
+        MarketAlignerService.prepare_internal_jaa(**arguments)
+
+
+def test_public_observation_without_acceptance_refuses_before_browser(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
+) -> None:
+    receipt, references = _eligibility_receipt_and_references(tmp_path)
+    descriptor_path = tmp_path / "observation-request.json"
+    descriptor_path.write_text(json.dumps(
+        _observation_descriptor("board:42", local_fixture_only=False, url="https://jobs.example.test/apply/1000001")
+    ))
+    def unreachable(*args, **kwargs):
+        raise AssertionError("acceptance consumed before argument-group validation")
+    monkeypatch.setattr(jaa_module, "verify_and_consume_market_observation_acceptance", unreachable)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
+    assert cli_main([
+        *_observation_cli_arguments(tmp_path, receipt, references),
+        "--forensic-root", str(tmp_path / "refused-forensics"),
+        "--attempt-id", "attempt-refused-0001",
+        "--application-id", "application-refused-0001",
+        "--observation-request", str(descriptor_path),
+        "--captured-at", "2026-08-27T12:00:00Z",
+    ]) == 1
+    refusal = json.loads(capsys.readouterr().err)
+    assert "external verified operator capability" in refusal["refused"]
+
+
+def test_public_observation_invalid_signature_refuses_before_browser(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
+) -> None:
+    receipt, references = _eligibility_receipt_and_references(tmp_path)
+    private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    descriptor = _observation_descriptor(
+        "board:42", local_fixture_only=False, url="https://jobs.example.test/apply/1000001"
+    )
+    authority = AtsObservationAuthority(**descriptor)
+    runtime_root = tmp_path / "runtime"
+    envelope_path, _ = write_signed_observation_acceptance(
+        external_root,
+        private_key,
+        authority,
+        consumption_root=runtime_root,
+        signing_key=Ed25519PrivateKey.generate(),  # not the pinned observation key
+    )
+    descriptor_path = tmp_path / "observation-request.json"
+    descriptor_path.write_text(json.dumps(descriptor))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
+    assert cli_main([
+        *_observation_cli_arguments(tmp_path, receipt, references),
+        "--forensic-root", str(tmp_path / "invalid-forensics"),
+        "--attempt-id", "attempt-invalid-0001",
+        "--application-id", "application-invalid-0001",
+        "--ats-name", "greenhouse",
+        "--observation-request", str(descriptor_path),
+        "--captured-at", "2026-08-27T12:00:00Z",
+        "--acceptance-envelope", str(envelope_path),
+        "--acceptance-public-key", str(public_path),
+        "--acceptance-consumption-root", str(runtime_root),
+    ]) == 1
+    refusal = json.loads(capsys.readouterr().err)
+    assert refusal["schema_version"] == "market-aligner.internal-jaa-refusal.v1"
+    assert "signature" in refusal["refused"].lower()
+    consumption_store = runtime_root / "observation-acceptance-consumptions"
+    assert not any(consumption_store.glob("*.json"))  # rejected before consumption
+
+
 def test_signed_observation_acceptance_consumes_once_and_replays_exactly(tmp_path, monkeypatch):
     private_key, public_path, external_root = observation_signing_key(tmp_path, monkeypatch)
     authority = public_observation_request(source())

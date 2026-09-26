@@ -456,30 +456,152 @@ class MarketAlignerService:
         application_id: str,
         ats_name: str = "fixture",
         backend=None,
+        observation_request: Mapping[str, object] | None = None,
+        captured_at: str | None = None,
+        fixture_html: str | None = None,
+        acceptance_envelope_path: Path | None = None,
+        acceptance_public_key_path: Path | None = None,
+        acceptance_consumption_root: Path | None = None,
     ) -> dict[str, object]:
         """Run only the faceless, zero-interaction Market-to-JAA corridor."""
-        from market_aligner.applications.jaa import capture_or_recover, prepare_from_market
+        from market_aligner.applications.jaa import (
+            AtsObservationAuthority,
+            _ATS_PROVIDERS,
+            _ats_time,
+            _id,
+            _root,
+            capture_or_recover,
+            observe_ats_form_or_recover,
+            prepare_from_market,
+            verify_and_consume_market_observation_acceptance,
+        )
+
+        observation_arguments = (
+            captured_at,
+            fixture_html,
+            acceptance_envelope_path,
+            acceptance_public_key_path,
+            acceptance_consumption_root,
+        )
+        if observation_request is None and any(
+            value is not None for value in observation_arguments
+        ):
+            raise ValueError("ATS observation options require an observation request")
+        authority = None
+        acceptance_arguments = (
+            acceptance_envelope_path,
+            acceptance_public_key_path,
+            acceptance_consumption_root,
+        )
+        if observation_request is not None:
+            if not isinstance(observation_request, Mapping):
+                raise ValueError("ATS observation request must be a JSON object descriptor")
+            authority = AtsObservationAuthority(**dict(observation_request))
+            if authority.local_fixture_only is True:
+                if any(value is not None for value in acceptance_arguments):
+                    raise ValueError("local ATS fixture cannot consume public observation authority")
+                if fixture_html is None or captured_at is None:
+                    raise ValueError("local ATS fixture observation requires fixture HTML and a capture time")
+            else:
+                if any(value is None for value in acceptance_arguments):
+                    raise PermissionError("public ATS observation requires an external verified operator capability")
+                if fixture_html is not None:
+                    raise ValueError("public ATS observation cannot use fixture HTML")
+                if captured_at is None:
+                    raise ValueError("public ATS observation requires a capture time")
+                # Reuse the observation owner’s validators before the signed
+                # capability is consumed, so malformed input cannot burn it.
+                _ats_time(captured_at)
+                _id(attempt_id, "attempt ID")
+                _id(application_id, "application ID")
+                _id(ats_name, "ATS name")
+                if ats_name not in _ATS_PROVIDERS or ats_name == "fixture":
+                    raise ValueError("public ATS observation provider differs")
 
         source, sanity = prepare_from_market(
             eligibility_receipt=eligibility_receipt,
             evidence_reference_sha256=evidence_reference_sha256,
             contact_reference_sha256=contact_reference_sha256,
         )
-        forensic = capture_or_recover(
-            root=forensic_root,
-            attempt_id=attempt_id,
-            application_id=application_id,
-            source=source,
-            sanity=sanity,
-            ats_name=ats_name,
-            backend=backend,
-        )
+        if observation_request is None:
+            forensic = capture_or_recover(
+                root=forensic_root,
+                attempt_id=attempt_id,
+                application_id=application_id,
+                source=source,
+                sanity=sanity,
+                ats_name=ats_name,
+                backend=backend,
+            )
+            return {
+                "schema_version": "market-aligner.internal-jaa-result.v1",
+                "status": forensic.outcome,
+                "source": source.document(),
+                "sanity_receipt_sha256": sanity.receipt_sha256,
+                "forensic_receipt": forensic.document(),
+                "identity_authority": False,
+                "release_authority": False,
+                "submission_authority": False,
+            }
+        assert authority is not None
+        # Group and job-source bindings are refused before the acceptance is
+        # consumed or any browser runtime is imported.
+        if authority.job_key != source.job_key:
+            raise ValueError("ATS observation request does not bind the application source job")
+        if sanity.source_sha256 != source.source_sha256:
+            raise ValueError("ATS observation source binding differs")
+        if authority.local_fixture_only is True:
+            observation = observe_ats_form_or_recover(
+                root=forensic_root,
+                attempt_id=attempt_id,
+                application_id=application_id,
+                source=source,
+                sanity=sanity,
+                ats_name=ats_name,
+                authority=authority,
+                captured_at=captured_at,
+                fixture_html=fixture_html,
+            )
+        else:
+            _root(forensic_root, create=True)
+            acceptance_receipt = verify_and_consume_market_observation_acceptance(
+                authority,
+                envelope_path=acceptance_envelope_path,
+                public_key_path=acceptance_public_key_path,
+                consumption_root=acceptance_consumption_root,
+            )
+            observation = observe_ats_form_or_recover(
+                root=forensic_root,
+                attempt_id=attempt_id,
+                application_id=application_id,
+                source=source,
+                sanity=sanity,
+                ats_name=ats_name,
+                authority=authority,
+                captured_at=captured_at,
+                acceptance_receipt=acceptance_receipt,
+                acceptance_envelope_path=acceptance_envelope_path,
+                acceptance_public_key_path=acceptance_public_key_path,
+                acceptance_consumption_root=acceptance_consumption_root,
+            )
         return {
             "schema_version": "market-aligner.internal-jaa-result.v1",
-            "status": forensic.outcome,
+            "status": observation.receipt.outcome,
             "source": source.document(),
             "sanity_receipt_sha256": sanity.receipt_sha256,
-            "forensic_receipt": forensic.document(),
+            "forensic_receipt": observation.receipt.document(),
+            "observation": {
+                "requested_application_url": observation.requested_application_url,
+                "final_application_url": observation.final_application_url,
+                "transport": observation.transport,
+                "observation_authority_sha256": observation.observation_authority_sha256,
+                "inventory": (
+                    observation.inventory.document()
+                    if observation.inventory is not None
+                    else None
+                ),
+                "acceptance_receipt_sha256": observation.acceptance_receipt_sha256,
+            },
             "identity_authority": False,
             "release_authority": False,
             "submission_authority": False,
