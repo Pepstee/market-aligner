@@ -127,6 +127,7 @@ class ReportingTests(unittest.TestCase):
             width, height, metadata = _inspect_png(png)
             self.assertEqual((1800, 1200), (width, height))
             self.assertEqual("Fit vs Opportunity", metadata["Title"])
+            self.assertEqual("uncalibrated", metadata["Fit status"])
             pixels = matplotlib_image.imread(paths.scatter_png)
             self.assertEqual((1200, 1800), pixels.shape[:2])
             self.assertGreater(float(pixels[:, :, :3].std()), 0.05)

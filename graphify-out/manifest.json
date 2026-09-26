@@ -7655,8 +7655,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/career_automation/application_archive.py": {
-    "mtime": 1789312955.864371,
-    "ast_hash": "6d2167c42de885aec3329c13b95cbbfd",
+    "mtime": 1790421709.2516859,
+    "ast_hash": "a8a9273ad7e003148d9edaa9836c1971",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/career_automation/application_artifacts.py": {
@@ -10430,8 +10430,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/src/market_aligner/applications/__init__.py": {
-    "mtime": 1788142533.2387924,
-    "ast_hash": "38156a3d364dfb8ca96acbd22faedf98",
+    "mtime": 1790421353.7546577,
+    "ast_hash": "f3920efbb6d175d81c30bebdcaae7cec",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/src/market_aligner/applications/assessment_promotion.py": {
@@ -10840,8 +10840,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/src/market_aligner/reporting/reports.py": {
-    "mtime": 1789298873.232768,
-    "ast_hash": "0b501c868a79f647aeddf9b34846088c",
+    "mtime": 1790421185.4687989,
+    "ast_hash": "83c494b21ad498904a3bdf66257f8a66",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/src/market_aligner/research/__init__.py": {
@@ -10985,8 +10985,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/tests/test_applications_contract.py": {
-    "mtime": 1788142533.2617996,
-    "ast_hash": "2619ae7f8ce7e21b514aabd21e38ff29",
+    "mtime": 1790421373.690558,
+    "ast_hash": "3955c7288ce05e5440b07808ed34673e",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/tests/test_assessment.py": {
@@ -11110,8 +11110,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/tests/test_reporting.py": {
-    "mtime": 1789298856.1106768,
-    "ast_hash": "3eaa5fdd2f035f7b11c1aa8a902dd8fc",
+    "mtime": 1790421185.4694195,
+    "ast_hash": "eae9f703ab6668dc7e5ce55535f7e2c0",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/tests/test_research_worker.py": {
@@ -11597,6 +11597,16 @@
   "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/skeleton/config.bulk_terra.yaml": {
     "mtime": 1790093066.9780786,
     "ast_hash": "db7d45cf621f52320933c2fac0bec5d1",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/career_automation/canary_forensic_evidence.py": {
+    "mtime": 1790421443.6377447,
+    "ast_hash": "77faf362305d6052528ee9f26f0ac7d7",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner-ma0112-successor-lane/repo/internal/jaa/career_automation/test_canary_forensic_evidence.py": {
+    "mtime": 1790421730.6712208,
+    "ast_hash": "8476b010e63857f2e18e71413e405d7a",
     "semantic_hash": ""
   }
 }

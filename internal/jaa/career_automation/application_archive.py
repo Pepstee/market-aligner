@@ -2205,11 +2205,92 @@ def _parser() -> argparse.ArgumentParser:
     export = commands.add_parser("export")
     export.add_argument("attempt_id")
     export.add_argument("destination")
+    forensic_record = commands.add_parser("forensic-record")
+    forensic_record.add_argument("source_path")
+    forensic_record.add_argument("--root", required=True, dest="forensic_root")
+    forensic_record.add_argument("--recorded-at", required=True)
+    forensic_record.add_argument("--cycle-id", required=True)
+    forensic_record.add_argument("--stage", required=True)
+    forensic_record.add_argument("--issue-code", required=True)
+    forensic_record.add_argument("--summary", required=True)
+    forensic_record.add_argument("--technical-detail", required=True)
+    forensic_record.add_argument("--media-type", default="application/octet-stream")
+    forensic_verify = commands.add_parser("forensic-verify")
+    forensic_verify.add_argument("receiptsha")
+    forensic_verify.add_argument("--root", required=True, dest="forensic_root")
+    forensic_list = commands.add_parser("forensic-list")
+    forensic_list.add_argument("--root", required=True, dest="forensic_root")
     return parser
+
+
+def _forensic_command(arguments: argparse.Namespace) -> int:
+    from career_automation.canary_forensic_evidence import (
+        CanaryForensicEvidenceError,
+        list_canary_forensic_events,
+        record_canary_forensic_event,
+        verify_exact_canary_evidence,
+    )
+
+    try:
+        if arguments.command == "forensic-record":
+            event = record_canary_forensic_event(
+                arguments.source_path,
+                root=arguments.forensic_root,
+                repository_root=arguments.repository_root,
+                recorded_at=arguments.recorded_at,
+                cycle_id=arguments.cycle_id,
+                stage=arguments.stage,
+                issue_code=arguments.issue_code,
+                summary=arguments.summary,
+                technical_detail=arguments.technical_detail,
+                media_type=arguments.media_type,
+            )
+            print(
+                canonical_json(
+                    {
+                        "sequence": event.sequence,
+                        "event_sha256": event.event_sha256,
+                        "evidence_receipt_sha256": event.evidence_receipt_sha256,
+                        "exact_evidence_sha256": event.exact_evidence_sha256,
+                    }
+                )
+            )
+            return 0
+        if arguments.command == "forensic-verify":
+            receipt, _artifact = verify_exact_canary_evidence(
+                arguments.forensic_root,
+                arguments.repository_root,
+                arguments.receiptsha,
+            )
+            print(canonical_json(receipt.document()))
+            return 0
+        events = list_canary_forensic_events(
+            root=arguments.forensic_root,
+            repository_root=arguments.repository_root,
+        )
+        print(
+            canonical_json(
+                [
+                    {
+                        "sequence": event.sequence,
+                        "event_sha256": event.event_sha256,
+                        "evidence_receipt_sha256": event.evidence_receipt_sha256,
+                        "exact_evidence_sha256": event.exact_evidence_sha256,
+                    }
+                    for event in events
+                ]
+            )
+        )
+        return 0
+    except (CanaryForensicEvidenceError, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.command in {"forensic-record", "forensic-verify", "forensic-list"}:
+        return _forensic_command(arguments)
     archive = ApplicationArchive(
         arguments.root,
         repository_root=arguments.repository_root,

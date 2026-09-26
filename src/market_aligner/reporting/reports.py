@@ -356,7 +356,7 @@ def _write_scatter_png(
                 ha="right", color=muted, fontsize=8.5, fontfamily="DejaVu Sans")
     figure.savefig(path, format="png", dpi=150, facecolor=figure.get_facecolor(),
                    metadata={"Software": "Market Aligner", "Title": "Fit vs Opportunity",
-                             "Profile": profile_id})
+                             "Profile": profile_id, "Fit status": "uncalibrated"})
 
 
 def _label_top_points(
