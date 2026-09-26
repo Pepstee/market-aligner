@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from dataclasses import asdict
@@ -407,6 +408,21 @@ def _research_run_one_command(args: argparse.Namespace) -> int:
     return 0 if run is not None and run.status == "completed" else 1
 
 
+def _semantic_worker(specification: str, *, config: Path, data_home: Path | None):
+    module_name, separator, attribute_name = specification.partition(":")
+    if not separator or not module_name or not attribute_name:
+        raise ValueError("semantic worker must use module:factory syntax")
+    factory = getattr(importlib.import_module(module_name), attribute_name)
+    if not callable(factory):
+        raise ValueError(f"semantic worker factory is not callable: {specification}")
+    worker = factory(config_path=config, data_home=data_home)
+    if not callable(getattr(worker, "extract_vacancy", None)) or not callable(
+        getattr(worker, "align_evidence", None)
+    ):
+        raise ValueError("semantic worker factory returned an incompatible object")
+    return worker
+
+
 def _codex_gateway(args: argparse.Namespace) -> CodexSemanticGateway:
     return CodexSemanticGateway(
         model=args.model,
@@ -416,7 +432,13 @@ def _codex_gateway(args: argparse.Namespace) -> CodexSemanticGateway:
 
 
 def _process_command(args: argparse.Namespace) -> int:
-    worker = _codex_gateway(args)
+    worker = (
+        _semantic_worker(
+            args.semantic_worker, config=args.config, data_home=args.data_home
+        )
+        if args.semantic_worker is not None
+        else _codex_gateway(args)
+    )
     receipt = ProcessingService(args.data_home, worker).process(
         args.config,
         profile_id=args.profile_id,
@@ -428,7 +450,14 @@ def _process_command(args: argparse.Namespace) -> int:
 
 
 def _process_job_command(args: argparse.Namespace) -> int:
-    receipt = ProcessingService(args.data_home, _codex_gateway(args)).process(
+    worker = (
+        _semantic_worker(
+            args.semantic_worker, config=args.config, data_home=args.data_home
+        )
+        if args.semantic_worker is not None
+        else _codex_gateway(args)
+    )
+    receipt = ProcessingService(args.data_home, worker).process(
         args.config,
         profile_id=args.profile_id,
         track=args.track,
@@ -1098,7 +1127,12 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--profile-id", required=True)
     process.add_argument("--track", required=True)
     process.add_argument("--worker-id", required=True)
-    process.add_argument("--model", required=True, help="Explicit Codex model identity.")
+    process_selection = process.add_mutually_exclusive_group(required=True)
+    process_selection.add_argument("--model", help="Explicit Codex model identity.")
+    process_selection.add_argument(
+        "--semantic-worker",
+        help="Explicit trusted installed-code plugin selector in module:factory form.",
+    )
     process.add_argument("--semantic-timeout", type=float, default=120.0)
     process.add_argument("--codex-binary", type=Path)
     _add_data_home(process)
@@ -1113,7 +1147,12 @@ def build_parser() -> argparse.ArgumentParser:
     process_job.add_argument("--track", required=True)
     process_job.add_argument("--worker-id", required=True)
     process_job.add_argument("--job-key", required=True)
-    process_job.add_argument("--model", required=True, help="Explicit Codex model identity.")
+    process_job_selection = process_job.add_mutually_exclusive_group(required=True)
+    process_job_selection.add_argument("--model", help="Explicit Codex model identity.")
+    process_job_selection.add_argument(
+        "--semantic-worker",
+        help="Explicit trusted installed-code plugin selector in module:factory form.",
+    )
     process_job.add_argument("--semantic-timeout", type=float, default=120.0)
     process_job.add_argument("--codex-binary", type=Path)
     _add_data_home(process_job)

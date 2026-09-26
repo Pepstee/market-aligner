@@ -1,11 +1,11 @@
 {
-  "community_count": 30580,
-  "edge_count": 144682,
-  "node_count": 72418,
+  "community_count": 30091,
+  "edge_count": 144756,
+  "node_count": 72429,
   "outputs": {
     ".graphify_labels.json": "a545880d83c95f86923a7687af90c9c2107fb28bb26b401c6fa2689d9c75ddf9",
     "GRAPH_REPORT.md": "78737e17544537a5ae04eed27c9d262efc43928bc662261f40add22ee1673dc8",
-    "graph.json": "ae32009b44fc487af4704043bf052acf640225a2f198d2113d3773b7cadce272"
+    "graph.json": "1f45f6123e328ddd035d4b2c7038b7bbcca16175494e34634062fdc577425e62"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "7f484f6e18fa762f47a94bbbda10a8d7dd063359",
+  "source_base_commit": "8150b758066e5874034b9c75970a7a7ddf426445",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -31,7 +31,7 @@
     "docs/migration/REPORT_2026-08-01.md": "995b108558c0a80c80dc2d2f48cd6a28a4b7f2c1e3d6e04937f7cb8b1003d3e3",
     "docs/migration/capability-dispositions.jsonl": "d439157643765b3b6def77d434f8acfd2feb5b58a1e8626ffdbe91b91130f3d7",
     "docs/migration/capability-inventory.jsonl": "b3d9d78d63bbcfcc21aaacaab0612f55a9a2e789ffed46d52b75746768af9233",
-    "docs/migration/ledger.jsonl": "f218c6878ca2c526bc940e4ea89ae6d3f3ebcff53fb889852ba1ad4ee8be697c",
+    "docs/migration/ledger.jsonl": "5a49a00580b0b9558ae16469227255d6514289b2d560a036986ff9375a1a8f90",
     "docs/migration/source-manifests.json": "859c3104e3bf4b135cfb74bd1aaccc9982a4abde73a011c3073f670ac512e62e",
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
@@ -712,7 +712,7 @@
     "src/market_aligner/assessment/opportunity.py": "f4483faeb7bac7d49a13a9bfac77e11e599d9d871c4362d19a373c868734b1ca",
     "src/market_aligner/assessment/scoring.py": "a5a354e8bd48d33d8dbb9d9cacf4d96fc0a2aa6b46aff6d4ab41334ce8f772ac",
     "src/market_aligner/assessment/viability.py": "26ccbfd18e05dda673391594fbfeb9621917ae11896bbf7236a9ab0368eecce4",
-    "src/market_aligner/cli.py": "9e657f04081bdbef3146b2b0436f6ef676973d17b34f30d69e15d37662c9a8b7",
+    "src/market_aligner/cli.py": "47f6ed6313f40771d1e8e126af54196c2993f5cbef31a5c389fb58bed9c0c1c5",
     "src/market_aligner/collectors/__init__.py": "260a6fec63e28d4384679128c5fc66d09644d5efa06869b51075041243390d9f",
     "src/market_aligner/collectors/adapters/__init__.py": "6116b53b0e08252ea14e63cba54241acf918300bef7c8c8a76313796073119c3",
     "src/market_aligner/collectors/adapters/adzuna.py": "dd9a1a975af9a6cdddcf176b207866c132d88158615ea6a1d65fd6bb3768d714",
@@ -835,6 +835,6 @@
     "tests/test_reporting.py": "1ac5298ecdf2ec401102b57dcbcfc3d8ad31db4f2b1a057e58af7eb1813487e3",
     "tests/test_research_worker.py": "9dd7b6f0d3bd6d11153ca76539e30ba5633ac4b72eb01510d93b9d9b01c18586",
     "tests/test_scrapling_protocol.py": "25635da53ada976863c3304412e28ab16703cc826aac72f19ff107363e0ad466",
-    "tests/test_service.py": "bcca793ec1e75cd3d290a9c9afbe9941c6cd13595b618c5bded18da50983ff72"
+    "tests/test_service.py": "62d31b10a93aae736940de2448d32553fd13805ceea6a1ed7f98cd6bbe956c68"
   }
 }
