@@ -8,8 +8,6 @@ non-release protected outbox bundle.  It never calls a model or a provider.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
 import os
@@ -18,7 +16,7 @@ import secrets
 import sqlite3
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -30,9 +28,11 @@ from market_aligner.applications.producer import (
     WrittenHandoffBundle,
     write_protected_handoff_bundle,
 )
+from market_aligner.assessment.geography import GeographyMatch, SelectionDecision
 from market_aligner.assessment.scoring import ScoringParams
+from market_aligner.collectors.evidence import public_listing_bytes
+from market_aligner.profiler.intent import serialize_candidate_intent
 from market_aligner.research.models import (
-    RESEARCH_ARCHIVE_ROOT_POLICY_SHA256,
     ClaimSupport,
     ResearchClaim,
     ResearchDossier,
@@ -45,6 +45,7 @@ from market_aligner.research.store import (
 )
 from market_aligner.service.api import MarketAlignerService
 from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
+from market_aligner.state.atomic_publish import publish_noreplace
 
 PRODUCTION_HANDOFF_TRUST_ROOT_ID = "gigabyte-market-aligner-protected-outbox-v1"
 PRODUCTION_VACANCY_MAXIMUM_AGE_SECONDS = 21_600
@@ -339,32 +340,7 @@ def _publish_execution_receipt_noreplace(
     directory_descriptor: int, temporary_name: str, final_name: str
 ) -> bool:
     """Publish one receipt without replacing an independently published replay."""
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = libc.renameat2
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    if (
-        renameat2(
-            directory_descriptor,
-            os.fsencode(temporary_name),
-            directory_descriptor,
-            os.fsencode(final_name),
-            1,  # RENAME_NOREPLACE
-        )
-        == 0
-    ):
-        return True
-    error = ctypes.get_errno()
-    if error == errno.EEXIST:
-        return False
-    raise OSError(error, os.strerror(error))
+    return publish_noreplace(directory_descriptor, temporary_name, final_name)
 
 
 def _persist_execution_receipt(root: Path, semantic_sha256: str, exact: bytes) -> Path:
@@ -1159,6 +1135,30 @@ def _research_evidence(
     return metadata_raw, object_raw, receipt_raw, observed
 
 
+def _retained_raw_listing(jobs: JobDatabase, job_key: str, posting: Mapping[str, Any]) -> bytes:
+    """Preserve both collector source representations without reserialising captures."""
+    legacy = (str(posting["raw_text"] or "") + str(posting["raw_json"] or "")).encode("utf-8")
+    # Older admitted rows predate immutable snapshots. Preserve their existing
+    # exact-byte contract when it already proves the requested content identity.
+    if legacy and _sha(legacy) == posting["content_hash"]:
+        return legacy
+    try:
+        raw = jobs.load_raw_snapshot(job_key, str(posting["content_hash"]))
+        if raw.public_content_base64 is not None:
+            material = public_listing_bytes(raw)
+        else:
+            material = ((raw.raw_text or "") + (
+                json.dumps(raw.raw_json, ensure_ascii=False) if raw.raw_json is not None else ""
+            )).encode("utf-8")
+        if not material or _sha(material) != posting["content_hash"]:
+            raise ValueError("retained collector source digest differs")
+        return material
+    except (KeyError, ValueError) as exc:
+        raise ProductionHandoffError(
+            "vacancy_hash", "retained collector source is unavailable or differs"
+        ) from exc
+
+
 def _logical_job_key(adapter: str, canonical_url: str, source_job_id: str) -> str:
     return "job_" + _sha(
         _canonical(
@@ -1246,6 +1246,62 @@ def _deterministic_handoff_issuance(
     return handoff_issued_at, vacancy_valid_until, dossier_valid_until
 
 
+def _require_detailed_eligibility(
+    connection: sqlite3.Connection, *, profile_id: str, profile_version: str,
+    track: str, job_key: str, source_content_sha256: str,
+    profile_file_sha256: str, evidence_file_sha256: str,
+    normalized_json_sha256: str, current_profile=None,
+) -> bytes:
+    """Require current, matching eligibility evidence; never grant release."""
+    from market_aligner.processing import (
+        ProcessingRefused, parse_eligibility_receipt,
+        read_current_eligibility_receipt,
+    )
+
+    try:
+        rows = connection.execute(
+            "SELECT operation_id,binding_sha256 FROM eligibility_receipts "
+            "WHERE profile_id=? AND job_key=? AND track=?",
+            (profile_id, job_key, track),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ProductionHandoffError("eligibility_state", "one detailed eligibility receipt is required")
+        raw = read_current_eligibility_receipt(
+            connection, operation_id=rows[0][0], binding_sha256=rows[0][1],
+            opportunity_profile=current_profile)
+        if raw is None:
+            raise ProductionHandoffError("eligibility_state", "detailed eligibility disappeared")
+        receipt = parse_eligibility_receipt(raw)
+        if (receipt["profile_id"], receipt["profile_version"], receipt["job_key"], receipt["track"]) != (
+            profile_id, profile_version, job_key, track
+        ):
+            raise ProductionHandoffError("eligibility_binding", "eligibility subject differs")
+        fit = receipt["fit_receipt"]
+        if (fit["raw"]["source_content_sha256"] != source_content_sha256
+                or fit["profile"]["profile_file_sha256"] != profile_file_sha256
+                or fit["profile"]["evidence_file_sha256"] != evidence_file_sha256
+                or fit["normalised_projection"]["normalized_json_sha256"] != normalized_json_sha256):
+            raise ProductionHandoffError("eligibility_binding", "eligibility product input differs")
+        actual = {row[1]: str(Path(row[2]).resolve())
+                  for row in connection.execute("PRAGMA database_list") if row[1] != "temp"}
+        for alias, name in (("main", "assessments"), ("vacancy", "vacancy")):
+            declared = receipt["databases"][name]
+            if actual.get(alias) != declared["path"]:
+                raise ProductionHandoffError("eligibility_binding", "eligibility database path differs")
+            info = os.stat(actual[alias], follow_symlinks=False)
+            observed = (info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode), info.st_nlink)
+            expected = tuple(declared[key] for key in ("dev", "ino", "uid", "mode", "nlink"))
+            if observed != expected:
+                raise ProductionHandoffError("eligibility_binding", "eligibility database identity differs")
+        if receipt["decision"] != "pass" or receipt["eligibility_authority"] is not True:
+            raise ProductionHandoffError("eligibility_state", "detailed eligibility did not pass")
+        return raw
+    except ProductionHandoffError:
+        raise
+    except (ProcessingRefused, ValueError, sqlite3.Error, OSError) as exc:
+        raise ProductionHandoffError("eligibility_state", "detailed eligibility evidence refused") from exc
+
+
 def _build_production_handoff_from_authenticated_time(
     *,
     deployment: _ProductionHandoffDeployment,
@@ -1274,7 +1330,7 @@ def _build_production_handoff_from_authenticated_time(
     profile_path = profile_directory / "profile.yaml"
     evidence_path = profile_directory / "evidence.jsonl"
     projection_path = profile_directory / "projection-receipt.json"
-    profile_bytes = _read_regular(profile_path, "canonical profile")
+    _profile_bytes = _read_regular(profile_path, "canonical profile")
     evidence_bytes = _read_regular(evidence_path, "canonical evidence ledger")
     projection = _document(
         _read_regular(projection_path, "canonical projection receipt"),
@@ -1350,12 +1406,7 @@ def _build_production_handoff_from_authenticated_time(
         raise ProductionHandoffError(
             "vacancy_state", "current fetched processing row is absent"
         )
-    # This is the collector's persisted content identity from
-    # VacancyStore.store_raw.  Keep the two components explicit here so a
-    # reviewer can verify both their order and their individual boundaries.
-    raw_text_bytes = str(posting["raw_text"] or "").encode("utf-8")
-    raw_json_bytes = str(posting["raw_json"] or "").encode("utf-8")
-    raw_material = raw_text_bytes + raw_json_bytes
+    raw_material = _retained_raw_listing(service.jobs, source_job_key, posting)
     if (
         not raw_material
         or _sha(raw_material) != posting["content_hash"]
@@ -1451,7 +1502,7 @@ def _build_production_handoff_from_authenticated_time(
         "uk_hybrid": ("UK_HYBRID", 2, "GB", "hybrid"),
         "uk_onsite": ("UK_ONSITE", 3, "GB", "onsite"),
         "romania_remote": ("RO_REMOTE", 4, "RO", "remote"),
-        "eu_remote": ("EU_REMOTE", 5, "RO", "remote"),
+        "eu_remote": ("EU_REMOTE", 5, None, "remote"),
     }
     try:
         geography_bucket, geography_rank, country_code, work_mode = location_map[
@@ -1462,6 +1513,16 @@ def _build_production_handoff_from_authenticated_time(
             "geography_binding", "processing geography cannot enter the handoff"
         ) from exc
     raw_location = str(vacancy.get("location") or "")
+    if location_category == "eu_remote":
+        from market_aligner.assessment.geography import (
+            retained_location_country, EU_REMOTE_COUNTRIES, SelectionBlocked)
+        raw_country = expected_raw_json.get("country") if isinstance(expected_raw_json, dict) else None
+        try:
+            country_code = retained_location_country(raw_country, raw_location)
+            if country_code not in EU_REMOTE_COUNTRIES:
+                raise SelectionBlocked("location_country_invalid", "country does not belong to EU_REMOTE")
+        except (ValueError, SelectionBlocked) as exc:
+            raise ProductionHandoffError("geography_binding", "EU-remote country evidence is absent or conflicting") from exc
     location = {
         "country_code": country_code,
         "locality": raw_location.split(",", 1)[0].strip(),
@@ -1522,7 +1583,31 @@ def _build_production_handoff_from_authenticated_time(
         "vacancy_snapshot_sha256": vacancy_snapshot_sha,
     }
 
+    eligibility_connection = service.assessments.connect()
+    try:
+        eligibility_connection.row_factory = None
+        eligibility_connection.execute("ATTACH DATABASE ? AS vacancy", (str(service.jobs.path),))
+        eligibility_connection.execute("PRAGMA query_only=ON")
+        eligibility_connection.execute("BEGIN")
+        detailed_eligibility_bytes = _require_detailed_eligibility(
+            eligibility_connection, profile_id=profile_id, profile_version=profile.version,
+            track=track, job_key=source_job_key,
+            source_content_sha256=str(posting["content_hash"]),
+            profile_file_sha256=_sha(_profile_bytes), evidence_file_sha256=_sha(evidence_bytes),
+            normalized_json_sha256=_sha(_canonical(vacancy)), current_profile=profile,
+        )
+    finally:
+        eligibility_connection.close()
+
+    from market_aligner.assessment.eligibility import EligibilityDecision
+    detailed_receipt = json.loads(detailed_eligibility_bytes)
+    detailed_checks = EligibilityDecision(
+        detailed_receipt["decision"], tuple(detailed_receipt["reasons"]),
+        tuple(detailed_receipt["unknowns"])).checks
     eligibility_sources = {
+        "detailed_eligibility": {"decision": "include",
+                                 "receipt": detailed_receipt,
+                                 "checks": [asdict(check) for check in detailed_checks]},
         "first_job_scope": result.get("first_job_scope"),
         "vacancy_viability": result.get("viability"),
     }
@@ -1572,13 +1657,18 @@ def _build_production_handoff_from_authenticated_time(
             "selection_policy_passed",
         }
     )
+    selection_decision = SelectionDecision(
+        GeographyMatch(geography_bucket, geography_rank).bucket,
+        geography_rank,
+        tuple(rationale_codes),
+    )
     selection_receipt_document = {
         "decision": "selected_for_application",
-        "geography_bucket": geography_bucket,
-        "geography_priority_rank": geography_rank,
-        "hard_gate_passed": True,
+        "geography_bucket": selection_decision.geography_bucket,
+        "geography_priority_rank": selection_decision.geography_priority_rank,
+        "hard_gate_passed": selection_decision.hard_gate_passed,
         "promotion_receipt_sha256": str(promotion_row["receipt_sha256"]),
-        "rationale_codes": rationale_codes,
+        "rationale_codes": list(selection_decision.rationale_codes),
         "source_job_key": source_job_key,
     }
     selection_receipt_bytes = _canonical(selection_receipt_document)
@@ -1599,18 +1689,12 @@ def _build_production_handoff_from_authenticated_time(
         "role_track_ids": sorted(profile.tracks),
         "schema_version": "market-aligner.candidate-intent.v1",
     }
-    candidate_intent_bytes = _canonical(candidate_intent_document)
+    # The excavated intent authority module owns this wire contract.  Keep the
+    # production bytes identical while refusing drift from the strict schema.
+    candidate_intent_bytes = serialize_candidate_intent(candidate_intent_document)
 
     scoring_parameters_bytes = json.dumps(
-        {
-            "blend": ScoringParams().blend,
-            "epsilon": ScoringParams().epsilon,
-            "fit_weights": [list(row) for row in ScoringParams().fit_weights],
-            "mean_p": ScoringParams().mean_p,
-            "opportunity_weights": [
-                list(row) for row in ScoringParams().opportunity_weights
-            ],
-        },
+        ScoringParams().reference_payload,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -1820,6 +1904,7 @@ def _build_production_handoff_from_authenticated_time(
     receipt_path = _persist_execution_receipt(
         deployment.output_root, receipt_semantic_sha, receipt_bytes
     )
+    service.assessments._record_published_handoff(handoff.exact_bytes, receipt_bytes)
     return ProductionHandoffReceipt(
         source_job_key=source_job_key,
         handoff_job_key=handoff_job_key,

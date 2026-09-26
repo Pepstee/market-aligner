@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import sys
 import tempfile
 import time
@@ -37,7 +39,7 @@ CASES = (
 )
 
 INCIDENT_PDF_SHA256 = "3dd13ba9709c7679152f2fc938c4495e2631796712f724f56ab0c82bb34aa0d2"
-LIVE_BACKENDS = frozenset({"codex_cli", "claude_cli"})
+LIVE_BACKENDS = frozenset({"codex_cli", "claude_cli", "openai_responses"})
 
 
 def _pdf(text: str) -> bytes:
@@ -61,16 +63,77 @@ def _package(text: str, *, cv_pdf_bytes: bytes | None = None) -> SanityReviewPac
     )
 
 
-def _build_backend(name: str, model: str, timeout: float) -> Backend:
+def _build_backend(
+    name: str,
+    model: str,
+    timeout: float,
+    *,
+    api_key_environment_variable: str = "OPENAI_API_KEY",
+) -> Backend:
     if name not in LIVE_BACKENDS:
         raise ValueError(f"unsupported live sanity backend: {name}")
-    config: dict[str, object] = {
-        "backend": name,
-        "cli_timeout_seconds": timeout,
-    }
-    if model:
-        config["model" if name == "claude_cli" else "codex_model"] = model
+    if name == "openai_responses":
+        if not model:
+            raise ValueError("OpenAI Responses smoke requires an explicit model")
+        if isinstance(timeout, bool) or int(timeout) != timeout:
+            raise ValueError("OpenAI Responses smoke timeout must be whole seconds")
+        config: dict[str, object] = {
+            "backend": name,
+            "openai_model": model,
+            "openai_api_key_env": api_key_environment_variable,
+            "openai_timeout_seconds": int(timeout),
+        }
+    else:
+        config = {
+            "backend": name,
+            "cli_timeout_seconds": timeout,
+        }
+        if model:
+            config["model" if name == "claude_cli" else "codex_model"] = model
     return make_backend(config)
+
+
+def _require_external_private_directory(path: Path) -> Path:
+    """Validate one operator-owned private output root outside this worktree."""
+
+    repository = ROOT.resolve(strict=True)
+    parent = path.resolve(strict=True)
+    try:
+        parent.relative_to(repository)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("OpenAI smoke evidence must remain outside the Git worktree")
+    metadata = parent.stat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise ValueError("OpenAI smoke evidence root must be operator-owned mode 0700")
+    return parent
+
+
+def _publish_external_trace(output: Path, value: bytes) -> None:
+    """Create one private public-evidence trace without overwrite or symlinks."""
+
+    if output.suffix != ".json" or output.name in {"", ".", ".."}:
+        raise ValueError("OpenAI smoke trace must be a named JSON file")
+    parent = _require_external_private_directory(output.parent)
+    target = parent / output.name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+    metadata = target.stat()
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise RuntimeError("OpenAI smoke trace publication changed identity or mode")
 
 
 def _incident_pdf_bytes(path: Path) -> bytes:
@@ -93,8 +156,15 @@ def _review_case(
     model: str,
     timeout: float,
     root: Path,
+    api_key_environment_variable: str = "OPENAI_API_KEY",
+    transport_archive_dir: Path | None = None,
 ) -> dict[str, object]:
-    backend = _build_backend(backend_name, model, timeout)
+    backend = _build_backend(
+        backend_name,
+        model,
+        timeout,
+        api_key_environment_variable=api_key_environment_variable,
+    )
     client = LLMClient(
         backend=backend,
         model=model or "provider-default",
@@ -102,16 +172,23 @@ def _review_case(
         max_retries=1,
         cache_enabled=False,
         cache_dir=root / case_id / "cache",
+        transport_archive_dir=transport_archive_dir,
         usage_log=root / case_id / "usage.jsonl",
     )
     started = time.perf_counter()
     codes: list[str] = []
     receipt_sha256 = None
+    transport_evidence = None
     error_code = None
     try:
         receipt = review_application_package(package, client=client)
         verdict = receipt.verdict
         receipt_sha256 = receipt.receipt_sha256
+        transport_evidence = (
+            dict(receipt.transport_evidence)
+            if receipt.transport_evidence is not None
+            else None
+        )
         model_identity = receipt.model_identity
     except ApplicationSanityReviewError as error:
         # Only an actual material model finding proves a BLOCK canary. Provider
@@ -121,6 +198,11 @@ def _review_case(
         error_code = error.code
         result = error.result or {}
         codes = [str(row["code"]) for row in result.get("findings", [])]
+        transport_evidence = (
+            dict(error.transport_evidence)
+            if error.transport_evidence is not None
+            else None
+        )
         model_identity = str(getattr(backend, "model", "") or model or "provider-default")
     elapsed_ms = round((time.perf_counter() - started) * 1000)
     return {
@@ -136,6 +218,7 @@ def _review_case(
         "cv_pdf_sha256": hashlib.sha256(package.cv_pdf_bytes).hexdigest(),
         "cover_letter_pdf_sha256": hashlib.sha256(package.cover_letter_pdf_bytes).hexdigest(),
         "receipt_sha256": receipt_sha256,
+        "transport_evidence": transport_evidence,
     }
 
 
@@ -143,14 +226,27 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--backend",
-        choices=("codex_cli", "claude_cli"),
+        choices=("codex_cli", "claude_cli", "openai_responses"),
         default="codex_cli",
     )
     parser.add_argument("--model", default="")
+    parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    parser.add_argument("--transport-archive-dir", type=Path)
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--incident-pdf", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.backend == "openai_responses":
+        if args.transport_archive_dir is None:
+            parser.error("OpenAI Responses smoke requires --transport-archive-dir")
+        if not args.model:
+            parser.error("OpenAI Responses smoke requires --model")
+        archive_root = _require_external_private_directory(
+            args.transport_archive_dir
+        )
+        _require_external_private_directory(args.output.parent)
+    else:
+        archive_root = None
     records = []
     with tempfile.TemporaryDirectory(prefix="jaa-sanity-smoke-") as directory:
         root = Path(directory)
@@ -163,6 +259,8 @@ def main() -> int:
                 model=args.model,
                 timeout=args.timeout,
                 root=root,
+                api_key_environment_variable=args.api_key_env,
+                transport_archive_dir=archive_root,
             ))
         if args.incident_pdf is not None:
             incident_bytes = _incident_pdf_bytes(args.incident_pdf)
@@ -174,9 +272,11 @@ def main() -> int:
                 model=args.model,
                 timeout=args.timeout,
                 root=root,
+                api_key_environment_variable=args.api_key_env,
+                transport_archive_dir=archive_root,
             ))
     evidence = {
-        "schema_version": "jaa.application-sanity-live-smoke.v1",
+        "schema_version": "jaa.application-sanity-live-smoke.v2",
         "redaction": (
             "synthetic packages plus the exact quarantined incident PDF; "
             "the smoke harness adds no personal contact values"
@@ -188,12 +288,26 @@ def main() -> int:
         "schema_sha256": SCHEMA_SHA256,
         "provider": args.backend,
         "configured_model": args.model or "provider-default",
+        "provider_transport_archive": (
+            {
+                "outside_repository": True,
+                "root_sha256": hashlib.sha256(
+                    str(archive_root).encode("utf-8")
+                ).hexdigest(),
+            }
+            if archive_root is not None
+            else None
+        ),
         "case_count": len(records),
         "all_expectations_met": all(row["matched_expectation"] for row in records),
         "cases": records,
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(canonical_json(evidence) + "\n", encoding="utf-8")
+    output_bytes = (canonical_json(evidence) + "\n").encode("utf-8")
+    if args.backend == "openai_responses":
+        _publish_external_trace(args.output, output_bytes)
+    else:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_bytes(output_bytes)
     print(json.dumps(evidence, indent=2))
     return 0 if evidence["all_expectations_met"] else 2
 

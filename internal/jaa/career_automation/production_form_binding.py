@@ -7,6 +7,9 @@ import re
 from typing import Mapping, Sequence
 
 from .application_compiler import ApplicationSource
+from .ats_application_authority import (
+    STANDARD_CANDIDATE_AUTHORITIES,
+)
 from .evidence_matching import canonical_json
 from .rendering import ApplicationArtifacts
 
@@ -27,15 +30,7 @@ CONTACT_AUTHORITIES = frozenset(
 # These values are deliberately narrow: they answer recurring Greenhouse
 # identity/eligibility controls and choose non-disclosure for demographic
 # surveys.  Vacancy-specific prose remains owned by ApplicationSource.answers.
-STANDARD_FORM_AUTHORITIES: Mapping[str, str] = {
-    "candidate.legal_name_complete": "Yes",
-    "candidate.uk_work_right": "Yes",
-    "candidate.uk_work_status": "EU Settled Status",
-    "candidate.discovery_source": "Greenhouse job board",
-    "candidate.gender_nondisclosure": "I don't wish to answer",
-    "candidate.ethnicity_nondisclosure": "I don't wish to answer",
-    "candidate.disability_nondisclosure": "I don't wish to answer",
-}
+STANDARD_FORM_AUTHORITIES: Mapping[str, str] = STANDARD_CANDIDATE_AUTHORITIES
 
 
 class ProductionFormBindingError(ValueError):

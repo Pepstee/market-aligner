@@ -32,9 +32,7 @@ MARKET_OBSERVATION_PUBLIC_DER_SHA256 = (
     "1f852ff70c3e7faf34e75c89e2dca9f067a045927967d069ac2bc544dd0bff1e"
 )
 _ACCEPTANCE_SCHEMA = "market-aligner.provider-observation-acceptance.v1"
-_ACCEPTANCE_RECEIPT_SCHEMA = (
-    "market-aligner.provider-observation-acceptance-receipt.v1"
-)
+_ACCEPTANCE_RECEIPT_SCHEMA = "market-aligner.provider-observation-acceptance-receipt.v1"
 _REQUEST_SCHEMA = "market-aligner.provider-observation-request.v1"
 _OPERATION = "one_read_only_observation"
 _ALLOWED_METHODS = ["GET"]
@@ -60,14 +58,14 @@ _ZERO_AUTHORITY_LIMITS = {
 _IMMUTABLE_LEGACY_COLLECTORS = frozenset(
     {
         (
+            "jaa.repository-playwright-route-fixture.v1",
+            "8c83eb724153beee0f95c53c109cd588ff4fc5cc",
+            "732ecb62f54ea395daf729697dfe8c932686cd4328a54b67ae6843537d7ac907",
+        ),
+        (
             "jaa.playwright-greenhouse-read-only-observer.v3",
             "8b0868399733a33716c3f37818f58dab8cb204bf",
             "2d8859b69fcba66d2c0767fc8fe24a58f5b3c5ed01a3752280d8c6d00056220f",
-        ),
-        (
-            "jaa.repository-playwright-route-fixture.v1",
-            "cf4543f5906918c7e25143c18c344ddd6c6b602e",
-            "c87b0941bcd8df37d328724bead6a01c231cd85d7068a588491ed62cf843a463",
         ),
     }
 )
@@ -128,7 +126,9 @@ def _canonical_greenhouse_target(source_url: object, source_job_id: object) -> s
         or parsed.fragment
         or re.search(r"(?:^|/)jobs/(\d+)(?:/|$)", parsed.path) is None
     ):
-        raise ValueError("provider observation target is not canonical Greenhouse HTTPS")
+        raise ValueError(
+            "provider observation target is not canonical Greenhouse HTTPS"
+        )
     match = re.search(r"(?:^|/)jobs/(\d+)(?:/|$)", parsed.path)
     assert match is not None
     if match.group(1) != source_job_id:
@@ -136,14 +136,20 @@ def _canonical_greenhouse_target(source_url: object, source_job_id: object) -> s
     return source_url
 
 
-def _owned_directory(path: str | Path, *, mode: int, label: str) -> tuple[Path, tuple[int, int]]:
+def _owned_directory(
+    path: str | Path, *, mode: int, label: str
+) -> tuple[Path, tuple[int, int]]:
     absolute = Path(os.path.abspath(os.fspath(path)))
     try:
         resolved = absolute.resolve(strict=True)
         metadata = os.lstat(absolute)
     except OSError as exc:
         raise ValueError(f"{label} is unavailable") from exc
-    if resolved != absolute or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+    if (
+        resolved != absolute
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
         raise ValueError(f"{label} is unsafe")
     if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != mode:
         raise ValueError(f"{label} ownership or mode differs")
@@ -159,9 +165,7 @@ def _external_owned_file(
         raise ValueError(f"{label} parent is unsafe")
     parent_fd = os.open(
         parent,
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -258,9 +262,15 @@ def provider_observation_request_document(
     if not _JOB_KEY.fullmatch(job_key):
         raise ValueError("provider observation job key is invalid")
     _canonical_greenhouse_target(source_url, source_job_id)
-    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 1 <= timeout_ms <= 65_536:
+    if (
+        isinstance(timeout_ms, bool)
+        or not isinstance(timeout_ms, int)
+        or not 1 <= timeout_ms <= 65_536
+    ):
         raise ValueError("provider observation timeout is outside policy")
-    if not _HEX_40.fullmatch(repository_commit) or not _HEX_40.fullmatch(repository_tree):
+    if not _HEX_40.fullmatch(repository_commit) or not _HEX_40.fullmatch(
+        repository_tree
+    ):
         raise ValueError("provider observation Git identity is invalid")
     if not _HEX_64.fullmatch(collector_source_sha256) or not _HEX_64.fullmatch(
         consumption_root_sha256
@@ -312,7 +322,10 @@ def build_provider_observation_acceptance_payload(
         key_id = MARKET_OBSERVATION_KEY_ID
     if public_der_sha256 is None:
         public_der_sha256 = MARKET_OBSERVATION_PUBLIC_DER_SHA256
-    if key_id != MARKET_OBSERVATION_KEY_ID or public_der_sha256 != MARKET_OBSERVATION_PUBLIC_DER_SHA256:
+    if (
+        key_id != MARKET_OBSERVATION_KEY_ID
+        or public_der_sha256 != MARKET_OBSERVATION_PUBLIC_DER_SHA256
+    ):
         raise ValueError("provider observation signer identity is not pinned")
     request = provider_observation_request_document(
         job_key=job_key,
@@ -445,8 +458,13 @@ def _parse_acceptance(value: bytes) -> dict[str, object]:
     try:
         signature = base64.b64decode(signature_b64, validate=True)
     except (ValueError, TypeError) as exc:
-        raise ValueError("provider observation acceptance signature is malformed") from exc
-    if len(signature) != 64 or base64.b64encode(signature).decode("ascii") != signature_b64:
+        raise ValueError(
+            "provider observation acceptance signature is malformed"
+        ) from exc
+    if (
+        len(signature) != 64
+        or base64.b64encode(signature).decode("ascii") != signature_b64
+    ):
         raise ValueError("provider observation acceptance signature is non-canonical")
     unsigned_envelope = signed | {"signature_b64": signature_b64}
     envelope_sha256 = _sha256(canonical_json(unsigned_envelope).encode("utf-8"))
@@ -455,13 +473,17 @@ def _parse_acceptance(value: bytes) -> dict[str, object]:
     return document
 
 
-def _verify_acceptance_signature(document: Mapping[str, object], public_pem: bytes) -> str:
+def _verify_acceptance_signature(
+    document: Mapping[str, object], public_pem: bytes
+) -> str:
     try:
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError as exc:
-        raise RuntimeError("provider observation acceptance requires cryptography") from exc
+        raise RuntimeError(
+            "provider observation acceptance requires cryptography"
+        ) from exc
     try:
         public_key = serialization.load_pem_public_key(public_pem)
     except ValueError as exc:
@@ -482,7 +504,9 @@ def _verify_acceptance_signature(document: Mapping[str, object], public_pem: byt
     try:
         public_key.verify(signature, canonical_json(signed).encode("utf-8"))
     except InvalidSignature as exc:
-        raise ValueError("provider observation acceptance signature is invalid") from exc
+        raise ValueError(
+            "provider observation acceptance signature is invalid"
+        ) from exc
     return _sha256(signature)
 
 
@@ -560,8 +584,7 @@ def _receipt_from_document(value: bytes) -> ProviderObservationAcceptanceReceipt
         )
         or receipt.key_id != MARKET_OBSERVATION_KEY_ID
         or receipt.public_der_sha256 != MARKET_OBSERVATION_PUBLIC_DER_SHA256
-        or receipt.request_sha256
-        != _sha256(canonical_json(request).encode("utf-8"))
+        or receipt.request_sha256 != _sha256(canonical_json(request).encode("utf-8"))
         or not receipt.not_before <= receipt.consumed_at < receipt.expires_at
         or receipt.document() != document
         or receipt.receipt_sha256
@@ -611,7 +634,9 @@ def _load_stored_receipt(store: Path, nonce: str) -> bytes | None:
                 after.st_size,
                 after.st_mtime_ns,
             ):
-                raise ValueError("provider observation acceptance receipt changed while reading")
+                raise ValueError(
+                    "provider observation acceptance receipt changed while reading"
+                )
             return b"".join(chunks)
         finally:
             os.close(descriptor)
@@ -619,9 +644,7 @@ def _load_stored_receipt(store: Path, nonce: str) -> bytes | None:
         os.close(store_fd)
 
 
-def _store_receipt(
-    store: Path, nonce: str, value: bytes
-) -> tuple[bytes, bool]:
+def _store_receipt(store: Path, nonce: str, value: bytes) -> tuple[bytes, bool]:
     store_fd = os.open(
         store,
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -650,7 +673,9 @@ def _store_receipt(
                     or stat.S_IMODE(current.st_mode) != 0o600
                     or current.st_nlink != 1
                 ):
-                    raise ValueError("provider observation acceptance receipt is unsafe")
+                    raise ValueError(
+                        "provider observation acceptance receipt is unsafe"
+                    )
                 chunks: list[bytes] = []
                 while chunk := os.read(descriptor, 65_536):
                     chunks.append(chunk)
@@ -661,10 +686,7 @@ def _store_receipt(
         try:
             descriptor = os.open(
                 name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
                 dir_fd=store_fd,
             )
@@ -675,7 +697,9 @@ def _store_receipt(
             while remaining:
                 written = os.write(descriptor, remaining)
                 if written <= 0:
-                    raise OSError("provider observation acceptance receipt write stalled")
+                    raise OSError(
+                        "provider observation acceptance receipt write stalled"
+                    )
                 remaining = remaining[written:]
             os.fsync(descriptor)
         finally:
@@ -683,7 +707,9 @@ def _store_receipt(
         os.fsync(store_fd)
         stored = read_existing()
         if stored != value:
-            raise ValueError("provider observation acceptance receipt publication differs")
+            raise ValueError(
+                "provider observation acceptance receipt publication differs"
+            )
         return stored, True
     finally:
         os.close(store_fd)
@@ -740,7 +766,9 @@ def verify_and_consume_provider_observation_acceptance(
         if key not in {"signature_b64", "envelope_sha256"}
     }
     if signed_document != expected_payload:
-        raise ValueError("provider observation acceptance does not bind the exact request")
+        raise ValueError(
+            "provider observation acceptance does not bind the exact request"
+        )
     signature_sha256 = _verify_acceptance_signature(document, public_pem)
     existing_value = _load_stored_receipt(store, str(document["nonce"]))
     if existing_value is not None:
@@ -769,7 +797,9 @@ def verify_and_consume_provider_observation_acceptance(
                 "store_identity": store_identity,
             }.items()
         ):
-            raise ValueError("provider observation acceptance nonce binds different evidence")
+            raise ValueError(
+                "provider observation acceptance nonce binds different evidence"
+            )
         _verify_external_file_identity(
             envelope_path,
             envelope_identity,
@@ -800,7 +830,9 @@ def verify_and_consume_provider_observation_acceptance(
         "provider observation current time",
     )
     if not str(document["not_before"]) <= current < str(document["expires_at"]):
-        raise ValueError("provider observation acceptance is outside its validity window")
+        raise ValueError(
+            "provider observation acceptance is outside its validity window"
+        )
     receipt_values = {
         "schema_version": _ACCEPTANCE_RECEIPT_SCHEMA,
         "acceptance_id": document["acceptance_id"],
@@ -853,7 +885,9 @@ def verify_and_consume_provider_observation_acceptance(
     )
     resolved = _receipt_from_document(stored)
     if resolved != receipt:
-        raise ValueError("provider observation acceptance nonce binds different evidence")
+        raise ValueError(
+            "provider observation acceptance nonce binds different evidence"
+        )
     _verify_external_file_identity(
         envelope_path,
         envelope_identity,
@@ -908,7 +942,11 @@ def _git_show(
     allow_legacy_root: bool = False,
 ) -> bytes:
     relative = Path(relative_path)
-    if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != relative_path:
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.as_posix() != relative_path
+    ):
         raise ValueError("provider observation source path is unsafe")
     committed_path = f"{_repository_prefix(repository_root)}{relative_path}"
     repository = str(Path(repository_root).resolve(strict=True))
@@ -1168,10 +1206,7 @@ def _verify_capture_manifest(
         raise ValueError("provider observation collector source identity differs")
     current_source = _git_show(repository_root, "HEAD", source_path)
     legacy_identity = (collector_identity, commit, source_digest)
-    if (
-        current_source != source
-        and legacy_identity not in _IMMUTABLE_LEGACY_COLLECTORS
-    ):
+    if current_source != source and legacy_identity not in _IMMUTABLE_LEGACY_COLLECTORS:
         raise ValueError("provider observation collector changed since capture")
     if authority.get("collector_identity") is not None:
         raise ValueError("trust policy must not assert or relabel collector identity")
@@ -1268,9 +1303,7 @@ def load_provider_observation_authority(
         if isinstance(row, Mapping) and row.get("source_url") == source_url
     ]
     if len(matches) != 1:
-        raise ValueError(
-            "provider source URL lacks one trusted observation authority"
-        )
+        raise ValueError("provider source URL lacks one trusted observation authority")
     authority = matches[0]
     scope = authority.get("scope")
     if not isinstance(scope, str):

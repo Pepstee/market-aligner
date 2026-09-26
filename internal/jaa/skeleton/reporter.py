@@ -55,6 +55,8 @@ JOB_COLUMNS: tuple[str, ...] = (
     "preferred_skills", "education_required", "certifications_required",
     "benefits", "application_deadline",
     "technical_alignment", "evidence_match", "growth_potential",
+    "site_intensity", "visualization", "spatial_relevance", "cs_usefulness",
+    "english_usefulness", "freelance_potential",
     "market_demand", "barrier_to_entry",
     "why_it_fits", "skills_to_learn",
     "extraction_confidence", "dedup_key",
@@ -77,6 +79,8 @@ def write_reports(
     scored: Sequence[ScoredRow],
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     make_plot: bool = True,
+    *,
+    entry_level_only: bool = False,
 ) -> ReportPaths:
     """Write both workbooks (+ the scatter) from a list of C4 rows.
 
@@ -87,7 +91,7 @@ def write_reports(
     out.mkdir(parents=True, exist_ok=True)
 
     ranked = sorted(scored, key=lambda sr: sr.final, reverse=True)
-    fields = aggregate_fields(ranked)
+    fields = aggregate_fields(ranked, entry_level_only=entry_level_only)
 
     paths = ReportPaths(
         jobs_xlsx=out / "jobs_ranked.xlsx",
@@ -97,24 +101,25 @@ def write_reports(
     )
 
     write_jobs_workbook(ranked, fields, paths.jobs_xlsx)
-    write_requirements_workbook(ranked, paths.requirements_xlsx)
-    write_shortlist(ranked, paths.shortlist_md)
+    write_requirements_workbook(ranked, paths.requirements_xlsx, entry_level_only=entry_level_only)
+    write_shortlist(ranked, paths.shortlist_md, entry_level_only=entry_level_only)
     if make_plot:
         try:
-            write_scatter(ranked, paths.scatter_png)
+            write_scatter(ranked, paths.scatter_png, entry_level_only=entry_level_only)
         except ImportError as e:  # matplotlib missing → skip, don't crash the run
             print(f"[reporter] scatter skipped ({e}); workbooks written.")
     return paths
 
 
 def write_shortlist(
-    ranked: Sequence[ScoredRow], path: str | Path, limit: int = 12
+    ranked: Sequence[ScoredRow], path: str | Path, limit: int = 12,
+    *, entry_level_only: bool = False,
 ) -> Path:
     """Write an actionable shortlist locally with no model call."""
     eligible = [
         sr for sr in ranked
         if sr.row.mapped_career != "other"
-        and (sr.row.technical_alignment or 0) >= 5
+        and (sr.row.entry_level is True if entry_level_only else (sr.row.technical_alignment or 0) >= 5)
         and sr.final >= 65
     ]
     eligible.sort(key=lambda sr: (sr.row.entry_level is True, sr.final), reverse=True)
@@ -194,12 +199,19 @@ def _job_value(sr: ScoredRow, col: str) -> Any:
 # --------------------------------------------------------------------------- #
 # requirements_ranked.xlsx  (canonical skill frequency = portfolio to-do list)
 # --------------------------------------------------------------------------- #
-def skill_frequency(ranked: Sequence[ScoredRow]) -> list[dict[str, Any]]:
+def eligible_rows(ranked: Sequence[ScoredRow]) -> list[ScoredRow]:
+    """Rows allowed to drive entry-level recommendations and visuals."""
+    return [sr for sr in ranked if sr.row.entry_level is True]
+
+
+def skill_frequency(ranked: Sequence[ScoredRow], *, entry_level_only: bool = False) -> list[dict[str, Any]]:
     """Canonical-skill frequency table across all postings.
 
     +1 per canonical skill id per posting it appears in (Build-Spec §4), plus
     the % of postings demanding it and the top mapped_careers that demand it.
     """
+    if entry_level_only:
+        ranked = eligible_rows(ranked)
     total = len(ranked)
     required: Counter[str] = Counter()
     preferred: Counter[str] = Counter()
@@ -209,8 +221,8 @@ def skill_frequency(ranked: Sequence[ScoredRow]) -> list[dict[str, Any]]:
     for sr in ranked:
         career = sr.row.mapped_career or "other"
         # A skill counts once per posting even if listed twice.
-        required_set = {s for s in ((sr.row.required_software or []) + (sr.row.required_skills or [])) if s}
-        preferred_set = {s for s in (sr.row.preferred_skills or []) if s}
+        required_set = {s for s in ((sr.row.required_software or []) + ([] if entry_level_only else (sr.row.required_skills or []))) if s}
+        preferred_set = set() if entry_level_only else {s for s in (sr.row.preferred_skills or []) if s}
         for skill in required_set:
             required[skill] += 1
         for skill in preferred_set:
@@ -226,6 +238,7 @@ def skill_frequency(ranked: Sequence[ScoredRow]) -> list[dict[str, Any]]:
         )
         rows.append({
             "skill": skill,
+            "frequency": count,
             "required_frequency": required[skill],
             "preferred_frequency": preferred[skill],
             "any_frequency": count,
@@ -235,16 +248,17 @@ def skill_frequency(ranked: Sequence[ScoredRow]) -> list[dict[str, Any]]:
     return rows
 
 
-def write_requirements_workbook(ranked: Sequence[ScoredRow], path: str | Path) -> Path:
+def write_requirements_workbook(ranked: Sequence[ScoredRow], path: str | Path, *, entry_level_only: bool = False) -> Path:
     from openpyxl import Workbook
 
     wb = Workbook()
     ws = wb.active
     ws.title = "requirements"
-    ws.append(["skill", "required_frequency", "preferred_frequency", "any_frequency", "pct_of_postings", "top_fields"])
-    for row in skill_frequency(ranked):
-        ws.append([row["skill"], row["required_frequency"], row["preferred_frequency"],
-                   row["any_frequency"], row["pct_of_postings"], row["top_fields"]])
+    columns = (["skill", "frequency", "pct_of_postings", "top_fields"] if entry_level_only
+               else ["skill", "required_frequency", "preferred_frequency", "any_frequency", "pct_of_postings", "top_fields"])
+    ws.append(columns)
+    for row in skill_frequency(ranked, entry_level_only=entry_level_only):
+        ws.append([row[column] for column in columns])
 
     _autosize(ws)
     _freeze_header(ws)
@@ -257,18 +271,23 @@ def write_requirements_workbook(ranked: Sequence[ScoredRow], path: str | Path) -
 # --------------------------------------------------------------------------- #
 # fit_opportunity.png  (the 2D map that answers "which field")
 # --------------------------------------------------------------------------- #
-def write_scatter(ranked: Sequence[ScoredRow], path: str | Path) -> Path:
+def write_scatter(ranked: Sequence[ScoredRow], path: str | Path, *, entry_level_only: bool = False) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")  # headless — no display needed
     import matplotlib.pyplot as plt
 
+    if entry_level_only:
+        ranked = eligible_rows(ranked)
     # One colour per career; postings placed at (Fit, Opportunity).
     careers = sorted({sr.row.mapped_career or "other" for sr in ranked})
     cmap = plt.get_cmap("tab10")
     colour = {c: cmap(i % 10) for i, c in enumerate(careers)}
 
     fig, ax = plt.subplots(figsize=(8, 6))
+    if entry_level_only:
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
     for c in careers:
         pts = [(sr.fit, sr.opportunity) for sr in ranked if (sr.row.mapped_career or "other") == c]
         if not pts:
@@ -286,10 +305,11 @@ def write_scatter(ranked: Sequence[ScoredRow], path: str | Path) -> Path:
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
-    ax.set_xlabel("Fit  (profile evidence × vacancy alignment)")
-    ax.set_ylabel("Opportunity  (demand × accessibility × growth)")
-    ax.set_title("Fit vs Opportunity — per posting")
-    ax.legend(loc="lower left", fontsize=8, framealpha=0.9, ncol=2)
+    ax.set_xlabel("Fit  (interest · evidence-adjusted skill · software · role axes)" if entry_level_only else "Fit  (profile evidence × vacancy alignment)")
+    ax.set_ylabel("Opportunity  (market · accessibility · freelance)" if entry_level_only else "Opportunity  (demand × accessibility × growth)")
+    ax.set_title(f"Fit vs Opportunity — entry-level only (n={len(ranked)})" if entry_level_only else "Fit vs Opportunity — per posting")
+    if careers:
+        ax.legend(loc="lower left", fontsize=8, framealpha=0.9, ncol=2)
     fig.tight_layout()
 
     path = Path(path)

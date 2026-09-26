@@ -2110,6 +2110,8 @@ def run_editorial_composition_runtime(
 ]:
     """Invoke isolated writer then Humanizer adapters and validate exact output."""
 
+    if type(request) is not CVEditorialRequest:
+        raise EditorialCompositionError("CV runtime requires an exact CV request")
     request.__post_init__()
     runtime.__post_init__()
     if runtime.environment == "production":
@@ -2271,6 +2273,10 @@ def run_cover_letter_composition_runtime(
     EditorialStageEvidence,
 ]:
     """Invoke detached one-shot cover-letter writer and Humanizer sessions."""
+    if type(request) is not CoverLetterEditorialRequest:
+        raise EditorialCompositionError(
+            "cover-letter runtime requires an exact cover-letter request"
+        )
     request.__post_init__()
     runtime.__post_init__()
     if runtime.document_kind != "cover_letter":

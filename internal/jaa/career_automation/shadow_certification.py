@@ -33,8 +33,7 @@ HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 BASELINE_REVISION = "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
 BASELINE_TREE = "3d4df58429daa7e97310552c8556945720627915"
 BASELINE_SOURCE_CONTENT_REVISION = (
-    "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
-    "a4906e8d74241b7a1ec04d2e481db95a"
+    "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4da4906e8d74241b7a1ec04d2e481db95a"
 )
 MINIMUM_SHADOW_SEPARATION = timedelta(hours=24)
 REQUIRED_INTERRUPTION_POINTS = (
@@ -60,67 +59,69 @@ REQUIRED_MUTATION_CONTROLS = (
     "duplicate_submit",
     "concurrent_submit",
 )
-MUTATION_TEST_NODES: Mapping[str, str] = MappingProxyType({
-    "unsupported_metric": (
-        "test_jaa07_negative_controls.py::"
-        "test_factual_sentence_cannot_paraphrase_or_add_an_unsupported_metric"
-    ),
-    "stale_vacancy": (
-        "test_jaa08_negative_controls.py::"
-        "test_non_bypassable_deterministic_preconditions"
-        "[stale_vacancy-vacancy is stale]"
-    ),
-    "ineligible_contract": (
-        "test_jaa08_negative_controls.py::"
-        "test_non_bypassable_deterministic_preconditions"
-        "[ineligible-work right]"
-    ),
-    "duplicate_release": (
-        "test_jaa08_negative_controls.py::"
-        "test_non_bypassable_deterministic_preconditions"
-        "[duplicate-duplicate application]"
-    ),
-    "release_clock_forgery": (
-        "test_jaa08_negative_controls.py::"
-        "test_action_capable_release_store_rejects_caller_forged_future_clock"
-    ),
-    "upload_byte_drift": (
-        "test_jaa09_negative_controls.py::"
-        "test_executor_detects_upload_mutation_before_browser_materialization"
-    ),
-    "selector_drift": (
-        "test_jaa09_negative_controls.py::"
-        "test_executor_records_ambiguous_selector_without_advancing"
-    ),
-    "field_map_drift": (
-        "test_jaa10_negative_controls.py::"
-        "test_frozen_field_map_drift_cannot_enter_shadow_evidence"
-    ),
-    "release_token_tamper": (
-        "test_jaa09_negative_controls.py::"
-        "test_invalid_jaa08_token_cannot_create_fixture_receipt"
-    ),
-    "receipt_payload_fabrication": (
-        "test_jaa09_negative_controls.py::"
-        "test_self_consistent_wrong_payload_receipt_is_not_recorded"
-    ),
-    "local_origin_drift": (
-        "test_jaa09_negative_controls.py::"
-        "test_fixture_refuses_other_loopback_host_port_or_origin"
-    ),
-    "disguised_submit": (
-        "test_jaa09_negative_controls.py::"
-        "test_click_action_cannot_disguise_final_submission"
-    ),
-    "duplicate_submit": (
-        "test_jaa09_negative_controls.py::"
-        "test_duplicate_submit_and_second_review_produce_no_second_receipt"
-    ),
-    "concurrent_submit": (
-        "test_jaa09_negative_controls.py::"
-        "test_one_jaa08_token_cannot_prepare_two_browser_submit_runs"
-    ),
-})
+MUTATION_TEST_NODES: Mapping[str, str] = MappingProxyType(
+    {
+        "unsupported_metric": (
+            "test_jaa07_negative_controls.py::"
+            "test_factual_sentence_cannot_paraphrase_or_add_an_unsupported_metric"
+        ),
+        "stale_vacancy": (
+            "test_jaa08_negative_controls.py::"
+            "test_non_bypassable_deterministic_preconditions"
+            "[stale_vacancy-vacancy is stale]"
+        ),
+        "ineligible_contract": (
+            "test_jaa08_negative_controls.py::"
+            "test_non_bypassable_deterministic_preconditions"
+            "[ineligible-work right]"
+        ),
+        "duplicate_release": (
+            "test_jaa08_negative_controls.py::"
+            "test_non_bypassable_deterministic_preconditions"
+            "[duplicate-duplicate application]"
+        ),
+        "release_clock_forgery": (
+            "test_jaa08_negative_controls.py::"
+            "test_action_capable_release_store_rejects_caller_forged_future_clock"
+        ),
+        "upload_byte_drift": (
+            "test_jaa09_negative_controls.py::"
+            "test_executor_detects_upload_mutation_before_browser_materialization"
+        ),
+        "selector_drift": (
+            "test_jaa09_negative_controls.py::"
+            "test_executor_records_ambiguous_selector_without_advancing"
+        ),
+        "field_map_drift": (
+            "test_jaa10_negative_controls.py::"
+            "test_frozen_field_map_drift_cannot_enter_shadow_evidence"
+        ),
+        "release_token_tamper": (
+            "test_jaa09_negative_controls.py::"
+            "test_invalid_jaa08_token_cannot_create_fixture_receipt"
+        ),
+        "receipt_payload_fabrication": (
+            "test_jaa09_negative_controls.py::"
+            "test_self_consistent_wrong_payload_receipt_is_not_recorded"
+        ),
+        "local_origin_drift": (
+            "test_jaa09_negative_controls.py::"
+            "test_fixture_refuses_other_loopback_host_port_or_origin"
+        ),
+        "disguised_submit": (
+            "test_jaa09_negative_controls.py::"
+            "test_click_action_cannot_disguise_final_submission"
+        ),
+        "duplicate_submit": (
+            "test_jaa09_negative_controls.py::"
+            "test_duplicate_submit_and_second_review_produce_no_second_receipt"
+        ),
+        "concurrent_submit": (
+            "test_jaa09_negative_controls.py::"
+            "test_one_jaa08_token_cannot_prepare_two_browser_submit_runs"
+        ),
+    }
+)
 REQUIRED_ACTIONS = (
     "open",
     "full_name",
@@ -134,15 +135,17 @@ REQUIRED_ACTIONS = (
     "review",
     "submit",
 )
-HARD_QUALITY_TARGETS: Mapping[str, int] = MappingProxyType({
-    "ats_parse_success_bp": 10_000,
-    "confirmed_without_receipt": 0,
-    "deterministic_replay_mismatch": 0,
-    "duplicate_submissions": 0,
-    "ineligible_submissions": 0,
-    "released_employer_claims_without_citations": 0,
-    "unsupported_released_claims": 0,
-})
+HARD_QUALITY_TARGETS: Mapping[str, int] = MappingProxyType(
+    {
+        "ats_parse_success_bp": 10_000,
+        "confirmed_without_receipt": 0,
+        "deterministic_replay_mismatch": 0,
+        "duplicate_submissions": 0,
+        "ineligible_submissions": 0,
+        "released_employer_claims_without_citations": 0,
+        "unsupported_released_claims": 0,
+    }
+)
 WITHHELD_REASON = "live_time_separated_shadow_and_metrics_not_evaluated"
 
 
@@ -190,9 +193,8 @@ def normalized_workflow_sha256(
         ):
             raise ValueError("shadow workflow target must be loopback HTTP")
         host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-        action["target_url"] = (
-            f"http://{host}:0{parsed.path}"
-            + (f"?{parsed.query}" if parsed.query else "")
+        action["target_url"] = f"http://{host}:0{parsed.path}" + (
+            f"?{parsed.query}" if parsed.query else ""
         )
     return _content_hash(document)
 
@@ -248,8 +250,7 @@ class FrozenShadowContract:
         if (
             self.baseline_revision != BASELINE_REVISION
             or self.baseline_tree != BASELINE_TREE
-            or self.baseline_source_content_revision
-            != BASELINE_SOURCE_CONTENT_REVISION
+            or self.baseline_source_content_revision != BASELINE_SOURCE_CONTENT_REVISION
         ):
             raise ValueError(
                 "shadow baseline must bind the standing JAA-09 source triple"
@@ -287,9 +288,7 @@ class FrozenShadowContract:
             or self.official_response_sha256 != RAW_RESPONSE_SHA256
             or self.dossier_sha256 != DOSSIER_SHA256
         ):
-            raise ValueError(
-                "shadow vacancy authority differs from standing JAA-09"
-            )
+            raise ValueError("shadow vacancy authority differs from standing JAA-09")
         if self.schema_version != "jaa10.frozen-shadow-contract.v2":
             raise ValueError("shadow contract schema is unsupported")
         expected_submit_event = normalized_submit_event_sha256(
@@ -300,18 +299,14 @@ class FrozenShadowContract:
             field_map_sha256=self.field_map_sha256,
         )
         if self.submit_event_sha256 != expected_submit_event:
-            raise ValueError(
-                "shadow submit-event hash differs from its frozen inputs"
-            )
+            raise ValueError("shadow submit-event hash differs from its frozen inputs")
 
     def document(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
             "baseline_revision": self.baseline_revision,
             "baseline_tree": self.baseline_tree,
-            "baseline_source_content_revision": (
-                self.baseline_source_content_revision
-            ),
+            "baseline_source_content_revision": (self.baseline_source_content_revision),
             "corpus_inventory_sha256": self.corpus_inventory_sha256,
             "official_response_sha256": self.official_response_sha256,
             "dossier_sha256": self.dossier_sha256,
@@ -329,9 +324,7 @@ class FrozenShadowContract:
             "required_actions": REQUIRED_ACTIONS,
             "required_interruption_points": REQUIRED_INTERRUPTION_POINTS,
             "mutation_test_nodes": dict(sorted(MUTATION_TEST_NODES.items())),
-            "hard_quality_targets": dict(
-                sorted(HARD_QUALITY_TARGETS.items())
-            ),
+            "hard_quality_targets": dict(sorted(HARD_QUALITY_TARGETS.items())),
         }
 
     @property
@@ -345,20 +338,18 @@ FROZEN_SHADOW_CONTRACT = FrozenShadowContract(
     ),
     application_id="graphcore-build-engineer",
     job_key=GRAPHCORE_JOB_KEY,
-    receipt_id=(
-        "96d907b1f9b181c291da12bf7910279bcc307182b5b4ce3c4de6ed717ba2514d"
-    ),
+    receipt_id=("fb1882d356c0dc0ea0e6bcd59da565a76f19d9fba21929948c7a5a4370d61d10"),
     receipt_payload_sha256=(
-        "184df396f3aac7f641adca129353d8eef8b29072bd805c0e447964c65e636b9f"
+        "747276c8b8076a0751167699dca4babd2829bd0a3baacfebdefb829bb9c7ba70"
     ),
     field_map_sha256=(
         "952eb9e97ca170dd45b333c4589130a29726d46e977fd4dfffe6df06c3c1141e"
     ),
     screenshot_sha256=(
-        "4aeea8f2b0dd2fd4e02b35a5b0eab2427da9658e57fba092b6bc9bedc6b2715c"
+        "2ef920ba2850b31b3bed8b6d294fe2d36d80e71fba7641b9dbaa41b241ebde04"
     ),
     submit_event_sha256=(
-        "592a8c32edd909ff7a1fd114c34d356a39184543ad18cb511374b54a67e2af85"
+        "6c1ded3ea24618457848ba37f3808059ee80b4ff3a6e94d88609f59d309a3b50"
     ),
 )
 
@@ -511,20 +502,15 @@ class ShadowObservation:
             self.submit_event_sha256,
         )
         if proof_values != observation_values:
-            raise ValueError(
-                "shadow submission proof differs from observation lineage"
-            )
+            raise ValueError("shadow submission proof differs from observation lineage")
         if (
             self.fixture_receipt.receipt_id != self.receipt_id
             or self.fixture_receipt.application_id
             != FROZEN_SHADOW_CONTRACT.application_id
             or self.fixture_receipt.job_key != FROZEN_SHADOW_CONTRACT.job_key
-            or self.fixture_receipt.payload_sha256
-            != self.receipt_payload_sha256
+            or self.fixture_receipt.payload_sha256 != self.receipt_payload_sha256
         ):
-            raise ValueError(
-                "shadow fixture receipt differs from observation lineage"
-            )
+            raise ValueError("shadow fixture receipt differs from observation lineage")
         expected_submit_event = fixture_submit_event_sha256(
             run_id=self.run_id,
             workflow_sha256=self.durable_workflow_sha256,
@@ -571,9 +557,7 @@ class ShadowObservation:
         ):
             raise ValueError("shadow observation cannot claim live or model work")
         if self.execution_claim != "structural_lineage_only":
-            raise ValueError(
-                "shadow observation cannot self-attest execution"
-            )
+            raise ValueError("shadow observation cannot self-attest execution")
         if tuple(row.injection_point for row in self.interruptions) != (
             REQUIRED_INTERRUPTION_POINTS
         ):
@@ -602,9 +586,7 @@ class ShadowObservation:
             "field_map_sha256": self.field_map_sha256,
             "screenshot_sha256": self.screenshot_sha256,
             "submit_event_sha256": self.submit_event_sha256,
-            "normalized_submit_event_sha256": (
-                self.normalized_submit_event_sha256
-            ),
+            "normalized_submit_event_sha256": (self.normalized_submit_event_sha256),
             "submission_proof": {
                 "release_manifest_sha256": (
                     self.submission_proof.release_manifest_sha256
@@ -614,13 +596,9 @@ class ShadowObservation:
                 "receipt_payload_sha256": (
                     self.submission_proof.receipt_payload_sha256
                 ),
-                "screenshot_sha256": (
-                    self.submission_proof.screenshot_sha256
-                ),
+                "screenshot_sha256": (self.submission_proof.screenshot_sha256),
                 "field_map_sha256": self.submission_proof.field_map_sha256,
-                "submit_event_sha256": (
-                    self.submission_proof.submit_event_sha256
-                ),
+                "submit_event_sha256": (self.submission_proof.submit_event_sha256),
             },
             "fixture_receipt": self.fixture_receipt.document(),
             "action_elapsed_ms": dict(sorted(self.action_elapsed_ms.items())),
@@ -644,33 +622,23 @@ def _validate_shadow_observations(
     observations: tuple[ShadowObservation, ...],
 ) -> None:
     if contract != FROZEN_SHADOW_CONTRACT:
-        raise ValueError(
-            "shadow evidence requires the canonical frozen contract"
-        )
+        raise ValueError("shadow evidence requires the canonical frozen contract")
     if len(observations) < 2 or not all(
         isinstance(row, ShadowObservation) for row in observations
     ):
         raise ValueError("shadow evidence requires two typed observations")
-    times = tuple(
-        datetime.fromisoformat(row.observed_at) for row in observations
-    )
+    times = tuple(datetime.fromisoformat(row.observed_at) for row in observations)
     if tuple(sorted(times)) != times or len(set(times)) != len(times):
         raise ValueError("shadow observations must be time-separated and ordered")
     if any(
         later - earlier < MINIMUM_SHADOW_SEPARATION
         for earlier, later in zip(times, times[1:], strict=False)
     ):
-        raise ValueError(
-            "shadow observations must be separated by at least 24 hours"
-        )
+        raise ValueError("shadow observations must be separated by at least 24 hours")
     if len({row.observation_id for row in observations}) != len(observations):
         raise ValueError("shadow observation IDs must be unique")
-    if len({
-        row.release_manifest_sha256 for row in observations
-    }) != len(observations):
-        raise ValueError(
-            "shadow observations require distinct release manifests"
-        )
+    if len({row.release_manifest_sha256 for row in observations}) != len(observations):
+        raise ValueError("shadow observations require distinct release manifests")
     for row in observations:
         actual = (
             row.workflow_sha256,
@@ -689,9 +657,7 @@ def _validate_shadow_observations(
             contract.submit_event_sha256,
         )
         if actual != expected:
-            raise ValueError(
-                "shadow observation differs from its frozen golden set"
-            )
+            raise ValueError("shadow observation differs from its frozen golden set")
 
 
 @dataclass(frozen=True)
@@ -725,23 +691,17 @@ class WithheldShadowEvidence:
 
     @property
     def release_manifest_sha256s(self) -> tuple[str, ...]:
-        return tuple(
-            row.release_manifest_sha256 for row in self.observations
-        )
+        return tuple(row.release_manifest_sha256 for row in self.observations)
 
     def document(self, *, include_identity: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "schema_version": self.schema_version,
             "contract": self.contract.document(),
             "contract_sha256": self.contract.contract_sha256,
-            "observations": [
-                row.document() for row in self.observations
-            ],
+            "observations": [row.document() for row in self.observations],
             "observation_sha256s": self.observation_sha256s,
             "release_manifest_sha256s": self.release_manifest_sha256s,
-            "hard_quality_targets": dict(
-                sorted(self.hard_quality_targets.items())
-            ),
+            "hard_quality_targets": dict(sorted(self.hard_quality_targets.items())),
             "metrics_evaluated": False,
             "production_certification": "withheld",
             "withheld_reason": self.withheld_reason,
@@ -757,13 +717,9 @@ class WithheldShadowEvidence:
             not isinstance(self.contract, FrozenShadowContract)
             or self.contract != FROZEN_SHADOW_CONTRACT
         ):
-            raise ValueError(
-                "withheld evidence requires the canonical frozen contract"
-            )
+            raise ValueError("withheld evidence requires the canonical frozen contract")
         _validate_shadow_observations(self.contract, self.observations)
-        if len(set(self.observation_sha256s)) != len(
-            self.observation_sha256s
-        ):
+        if len(set(self.observation_sha256s)) != len(self.observation_sha256s):
             raise ValueError("shadow observation identities must be unique")
         if dict(self.hard_quality_targets) != HARD_QUALITY_TARGETS:
             raise ValueError("shadow hard-quality targets differ from policy")
@@ -790,18 +746,14 @@ def compile_withheld_shadow_evidence(
     if not isinstance(contract, FrozenShadowContract):
         raise TypeError("shadow compilation requires a frozen contract")
     if contract != FROZEN_SHADOW_CONTRACT:
-        raise ValueError(
-            "shadow compilation requires the canonical frozen contract"
-        )
+        raise ValueError("shadow compilation requires the canonical frozen contract")
     _validate_shadow_observations(contract, observations)
     body = {
         "schema_version": "jaa10.withheld-shadow-evidence.v4",
         "contract": contract.document(),
         "contract_sha256": contract.contract_sha256,
         "observations": [row.document() for row in observations],
-        "observation_sha256s": tuple(
-            row.observation_sha256 for row in observations
-        ),
+        "observation_sha256s": tuple(row.observation_sha256 for row in observations),
         "release_manifest_sha256s": tuple(
             row.release_manifest_sha256 for row in observations
         ),

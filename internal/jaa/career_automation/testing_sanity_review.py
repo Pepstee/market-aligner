@@ -25,11 +25,13 @@ class FixturePassBackend(Backend):
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
         return LLMResponse(
-            text=json.dumps({
-                "schema_version": RESULT_SCHEMA_VERSION,
-                "verdict": "pass",
-                "findings": [],
-            }),
+            text=json.dumps(
+                {
+                    "schema_version": RESULT_SCHEMA_VERSION,
+                    "verdict": "pass",
+                    "findings": [],
+                }
+            ),
             model="scripted-fixture-v1",
         )
 
@@ -41,6 +43,7 @@ def fixture_pass_receipt(
     questions,
     state_root: Path,
     vacancy_requirements=None,
+    vacancy_review_material=None,
 ) -> SanityReviewReceipt:
     client = LLMClient(
         backend=FixturePassBackend(),
@@ -57,6 +60,7 @@ def fixture_pass_receipt(
             artifacts=artifacts,
             questions=questions,
             vacancy_requirements=vacancy_requirements,
+            vacancy_review_material=vacancy_review_material,
         ),
         client=client,
     )

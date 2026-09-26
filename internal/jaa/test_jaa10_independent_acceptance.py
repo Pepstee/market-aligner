@@ -111,8 +111,7 @@ def _observation(
             payload_sha256=golden.receipt_payload_sha256,
         ),
         action_elapsed_ms={
-            action: index
-            for index, action in enumerate(REQUIRED_ACTIONS, start=1)
+            action: index for index, action in enumerate(REQUIRED_ACTIONS, start=1)
         },
         browser_launch_count=1,
         database_bytes=4096,
@@ -120,11 +119,7 @@ def _observation(
         interruptions=tuple(
             InterruptionObservation(
                 point,
-                (
-                    "recovered"
-                    if point != "post_mark_pre_click"
-                    else "fail_closed"
-                ),
+                ("recovered" if point != "post_mark_pre_click" else "fail_closed"),
                 0 if point == "post_mark_pre_click" else 1,
                 0 if point == "post_mark_pre_click" else 1,
             )
@@ -152,9 +147,7 @@ def _frozen_fixture_inputs(tmp_path: Path):
         authority.company,
         authority.requirement_anchors[0].text,
     )
-    assert authority.corpus_identity == (
-        FROZEN_SHADOW_CONTRACT.corpus_inventory_sha256
-    )
+    assert authority.corpus_identity == (FROZEN_SHADOW_CONTRACT.corpus_inventory_sha256)
     assert authority.raw_response_sha256 == (
         FROZEN_SHADOW_CONTRACT.official_response_sha256
     )
@@ -204,7 +197,11 @@ def _execute_frozen_observation(
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
         elapsed: dict[str, int] = {}
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: authority.consumed_at,
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -218,9 +215,7 @@ def _execute_frozen_observation(
                     materialized_values=values,
                     release_authority=authority,
                 )
-                elapsed[action.step_id] = (
-                    perf_counter_ns() - started
-                ) // 1_000_000
+                elapsed[action.step_id] = (perf_counter_ns() - started) // 1_000_000
                 assert completed is not None
             screenshot_bytes = len(page.screenshot(full_page=True))
             browser.close()
@@ -242,13 +237,9 @@ def _execute_frozen_observation(
             run_id=run_id,
             workflow_sha256=workflow.content_hash,
             step_id="submit",
-            release_manifest_sha256=str(
-                dispatch["release_manifest_hash"]
-            ),
+            release_manifest_sha256=str(dispatch["release_manifest_hash"]),
             receipt_id=str(outputs["receipt_id"]),
-            receipt_payload_sha256=str(
-                outputs["receipt_payload_sha256"]
-            ),
+            receipt_payload_sha256=str(outputs["receipt_payload_sha256"]),
             screenshot_sha256=str(outputs["screenshot_sha256"]),
             field_map_sha256=str(outputs["field_map_sha256"]),
         )
@@ -256,16 +247,11 @@ def _execute_frozen_observation(
         normalized_event = normalized_submit_event_sha256(
             workflow_sha256=workflow_sha256,
             receipt_id=str(outputs["receipt_id"]),
-            receipt_payload_sha256=str(
-                outputs["receipt_payload_sha256"]
-            ),
+            receipt_payload_sha256=str(outputs["receipt_payload_sha256"]),
             screenshot_sha256=str(outputs["screenshot_sha256"]),
             field_map_sha256=str(outputs["field_map_sha256"]),
         )
-        assert (
-            normalized_event
-            == FROZEN_SHADOW_CONTRACT.submit_event_sha256
-        )
+        assert normalized_event == FROZEN_SHADOW_CONTRACT.submit_event_sha256
         return ShadowObservation(
             observation_id=observation_id,
             observed_at=observed_at.isoformat(),
@@ -273,26 +259,18 @@ def _execute_frozen_observation(
             step_id="submit",
             workflow_sha256=workflow_sha256,
             durable_workflow_sha256=workflow.content_hash,
-            release_manifest_sha256=str(
-                dispatch["release_manifest_hash"]
-            ),
+            release_manifest_sha256=str(dispatch["release_manifest_hash"]),
             receipt_id=str(outputs["receipt_id"]),
-            receipt_payload_sha256=str(
-                outputs["receipt_payload_sha256"]
-            ),
+            receipt_payload_sha256=str(outputs["receipt_payload_sha256"]),
             field_map_sha256=str(outputs["field_map_sha256"]),
             screenshot_sha256=str(outputs["screenshot_sha256"]),
             submit_event_sha256=actual_submit_event,
             normalized_submit_event_sha256=normalized_event,
             submission_proof=SubmissionProof(
-                release_manifest_sha256=str(
-                    dispatch["release_manifest_hash"]
-                ),
+                release_manifest_sha256=str(dispatch["release_manifest_hash"]),
                 token_sha256=issued.token_sha256,
                 receipt_id=str(outputs["receipt_id"]),
-                receipt_payload_sha256=str(
-                    outputs["receipt_payload_sha256"]
-                ),
+                receipt_payload_sha256=str(outputs["receipt_payload_sha256"]),
                 screenshot_sha256=str(outputs["screenshot_sha256"]),
                 field_map_sha256=str(outputs["field_map_sha256"]),
                 submit_event_sha256=actual_submit_event,
@@ -356,7 +334,11 @@ def _execute_interruption(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: authority.consumed_at,
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -392,6 +374,7 @@ def _execute_interruption(
                 resumed = LocalBrowserExecutor(
                     store,
                     repository_root=ROOT,
+                    clock=lambda: authority.consumed_at,
                 )
                 resumed_browser = playwright.chromium.launch(headless=True)
                 resumed_page = resumed_browser.new_page()
@@ -444,6 +427,7 @@ def _execute_interruption(
                 resumed = LocalBrowserExecutor(
                     store,
                     repository_root=ROOT,
+                    clock=lambda: authority.consumed_at,
                 )
                 resumed_browser = playwright.chromium.launch(headless=True)
                 resumed_page = resumed_browser.new_page()
@@ -485,7 +469,11 @@ def _execute_interruption(
                     store.submit_dispatch(run_id)["state"]  # type: ignore[index]
                     == "release_consumed"
                 )
-                resumed = LocalBrowserExecutor(store, repository_root=ROOT)
+                resumed = LocalBrowserExecutor(
+                    store,
+                    repository_root=ROOT,
+                    clock=lambda: authority.consumed_at,
+                )
                 resumed_browser = playwright.chromium.launch(headless=True)
                 resumed_page = resumed_browser.new_page()
                 resumed.execute_next(
@@ -531,6 +519,7 @@ def _execute_interruption(
                 resumed = LocalBrowserExecutor(
                     store,
                     repository_root=ROOT,
+                    clock=lambda: authority.consumed_at,
                 )
                 resumed_browser = playwright.chromium.launch(headless=True)
                 resumed_page = resumed_browser.new_page()
@@ -580,7 +569,11 @@ def _execute_interruption(
                 browser.close()
                 first_receipt = fixture.receipt
                 assert first_receipt is not None
-                resumed = LocalBrowserExecutor(store, repository_root=ROOT)
+                resumed = LocalBrowserExecutor(
+                    store,
+                    repository_root=ROOT,
+                    clock=lambda: authority.consumed_at,
+                )
                 resumed_browser = playwright.chromium.launch(headless=True)
                 resumed_page = resumed_browser.new_page()
                 resumed.execute_next(
@@ -597,10 +590,7 @@ def _execute_interruption(
                 assert dispatch is not None
                 assert dispatch["state"] == "receipt_recorded"
                 assert dispatch["receipt_id"] == first_receipt.receipt_id
-                assert (
-                    dispatch["receipt_payload_hash"]
-                    == first_receipt.payload_sha256
-                )
+                assert dispatch["receipt_payload_hash"] == first_receipt.payload_sha256
                 result = InterruptionObservation(
                     injection_point,
                     "recovered",
@@ -609,8 +599,7 @@ def _execute_interruption(
                 )
         events = store.events(run_id)
         click_intent_count = sum(
-            row["event_type"] == "submit_click_started"
-            for row in events
+            row["event_type"] == "submit_click_started" for row in events
         )
         if injection_point == "post_mark_pre_click":
             assert click_intent_count == 1
@@ -622,15 +611,10 @@ def _execute_interruption(
 
 def test_frozen_shadow_contract_binds_standing_jaa09_real_vacancy_set() -> None:
     golden = FROZEN_SHADOW_CONTRACT
-    assert golden.baseline_revision == (
-        "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8"
-    )
-    assert golden.baseline_tree == (
-        "3d4df58429daa7e97310552c8556945720627915"
-    )
+    assert golden.baseline_revision == ("7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8")
+    assert golden.baseline_tree == ("3d4df58429daa7e97310552c8556945720627915")
     assert golden.baseline_source_content_revision == (
-        "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4d"
-        "a4906e8d74241b7a1ec04d2e481db95a"
+        "sha256:eceb58ce3ac49025fb4e0ee65ff7cc4da4906e8d74241b7a1ec04d2e481db95a"
     )
     assert golden.workflow_sha256 == (
         "0577bae68e8d8372e2cb42caa42394439dac286a92e63ef95bb84e40245ed100"
@@ -667,9 +651,10 @@ def test_time_separated_shadow_evidence_is_content_addressed_and_withheld() -> N
     assert evidence.evidence_kind == "synthetic_shadow"
     assert evidence.contract == FROZEN_SHADOW_CONTRACT
     assert evidence.observations == observations
-    assert tuple(
-        row.observation_sha256 for row in observations
-    ) == evidence.observation_sha256s
+    assert (
+        tuple(row.observation_sha256 for row in observations)
+        == evidence.observation_sha256s
+    )
     assert evidence.release_manifest_sha256s == tuple(
         row.release_manifest_sha256 for row in observations
     )
@@ -721,9 +706,9 @@ def test_two_frozen_fixture_runs_with_synthetic_shadow_times_compile(
         observations,
     )
     evidence.verify()
-    assert len(
-        {row.release_manifest_sha256 for row in observations}
-    ) == len(observations)
+    assert len({row.release_manifest_sha256 for row in observations}) == len(
+        observations
+    )
     assert evidence.release_manifest_sha256s == tuple(
         row.release_manifest_sha256 for row in observations
     )

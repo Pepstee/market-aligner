@@ -241,3 +241,47 @@ def run() -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
+
+
+def test_extract_job_preserves_positional_client_and_profile_calls(tmp_path):
+    import pytest
+    client, backend = _fresh_client(tmp_path)
+    positional = caps.extract_job(FIXTURE_RAW, client)
+    keyword = caps.extract_job(FIXTURE_RAW, client=client)
+    with_profile = caps.extract_job(FIXTURE_RAW, {"tracks": {}}, client=client)
+    assert positional == keyword == with_profile
+    validate_json(positional, load_schema("job_extract"))
+    with pytest.raises(TypeError, match="client twice"):
+        caps.extract_job(FIXTURE_RAW, client, client=client)
+
+
+def test_creative_extraction_and_ratings_use_separate_validated_contracts(tmp_path):
+    client, backend = _fresh_client(tmp_path)
+    raw = {"board": "fixture", "job_id": "creative", "url": "https://example.test/creative",
+           "raw_json": {"title": "신입 UX 디자이너", "company": "Example"},
+           "raw_text": "신입 UX UI 디자이너 Figma 피그마 Blender 원격 현장 설치"}
+    row = caps.extract_job(raw, client=client, mode="creative")
+    validate_json(row, load_schema("creative_job_extract"))
+    assert row["mapped_career"] == "UX_UI"
+    assert row["entry_level"] is True
+    assert row["required_software"] == ["blender", "figma"]
+    assert row["remote_flag"] is True
+    assert row["site_intensity"] > 0
+    axes = caps.rate_axes(row, {}, client=client, mode="creative")
+    validate_json(axes, load_schema("creative_axis_ratings"))
+    assert set(axes) == {"visualization", "spatial_relevance", "cs_usefulness", "english_usefulness",
+                         "freelance_potential", "market_demand", "barrier_to_entry"}
+    assert caps.extract_job(FIXTURE_RAW, client=client)["mapped_career"] == "AI_Automation_Engineer"
+
+
+def test_creative_portfolio_assessment_preserves_advisory_fields(tmp_path):
+    client, backend = _fresh_client(tmp_path)
+    result = caps.assess_portfolio([{"title": "UX UI exhibition", "description": "Figma Blender prototype"}],
+                                   client=client, mode="creative")
+    validate_json(result, load_schema("creative_portfolio_assess"))
+    assert {r["career"] for r in result["per_field"]} == {"UX_UI", "Exhibition"}
+    assert result["detected_skills"] == ["blender", "figma"]
+    assert caps.assess_portfolio([], client=client, mode="creative")["per_field"] == []
+    import pytest
+    with pytest.raises(ValueError, match="portfolio mode"):
+        caps.assess_portfolio([], client=client, mode="unknown")

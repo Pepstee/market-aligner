@@ -10,6 +10,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from market_aligner.applications.handoff import (
@@ -47,6 +48,11 @@ class HandoffReference:
     issued_at: str
     valid_until: str | None
     issuer_id: str = "market-aligner"
+
+    def __post_init__(self) -> None:
+        """Freeze supplied evidence before publication, as retained issuance did."""
+        object.__setattr__(self, "exact_bytes", bytes(self.exact_bytes))
+        object.__setattr__(self, "subject", MappingProxyType(dict(self.subject)))
 
 
 @dataclass(frozen=True)
@@ -201,6 +207,7 @@ def write_protected_handoff_bundle(
     trust_root_id: str,
     issued_at: str,
     source_job_key: str,
+    visible_listing_text_bytes: bytes | None = None,
 ) -> WrittenHandoffBundle:
     """Create or verify one content-addressed protected-local-outbox bundle.
 
@@ -221,6 +228,59 @@ def write_protected_handoff_bundle(
         raise HandoffProducerError("handoff exact bytes are unavailable")
     producer_commit = payload["producer"]["commit_sha"]
     handoff_root = handoff.root_sha256
+    if visible_listing_text_bytes is not None:
+        # The optional JAA review integration owns its projection contract.
+        # Preserve the original capture separately; never derive it from HTML.
+        from career_automation.review_material import (
+            REVIEW_TEXT_PROJECTION_ID, REVIEW_TEXT_PROJECTION_SCHEMA,
+            ReviewMaterialError, _project_visible_text,
+        )
+        try:
+            _, text_sha = _project_visible_text(visible_listing_text_bytes)
+        except ReviewMaterialError as exc:
+            raise HandoffProducerError(str(exc)) from exc
+        references = dict(references)
+        keys = {"vacancy.visible_listing_text", "vacancy.review_text_projection"}
+        if keys.intersection(references):
+            raise HandoffProducerError("review references must be generated from the exact capture")
+        try:
+            raw = references["vacancy.raw_listing"]
+            snapshot = references["vacancy.snapshot"]
+        except KeyError as exc:
+            raise HandoffProducerError("review capture requires raw listing and snapshot") from exc
+        vacancy = payload["vacancy"]
+        source_subject = {"job_key": payload["job_key"],
+                          "vacancy_snapshot_sha256": vacancy["vacancy_snapshot_sha256"]}
+        for ref, key, type_id, schema in (
+            (raw, "raw_listing_sha256", "raw_listing", "market-aligner.raw-listing-evidence.v1"),
+            (snapshot, "vacancy_snapshot_sha256", "vacancy_snapshot", "market-aligner.vacancy-snapshot.v1"),
+        ):
+            if (not isinstance(ref, HandoffReference)
+                    or hashlib.sha256(ref.exact_bytes).hexdigest() != vacancy[key]
+                    or dict(ref.subject) != source_subject
+                    or ref.type_id != type_id or ref.schema_version != schema):
+                raise HandoffProducerError("review source differs from handoff")
+        if raw.valid_until is None or raw.valid_until != snapshot.valid_until:
+            raise HandoffProducerError("review source validity differs")
+        projection = canonical_json_bytes({
+            **source_subject, "raw_listing_sha256": vacancy["raw_listing_sha256"],
+            "review_text_sha256": text_sha, "projection_id": REVIEW_TEXT_PROJECTION_ID,
+            "schema_version": REVIEW_TEXT_PROJECTION_SCHEMA,
+        })
+        projection_subject = {**source_subject, "handoff_root_sha256": handoff_root,
+                              "raw_listing_sha256": vacancy["raw_listing_sha256"],
+                              "review_text_sha256": text_sha}
+        for key, exact, type_id, schema in (
+            ("vacancy.visible_listing_text", visible_listing_text_bytes,
+             "visible_listing_text", "market-aligner.visible-listing-text.v1"),
+            ("vacancy.review_text_projection", projection,
+             "review_text_projection", REVIEW_TEXT_PROJECTION_SCHEMA),
+        ):
+            references[key] = HandoffReference(
+                exact_bytes=exact, type_id=type_id, schema_version=schema,
+                subject=projection_subject, issued_at=issued_at,
+                valid_until=raw.valid_until, issuer_id="market-aligner",
+            )
     rows: list[dict[str, str]] = []
     materialized: list[tuple[str, bytes, bytes, str, str]] = []
     for key in sorted(references):

@@ -1,0 +1,5 @@
+# Isolated wheel-build tools; separate lifecycle from runtime/test dependencies.
+pip==25.1.1
+setuptools==80.9.0
+wheel==0.45.1
+packaging==26.2

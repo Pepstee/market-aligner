@@ -29,6 +29,11 @@ def _git_repository(destination: Path) -> Path:
             continue
         relative = Path(os.fsdecode(encoded))
         source = ROOT / relative
+        # A reconciliation branch may intentionally delete a formerly tracked
+        # historical fixture.  Build from the caller's current worktree bytes,
+        # not from the index's stale path list.
+        if not os.path.lexists(source):
+            continue
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.is_symlink():

@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 
 ROOT = Path(__file__).resolve().parent
 VALIDATOR = Path("scripts/accept_jaa03_receipt.py")
@@ -17,34 +19,45 @@ VALIDATOR = Path("scripts/accept_jaa03_receipt.py")
 
 def _run(root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        (sys.executable, str(VALIDATOR)), cwd=root, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        (sys.executable, str(VALIDATOR)),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 def _git(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ("git", *argv), cwd=root, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ("git", *argv),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 def _canonical(document: object) -> bytes:
     return (
-        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
     ).encode()
 
 
 @pytest.fixture()
 def certified_repository(tmp_path: Path) -> Path:
-    clone = tmp_path / "certified"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    clone = clone_jaa_repository(ROOT, tmp_path / "certified")
+    assert (
+        _git(
+            clone, "config", "user.name", "independent JAA-03 receipt tester"
+        ).returncode
+        == 0
     )
-    assert copied.returncode == 0, copied.stderr
-    assert _git(clone, "config", "user.name", "independent JAA-03 receipt tester").returncode == 0
-    assert _git(clone, "config", "user.email", "jaa03-tester@example.test").returncode == 0
+    assert (
+        _git(clone, "config", "user.email", "jaa03-tester@example.test").returncode == 0
+    )
     return clone
 
 
@@ -69,7 +82,10 @@ def test_historical_receipt_acceptance_survives_a_later_source_revision(
     readme = certified_repository / "README.md"
     readme.write_bytes(readme.read_bytes() + b"\nindependent source-revision drift\n")
     assert _git(certified_repository, "add", "README.md").returncode == 0
-    assert _git(certified_repository, "commit", "-m", "later source revision").returncode == 0
+    assert (
+        _git(certified_repository, "commit", "-m", "later source revision").returncode
+        == 0
+    )
     accepted = _run(certified_repository)
     assert accepted.returncode == 0, accepted.stderr
 
@@ -77,7 +93,9 @@ def test_historical_receipt_acceptance_survives_a_later_source_revision(
 def test_jaa03_rehashed_runtime_identity_substitution_fails_closed(
     certified_repository: Path,
 ) -> None:
-    receipt = next((certified_repository / "runtime_evidence" / "jaa03").glob("sha256-*.json"))
+    receipt = next(
+        (certified_repository / "runtime_evidence" / "jaa03").glob("sha256-*.json")
+    )
     document = json.loads(receipt.read_text(encoding="utf-8"))
     runtime = document["runtime"]
     assert isinstance(runtime, dict)
@@ -92,7 +110,9 @@ def test_jaa03_receipt_tampering_fails_closed(
     certified_repository: Path,
     attack: str,
 ) -> None:
-    receipt = next((certified_repository / "runtime_evidence" / "jaa03").glob("sha256-*.json"))
+    receipt = next(
+        (certified_repository / "runtime_evidence" / "jaa03").glob("sha256-*.json")
+    )
     if attack == "byte_tamper":
         receipt.write_bytes(receipt.read_bytes() + b" ")
     else:

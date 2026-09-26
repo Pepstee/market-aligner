@@ -40,9 +40,6 @@ from career_automation.human_evidence_ingestion import (
     AUTHOR_IDENTITY,
     EXPECTED_HUMAN_AUTHORITY_SHA256,
     EXPECTED_RECORD_COUNT,
-    EXPECTED_STATUS,
-    INGESTION_POLICY_HASH,
-    INGESTION_SCHEMA_VERSION,
     VERIFIER_IDENTITY,
     ingest_human_evidence_schema,
     validate_ingestion_integrity,
@@ -57,13 +54,14 @@ AS_OF = date(2027, 1, 1)
 # Computed deterministically from the ingestion policy, evidence statements,
 # claim IDs, and verifier provenance — all fixed constants.
 EXPECTED_PROJECTION_HASH = (
-    "82ba6ca979b66fea25b1e987c50b8cdbbeca746869d0563a24480892c7ddab00"
+    "6df137a3709d7c4600101ba864896900c0ffb56e7b290247972434a1655786ca"
 )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _graph(tmp_path: Path) -> tuple[Path, tuple]:
     """Ingest once and return (graph_path, evidence_tuple)."""
@@ -76,6 +74,7 @@ def _graph(tmp_path: Path) -> tuple[Path, tuple]:
 # ---------------------------------------------------------------------------
 # Core projection assertions
 # ---------------------------------------------------------------------------
+
 
 def test_ingestion_produces_exactly_18_records(tmp_path: Path) -> None:
     _, evidence = _graph(tmp_path)
@@ -90,9 +89,7 @@ def test_projection_hash_matches_stable_fixture(tmp_path: Path) -> None:
 def test_every_evidence_has_non_empty_claim_lineage(tmp_path: Path) -> None:
     _, evidence = _graph(tmp_path)
     for ev in evidence:
-        assert len(ev.claim_lineage) >= 1, (
-            f"empty claim_lineage for {ev.evidence_id}"
-        )
+        assert len(ev.claim_lineage) >= 1, f"empty claim_lineage for {ev.evidence_id}"
 
 
 def test_all_18_evidence_ids_from_yaml_appear_in_projection(tmp_path: Path) -> None:
@@ -109,13 +106,18 @@ def test_all_18_evidence_ids_from_yaml_appear_in_projection(tmp_path: Path) -> N
 
 def test_all_projected_evidence_uses_verified_claim_proof_class(tmp_path: Path) -> None:
     _, evidence = _graph(tmp_path)
-    wrong = [(ev.evidence_id, ev.proof_class) for ev in evidence if ev.proof_class != "verified_claim"]
+    wrong = [
+        (ev.evidence_id, ev.proof_class)
+        for ev in evidence
+        if ev.proof_class != "verified_claim"
+    ]
     assert not wrong, f"non-downgraded proof classes: {wrong}"
 
 
 # ---------------------------------------------------------------------------
 # Idempotency
 # ---------------------------------------------------------------------------
+
 
 def test_ingestion_is_idempotent(tmp_path: Path) -> None:
     graph_path = tmp_path / "candidate.sqlite3"
@@ -136,7 +138,10 @@ def test_ingestion_is_idempotent(tmp_path: Path) -> None:
 # Tamper detection
 # ---------------------------------------------------------------------------
 
-def test_statement_tamper_is_detected_by_candidate_graph_evidence(tmp_path: Path) -> None:
+
+def test_statement_tamper_is_detected_by_candidate_graph_evidence(
+    tmp_path: Path,
+) -> None:
     graph_path, _ = _graph(tmp_path)
 
     # Modify the statement in the DB without updating content_hash —
@@ -181,6 +186,7 @@ def test_statement_tamper_is_detected_by_validate_ingestion_integrity(
 # Author / verifier separation
 # ---------------------------------------------------------------------------
 
+
 def test_author_and_verifier_identities_are_distinct() -> None:
     assert AUTHOR_IDENTITY != VERIFIER_IDENTITY
     assert f"sha256:{EXPECTED_HUMAN_AUTHORITY_SHA256}" in AUTHOR_IDENTITY
@@ -202,7 +208,9 @@ def test_evidence_provenance_uses_author_identity(tmp_path: Path) -> None:
         assert str(row["source_identity"]) == AUTHOR_IDENTITY
 
 
-def test_verification_decision_provenance_uses_verifier_identity(tmp_path: Path) -> None:
+def test_verification_decision_provenance_uses_verifier_identity(
+    tmp_path: Path,
+) -> None:
     graph_path, _ = _graph(tmp_path)
     with sqlite3.connect(graph_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -256,7 +264,10 @@ def test_no_decision_provenance_uses_author_identity(tmp_path: Path) -> None:
 # Schema / authority / status / hash validation (fail-closed)
 # ---------------------------------------------------------------------------
 
-def test_wrong_schema_version_rejected(tmp_path: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+
+def test_wrong_schema_version_rejected(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
     yaml_doc = yaml.safe_load(YAML_PATH.read_text(encoding="utf-8"))
     yaml_doc["schema_version"] = "jaa05.candidate-evidence.v99"
     bad_yaml = tmp_path / "bad.yaml"
@@ -334,6 +345,7 @@ def test_source_packet_sha256_invalid_format_rejected(tmp_path: Path) -> None:
 # Citation matching (Fable architecture: separate vacancy/candidate namespaces)
 # ---------------------------------------------------------------------------
 
+
 def _citation_requirement(requirement_id: str) -> Requirement:
     """Build a Requirement that accepts verified_claim proof class."""
     return Requirement(
@@ -395,12 +407,18 @@ def test_citation_matching_accepts_valid_claim_lineage(tmp_path: Path) -> None:
         confidence_bp=9000,
         basis="direct",
         rationale="Citation binds E-001 claim_lineage entry to the requirement.",
-        receipt=_citation_receipt(requirement, evidence_map, as_of=AS_OF, policy=policy),
+        receipt=_citation_receipt(
+            requirement, evidence_map, as_of=AS_OF, policy=policy
+        ),
         citations=(("E-001", real_claim_id),),
     )
 
-    result = evaluate_match(requirement, proposal, evidence_map, as_of=AS_OF, policy=policy)
-    assert result.decision == "matched", f"expected matched, got {result.decision}: {result.reason}"
+    result = evaluate_match(
+        requirement, proposal, evidence_map, as_of=AS_OF, policy=policy
+    )
+    assert result.decision == "matched", (
+        f"expected matched, got {result.decision}: {result.reason}"
+    )
     assert "E-001" in result.evidence_ids
 
 
@@ -422,11 +440,15 @@ def test_wrong_lineage_claim_id_rejected(tmp_path: Path) -> None:
         confidence_bp=9999,
         basis="direct",
         rationale="Deliberately cites a claim_id not present in E-001 claim_lineage.",
-        receipt=_citation_receipt(requirement, evidence_map, as_of=AS_OF, policy=policy),
+        receipt=_citation_receipt(
+            requirement, evidence_map, as_of=AS_OF, policy=policy
+        ),
         citations=(("E-001", "nonexistent-claim-not-in-lineage"),),
     )
 
-    result = evaluate_match(requirement, proposal, evidence_map, as_of=AS_OF, policy=policy)
+    result = evaluate_match(
+        requirement, proposal, evidence_map, as_of=AS_OF, policy=policy
+    )
     assert result.decision == "no_match", (
         f"expected no_match for wrong claim_id, got {result.decision}: {result.reason}"
     )
@@ -453,7 +475,9 @@ def test_citation_mixed_valid_invalid_releasability_is_no_match(tmp_path: Path) 
     _invalid_stmt = "synthetic non-releasable evidence for mixed-citation test"
     _invalid_sha = hashlib.sha256(_invalid_stmt.encode()).hexdigest()
     _invalid_claim_id = "claim-synthetic-nonreleasable"
-    _invalid_claim_sha = hashlib.sha256(b"synthetic-claim-content-nonreleasable").hexdigest()
+    _invalid_claim_sha = hashlib.sha256(
+        b"synthetic-claim-content-nonreleasable"
+    ).hexdigest()
     ev_invalid = Evidence(
         evidence_id="E-NONRELEASABLE",
         version=1,
@@ -482,25 +506,34 @@ def test_citation_mixed_valid_invalid_releasability_is_no_match(tmp_path: Path) 
             "Cites one releasable evidence (E-001) and one whose claim resolves lineage "
             "but whose approval state is pending — must still be no_match."
         ),
-        receipt=_citation_receipt(requirement, evidence_map, as_of=AS_OF, policy=policy),
+        receipt=_citation_receipt(
+            requirement, evidence_map, as_of=AS_OF, policy=policy
+        ),
         citations=(
             ("E-001", valid_claim_id),
             ("E-NONRELEASABLE", _invalid_claim_id),
         ),
     )
 
-    result = evaluate_match(requirement, proposal, evidence_map, as_of=AS_OF, policy=policy)
+    result = evaluate_match(
+        requirement, proposal, evidence_map, as_of=AS_OF, policy=policy
+    )
     assert result.decision == "no_match", (
         f"expected no_match for mixed valid/non-releasable citations, "
         f"got {result.decision}: {result.reason}"
     )
-    assert "not releasable" in result.reason or "ineligible" in result.reason or "pair" in result.reason
+    assert (
+        "not releasable" in result.reason
+        or "ineligible" in result.reason
+        or "pair" in result.reason
+    )
 
 
 # ---------------------------------------------------------------------------
 # Hardening: per-field negative tests (source_packet, locator bytes, secret,
 # negative flag, valid_until, and preflight atomicity)
 # ---------------------------------------------------------------------------
+
 
 def test_source_packet_sha_declared_mismatch_rejected(tmp_path: Path) -> None:
     """A well-formed but wrong source_packet_sha256 at document root is rejected."""
@@ -571,7 +604,9 @@ def test_valid_until_nonnull_rejected(tmp_path: Path) -> None:
         ingest_human_evidence_schema(graph_path, bad_yaml)
 
 
-def test_preflight_conflict_on_last_record_leaves_no_partial_rows(tmp_path: Path) -> None:
+def test_preflight_conflict_on_last_record_leaves_no_partial_rows(
+    tmp_path: Path,
+) -> None:
     """Locked preflight scans all 18 records before writes; E-018 conflict rolls back.
 
     Plants a conflicting row only for E-018 (the final record).  If preflight ran
@@ -588,7 +623,9 @@ def test_preflight_conflict_on_last_record_leaves_no_partial_rows(tmp_path: Path
     conn = graph.connect()
     try:
         conn.execute("BEGIN")
-        fake_prov_id = "prov-" + hashlib.sha256(b"test-e018-conflict-prov").hexdigest()[:24]
+        fake_prov_id = (
+            "prov-" + hashlib.sha256(b"test-e018-conflict-prov").hexdigest()[:24]
+        )
         fake_prov_hash = hashlib.sha256(b"test-e018-conflict-source").hexdigest()
         conn.execute(
             """INSERT INTO candidate_provenance(
@@ -633,7 +670,9 @@ def test_preflight_conflict_on_last_record_leaves_no_partial_rows(tmp_path: Path
         conn.close()
 
 
-def test_conflicting_preexisting_evidence_row_prevents_ingestion(tmp_path: Path) -> None:
+def test_conflicting_preexisting_evidence_row_prevents_ingestion(
+    tmp_path: Path,
+) -> None:
     """Preflight rejects ingestion when a pre-existing evidence row has a different statement.
 
     No partial target ingestion occurs: the 17 other evidence records are also absent
@@ -649,7 +688,9 @@ def test_conflicting_preexisting_evidence_row_prevents_ingestion(tmp_path: Path)
     conn = graph.connect()
     try:
         conn.execute("BEGIN")
-        fake_prov_id = "prov-" + hashlib.sha256(b"test-fake-evidence-prov").hexdigest()[:24]
+        fake_prov_id = (
+            "prov-" + hashlib.sha256(b"test-fake-evidence-prov").hexdigest()[:24]
+        )
         fake_prov_hash = hashlib.sha256(b"test-fake-source-content").hexdigest()
         conn.execute(
             """INSERT INTO candidate_provenance(

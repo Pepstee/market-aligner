@@ -6,7 +6,7 @@ import hashlib
 import importlib.util
 import json
 import sqlite3
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,8 @@ def _json(value: object) -> bytes:
 
 
 def _snapshot(tmp_path: Path) -> tuple[Path, list[dict[str, object]], CalibrationPolicy]:
-    policy, today, root = CalibrationPolicy(), date.today().isoformat(), tmp_path / "raw"
+    today = datetime.now(timezone.utc).date().isoformat()
+    policy, root = CalibrationPolicy(), tmp_path / "raw"
     records: list[dict[str, object]] = []
     for number in range(30):
         board, job_id = ("greenhouse", f"official-{number:02d}")

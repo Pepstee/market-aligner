@@ -10,6 +10,9 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Mapping, Sequence
 
+from market_aligner.applications.canonical import (
+    ContractValidationError, deep_freeze_json, require_sha256,
+)
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile
 
 
@@ -36,17 +39,78 @@ class ScoringParams:
     )
 
     def __post_init__(self) -> None:
-        if not 0 <= self.epsilon < 1:
-            raise ValueError("epsilon must be in [0,1)")
-        if not 0 <= self.blend <= 1:
-            raise ValueError("blend must be in [0,1]")
+        if (
+            isinstance(self.mean_p, bool)
+            or not isinstance(self.mean_p, (int, float))
+            or not math.isfinite(self.mean_p)
+        ):
+            raise ValueError("mean_p must be a finite number")
+        if (
+            isinstance(self.epsilon, bool)
+            or not isinstance(self.epsilon, (int, float))
+            or not math.isfinite(self.epsilon)
+            or not 0 <= self.epsilon < 1
+        ):
+            raise ValueError("epsilon must be a number in [0,1)")
+        if self.epsilon == 0.0 and self.mean_p < 1e-9:
+            raise ValueError(
+                "epsilon must be positive when mean_p uses a geometric or negative-power mean"
+            )
+        if (
+            isinstance(self.blend, bool)
+            or not isinstance(self.blend, (int, float))
+            or not math.isfinite(self.blend)
+            or not 0 <= self.blend <= 1
+        ):
+            raise ValueError("blend must be a number in [0,1]")
+        for group_name, weights in (
+            ("fit_weights", self.fit_weights),
+            ("opportunity_weights", self.opportunity_weights),
+        ):
+            if not isinstance(weights, tuple) or any(
+                not isinstance(entry, tuple) or len(entry) != 2 for entry in weights
+            ):
+                raise ValueError(f"{group_name} must be a tuple of name/number pairs")
+            for code, value in weights:
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value < 0
+                    or not isinstance(code, str)
+                    or not code
+                ):
+                    raise ValueError(f"{group_name} entries require non-negative finite weights")
+            if len(weights) != len({code for code, _ in weights}):
+                raise ValueError(f"{group_name} cannot repeat component names")
+        if {code for code, _ in self.fit_weights} != {
+            "interest",
+            "demonstrated_skill",
+            "market_readiness",
+            "technical_alignment",
+            "evidence_match",
+        }:
+            raise ValueError("fit_weights must contain every v1 fit component exactly once")
+        if {code for code, _ in self.opportunity_weights} != {
+            "market_demand",
+            "accessibility",
+            "growth_potential",
+        }:
+            raise ValueError(
+                "opportunity_weights must contain every v1 opportunity component exactly once"
+            )
         _normalise_weights(dict(self.fit_weights))
         _normalise_weights(dict(self.opportunity_weights))
 
     @property
     def parameters_hash(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(self.reference_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @property
+    def reference_payload(self) -> dict[str, object]:
+        """The established parameter wire projection, shared with handoff export."""
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -59,7 +123,8 @@ class AssessmentAxes:
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
-            if not 0 <= float(value) <= 10:
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 <= value <= 10):
                 raise ValueError(f"{name} must be in [0,10]")
 
 
@@ -73,14 +138,58 @@ class ScoreResult:
     final: float
     fit_status: FitStatus
     parameters_hash: str
-    fit_subscores: dict[str, float]
-    opportunity_subscores: dict[str, float]
+    fit_subscores: Mapping[str, float]
+    opportunity_subscores: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        for name in ("profile_id", "job_key", "track"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ContractValidationError(f"score {name} must be a non-empty string")
+        for name, low, high in (
+            ("fit", 0.0, 1.0),
+            ("opportunity", 0.0, 1.0),
+            ("final", 0.0, 100.0),
+        ):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not low <= value <= high
+                or not math.isfinite(value)
+            ):
+                raise ContractValidationError(f"score {name} must be finite and in [{low},{high}]")
+        if not isinstance(self.fit_status, FitStatus):
+            raise ContractValidationError("score fit_status must be a FitStatus")
+        require_sha256(self.parameters_hash, "score parameters_hash")
+        for name in ("fit_subscores", "opportunity_subscores"):
+            mapping = getattr(self, name)
+            if not isinstance(mapping, Mapping) or not mapping:
+                raise ContractValidationError(f"score {name} must be a non-empty mapping")
+            copied: dict[str, float] = {}
+            for key, value in mapping.items():
+                if not isinstance(key, str) or not key.strip():
+                    raise ContractValidationError(f"score {name} keys must be non-empty strings")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not 0.0 <= value <= 1.0
+                    or not math.isfinite(value)
+                ):
+                    raise ContractValidationError(
+                        f"score {name}.{key} must be finite and in [0,1]"
+                    )
+                copied[key] = value
+            object.__setattr__(self, name, deep_freeze_json(dict(sorted(copied.items()))))
 
 
 def _normalise_weights(weights: Mapping[str, float]) -> dict[str, float]:
-    selected = {name: float(value) for name, value in weights.items() if float(value) != 0}
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) or value < 0 for value in weights.values()):
+        raise ValueError("weights must be finite non-negative numbers")
+    selected = {name: float(value) for name, value in weights.items() if value != 0}
     total = sum(selected.values())
-    if total <= 0:
+    if not math.isfinite(total) or total <= 0:
         raise ValueError("weights must sum to a positive number")
     return {name: value / total for name, value in selected.items()}
 
@@ -95,9 +204,15 @@ def _floor(value: float, epsilon: float) -> float:
 def power_mean(values: Sequence[float], weights: Sequence[float], p: float, epsilon: float) -> float:
     if len(values) != len(weights) or not values:
         raise ValueError("values and weights must be non-empty and have equal length")
+    if (isinstance(p, bool) or not isinstance(p, (int, float)) or not math.isfinite(p)
+            or isinstance(epsilon, bool) or not isinstance(epsilon, (int, float))
+            or not math.isfinite(epsilon) or not 0 <= epsilon < 1):
+        raise ValueError("power mean p and epsilon must be finite numbers in range")
+    if epsilon == 0 and p < 1e-9:
+        raise ValueError("epsilon must be positive for geometric or negative-power means")
     normalised = _normalise_weights({str(index): value for index, value in enumerate(weights)})
-    selected_weights = [normalised[str(index)] for index in range(len(weights))]
-    selected_values = [_floor(value, epsilon) for value in values]
+    selected_weights = list(normalised.values())
+    selected_values = [_floor(values[int(index)], epsilon) for index in normalised]
     if abs(p) < 1e-9:
         return math.exp(
             sum(weight * math.log(value) for weight, value in zip(selected_weights, selected_values))
@@ -112,13 +227,10 @@ def _unit(value: float) -> float:
 
 
 def _track(profile: CandidateProfile, name: str) -> TrackProfile:
-    return profile.tracks.get(name) or TrackProfile(
-        interest=0,
-        demonstrated_skill=0,
-        confidence=0,
-        market_readiness=0,
-        rationale="No track evidence is available.",
-    )
+    try:
+        return profile.tracks[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown profile role track: {name}") from exc
 
 
 def _weighted_mean(subscores: Mapping[str, float], weights: Mapping[str, float], params: ScoringParams) -> float:

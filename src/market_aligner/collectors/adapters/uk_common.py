@@ -8,6 +8,38 @@ from html.parser import HTMLParser
 from typing import Any, Iterable
 
 
+_EU27_2026_08_REMOTE_MARKERS = (
+    " austria",
+    " belgium",
+    " bulgaria",
+    " croatia",
+    " cyprus",
+    " czech republic",
+    " czechia",
+    " denmark",
+    " estonia",
+    " finland",
+    " france",
+    " germany",
+    " greece",
+    " hungary",
+    " ireland",
+    " italy",
+    " latvia",
+    " lithuania",
+    " luxembourg",
+    " malta",
+    " netherlands",
+    " poland",
+    " portugal",
+    " romania",
+    " slovakia",
+    " slovenia",
+    " spain",
+    " sweden",
+)
+
+
 class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -42,6 +74,12 @@ def matches_terms(values: Iterable[Any], terms: Iterable[str]) -> bool:
 
 
 def uk_or_eligible_remote(location: Any, *, remote: bool = False, body: Any = "") -> bool:
+    """Keep explicit target-market remote listings in the discovery recall set.
+
+    This text filter is not eligibility authority. The release corridor still
+    requires exact typed country/work-mode facts and applies the frozen priority.
+    """
+
     text = f" {plain_text(location)} {plain_text(body)}".casefold()
     uk_markers = (
         " united kingdom", " uk", "u.k.", "great britain", "england",
@@ -56,7 +94,7 @@ def uk_or_eligible_remote(location: Any, *, remote: bool = False, body: Any = ""
         "worldwide", "anywhere", "global", "europe", "emea", "gmt",
         "utc+0", "utc +0", "utc-1", "utc+1", "uk time",
     )
-    return any(marker in text for marker in eligibility)
+    return any(marker in text for marker in (*_EU27_2026_08_REMOTE_MARKERS, *eligibility))
 
 
 def salary_text(*values: Any) -> str:

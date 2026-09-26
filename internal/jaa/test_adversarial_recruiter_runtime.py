@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from career_automation.adversarial_recruiter import (
-    RESULT_SCHEMA_VERSION,
     RecruiterAssessmentPackage,
 )
 from career_automation.adversarial_recruiter_runtime import (
@@ -17,42 +16,14 @@ from career_automation.adversarial_recruiter_runtime import (
 )
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.rendering import _build_text_pdf
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 from llm.client import LLMClient, LLMError
 
 
 def _result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 55,
-        "verdict": "borderline",
-        "reasons": ["Synthetic evidence is relevant but deliberately limited."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 52,
-        "fit_range_percent": {"low": 40, "high": 65},
-        "overall_verdict": "plausible_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
-        "strengths": [{"location": "cv:projects", "assessment": "Relevant synthetic project."}],
-        "risks": [{
-            "category": "experience",
-            "severity": "medium",
-            "location": "cv:experience",
-            "assessment": "Synthetic commercial depth is limited.",
-        }],
-        "application_improvements": [{
-            "target": "cv",
-            "recommendation": "Clarify the synthetic operational scope.",
-            "expected_effect": "Makes scope easier to assess.",
-        }],
-        "profile_improvements": [{
-            "category": "experience",
-            "recommendation": "Add a larger synthetic operating example.",
-            "time_horizon": "months",
-            "expected_effect": "Strengthens the synthetic ownership signal.",
-        }],
-    }
+    return fixture_recruiter_result()
 
 
 def _pdf(text: str) -> bytes:

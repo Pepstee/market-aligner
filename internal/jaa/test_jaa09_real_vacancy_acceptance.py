@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
 import os
 import platform
 import stat
-from datetime import date, datetime, timezone
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -55,7 +55,9 @@ from career_automation.jaa04_corpus_authority import (
     FrozenVacancyAuthority,
     verify_graphcore_corpus,
 )
+from career_automation.runtime_compatibility import inspect_runtime
 from career_automation.jaa09_real_vacancy_certifier import (
+    RECEIPT_SCHEMA,
     write_real_vacancy_receipt,
 )
 from career_automation.release_gate import (
@@ -71,15 +73,19 @@ from test_jaa09_independent_acceptance import (
     NONCE,
     _released_browser_inputs,
 )
+from testing_repository import operator_control_path
 
 
 ROOT = Path(__file__).resolve().parent
 CERTIFIED_CORPUS = Path(
     os.environ.get(
         "JAA_CERTIFIED_CORPUS_ROOT",
-        "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
-        "runtime/.jaa04-corpus-v3-a4f4490-releases/"
-        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        operator_control_path(
+            "jaa-12h-supervisor-20260727",
+            "runtime",
+            ".jaa04-corpus-v3-a4f4490-releases",
+            "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        ),
     )
 )
 TRACKED_SEED = ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"
@@ -120,8 +126,7 @@ class _FrozenCorpusResearch:
         )
         if (
             robots_digest != ROBOTS_RESPONSE_SHA256
-            or robots_reference
-            != f"sha256/0b/{ROBOTS_RESPONSE_SHA256}"
+            or robots_reference != f"sha256/0b/{ROBOTS_RESPONSE_SHA256}"
         ):
             raise ValueError("replayed robots response identity changed")
         source_document = self.authority.dossier["sources"][0]
@@ -174,9 +179,7 @@ def _real_scored_payload(authority: FrozenVacancyAuthority) -> dict[str, Any]:
                 "dossier_sha256": authority.dossier_sha256,
                 "queue_content_sha256": authority.queue_body_content_sha256,
                 "queue_payload_hash": authority.admitted_queue_payload_sha256,
-                "tracked_seed_payload_hash": (
-                    authority.tracked_seed_payload_sha256
-                ),
+                "tracked_seed_payload_hash": (authority.tracked_seed_payload_sha256),
             },
             "jaa04_requirement_anchors": [
                 {
@@ -196,10 +199,22 @@ def _real_fit_database(
     tmp_path: Path,
     authority: FrozenVacancyAuthority,
 ) -> tuple[CareerDatabase, object, tuple[Requirement, ...]]:
+    research_as_of = datetime.fromisoformat(
+        str(authority.dossier["sources"][0]["captured_at"]).replace("Z", "+00:00")
+    ).date()
+    as_of = research_as_of
     database = CareerDatabase(tmp_path / "career.sqlite3")
     job = scored_job_from_payload(_real_scored_payload(authority))
     assert job.key == GRAPHCORE_JOB_KEY
     assert OpportunityGate(database).bootstrap([job]).queued == 1
+    with database.transaction(immediate=True) as connection:
+        assert (
+            connection.execute(
+                "UPDATE pipeline_jobs SET created_at=? WHERE job_key=?",
+                (as_of.isoformat(), job.key),
+            ).rowcount
+            == 1
+        )
     cache = RawResponseCache(tmp_path / "raw")
     coordinator = Opportunity1Coordinator(
         database,
@@ -208,6 +223,7 @@ def _real_fit_database(
             "jaa09-frozen-corpus-worker",
             cache,
             retriever=_FrozenCorpusResearch(cache, authority),
+            as_of=research_as_of,
         ),
         signal_deriver=lambda _dossier: [],
     )
@@ -247,7 +263,7 @@ def _real_fit_database(
     )
     assert tuple(
         authority.raw_response_bytes[
-            anchor.byte_start:anchor.byte_start + anchor.byte_length
+            anchor.byte_start : anchor.byte_start + anchor.byte_length
         ].decode("utf-8")
         for anchor in authority.requirement_anchors
     ) == tuple(requirement.text for requirement in requirements)
@@ -264,9 +280,7 @@ def _real_fit_database(
             source_identity=f"fixture:candidate-evidence:{index}",
             state="evidence",
             evidence_kind="portfolio_artifact",
-            valid_until=date.today().replace(
-                year=date.today().year + 1
-            ).isoformat(),
+            valid_until=as_of.replace(year=as_of.year + 1).isoformat(),
         )
         graph.verify_evidence(
             evidence_id,
@@ -282,15 +296,12 @@ def _real_fit_database(
         graph.add_claim(
             requirement.criterion,
             statement=(
-                f"Fixture claim for {requirement.text}; "
-                f"{CANDIDATE_FIXTURE_DISCLOSURE}."
+                f"Fixture claim for {requirement.text}; {CANDIDATE_FIXTURE_DISCLOSURE}."
             ),
             claim_type=("capability", "project", "education")[(index - 1) % 3],
             state="evidence",
             source_identity=f"fixture:candidate-claim:{index}",
-            valid_until=date.today().replace(
-                year=date.today().year + 1
-            ).isoformat(),
+            valid_until=as_of.replace(year=as_of.year + 1).isoformat(),
         )
         graph.link_claim_evidence(
             requirement.criterion,
@@ -300,7 +311,7 @@ def _real_fit_database(
         )
         graph.approve_claim(requirement.criterion)
 
-    evidence = candidate_graph_evidence(database.path, as_of=date.today())
+    evidence = candidate_graph_evidence(database.path, as_of=as_of)
     profile_hash = evidence_projection_hash(evidence)
     proposals = tuple(
         MatchProposal(
@@ -318,7 +329,7 @@ def _real_fit_database(
                 matching_input_hash(
                     requirement,
                     candidate_profile_sha256=profile_hash,
-                    as_of=date.today(),
+                    as_of=as_of,
                 ),
             ),
         )
@@ -328,7 +339,7 @@ def _real_fit_database(
         job_key=job.key,
         requirements=requirements,
         proposals=proposals,
-        as_of=date.today(),
+        as_of=as_of,
     )
     assert run.status == "ready"
     return database, run, requirements
@@ -520,6 +531,7 @@ def _write_evidence_receipt_if_requested(
     source_git_revision = os.environ["JAA09_SOURCE_GIT_REVISION"]
     source_tree = os.environ["JAA09_SOURCE_TREE"]
     source_content_revision = os.environ["JAA09_SOURCE_CONTENT_REVISION"]
+    runtime = inspect_runtime()
     strategy = release_inputs[1]
     source = release_inputs[4]
     artifacts = release_inputs[5]
@@ -527,7 +539,7 @@ def _write_evidence_receipt_if_requested(
     issued = release_inputs[11]
     projection_sha256 = getattr(strategy, "candidate_profile_hash")
     document = {
-        "schema_version": "jaa09.real-vacancy-local-receipt.v1",
+        "schema_version": RECEIPT_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "certifies_slice": False,
         "corpus_binding": {
@@ -565,9 +577,7 @@ def _write_evidence_receipt_if_requested(
             "disclosure": CANDIDATE_FIXTURE_DISCLOSURE,
         },
         "release_binding": {
-            "release_manifest_sha256": (
-                issued.manifest.release_manifest_sha256
-            ),
+            "release_manifest_sha256": (issued.manifest.release_manifest_sha256),
             "release_token_sha256": issued.token_sha256,
             "application_source_sha256": source.content_sha256,
             "vacancy_sha256": source.vacancy_sha256,
@@ -589,10 +599,11 @@ def _write_evidence_receipt_if_requested(
             "source_git_revision": source_git_revision,
             "source_tree": source_tree,
             "source_content_revision": source_content_revision,
-            "interpreter_path": str(ROOT / ".venv/bin/python"),
-            "implementation": platform.python_implementation(),
-            "python_version": platform.python_version(),
-            "playwright_version": importlib.metadata.version("playwright"),
+            "interpreter_path": sys.executable,
+            "implementation": runtime.python_implementation,
+            "python_version": runtime.python_version,
+            "playwright_version": runtime.playwright_version,
+            "chromium_revision": runtime.chromium_revision,
             "chromium_version": chromium_version,
             "platform": platform.platform(),
         },
@@ -602,9 +613,7 @@ def _write_evidence_receipt_if_requested(
                 "in_process_fixture_receipt_forgery_residual"
             ),
             "ats_scope": "local_simulated_ats_only",
-            "filesystem_trust_limit": (
-                "operator_control_root_local_filesystem"
-            ),
+            "filesystem_trust_limit": ("operator_control_root_local_filesystem"),
             "real_application_submitted": False,
             "external_authority_granted": False,
         },
@@ -623,7 +632,7 @@ def test_verified_graphcore_authority_precedes_real_browser_execution(
     assert authority.raw_response_sha256 == RAW_RESPONSE_SHA256
     assert tuple(
         authority.raw_response_bytes[
-            anchor.byte_start:anchor.byte_start + anchor.byte_length
+            anchor.byte_start : anchor.byte_start + anchor.byte_length
         ].decode()
         for anchor in authority.requirement_anchors
     ) == tuple(anchor.text for anchor in authority.requirement_anchors)
@@ -663,10 +672,13 @@ def test_verified_graphcore_authority_precedes_real_browser_execution(
                 f"jaa09-real-vacancy:{authority.admitted_queue_payload_sha256}"
             ),
         )
-        assert store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=run_id,
-        ) is not None
+        assert (
+            store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=run_id,
+            )
+            is not None
+        )
         store.authorize_release(
             run_id,
             token=issued.release_token,
@@ -675,7 +687,11 @@ def test_verified_graphcore_authority_precedes_real_browser_execution(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: _fixture_now(database),
+        )
         chromium_version = ""
         non_loopback_request_urls: list[str] = []
         fixture_url = urlsplit(fixture.application_url)
@@ -732,9 +748,7 @@ def test_verified_graphcore_authority_precedes_real_browser_execution(
             run_id=run_id,
             workflow_sha256=workflow.content_hash,
             step_id="submit",
-            release_manifest_sha256=(
-                issued.manifest.release_manifest_sha256
-            ),
+            release_manifest_sha256=(issued.manifest.release_manifest_sha256),
             receipt_id=receipt.receipt_id,
             receipt_payload_sha256=receipt.payload_sha256,
             screenshot_sha256=str(outputs["screenshot_sha256"]),
@@ -797,10 +811,13 @@ def test_real_vacancy_post_click_interruption_recovers_one_receipt(
         )
         store = BrowserWorkflowStore(database.path)
         run_id = store.create_run(workflow)
-        assert store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=run_id,
-        ) is not None
+        assert (
+            store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=run_id,
+            )
+            is not None
+        )
         store.authorize_release(
             run_id,
             token=issued.release_token,
@@ -809,7 +826,11 @@ def test_real_vacancy_post_click_interruption_recovers_one_receipt(
             ),
             idempotency_key=issued.manifest.release_manifest_sha256,
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: _fixture_now(database),
+        )
         original_complete = store.complete_step
         interrupted = False
 
@@ -857,6 +878,7 @@ def test_real_vacancy_post_click_interruption_recovers_one_receipt(
             completed = LocalBrowserExecutor(
                 store,
                 repository_root=ROOT,
+                clock=lambda: _fixture_now(database),
             ).execute_next(
                 resumed_page,
                 run_id=run_id,
@@ -871,12 +893,18 @@ def test_real_vacancy_post_click_interruption_recovers_one_receipt(
         assert fixture.receipt is first_receipt
         assert fixture.receipt.job_key == GRAPHCORE_JOB_KEY
         assert store.run_snapshot(run_id)["status"] == "completed"
-        assert sum(
-            event["event_type"] == "submit_click_started"
-            for event in store.events(run_id)
-        ) == 1
+        assert (
+            sum(
+                event["event_type"] == "submit_click_started"
+                for event in store.events(run_id)
+            )
+            == 1
+        )
         with database.connection() as connection:
-            assert connection.execute(
-                "SELECT COUNT(*) FROM browser_submit_dispatches WHERE run_id=?",
-                (run_id,),
-            ).fetchone()[0] == 1
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM browser_submit_dispatches WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()[0]
+                == 1
+            )

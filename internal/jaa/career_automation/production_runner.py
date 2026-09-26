@@ -7,10 +7,12 @@ import base64
 import hashlib
 import importlib
 import json
+import os
 import pickle
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +22,10 @@ from playwright.sync_api import Page
 
 from .application_archive import ApplicationArchive
 from .application_compiler import ApplicationSource, CandidateContact
-from .application_sanity_review import SanityReviewReceipt
+from .application_sanity_review import SanityReviewReceipt, VacancyReviewMaterial
+from .application_quality import ApplicationQualityInput
+from .application_quality_contracts import ApplicationPreflightQualityReview
+from .ats_application_authority import AtsApplicationAuthority
 from .browser_executor import (
     GreenhouseSuccessEvidence,
 )
@@ -230,71 +235,65 @@ class GeneratedRevisionSink:
         self._owned_generation_active = True
         try:
             repository = self._recorder.attempt.archive.repository_root
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "career_automation.candidate_generation_worker",
-                ],
-                cwd=repository,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            assert process.stdin is not None
-            assert process.stdout is not None
-            process.stdin.write(canonical_json(arguments))
-            process.stdin.close()
-            package_pickle_sha256: str | None = None
-            for line in process.stdout:
-                message = json.loads(line)
-                if not isinstance(message, dict):
-                    process.kill()
-                    raise ValueError(
-                        "isolated candidate generator emitted malformed output"
-                    )
-                if message.get("kind") == "revision":
+            from .candidate_generation_worker import GENERATION_OUTPUT_FD_ENV
+
+            # Archive revisions while the child runs. Public status and diagnostic
+            # output use separate private files so neither can block the pipe.
+            with tempfile.TemporaryFile() as status, tempfile.TemporaryFile() as diagnostics:
+                read_fd, write_fd = os.pipe()
+                with os.fdopen(read_fd, "rb") as revisions:
+                    environment = dict(os.environ)
+                    environment[GENERATION_OUTPUT_FD_ENV] = str(write_fd)
                     try:
-                        value = base64.b64decode(
-                            str(message["value_base64"]), validate=True
+                        process = subprocess.Popen(
+                            [sys.executable, "-m", "career_automation.candidate_generation_worker"],
+                            cwd=repository,
+                            stdin=subprocess.PIPE,
+                            stdout=status,
+                            stderr=diagnostics,
+                            env=environment,
+                            pass_fds=(write_fd,),
                         )
-                    except (KeyError, ValueError) as exc:
-                        process.kill()
-                        raise ValueError(
-                            "isolated candidate generator revision is malformed"
-                        ) from exc
-                    self._archive_owned_revision(
-                        role=message.get("role"),
-                        value=value,
-                        media_type=message.get("media_type"),
-                        prior_sha256=message.get("prior_sha256"),
-                        approved=message.get("approved"),
-                        rejection_codes=message.get("rejection_codes", ()),
-                    )
-                elif message.get("kind") == "result" and package_pickle_sha256 is None:
-                    package_pickle_sha256 = str(
-                        message.get("package_pickle_sha256", "")
-                    )
-                    if not re.fullmatch(r"[0-9a-f]{64}", package_pickle_sha256):
-                        process.kill()
-                        raise ValueError(
-                            "isolated candidate generator result is malformed"
-                        )
-                else:
-                    process.kill()
+                    finally:
+                        os.close(write_fd)
+                    try:
+                        assert process.stdin is not None
+                        process.stdin.write(canonical_json(arguments).encode())
+                        process.stdin.close()
+                        for line in revisions:
+                            try:
+                                message = json.loads(line)
+                                if not isinstance(message, dict) or message.get("kind") != "revision":
+                                    raise ValueError("invalid revision kind")
+                                value = base64.b64decode(str(message["value_base64"]), validate=True)
+                            except (KeyError, ValueError, UnicodeDecodeError):
+                                raise ValueError("isolated candidate generator revision is malformed") from None
+                            self._archive_owned_revision(
+                                role=message.get("role"),
+                                value=value,
+                                media_type=message.get("media_type"),
+                                prior_sha256=message.get("prior_sha256"),
+                                approved=message.get("approved"),
+                                rejection_codes=message.get("rejection_codes", ()),
+                            )
+                        if process.wait() != 0:
+                            raise RuntimeError("isolated candidate generator failed")
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait()
+                        if process.stdin is not None:
+                            process.stdin.close()
+                status.seek(0)
+                try:
+                    result = json.load(status)
+                except (ValueError, UnicodeDecodeError):
+                    raise ValueError("isolated candidate generator result is malformed") from None
+                if not isinstance(result, dict) or result.get("kind") != "result":
                     raise ValueError("isolated candidate generator protocol differs")
-            return_code = process.wait()
-            stderr = process.stderr.read() if process.stderr is not None else ""
-            if return_code != 0:
-                raise RuntimeError(
-                    "isolated candidate generator failed: "
-                    + (
-                        stderr.strip().splitlines()[-1]
-                        if stderr.strip()
-                        else "unknown error"
-                    )
-                )
+                package_pickle_sha256 = str(result.get("package_pickle_sha256", ""))
+                if not re.fullmatch(r"[0-9a-f]{64}", package_pickle_sha256):
+                    raise ValueError("isolated candidate generator result is malformed")
             durable = self._verified_durable_revisions()
             package_rows = [
                 row for row in durable if row.role == "generation.package_pickle"
@@ -484,6 +483,9 @@ class PreparedGreenhouseRelease:
         ExternalDocumentAssuranceReceipt,
     ]
     sanity_review_receipt: SanityReviewReceipt
+    ats_application_authority: AtsApplicationAuthority
+    quality_input: ApplicationQualityInput
+    quality_review: ApplicationPreflightQualityReview
     production_identity: ProductionIdentity
     generation_authority: SinkBoundGenerationAuthority
     attached_roles: tuple[str, ...]
@@ -502,6 +504,7 @@ class PreparedGreenhouseRelease:
     jurisdiction: str
     contract_type: str
     consumed_at: datetime
+    vacancy_review_material: VacancyReviewMaterial
     vacancy_requirements: tuple[str, ...] = ()
     submit_button_name: str = "Submit Application"
     timeout_ms: int = 20_000
@@ -643,7 +646,6 @@ class GreenhouseProductionRunner:
                 item.vacancy.vacancy.vacancy_sha256,
             )
         ]
-        navigation = open_vacancy(item, page)
         recorder = (
             GreenhouseAttemptRecorder.resume(
                 archive_root=self.archive.root,
@@ -660,6 +662,18 @@ class GreenhouseProductionRunner:
                 assessment={**candidate.assessment, "queue_rank": item.queue_rank},
             )
         )
+        recorder.attach_page_evidence(page)
+        try:
+            navigation = open_vacancy(item, page)
+            recorder.record_navigation(navigation)
+        except Exception as exc:
+            recorder.finalize_preintent_failure(
+                page,
+                reason_code="navigation_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise
         boundary_signals = self.executor.boundary_signals(page)
         if boundary_signals:
             observed_network = list(candidate.network_evidence)
@@ -703,6 +717,9 @@ class GreenhouseProductionRunner:
             artifacts=prepared.artifacts,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             production_identity=prepared.production_identity,
             attached_roles=prepared.attached_roles,
             upload_field_names=prepared.upload_field_names,
@@ -720,6 +737,9 @@ class GreenhouseProductionRunner:
             questions=prepared.questions,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             archive_receipt=archive_receipt,
             archive_root=self.archive.root,
             artifact_root=prepared.artifact_root,
@@ -737,6 +757,7 @@ class GreenhouseProductionRunner:
             receipt_url=prepared.receipt_url,
             application_id=prepared.application_id,
             job_key=prepared.source.job_key,
+            vacancy_review_material=prepared.vacancy_review_material,
             vacancy_requirements=prepared.vacancy_requirements,
         )
         return self.executor.execute(

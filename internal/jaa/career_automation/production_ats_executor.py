@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import (
@@ -30,6 +30,12 @@ from .application_archive import (
     selected_archive_hashes,
     selected_archive_object_bytes,
 )
+from .ats_application_authority import (
+    AtsFieldOption,
+    AtsFieldPlan,
+    AtsFormInventory,
+    AtsObservedField,
+)
 from .application_sanity_review import verify_sanity_review_receipt
 from .browser_executor import (
     FinalClickRevalidationError,
@@ -41,6 +47,11 @@ from .browser_workflows import ReleaseGateError
 from .candidate_release_gate import CandidateAuthorityReleaseGate
 from .evidence_matching import canonical_json
 from .external_document_assurance import IntendedVacancy, verify_receipt_for_pdf
+from form_filling.ats_forensics import (
+    ATSForensicReceipt,
+    ATSForensicRecorder,
+    load_forensic_receipt,
+)
 from form_filling.service import approved_form_mapping_bytes
 from .production_queue import ProductionCheckpointLedger
 
@@ -229,6 +240,8 @@ def canonical_non_secret_form_state(page: Page) -> bytes:
             labels,
             required: Boolean(element.required) || element.getAttribute('aria-required') === 'true',
             disabled: Boolean(element.disabled),
+            read_only: Boolean(element.readOnly),
+            visible: Boolean(element.getClientRects().length),
             aria_invalid: element.getAttribute('aria-invalid') || '',
           };
           if (type === 'hidden') {
@@ -319,6 +332,206 @@ def collect_greenhouse_form_inventory(page: Page) -> bytes:
             "select_inventories": inventories,
         }
     )
+
+
+def greenhouse_ats_inventory_from_capture(
+    capture: bytes,
+    *,
+    captured_at: str,
+    page_snapshot_sha256: str,
+    screenshot_sha256: str,
+    uploaded_sha256_by_field: Mapping[str, str] | None = None,
+) -> AtsFormInventory:
+    """Convert the existing Greenhouse capture into the closed ATS contract."""
+    try:
+        document = json.loads(capture)
+        form_state = document["form_state"]
+        fields = form_state["fields"]
+        select_rows = document["select_inventories"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProductionATSBoundaryError(
+            "Greenhouse ATS inventory capture is malformed"
+        ) from exc
+    if not isinstance(fields, list) or not isinstance(select_rows, list):
+        raise ProductionATSBoundaryError(
+            "Greenhouse ATS inventory fields are malformed"
+        )
+    options_by_identity: dict[str, tuple[AtsFieldOption, ...]] = {}
+    for row in select_rows:
+        if not isinstance(row, Mapping) or not isinstance(
+            row.get("field_identity"), str
+        ):
+            raise ProductionATSBoundaryError(
+                "Greenhouse ATS option inventory is malformed"
+            )
+        options: list[AtsFieldOption] = []
+        seen: set[str] = set()
+        for option in row.get("options", []):
+            if not isinstance(option, Mapping):
+                raise ProductionATSBoundaryError(
+                    "Greenhouse ATS option row is malformed"
+                )
+            label = str(option.get("text", "")).strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            options.append(AtsFieldOption(value=label, label=label))
+        options_by_identity[str(row["field_identity"])] = tuple(options)
+
+    uploaded = dict(uploaded_sha256_by_field or {})
+    observed: list[AtsObservedField] = []
+    identities: set[str] = set()
+    for raw in fields:
+        if not isinstance(raw, Mapping):
+            raise ProductionATSBoundaryError("Greenhouse ATS field is malformed")
+        identity = str(raw.get("name") or raw.get("id") or "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", identity)
+            or identity in identities
+        ):
+            raise ProductionATSBoundaryError(
+                "Greenhouse ATS field identity is missing or ambiguous"
+            )
+        identities.add(identity)
+        tag = str(raw.get("tag", "")).casefold()
+        field_type = str(raw.get("type", "")).casefold()
+        if field_type in {"submit", "button", "reset"}:
+            continue
+        kind = (
+            "textarea"
+            if tag == "textarea"
+            else "select"
+            if tag == "select" or identity in options_by_identity
+            else field_type
+            if field_type
+            in {
+                "text",
+                "email",
+                "tel",
+                "url",
+                "number",
+                "radio",
+                "checkbox",
+                "file",
+                "hidden",
+            }
+            else "text"
+        )
+        disabled = raw.get("disabled") is True
+        read_only = raw.get("read_only") is True
+        visible = raw.get("visible") is True
+        if "visible" not in raw:
+            visible = field_type != "hidden" and not disabled
+        role = (
+            "provider_managed"
+            if field_type == "hidden" or disabled or read_only or not visible
+            else "applicant"
+        )
+        authority_visible = visible if role == "applicant" else False
+        labels = " ".join(
+            str(value).strip() for value in raw.get("labels", []) if str(value).strip()
+        )
+        label = labels or identity
+        if kind == "hidden":
+            current: str | bool | int | None = raw.get("value_present") is True
+        elif kind == "file":
+            if identity in uploaded:
+                current = uploaded[identity]
+            elif raw.get("files"):
+                raise ProductionATSBoundaryError(
+                    "Greenhouse file capture lacks exact uploaded artifact identity"
+                )
+            else:
+                current = None
+        elif kind in {"checkbox", "radio"}:
+            current = raw.get("checked") is True
+        elif kind == "select":
+            selected = raw.get("selected_text")
+            current = (
+                str(selected[0])
+                if isinstance(selected, list) and len(selected) == 1
+                else str(raw.get("value", ""))
+            )
+        else:
+            selected = raw.get("selected_text")
+            current = (
+                str(selected[0])
+                if isinstance(selected, list) and len(selected) == 1
+                else str(raw.get("value", ""))
+            )
+        try:
+            observed.append(
+                AtsObservedField(
+                    field_id=identity,
+                    control_kind=kind,
+                    label=label,
+                    required=raw.get("required") is True,
+                    visible=authority_visible,
+                    automation_role=role,
+                    disabled=disabled,
+                    read_only=read_only,
+                    options=options_by_identity.get(identity, ()),
+                    current_value=current,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProductionATSBoundaryError(
+                f"Greenhouse ATS field {identity!r} is unsupported: {exc}"
+            ) from exc
+    try:
+        return AtsFormInventory(
+            provider="greenhouse",
+            application_url=str(form_state["url"]),
+            captured_at=captured_at,
+            page_snapshot_sha256=page_snapshot_sha256,
+            screenshot_sha256s=(screenshot_sha256,),
+            fields=tuple(observed),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProductionATSBoundaryError(
+            f"Greenhouse ATS inventory is unsupported: {exc}"
+        ) from exc
+
+
+def compile_greenhouse_ats_plans(
+    inventory: AtsFormInventory,
+    *,
+    field_authority_names: Mapping[str, str],
+    consent_states: Mapping[str, bool | str],
+    upload_roles_by_field: Mapping[str, str],
+) -> tuple[AtsFieldPlan, ...]:
+    """Bind every observed Greenhouse field to one exact canonical source."""
+    plans: list[AtsFieldPlan] = []
+    for field in inventory.fields:
+        authority = field_authority_names.get(field.field_id)
+        role = upload_roles_by_field.get(field.field_id)
+        if role is not None:
+            action, reference = "upload", f"artifact.{role}"
+        elif field.field_id in consent_states:
+            expected = consent_states[field.field_id]
+            if not isinstance(expected, bool):
+                raise ProductionATSBoundaryError(
+                    "Greenhouse consent authority must be exact boolean state"
+                )
+            action, reference = "fill", f"consent.{str(expected).lower()}"
+        elif authority and authority != "blank.optional":
+            action, reference = "fill", authority
+        else:
+            action, reference = "omit", "none"
+        try:
+            plans.append(
+                AtsFieldPlan(
+                    field_id=field.field_id,
+                    action=action,
+                    source_reference=reference,
+                    observed_value=field.current_value,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProductionATSBoundaryError(
+                f"Greenhouse ATS plan for {field.field_id!r} is invalid: {exc}"
+            ) from exc
+    return tuple(plans)
 
 
 @dataclass(frozen=True)
@@ -418,9 +631,11 @@ class CertifiedGreenhouseSubmitExecutor:
         *,
         repository_root: str | Path,
         gmail_confirmation_checker: GmailConfirmationChecker | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository_root = Path(repository_root).resolve(strict=True)
         self.gmail_confirmation_checker = gmail_confirmation_checker
+        self.now = now or (lambda: datetime.now(timezone.utc))
 
     @staticmethod
     def _submit_locator(page: Page, plan: GreenhouseSubmissionPlan) -> Locator:
@@ -844,7 +1059,7 @@ class CertifiedGreenhouseSubmitExecutor:
         network_evidence: tuple[Mapping[str, object], ...] = (),
     ) -> tuple[str, bytes, bytes, bytes]:
         """Check provider state and Gmail once without replaying the click."""
-        checked_at = max(datetime.now(timezone.utc), authority.consumed_at)
+        checked_at = max(self.now(), authority.consumed_at)
         visible_text = page.locator("body").inner_text().encode("utf-8")
         screenshot = page.screenshot(full_page=True)
         provider_success = self._provider_success(page, authority.success_evidence)
@@ -1310,6 +1525,23 @@ class CertifiedGreenhouseSubmitExecutor:
         if receipt_object is not None:
             terminal_selection["submission.receipt"] = receipt_object.sha256
         terminal_selection["submission.reconciliation"] = reconciliation.sha256
+        attempt.record_evidence_event(
+            event_id=attempt.next_evidence_event_id("terminal"),
+            event_kind="terminal",
+            occurred_at=self.now().strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            ),
+            result=("completed" if outcome == "submitted_success" else "indeterminate"),
+            member_sha256s=terminal_selection,
+            details={
+                "provenance": "greenhouse.terminal_reconciliation",
+                "interaction_counts": {
+                    "fields_filled": len(authority.field_authority_names),
+                    "files_uploaded": len(authority.attached_roles),
+                    "submit_clicks": 1,
+                },
+            },
+        )
         attempt.finalize_terminal(
             outcome=outcome,
             selected=terminal_selection,
@@ -1366,7 +1598,7 @@ class CertifiedGreenhouseSubmitExecutor:
                 reconciliation_visible_text,
             ) = self._reconcile_after_intent(page, authority)
             if reconciled_outcome == "submitted_success":
-                submitted_at = datetime.now(timezone.utc).isoformat()
+                submitted_at = self.now().isoformat()
                 _screenshot, _result, receipt = self._record_terminal(
                     page,
                     authority,
@@ -1385,7 +1617,7 @@ class CertifiedGreenhouseSubmitExecutor:
                 authority,
                 state="indeterminate",
                 outcome="indeterminate",
-                submitted_at=datetime.now(timezone.utc).isoformat(),
+                submitted_at=self.now().isoformat(),
                 reconciliation_evidence=reconciliation,
                 reconciliation_screenshot=reconciliation_screenshot,
                 reconciliation_visible_text=reconciliation_visible_text,
@@ -1472,19 +1704,70 @@ class CertifiedGreenhouseSubmitExecutor:
                     ),
                 }
             )
+            attempt.record_evidence_event(
+                event_id=attempt.next_evidence_event_id("response"),
+                event_kind="response",
+                occurred_at=self.now().strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                ),
+                result="observed",
+                details={
+                    "method": str(request.method).upper(),
+                    "status": int(response.status),
+                    "url_sha256": _sha256(
+                        _normal_url(response.url).encode("utf-8")
+                    ),
+                },
+            )
 
         page.on("response", record_response)
+
+        def record_request(request) -> None:
+            attempt.record_evidence_event(
+                event_id=attempt.next_evidence_event_id("request"),
+                event_kind="request",
+                occurred_at=self.now().strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                ),
+                result="observed",
+                details={
+                    "method": str(request.method).upper(),
+                    "resource_type": str(request.resource_type),
+                    "url_sha256": _sha256(_normal_url(request.url).encode("utf-8")),
+                },
+            )
+
+        page.on("request", record_request)
         try:
             certified_final_submit_click(
                 locator,
                 authority,
-                verified_at=datetime.now(timezone.utc),
+                verified_at=self.now(),
                 immediate_revalidation=lambda: self._authoritative_revalidation(
                     page,
                     plan,
                     authority,
-                    verified_at=datetime.now(timezone.utc),
+                    verified_at=self.now(),
                 ),
+            )
+            attempt.record_evidence_event(
+                event_id=attempt.next_evidence_event_id("click"),
+                event_kind="click",
+                occurred_at=self.now().strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                ),
+                result="completed",
+                member_sha256s={
+                    "submission.click_intent": self._click_intent_sha256(attempt)
+                },
+                details={
+                    "provenance": "greenhouse.certified_final_submit_click",
+                    "interaction_counts": {
+                        "fields_filled": len(authority.field_authority_names),
+                        "files_uploaded": len(authority.attached_roles),
+                        "submit_clicks": 1,
+                    },
+                },
             )
         except FinalClickRevalidationError as exc:
             description = str(exc.__cause__ or exc)
@@ -1613,6 +1896,111 @@ class CertifiedGreenhouseSubmitExecutor:
         )
 
 
+def capture_greenhouse_forensic_observation(
+    page: Page,
+    *,
+    forensic_root: str | Path,
+    attempt_id: str,
+    application_id: str,
+    application_url: str,
+    runtime: Mapping[str, object],
+    release_manifest_sha256: str | None = None,
+    artifact_set_sha256: str | None = None,
+) -> ATSForensicReceipt:
+    """Capture a no-submit Greenhouse preflight through the canonical executor.
+
+    This helper only attaches passive listeners, inventories the current form,
+    masks form controls in the screenshot, and writes a diagnostic-only receipt.
+    It neither fills a field nor obtains release or submission authority, and
+    it never navigates: the caller supplies an already-open page that must
+    already sit on the vacancy-bound application URL.
+    """
+
+    if _normal_url(page.url) != _normal_url(application_url):
+        raise ProductionATSBoundaryError(
+            "browser is not on the vacancy-bound Greenhouse application"
+        )
+    recorder = ATSForensicRecorder(
+        Path(forensic_root),
+        attempt_id=attempt_id,
+        application_id=application_id,
+        ats_name="greenhouse",
+        application_url=application_url,
+        runtime=runtime,
+        release_manifest_sha256=release_manifest_sha256,
+        artifact_set_sha256=artifact_set_sha256,
+    )
+    recorder.attach_playwright(page)
+    inventory = collect_greenhouse_form_inventory(page)
+    signals = CertifiedGreenhouseSubmitExecutor.boundary_signals(page)
+    signals_bytes = _json_bytes(tuple(sorted(signals)))
+    recorder.record_checkpoint(
+        "greenhouse_preflight_inventory",
+        inventory_bytes=len(inventory),
+        inventory_sha256=_sha256(inventory),
+        boundary_signal_count=len(signals),
+        boundary_signals_sha256=_sha256(signals_bytes),
+    )
+    recorder.capture_page(page, label="preflight")
+    if signals:
+        recorder.record_checkpoint(
+            "human_verification_boundary",
+            boundary_signal_count=len(signals),
+            boundary_signals_sha256=_sha256(signals_bytes),
+        )
+        return recorder.finalize(outcome="blocked", failure_class="human_verification")
+    return recorder.finalize(outcome="prepared")
+
+
+def capture_or_recover_greenhouse_forensic_observation(
+    page: Page | None,
+    *,
+    forensic_root: str | Path,
+    attempt_id: str,
+    application_id: str,
+    application_url: str,
+    runtime: Mapping[str, object],
+    release_manifest_sha256: str | None = None,
+    artifact_set_sha256: str | None = None,
+) -> ATSForensicReceipt:
+    """Return an exact existing passive observation, or capture it once.
+
+    Replay is admitted only when the stored manifest fully reverifies under
+    the exact caller binding (application, URL, ATS, runtime, artifact and
+    release identities); any difference refuses instead of recapturing.
+    """
+
+    arguments = {
+        "forensic_root": forensic_root,
+        "attempt_id": attempt_id,
+        "application_id": application_id,
+        "application_url": application_url,
+        "runtime": runtime,
+        "release_manifest_sha256": release_manifest_sha256,
+        "artifact_set_sha256": artifact_set_sha256,
+    }
+    try:
+        return load_forensic_receipt(
+            Path(forensic_root),
+            attempt_id=attempt_id,
+            application_id=application_id,
+            application_url=application_url,
+            ats_name="greenhouse",
+            runtime_sha256=runtime.get("runtime_sha256"),
+            artifact_set_sha256=artifact_set_sha256,
+            release_manifest_sha256=release_manifest_sha256,
+        )
+    except KeyError:
+        if page is None:
+            raise ValueError("page is required for a missing forensic attempt") from None
+    try:
+        return capture_greenhouse_forensic_observation(page, **arguments)
+    except FileExistsError:
+        # A concurrent writer published this exact attempt first; converge on
+        # its verified evidence or refuse if the stored bytes differ.
+        return capture_or_recover_greenhouse_forensic_observation(None, **arguments)
+
+
 __all__ = [
     "CertifiedGreenhouseSubmitExecutor",
     "GreenhouseSubmissionPlan",
@@ -1622,5 +2010,7 @@ __all__ = [
     "ProductionSubmissionIndeterminate",
     "ProductionSubmissionReceipt",
     "canonical_non_secret_form_state",
+    "capture_greenhouse_forensic_observation",
+    "capture_or_recover_greenhouse_forensic_observation",
     "collect_greenhouse_form_inventory",
 ]

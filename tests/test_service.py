@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 import hashlib
+import io
 import json
+import os
 import sqlite3
+import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,12 +174,22 @@ def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
 
 
 class ServiceTests(unittest.TestCase):
-    def test_process_one_cli_requires_exact_job_key(self) -> None:
+    def test_fresh_assessment_database_is_owner_private_under_common_umask(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state" / "assessments.sqlite3"
+            previous = os.umask(0o022)
+            try:
+                MarketAlignerService(temporary)
+            finally:
+                os.umask(previous)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_process_job_cli_requires_exact_job_key(self) -> None:
         parser = build_parser()
         with self.assertRaises(SystemExit):
             parser.parse_args(
                 [
-                    "process-one",
+                    "process-job",
                     "--config", "config.yaml",
                     "--profile-id", "prf_fixture",
                     "--track", "automation",
@@ -184,7 +199,7 @@ class ServiceTests(unittest.TestCase):
             )
         parsed = parser.parse_args(
             [
-                "process-one",
+                "process-job",
                 "--config", "config.yaml",
                 "--profile-id", "prf_fixture",
                 "--track", "automation",
@@ -269,6 +284,220 @@ class ServiceTests(unittest.TestCase):
                     worker_id="missing-exact",
                     job_key="fixture:missing",
                 )
+
+    def test_process_cli_semantic_worker_plugin_runs_full_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            plugin_root = root / "plugins"
+            plugin_root.mkdir()
+            (plugin_root / "semantic_plugin_under_test.py").write_text(
+                "from test_service import FixtureSemanticWorker\n"
+                "\n"
+                "factory_calls = []\n"
+                "workers = []\n"
+                "\n"
+                "\n"
+                "def fixture_factory(*, config_path, data_home):\n"
+                "    worker = FixtureSemanticWorker()\n"
+                "    factory_calls.append((str(config_path), str(data_home)))\n"
+                "    workers.append(worker)\n"
+                "    return worker\n",
+                encoding="utf-8",
+            )
+            sys.path.insert(0, str(plugin_root))
+            try:
+                args = build_parser().parse_args(
+                    [
+                        "process",
+                        "--config", str(config),
+                        "--profile-id", profile_id,
+                        "--track", "automation",
+                        "--worker-id", "plugin-worker",
+                        "--data-home", str(root),
+                        "--semantic-worker",
+                        "semantic_plugin_under_test:fixture_factory",
+                    ]
+                )
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = args.handler(args)
+                module = sys.modules["semantic_plugin_under_test"]
+            finally:
+                sys.path.remove(str(plugin_root))
+                sys.modules.pop("semantic_plugin_under_test", None)
+            self.assertEqual(0, result)
+            self.assertEqual([(str(config), str(root))], module.factory_calls)
+            self.assertEqual(1, module.workers[0].extractions)
+            self.assertEqual(1, module.workers[0].alignments)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(1, receipt["shard_claimed"])
+            self.assertEqual(1, receipt["included"])
+            self.assertEqual(0, receipt["errors"])
+            self.assertEqual(1, receipt["ranked_count"])
+            reports = {
+                name: Path(path) for name, path in receipt["reports"].items()
+            }
+            self.assertTrue(all(path.is_file() for path in reports.values()))
+            self.assertEqual(
+                hashlib.sha256(reports["ranked_json"].read_bytes()).hexdigest(),
+                receipt["report_hashes"]["ranked_json"],
+            )
+            ranked = json.loads(reports["ranked_json"].read_text(encoding="utf-8"))
+            self.assertEqual(["fixture:1"], [row["job_key"] for row in ranked["jobs"]])
+            self.assertTrue(
+                any((root / "state" / "promotion-receipts").glob("*.json"))
+            )
+            completed = ProcessingService(
+                root, FixtureSemanticWorker()
+            ).jobs.completed_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=str(receipt["evidence_authority_sha256"]),
+                processing_config_sha256=str(receipt["config_sha256"]),
+            )
+            self.assertEqual(1, len(completed))
+
+    def test_process_job_cli_semantic_worker_plugin_processes_exact_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root, jobs=2)
+            plugin_root = root / "plugins"
+            plugin_root.mkdir()
+            (plugin_root / "semantic_plugin_exact_under_test.py").write_text(
+                "from test_service import FixtureSemanticWorker\n"
+                "\n"
+                "factory_calls = []\n"
+                "workers = []\n"
+                "\n"
+                "\n"
+                "def fixture_factory(*, config_path, data_home):\n"
+                "    worker = FixtureSemanticWorker()\n"
+                "    factory_calls.append((str(config_path), str(data_home)))\n"
+                "    workers.append(worker)\n"
+                "    return worker\n",
+                encoding="utf-8",
+            )
+            sys.path.insert(0, str(plugin_root))
+            try:
+                args = build_parser().parse_args(
+                    [
+                        "process-job",
+                        "--config", str(config),
+                        "--profile-id", profile_id,
+                        "--track", "automation",
+                        "--worker-id", "plugin-exact",
+                        "--job-key", "fixture:2",
+                        "--data-home", str(root),
+                        "--semantic-worker",
+                        "semantic_plugin_exact_under_test:fixture_factory",
+                    ]
+                )
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = args.handler(args)
+                module = sys.modules["semantic_plugin_exact_under_test"]
+            finally:
+                sys.path.remove(str(plugin_root))
+                sys.modules.pop("semantic_plugin_exact_under_test", None)
+            self.assertEqual(0, result)
+            self.assertEqual([(str(config), str(root))], module.factory_calls)
+            self.assertEqual(1, module.workers[0].extractions)
+            self.assertEqual(1, module.workers[0].alignments)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(1, receipt["shard_claimed"])
+            self.assertEqual("fixture:2", receipt["scope"]["job_key"])
+            self.assertEqual("fixture:2", receipt["promotion"]["job_key"])
+            self.assertEqual(1, receipt["ranked_count"])
+            ranked = json.loads(
+                Path(receipt["reports"]["ranked_json"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(["fixture:2"], [row["job_key"] for row in ranked["jobs"]])
+
+    def test_process_cli_rejects_invalid_semantic_worker_before_state_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plugin_root = root / "plugins"
+            plugin_root.mkdir()
+            (plugin_root / "semantic_plugin_broken.py").write_text(
+                "not_callable = 123\n"
+                "\n"
+                "\n"
+                "def incompatible_factory(*, config_path, data_home):\n"
+                "    class Partial:\n"
+                "        def extract_vacancy(self, raw_context):\n"
+                "            raise AssertionError(\"must not be called\")\n"
+                "\n"
+                "    return Partial()\n",
+                encoding="utf-8",
+            )
+            data_home = root / "external-data"
+            common = [
+                "process",
+                "--config", "unused.yaml",
+                "--profile-id", "prf_fixture",
+                "--track", "automation",
+                "--worker-id", "reject",
+                "--data-home", str(data_home),
+            ]
+            cases = [
+                ("malformed-spec", ValueError, "module:factory syntax"),
+                ("semantic_plugin_missing:factory", ModuleNotFoundError, "semantic_plugin_missing"),
+                ("semantic_plugin_broken:not_callable", ValueError, "not callable"),
+                (
+                    "semantic_plugin_broken:incompatible_factory",
+                    ValueError,
+                    "incompatible object",
+                ),
+            ]
+            sys.path.insert(0, str(plugin_root))
+            try:
+                for specification, error_type, message in cases:
+                    with self.subTest(specification=specification):
+                        args = build_parser().parse_args(
+                            common + ["--semantic-worker", specification]
+                        )
+                        with self.assertRaisesRegex(error_type, message):
+                            args.handler(args)
+                        self.assertFalse(data_home.exists())
+            finally:
+                sys.path.remove(str(plugin_root))
+                sys.modules.pop("semantic_plugin_broken", None)
+
+    def test_process_cli_requires_exactly_one_semantic_selection(self) -> None:
+        parser = build_parser()
+        base = [
+            "process",
+            "--config", "config.yaml",
+            "--profile-id", "prf_fixture",
+            "--track", "automation",
+            "--worker-id", "exact",
+        ]
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                base + ["--model", "gpt-5.6-sol", "--semantic-worker", "pkg:factory"]
+            )
+        with self.assertRaises(SystemExit):
+            parser.parse_args(base)
+        codex = parser.parse_args(base + ["--model", "gpt-5.6-sol"])
+        self.assertEqual("gpt-5.6-sol", codex.model)
+        self.assertIsNone(codex.semantic_worker)
+        plugin = parser.parse_args(base + ["--semantic-worker", "pkg:factory"])
+        self.assertEqual("pkg:factory", plugin.semantic_worker)
+        self.assertIsNone(plugin.model)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "semantic-canary",
+                    "--semantic-worker", "pkg:factory",
+                    "--output", "out.json",
+                ]
+            )
+        canary = parser.parse_args(
+            ["semantic-canary", "--model", "gpt-5.6-sol", "--output", "out.json"]
+        )
+        self.assertEqual("gpt-5.6-sol", canary.model)
+        self.assertFalse(hasattr(canary, "semantic_worker"))
 
     def test_concurrent_board_scopes_have_isolated_deterministic_reports(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

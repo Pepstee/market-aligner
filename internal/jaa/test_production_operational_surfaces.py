@@ -712,3 +712,136 @@ def test_service_handoff_forwards_distinct_source_and_handoff_job_keys(
         "manifest": {"manifest": "exact"},
         "handoff_job_key": "job_" + "9" * 64,
     }
+
+
+@pytest.mark.parametrize("filter_field", [None, "profile_id", "profile_version", "candidate_intent_sha256",
+                                        "non_strict", "selection_blocked", "eligibility_blocked"])
+def test_published_selection_reads_verified_bundle_without_admission(
+    monkeypatch, tmp_path, filter_field,
+):
+    deployment = _deployment(tmp_path)
+    _execution(deployment, manifest_sha256=hashlib.sha256(b"manifest").hexdigest())
+    profile_id = "prf_" + "6" * 32
+    payload = {
+        "assessment": {"assessment_receipt_sha256": PROMOTION_OBJECT_SHA,
+                       "final": 0.75, "opportunity": 0.8},
+        "job_key": "job_" + "2" * 64,
+        "profile_id": profile_id,
+        "profile_version": "version-1",
+        "candidate_intent_sha256": "8" * 64,
+        "selection": {"decision": "selected_for_application", "hard_gate_passed": True,
+                      "geography_bucket": "UK_remote", "geography_priority_rank": 1},
+        "eligibility": {"hard_gate_passed": True},
+        "vacancy": {"vacancy_snapshot_sha256": "9" * 64},
+        "created_at": "2026-09-13T00:00:00Z",
+    }
+    monkeypatch.setattr(admission_runner, "ProtectedLocalOutbox", _Outbox)
+    monkeypatch.setattr(admission_runner, "parse_handoff", lambda _: SimpleNamespace(
+        root_sha256=SHA, application_id="app_" + "1" * 64,
+        payload=payload, strict_profile=filter_field != "non_strict",
+    ))
+    if filter_field == "selection_blocked":
+        payload["selection"]["hard_gate_passed"] = False
+    if filter_field == "eligibility_blocked":
+        payload["eligibility"]["hard_gate_passed"] = False
+    def forbid(*args, **kwargs):
+        raise AssertionError("read-only selection attempted an admission write")
+    monkeypatch.setattr(admission_runner, "HandoffAdmissionStore", forbid)
+    monkeypatch.setattr(admission_runner, "_prepare_database", forbid)
+    filters = dict(profile_id=profile_id, profile_version="version-1",
+                   candidate_intent_sha256="8" * 64)
+    if filter_field in {"non_strict", "selection_blocked", "eligibility_blocked"}:
+        with pytest.raises(admission_runner.ProductionHandoffAdmissionError, match="not strict|blocked"):
+            admission_runner._selected_published_handoffs(
+                **filters, deployment=deployment, commit_resolver=lambda *_: COMMIT,
+            )
+        assert not deployment.admission_root.exists()
+        return
+    if filter_field:
+        filters[filter_field] = {"profile_id": "prf_" + "7" * 32,
+                                "profile_version": "version-2",
+                                "candidate_intent_sha256": "a" * 64}[filter_field]
+    rows = admission_runner._selected_published_handoffs(
+        **filters, deployment=deployment, commit_resolver=lambda *_: COMMIT,
+    )
+    assert not deployment.admission_root.exists()
+    if filter_field:
+        assert rows == []
+    else:
+        assert len(rows) == 1
+        assert rows[0]["final_score"] == 75.0
+        assert rows[0]["handoff_root_sha256"] == SHA
+        assert rows[0]["release_authority"] is False
+        assert rows[0]["submission_authority"] is False
+
+
+def test_published_selection_ignores_unpublished_temporary_receipt(monkeypatch, tmp_path):
+    deployment = _deployment(tmp_path)
+    (deployment.execution_receipt_root / ".interrupted.tmp").write_bytes(b"incomplete")
+    def forbid(*args, **kwargs):
+        raise AssertionError("temporary publication became query input")
+    monkeypatch.setattr(admission_runner, "_read_published_handoff_pinned", forbid)
+    assert admission_runner._selected_published_handoffs(
+        profile_id="prf_" + "6" * 32, profile_version="version-1",
+        candidate_intent_sha256="8" * 64, deployment=deployment,
+        commit_resolver=lambda *_: COMMIT,
+    ) == []
+    assert not deployment.admission_root.exists()
+
+
+def test_service_selected_handoffs_uses_installed_read_boundary(monkeypatch):
+    expected = [{"application_id": "synthetic", "release_authority": False}]
+    observed = {}
+
+    def query(profile_id, **kwargs):
+        observed.update(profile_id=profile_id, **kwargs)
+        return expected
+
+    monkeypatch.setattr(admission_runner, "selected_published_handoffs", query)
+    assert service_api.MarketAlignerService.selected_handoffs(
+        "prf_" + "6" * 32, profile_version="version-1",
+        candidate_intent_sha256="8" * 64,
+    ) is expected
+    assert observed == {"profile_id": "prf_" + "6" * 32,
+                        "profile_version": "version-1", "candidate_intent_sha256": "8" * 64}
+
+
+def test_published_selection_preserves_geography_score_and_stable_tie_order(monkeypatch, tmp_path):
+    deployment = _deployment(tmp_path)
+    # Receipt validation is covered above; vary only the already-verified sort inputs here.
+    cases = {
+        "a": (2, 1.0, 1.0, "job_a", "app_a"),
+        "b": (1, 0.6, 0.9, "job_a", "app_b"),
+        "c": (1, 0.8, 0.7, "job_a", "app_c"),
+        "d": (1, 0.8, 0.9, "job_b", "app_d"),
+        "e": (1, 0.8, 0.9, "job_a", "app_f"),
+        "f": (1, 0.8, 0.9, "job_a", "app_e"),
+    }
+    for name in cases:
+        (deployment.execution_receipt_root / name).write_bytes(b"synthetic validated input")
+
+    def read(*, execution_receipt_path, **kwargs):
+        rank, score, opportunity, job_key, application_id = cases[execution_receipt_path.name]
+        handoff = SimpleNamespace(strict_profile=True, root_sha256=SHA,
+            application_id=application_id, payload={
+                "profile_id": "prf_" + "6" * 32, "profile_version": "version-1",
+                "candidate_intent_sha256": "8" * 64,
+                "selection": {"decision": "selected_for_application", "hard_gate_passed": True,
+                              "geography_bucket": "UK_remote", "geography_priority_rank": rank},
+                "eligibility": {"hard_gate_passed": True},
+                "assessment": {"final": score, "opportunity": opportunity},
+                "job_key": job_key, "vacancy": {"vacancy_snapshot_sha256": SHA},
+                "created_at": "2026-09-13T00:00:00Z",
+            })
+        return {"semantic_receipt_sha256": SHA, "source_job_key": job_key}, None, None, None, None, handoff
+
+    monkeypatch.setattr(admission_runner, "_read_published_handoff_pinned", read)
+    rows = admission_runner._selected_published_handoffs(
+        profile_id="prf_" + "6" * 32, profile_version="version-1",
+        candidate_intent_sha256="8" * 64, deployment=deployment,
+        commit_resolver=lambda *_: COMMIT,
+    )
+    assert [row["application_id"] for row in rows] == [
+        "app_e", "app_f", "app_d", "app_c", "app_b", "app_a",
+    ]
+    assert not deployment.admission_root.exists()

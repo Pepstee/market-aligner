@@ -13,12 +13,15 @@ from .application_compiler import (
     ApplicationSource,
     CandidateContact,
     DocumentSection,
+    EXACT_OUTWARD_PROFILE_REWRITES as OUTWARD_PROFILE_REWRITES,
     FactAuthority,
     FactualSentence,
     ProfileFactAuthority,
     StyleSlot,
     VacancyFactAuthority,
+    approved_candidate_outward_text,
     compile_application_source,
+    resolve_authenticated_outward_rewrite,
 )
 from .application_strategy import (
     CandidateSupport,
@@ -80,62 +83,6 @@ MINIMUM_CV_FACTS = 8
 MINIMUM_CV_WORDS = 110
 MINIMUM_LETTER_CANDIDATE_FACTS = 2
 MINIMUM_LETTER_WORDS = 90
-OUTWARD_PROFILE_REWRITES: Mapping[str, str] = {
-    "E-001": (
-        "First-Class BSc (Hons) Computer Science, Birmingham Newman "
-        "University, July 2026."
-    ),
-    "E-002": (
-        "Dissertation: SCAFAD: A Seven-Layer, Privacy-Preserving, Explainable "
-        "Anomaly-Detection Pipeline for Serverless Workloads."
-    ),
-    "E-011": (
-        "I led the end-to-end development of Market Aligner, covering its "
-        "collectors, validation, caching, SQLite persistence, retries and resumability."
-    ),
-    "E-013": (
-        "My GitHub portfolio is available under the username Pepstee, with work "
-        "covering orchestration, SCAFAD and delivered software projects."
-    ),
-    "E-012": (
-        "I architect and operate a multi-agent orchestration platform, owning "
-        "requirements, system architecture, evaluation gates and acceptance decisions."
-    ),
-    "E-014": (
-        "I provided product direction and validated the working Dubbing Studio MVP."
-    ),
-    "E-015": (
-        "Dubbing Studio has 709 passing automated tests and a real command-line "
-        "synthesis check that produced a timeline-correct WAV."
-    ),
-    "E-016": (
-        "Built Learning Accelerator, a tested system for LLM-assisted question "
-        "generation, spaced repetition, review sessions, persistence and analytics."
-    ),
-    "E-017": (
-        "The public scafad-delta repository contains the SCAFAD implementation."
-    ),
-    "E-018": (
-        "An earlier public orchestrator repository documents the development of "
-        "my orchestration architecture."
-    ),
-}
-OUTWARD_LETTER_REWRITES: Mapping[str, str] = {
-    "E-011": (
-        "In Market Aligner, I led work on collectors, validation, caching, "
-        "SQLite persistence, retries and resumability."
-    ),
-}
-OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
-    {
-        "schema_version": "jaa.candidate-outward-rewrite-policy.v1",
-        "mode": "exact_allowlist",
-        "rewrites": dict(OUTWARD_PROFILE_REWRITES),
-        "letter_rewrites": dict(OUTWARD_LETTER_REWRITES),
-    }
-)
-
-
 @dataclass(frozen=True)
 class CandidateApplicationPackage:
     source: ApplicationSource
@@ -822,9 +769,11 @@ def _outward_profile_text(
     document_kind: str | None = None,
 ) -> str:
     evidence_id = str(evidence["id"])
-    if document_kind == "cover_letter" and evidence_id in OUTWARD_LETTER_REWRITES:
-        return OUTWARD_LETTER_REWRITES[evidence_id]
-    return OUTWARD_PROFILE_REWRITES.get(evidence_id, str(evidence["statement"]))
+    return approved_candidate_outward_text(
+        evidence_id,
+        str(evidence["statement"]),
+        document_kind=document_kind or "cv",
+    )
 
 
 def _employer_document(
@@ -924,6 +873,17 @@ def _profile_sentence(
     approved_source_text = str(evidence["statement"])
     text = _outward_profile_text(evidence, document_kind=document_kind)
     rewritten = text != approved_source_text
+    rewrite_authority = (
+        resolve_authenticated_outward_rewrite(
+            candidate_evidence_id=evidence_id,
+            candidate_evidence_version=1,
+            approved_source_text=approved_source_text,
+            outward_text=text,
+            document_kind=document_kind,
+        )
+        if rewritten
+        else None
+    )
     authority = ProfileFactAuthority(
         candidate_profile_hash=candidate_profile_hash,
         candidate_claim_id=f"approved-claim:{evidence_id}",
@@ -932,10 +892,7 @@ def _profile_sentence(
         candidate_evidence_version=1,
         candidate_evidence_sha256=statement_sha256,
         proof_class=str(evidence["proof_class"]),
-        outward_text_sha256=_sha256(text.encode()) if rewritten else None,
-        rewrite_policy_sha256=(
-            OUTWARD_REWRITE_POLICY_SHA256 if rewritten else None
-        ),
+        rewrite_authority=rewrite_authority,
     )
     return FactualSentence(
         content_hash(

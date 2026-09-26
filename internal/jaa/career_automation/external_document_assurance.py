@@ -475,7 +475,8 @@ def assure_pdf_path(
 ) -> ExternalDocumentAssuranceReceipt:
     """Read one regular non-symlink PDF and assure its exact bytes."""
     candidate = Path(path)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    # A FIFO must reach fstat without waiting for a writer.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:  # pragma: no cover - supported production is POSIX
         raise RuntimeError("runtime lacks non-symlink file-open assurance")
