@@ -63,6 +63,30 @@ APPLICATION_URL = f"https://job-boards.greenhouse.io/example/jobs/{APPLICATION_I
 CONFIRMATION_URL = APPLICATION_URL + "/confirmation"
 
 
+@pytest.mark.parametrize("passive", [False, True])
+def test_inventory_passive_mode_never_expands_dynamic_controls(monkeypatch, passive):
+    from types import SimpleNamespace
+
+    actions = []
+    control = SimpleNamespace(
+        get_attribute=lambda name: "question",
+        evaluate=lambda script: "input",
+        focus=lambda: actions.append("focus"),
+        press=lambda key: actions.append(key),
+    )
+    page = SimpleNamespace(
+        url=APPLICATION_URL, title=lambda: "Synthetic application",
+        get_by_role=lambda role: SimpleNamespace(count=lambda: 1, nth=lambda index: control),
+        locator=lambda selector: SimpleNamespace(evaluate_all=lambda script: []),
+    )
+    monkeypatch.setattr(production_module, "canonical_non_secret_form_state", lambda page: b'{"fields":[]}')
+    inventory = json.loads(collect_greenhouse_form_inventory(page, passive=passive))
+    assert actions == ([] if passive else ["focus", "ArrowDown", "Escape"])
+    assert inventory["select_inventories"][0]["option_source"] == (
+        "unexpanded_aria_combobox" if passive else "dynamic_search"
+    )
+
+
 def test_only_optional_intl_phone_search_is_provider_auxiliary() -> None:
     assert is_greenhouse_auxiliary_field(
         identity="iti-0__search-input", field_type="search", required=False

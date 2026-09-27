@@ -23,6 +23,129 @@ from career_automation.production_runner import (
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("terminal_pending", [False, "event", "summary"])
+def test_review_only_runner_completes_without_release_and_does_not_reenter(tmp_path, monkeypatch, terminal_pending):
+    from test_application_archive import _review_preparation
+    from career_automation.production_runner import ReviewOnlyCompletion
+
+    recorder, prepared = _review_preparation(tmp_path)
+    if terminal_pending:
+        def interrupted(**kwargs):
+            raise RuntimeError("synthetic interruption before terminal manifest")
+
+        with monkeypatch.context() as patch:
+            if terminal_pending == "summary":
+                import career_automation.application_archive as archive_module
+                atomic_create = archive_module._atomic_create
+
+                def interrupt_manifest(path, value, **kwargs):
+                    if path.name == "terminal-manifest.json":
+                        interrupted()
+                    return atomic_create(path, value, **kwargs)
+
+                patch.setattr(archive_module, "_atomic_create", interrupt_manifest)
+            else:
+                patch.setattr(recorder.attempt, "finalize_terminal", interrupted)
+            with pytest.raises(RuntimeError, match="synthetic interruption"):
+                recorder.finalize_review_only(prepared)
+    prior_summary = ((recorder.attempt.path / "terminal-summary.txt").read_bytes()
+                     if terminal_pending == "summary" else None)
+    original_events = recorder.attempt._events()
+    original_objects = tuple((row, recorder.attempt.read_artifact(row))
+                             for row in recorder.attempt._objects(original_events))
+    candidate = ProductionRunCandidate(
+        vacancy=LiveVacancy.create(
+            vacancy=recorder.attempt.vacancy, provider="greenhouse", fit_score="0.2",
+            live=True, eligible=True, duplicate=False,
+            live_verified_at=datetime.now(timezone.utc).isoformat(),
+            scoring_inputs_sha256=_digest("review-score"),
+        ),
+        complete_vacancy=b"vacancy", structured_vacancy={}, assessment={},
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("release or submission authority reached")
+
+    monkeypatch.setattr(runner_module, "CertifiedGreenhouseSubmitExecutor", forbidden)
+    monkeypatch.setattr(runner_module, "CandidateReleaseExecutionAuthority", forbidden)
+    monkeypatch.setattr(GreenhouseAttemptRecorder, "finalize_release", forbidden)
+    monkeypatch.setattr(GreenhouseAttemptRecorder, "create", forbidden)
+    validated = []
+    monkeypatch.setattr(GreenhouseProductionRunner, "_validate_generation_inventory",
+                        staticmethod(lambda result, sink: validated.append(result)))
+    runner = GreenhouseProductionRunner(repository_root=recorder.attempt.archive.repository_root,
+                                       archive_root=recorder.attempt.archive.root, review_only=True)
+    routes = []
+    page = SimpleNamespace(on=lambda *args: None, route=lambda pattern, handler: routes.append(handler))
+    completed = runner.execute_all(page, candidates=(candidate,),
+                                   open_vacancy=forbidden if terminal_pending else lambda *args: {"method": "GET", "status": 200, "url": candidate.vacancy.vacancy.source_url},
+                                   prepare_review=forbidden if terminal_pending else lambda *args: prepared)
+    assert len(completed) == 1 and type(completed[0]) is ReviewOnlyCompletion
+    assert completed[0].attempt_id == recorder.attempt.attempt_id
+    assert recorder.attempt._events()[:len(original_events)] == original_events
+    assert sum(row.role == "review.intent" for row in recorder.attempt._objects(recorder.attempt._events())) == 1
+    for row, raw in original_objects:
+        assert recorder.attempt.read_artifact(row) == raw
+    assert validated == ([] if terminal_pending else [prepared])
+    assert runner._queue((candidate,)).next_action is None
+    if terminal_pending:
+        assert recorder.attempt._events() == original_events
+        assert routes == []
+        if prior_summary is not None:
+            assert (recorder.attempt.path / "terminal-summary.txt").read_bytes() == prior_summary
+        return
+    actions = []
+    routes[0](SimpleNamespace(request=SimpleNamespace(method="POST"),
+                              abort=lambda: actions.append("abort"),
+                              continue_=forbidden))
+    assert actions == ["abort"]
+
+
+def test_review_only_runner_rejects_incomplete_release_before_browser_access(tmp_path, monkeypatch):
+    candidate = _candidate()
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive", repository_root=ROOT,
+        vacancy=candidate.vacancy.vacancy, complete_vacancy=b"vacancy",
+        structured_vacancy={}, assessment={},
+    )
+    recorder._add("browser.prefill_snapshot", b"{}", "application/json")
+    original = recorder.attempt._events()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("review recovery reached browser or release authority")
+
+    monkeypatch.setattr(runner_module, "CertifiedGreenhouseSubmitExecutor", forbidden)
+    monkeypatch.setattr(runner_module, "CandidateReleaseExecutionAuthority", forbidden)
+    runner = GreenhouseProductionRunner(repository_root=ROOT, archive_root=tmp_path / "archive", review_only=True)
+    with pytest.raises(ValueError, match="no review-only intent"):
+        runner.execute_next(None, candidates=(candidate,), open_vacancy=forbidden, prepare_review=forbidden)
+    assert recorder.attempt._events() == original
+
+
+def test_review_only_runner_never_constructs_submit_executor(tmp_path, monkeypatch):
+    def forbidden(**kwargs):
+        raise AssertionError("submit executor reached")
+
+    monkeypatch.setattr(runner_module, "CertifiedGreenhouseSubmitExecutor", forbidden)
+    runner = GreenhouseProductionRunner(repository_root=ROOT, archive_root=tmp_path / "archive", review_only=True)
+    assert runner.executor is None
+    with pytest.raises(ValueError, match="only a review"):
+        runner.execute_next(None, candidates=(), open_vacancy=None, prepare_release=lambda *args: None)
+    with pytest.raises(ValueError, match="one terminal"):
+        runner.execute_all(None, candidates=(), open_vacancy=None, prepare_review=lambda *args: None, max_terminal_attempts=2)
+
+
+@pytest.mark.parametrize("flags", [[], ["--review-only", "--execute-live"], ["--review-only", "--max-terminal-attempts", "2"]])
+def test_review_only_cli_selection_is_explicit_and_bounded(tmp_path, monkeypatch, flags):
+    def forbidden(*args):
+        raise AssertionError("session factory must not run")
+
+    monkeypatch.setattr(runner_module, "_load_factory", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        runner_module.main(["--repository-root", str(ROOT), "--archive-root", str(tmp_path), *flags])
+    assert exc.value.code == 2
 PRIVATE_AUTHORITY_ROOT = ROOT.parents[1] / ".market-aligner-data" / "authority-inputs"
 AUTHORITY_PATH = (
     PRIVATE_AUTHORITY_ROOT

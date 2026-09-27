@@ -50,6 +50,7 @@ from .production_queue import (
 from .provider_observation_capture import exact_clean_head
 from .release_gate import ReleaseGateStore
 from .rendering import ApplicationArtifacts
+from form_filling.ats_forensics import ATSForensicReceipt
 
 
 PRODUCTION_FACTORY_REFERENCE = (
@@ -510,6 +511,30 @@ class PreparedGreenhouseRelease:
     timeout_ms: int = 20_000
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedGreenhouseReview:
+    source: ApplicationSource
+    artifacts: ApplicationArtifacts
+    document_assurance_receipts: tuple[ExternalDocumentAssuranceReceipt, ExternalDocumentAssuranceReceipt]
+    sanity_review_receipt: SanityReviewReceipt
+    production_identity: ProductionIdentity
+    generation_authority: SinkBoundGenerationAuthority
+    vacancy_review_material: VacancyReviewMaterial
+    vacancy_requirements: tuple[str, ...]
+    forensic_root: Path
+    forensic_receipt: ATSForensicReceipt
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewOnlyCompletion:
+    attempt_id: str
+    terminal_manifest_sha256: str
+
+
+PrepareReview = Callable[
+    [QueueItem, GreenhouseAttemptRecorder, Page, GeneratedRevisionSink],
+    PreparedGreenhouseReview,
+]
 PrepareRelease = Callable[
     [QueueItem, GreenhouseAttemptRecorder, Page, GeneratedRevisionSink],
     PreparedGreenhouseRelease,
@@ -522,6 +547,7 @@ class ProductionRunnerSession(Protocol):
     candidates: Sequence[ProductionRunCandidate]
     open_vacancy: OpenVacancy
     prepare_release: PrepareRelease
+    prepare_review: PrepareReview
     gmail_confirmation_checker: GmailConfirmationChecker | None
 
     def close(self) -> None: ...
@@ -537,7 +563,10 @@ class GreenhouseProductionRunner:
         archive_root: str | Path,
         gmail_confirmation_checker: GmailConfirmationChecker | None = None,
         retry_repairable_preclick_blocks: bool = False,
+        review_only: bool = False,
     ) -> None:
+        if type(review_only) is not bool:
+            raise TypeError("review-only selection must be boolean")
         if type(retry_repairable_preclick_blocks) is not bool:
             raise TypeError("repairable-block retry policy must be boolean")
         self.repository_root = Path(repository_root).resolve(strict=True)
@@ -545,7 +574,8 @@ class GreenhouseProductionRunner:
             archive_root,
             repository_root=self.repository_root,
         )
-        self.executor = CertifiedGreenhouseSubmitExecutor(
+        self.review_only = review_only
+        self.executor = None if review_only else CertifiedGreenhouseSubmitExecutor(
             repository_root=self.repository_root,
             gmail_confirmation_checker=gmail_confirmation_checker,
         )
@@ -627,8 +657,14 @@ class GreenhouseProductionRunner:
         *,
         candidates: Sequence[ProductionRunCandidate],
         open_vacancy: OpenVacancy,
-        prepare_release: PrepareRelease,
-    ) -> ProductionSubmissionReceipt | None:
+        prepare_release: PrepareRelease | None = None,
+        prepare_review: PrepareReview | None = None,
+    ) -> ProductionSubmissionReceipt | ReviewOnlyCompletion | None:
+        if self.review_only:
+            if prepare_release is not None or prepare_review is None:
+                raise ValueError("review-only execution requires only a review preparer")
+        elif prepare_release is None or prepare_review is not None:
+            raise ValueError("live execution requires only a release preparer")
         queue = self._queue(candidates)
         item = queue.next_action
         if item is None:
@@ -662,11 +698,29 @@ class GreenhouseProductionRunner:
                 assessment={**candidate.assessment, "queue_rank": item.queue_rank},
             )
         )
+        if self.review_only:
+            recorder.begin_review_only()
+            recovered = recorder.recover_review_only_completion()
+            if recovered is not None:
+                return ReviewOnlyCompletion(recorder.attempt.attempt_id, recovered)
+        elif any(row.role == "review.intent" for row in recorder.attempt._objects(recorder.attempt._events())):
+            raise ValueError("a review-only attempt cannot resume as live execution")
         recorder.attach_page_evidence(page)
+        refused_requests: list[str] = []
+        if self.review_only:
+            def review_route(route):
+                if route.request.method != "GET":
+                    refused_requests.append(route.request.method)
+                    route.abort()
+                else:
+                    route.continue_()
+            page.route("**/*", review_route)
         try:
             navigation = open_vacancy(item, page)
             recorder.record_navigation(navigation)
         except Exception as exc:
+            if self.review_only:
+                raise
             recorder.finalize_preintent_failure(
                 page,
                 reason_code="navigation_failed",
@@ -674,7 +728,7 @@ class GreenhouseProductionRunner:
                 error_message=str(exc),
             )
             raise
-        boundary_signals = self.executor.boundary_signals(page)
+        boundary_signals = () if self.review_only else self.executor.boundary_signals(page)
         if boundary_signals:
             observed_network = list(candidate.network_evidence)
             if navigation is not None:
@@ -689,11 +743,13 @@ class GreenhouseProductionRunner:
             row.role for row in recorder.attempt._objects(recorder.attempt._events())
         }
         if "browser.prefill_snapshot" not in roles:
-            recorder.record_prefill(page)
+            recorder.record_prefill(page, **({"passive": True} if self.review_only else {}))
         try:
             revision_sink = GeneratedRevisionSink(recorder)
-            prepared = prepare_release(item, recorder, page, revision_sink)
+            prepared = (prepare_review if self.review_only else prepare_release)(item, recorder, page, revision_sink)
         except Exception as exc:
+            if self.review_only:
+                raise
             recorder.finalize_preintent_failure(
                 page,
                 reason_code="release_preparation_failed",
@@ -701,6 +757,12 @@ class GreenhouseProductionRunner:
                 error_message=str(exc),
             )
             raise
+        if self.review_only:
+            if type(prepared) is not PreparedGreenhouseReview or refused_requests:
+                raise ValueError("review-only preparation crossed its passive boundary")
+            self._validate_generation_inventory(prepared, revision_sink)
+            digest = recorder.finalize_review_only(prepared)
+            return ReviewOnlyCompletion(recorder.attempt.attempt_id, digest)
         try:
             self._validate_generation_inventory(prepared, revision_sink)
         except Exception as exc:
@@ -777,12 +839,17 @@ class GreenhouseProductionRunner:
         *,
         candidates: Sequence[ProductionRunCandidate],
         open_vacancy: OpenVacancy,
-        prepare_release: PrepareRelease,
+        prepare_release: PrepareRelease | None = None,
+        prepare_review: PrepareReview | None = None,
         max_terminal_attempts: int | None = None,
-    ) -> tuple[ProductionSubmissionReceipt, ...]:
+    ) -> tuple[ProductionSubmissionReceipt | ReviewOnlyCompletion, ...]:
+        if self.review_only:
+            if max_terminal_attempts not in (None, 1):
+                raise ValueError("review-only invocation permits one terminal outcome")
+            max_terminal_attempts = 1
         if max_terminal_attempts is not None and max_terminal_attempts < 1:
             raise ValueError("max_terminal_attempts must be at least one")
-        receipts: list[ProductionSubmissionReceipt] = []
+        receipts: list[ProductionSubmissionReceipt | ReviewOnlyCompletion] = []
         terminal_attempts = 0
         while self._queue(candidates).next_action is not None:
             if (
@@ -799,6 +866,7 @@ class GreenhouseProductionRunner:
                     candidates=candidates,
                     open_vacancy=open_vacancy,
                     prepare_release=prepare_release,
+                    **({"prepare_review": prepare_review} if self.review_only else {}),
                 )
             except ProductionATSBoundaryError:
                 queue = self._queue(candidates)
@@ -831,7 +899,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repository-root", type=Path, required=True)
     parser.add_argument("--archive-root", type=Path, required=True)
     parser.add_argument("--factory", default=PRODUCTION_FACTORY_REFERENCE)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--review-only", action="store_true", help="prepare one review-only terminal attempt without release or submission")
+    mode.add_argument(
         "--execute-live",
         action="store_true",
         help="required acknowledgement for consequential production execution",
@@ -850,14 +920,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     arguments = parser.parse_args(argv)
-    if not arguments.execute_live:
-        parser.error("--execute-live is required")
+    if arguments.review_only and arguments.max_terminal_attempts not in (None, 1):
+        parser.error("--review-only permits at most one terminal outcome")
     session: ProductionRunnerSession = _load_factory(arguments.factory)(arguments)
     try:
         GreenhouseProductionRunner(
             repository_root=arguments.repository_root,
             archive_root=arguments.archive_root,
             gmail_confirmation_checker=session.gmail_confirmation_checker,
+            review_only=arguments.review_only,
             retry_repairable_preclick_blocks=(
                 arguments.retry_repairable_preclick_blocks
             ),
@@ -865,7 +936,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session.page,
             candidates=session.candidates,
             open_vacancy=session.open_vacancy,
-            prepare_release=session.prepare_release,
+            **({"prepare_review": session.prepare_review} if arguments.review_only else {"prepare_release": session.prepare_release}),
             max_terminal_attempts=arguments.max_terminal_attempts,
         )
     finally:

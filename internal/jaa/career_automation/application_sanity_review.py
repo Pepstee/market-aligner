@@ -486,6 +486,16 @@ class SanityReviewReceipt:
     receipt_sha256: str
     schema_version: str = RECEIPT_SCHEMA_VERSION
 
+    @classmethod
+    def from_document(cls, document: Mapping[str, object]) -> "SanityReviewReceipt":
+        fields = dict(document)
+        fields.pop("vacancy_intent_sha256")
+        fields["intended_vacancy"] = IntendedVacancy(**fields["intended_vacancy"])
+        receipt = cls(**fields)
+        if receipt.document() != document:
+            raise ValueError("sanity receipt document differs from its exact binding")
+        return receipt
+
     def __post_init__(self) -> None:
         if (
             type(self.package_hashes) is not dict

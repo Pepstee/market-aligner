@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import importlib.metadata
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from playwright.sync_api import Page
 
@@ -18,6 +19,7 @@ from .application_archive import (
     AttemptArchive,
     VacancyArchiveIdentity,
     release_upload_mapping_bytes,
+    REVIEW_ONLY_METADATA,
 )
 from .application_compiler import (
     ApplicationSource,
@@ -25,7 +27,9 @@ from .application_compiler import (
     ProfileFactAuthority,
     VacancyFactAuthority,
 )
-from .application_sanity_review import SanityReviewReceipt
+from .application_sanity_review import (
+    SanityReviewPackage, SanityReviewReceipt, package_from_application, verify_sanity_review_receipt,
+)
 from .application_quality import ApplicationQualityInput
 from .application_quality_contracts import ApplicationPreflightQualityReview
 from .ats_application_authority import AtsApplicationAuthority
@@ -111,6 +115,7 @@ class GreenhouseAttemptRecorder:
     def __init__(self, attempt: AttemptArchive) -> None:
         self.attempt = attempt
         self._attached_pages: set[int] = set()
+        self._created_here = False
 
     @classmethod
     def create(
@@ -153,6 +158,7 @@ class GreenhouseAttemptRecorder:
             _json_bytes(assessment),
             "application/json",
         )
+        recorder._created_here = True
         return recorder
 
     @classmethod
@@ -396,9 +402,9 @@ class GreenhouseAttemptRecorder:
             metadata={"rejection_codes": list(rejection_codes)},
         )
 
-    def record_prefill(self, page: Page) -> ArchivedObject:
+    def record_prefill(self, page: Page, *, passive: bool = False) -> ArchivedObject:
         state = canonical_non_secret_form_state(page)
-        inventory = collect_greenhouse_form_inventory(page)
+        inventory = collect_greenhouse_form_inventory(page, **({"passive": True} if passive else {}))
         prefill = self._add(
             "browser.prefill_snapshot",
             state,
@@ -628,6 +634,117 @@ class GreenhouseAttemptRecorder:
             if row.disposition == "approved":
                 selected[row.role] = row.sha256
         return selected
+
+    def begin_review_only(self) -> None:
+        self.attempt.begin_review_only(allow_new=self._created_here)
+        self._created_here = False
+
+    def recover_review_only_completion(self) -> str | None:
+        self.begin_review_only()
+        events = self.attempt._events()
+        last = events[-1]
+        if last["event_type"] != "evidence_recorded" or last["payload"].get("event_kind") != "terminal":
+            return None
+        digest = self.attempt.finalize_terminal(
+            outcome="review_only", selected=last["payload"]["member_sha256s"],
+            finalized_at=last["occurred_at"],
+        )
+        ProductionCheckpointLedger(self.attempt.archive).record_attempt_terminal(self.attempt.attempt_id)
+        return digest
+
+    def review_once(
+        self, package: SanityReviewPackage, review: Callable[[], SanityReviewReceipt],
+    ) -> SanityReviewReceipt:
+        self.begin_review_only()
+        rows = self.attempt._objects(self.attempt._events())
+        receipts = [row for row in rows if row.role == "assurance.semantic.receipt"]
+        if receipts:
+            if len(receipts) != 1:
+                raise ValueError("review-only semantic receipt is ambiguous")
+            receipt = SanityReviewReceipt.from_document(json.loads(self.attempt.read_artifact(receipts[0])))
+            verify_sanity_review_receipt(receipt, package)
+            return receipt
+        if any(row.role in {"review.semantic_intent", "review.sanity_result", "review.ats_passive_forensics"} for row in rows):
+            raise ValueError("review-only semantic result is unresolved; a second review is forbidden")
+        self._add("review.semantic_intent", _json_bytes({"attempt_id": self.attempt.attempt_id}), "application/json")
+        receipt = review()
+        verify_sanity_review_receipt(receipt, package)
+        self._add("assurance.semantic.receipt", _json_bytes(receipt.document()), "application/json")
+        return receipt
+
+    def finalize_review_only(self, prepared) -> str:
+        from .production_runner import PreparedGreenhouseReview
+        from form_filling.ats_forensics import verify_forensic_receipt
+
+        if type(prepared) is not PreparedGreenhouseReview:
+            raise TypeError("review-only completion requires its exact non-release type")
+        self.begin_review_only()
+        recovered = self.recover_review_only_completion()
+        if recovered is not None:
+            return recovered
+        package = package_from_application(
+            source=prepared.source, artifacts=prepared.artifacts, questions=None,
+            vacancy_requirements=prepared.vacancy_requirements,
+            vacancy_review_material=prepared.vacancy_review_material,
+        )
+        verify_sanity_review_receipt(prepared.sanity_review_receipt, package)
+        forensic = verify_forensic_receipt(prepared.forensic_root, prepared.forensic_receipt)
+        if forensic["attempt_id"] != self.attempt.attempt_id:
+            raise ValueError("passive evidence belongs to another attempt")
+        selected = self._selected()
+        payloads = {
+            "vacancy.visible_listing_capture": prepared.vacancy_review_material.visible_listing_text_bytes,
+            "document.source_inputs": _json_bytes(prepared.source.document()),
+            "document.cv.final_pdf": package.cv_pdf_bytes,
+            "document.cover_letter.final_pdf": package.cover_letter_pdf_bytes,
+            "assurance.cv.receipt": _json_bytes(prepared.document_assurance_receipts[0].document()),
+            "assurance.cover_letter.receipt": _json_bytes(prepared.document_assurance_receipts[1].document()),
+            "assurance.semantic.receipt": _json_bytes(prepared.sanity_review_receipt.document()),
+            "production.identities": _json_bytes(prepared.production_identity.document()),
+            "review.ats_passive_forensics": _json_bytes(forensic),
+            "review.package": _json_bytes({
+                "application_source_identity": package.application_source_identity,
+                "form_fields": package.form_fields,
+                "vacancy_requirements": package.vacancy_requirements,
+                "approved_evidence_ids": package.approved_evidence_ids,
+                "artifact_set_sha256": prepared.artifacts.artifact_set_sha256,
+            }),
+            "review.result": _json_bytes({
+                **REVIEW_ONLY_METADATA, "vacancy": self.attempt.vacancy.document(),
+                "outcome": "review_only",
+            }),
+        }
+        for event in forensic["events"]:
+            if event["kind"] == "screenshot":
+                payload = event["payload"]
+                payloads[f"review.screenshot.{event['sequence']}"] = (
+                    prepared.forensic_root / payload["object_path"]
+                ).read_bytes()
+        for role, value in payloads.items():
+            digest = hashlib.sha256(value).hexdigest()
+            existing = [row for row in self.attempt._objects(self.attempt._events())
+                        if row.role == role and row.sha256 == digest]
+            if len(existing) > 1:
+                raise ValueError("review-only evidence is ambiguous")
+            if existing:
+                selected[role] = digest
+            else:
+                media = (
+                    "text/plain" if role == "vacancy.visible_listing_capture"
+                    else "application/pdf" if role.endswith("final_pdf")
+                    else "image/png" if role.startswith("review.screenshot.")
+                    else "application/json"
+                )
+                selected[role] = self._add(role, value, media).sha256
+        self._record_evidence("terminal", result="completed", members=selected,
+                              details={"provenance": "greenhouse.review_only",
+                                       "interaction_counts": {"fields_filled": 0, "files_uploaded": 0, "submit_clicks": 0}})
+        digest = self.attempt.finalize_terminal(
+            outcome="review_only", selected=selected,
+            finalized_at=self.attempt._events()[-1]["occurred_at"],
+        )
+        ProductionCheckpointLedger(self.attempt.archive).record_attempt_terminal(self.attempt.attempt_id)
+        return digest
 
     def finalize_release(
         self,

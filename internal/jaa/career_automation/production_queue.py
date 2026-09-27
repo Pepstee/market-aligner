@@ -36,6 +36,7 @@ ADMITTED_PROVIDERS = frozenset({"greenhouse"})
 MAX_LIVE_AGE = timedelta(hours=6)
 QUARANTINE_OUTCOMES = frozenset(
     {
+        "review_only",
         "submitted_success",
         "historical_submitted_success",
         "submitted_failure",

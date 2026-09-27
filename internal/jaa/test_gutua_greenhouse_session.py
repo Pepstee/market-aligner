@@ -937,6 +937,69 @@ def _synthetic_seam_fixture(
     )
 
 
+def test_synthetic_review_seam_stops_before_gate_and_fill(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from career_automation.production_runner import PreparedGreenhouseReview
+    from form_filling.ats_forensics import ATSForensicRecorder
+
+    fixture = _synthetic_seam_fixture(tmp_path, monkeypatch, html=_SYNTHETIC_SEAM_HTML)
+    fixture.recorder.begin_review_only()
+    receipts = []
+
+    def review_once(recorder, package, review):
+        if not receipts:
+            receipts.append(review())
+        return receipts[0]
+
+    monkeypatch.setattr(GreenhouseAttemptRecorder, "review_once", review_once)
+    fixture.session._browser = SimpleNamespace(browser_type=SimpleNamespace(name="synthetic"), version="1")
+    page = SimpleNamespace(
+        content=lambda: fixture.html,
+        locator=lambda selector: SimpleNamespace(inner_text=lambda: "Graduate Engineer at Example"),
+        evaluate=lambda script: "synthetic",
+    )
+
+    from career_automation.production_ats_executor import capture_or_recover_greenhouse_forensic_observation as recover_forensics
+
+    def capture(active_page, **kwargs):
+        manifest = kwargs["forensic_root"] / "manifests" / f"{kwargs['attempt_id']}.json"
+        if manifest.exists():
+            return recover_forensics(None, **kwargs)
+        fixture.order.append("forensics")
+        assert kwargs.pop("passive_inventory") is True
+        recorder = ATSForensicRecorder(
+            kwargs.pop("forensic_root"), ats_name="greenhouse", **kwargs,
+        )
+        recorder.record_checkpoint("greenhouse_preflight_inventory", inventory_sha256="b" * 64, boundary_signal_count=0, passive_inventory=True)
+        recorder.record_screenshot(b"synthetic screenshot", label="preflight")
+        return recorder.finalize(outcome="prepared")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("review reached release or form mutation")
+
+    monkeypatch.setattr(session_module, "capture_or_recover_greenhouse_forensic_observation", capture)
+    monkeypatch.setattr(session_module.CandidateAuthorityReleaseGate, "issue", forbidden)
+    monkeypatch.setattr(GutuaGreenhouseSession, "_fill_supported_form", forbidden)
+    monkeypatch.setattr(session_module, "load_provider_observation_authority", forbidden)
+    prepared = fixture.session.prepare_review(fixture.item, fixture.recorder, page, fixture.sink)
+    assert type(prepared) is PreparedGreenhouseReview
+    assert fixture.order == ["sanity", "forensics"]
+    assert not hasattr(prepared, "gate") and not hasattr(prepared, "release_token")
+    with pytest.raises((AttributeError, TypeError)):
+        prepared.release_token = "forbidden"
+    assert not (fixture.archive_root / "production-runtime").exists()
+    original = fixture.recorder.attempt._events()
+    resumed = GreenhouseAttemptRecorder.resume(
+        archive_root=fixture.archive_root, repository_root=fixture.session.repository_root,
+        attempt_id=fixture.recorder.attempt.attempt_id,
+    )
+    resumed.begin_review_only()
+    recovered = fixture.session.prepare_review(fixture.item, resumed, page, fixture.sink)
+    assert type(recovered) is PreparedGreenhouseReview
+    assert fixture.order == ["sanity", "forensics"]
+    assert resumed.attempt._events() == original
+
+
 def test_synthetic_seam_passive_forensics_after_sanity_before_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1357,10 +1420,15 @@ def test_dynamic_option_is_bound_to_its_own_controlled_listbox() -> None:
 
 
 def test_concrete_preparation_uses_only_owned_candidate_generator() -> None:
-    source = inspect.getsource(GutuaGreenhouseSession.prepare_release)
+    source = inspect.getsource(GutuaGreenhouseSession._prepare_application)
     assert "sink.generate_candidate_application(" in source
     assert "producer=" not in source
     assert "generate_product" not in source
+    for method, selection in ((GutuaGreenhouseSession.prepare_release, "False"),
+                              (GutuaGreenhouseSession.prepare_review, "True")):
+        entrypoint = inspect.getsource(method)
+        assert f"self._prepare_application(item, recorder, page, sink, review_only={selection})" in entrypoint
+        assert "sink.generate_candidate_application(" not in entrypoint
 
 
 def test_original_visible_listing_is_archived_before_contact_authority(tmp_path, monkeypatch):

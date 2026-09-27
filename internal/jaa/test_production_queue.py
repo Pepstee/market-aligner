@@ -26,6 +26,17 @@ ROOT = Path(__file__).resolve().parent
 NOW = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("retry", [False, True])
+def test_review_only_terminal_never_automatically_reenters(retry):
+    candidate = _candidate("10", "0.2")
+    prior = PriorAttempt(candidate.vacancy, "jaa-20260805T120000Z-0123456789abcdef",
+                         "review_only", _digest("review-terminal"))
+    queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW,
+                                  retry_repairable_preclick_blocks=retry)
+    assert queue.next_action is None
+    assert queue.excluded[0].reason == "prior_review_only"
+
+
 def _digest(label: str) -> str:
     return hashlib.sha256(label.encode()).hexdigest()
 

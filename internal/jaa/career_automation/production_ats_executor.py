@@ -285,7 +285,7 @@ def canonical_non_secret_form_state(page: Page) -> bytes:
     return _json_bytes(document)
 
 
-def collect_greenhouse_form_inventory(page: Page) -> bytes:
+def collect_greenhouse_form_inventory(page: Page, *, passive: bool = False) -> bytes:
     """Capture questions and every currently enumerable select option."""
     state = json.loads(canonical_non_secret_form_state(page))
     inventories: list[dict[str, object]] = []
@@ -304,6 +304,9 @@ def collect_greenhouse_form_inventory(page: Page) -> bytes:
                 "({value: row.value, text: row.text, disabled: row.disabled}))"
             )
             source = "native_select"
+        elif passive:
+            options = []
+            source = "unexpanded_aria_combobox"
         else:
             combobox.focus()
             combobox.press("ArrowDown")
@@ -623,6 +626,26 @@ class ProductionSubmissionReceipt:
         return result
 
 
+def passive_greenhouse_boundary_signals(page: Page) -> tuple[str, ...]:
+    """Observe login/challenge boundaries without constructing execution authority."""
+    signals: set[str] = set()
+    frame_sources = page.locator("iframe:visible").evaluate_all(
+        "(frames) => frames.map((frame) => frame.getAttribute('src') || '')"
+    )
+    visible = page.locator("body").inner_text().casefold()
+    haystack = " ".join(str(value).casefold() for value in frame_sources)
+    for marker in BOUNDARY_MARKERS:
+        if marker in haystack or marker in visible:
+            signals.add(marker)
+    if "recaptcha" in haystack and any(
+        marker in haystack for marker in ("/bframe", "challenge", "fallback")
+    ):
+        signals.add("recaptcha_challenge")
+    if page.locator("input[type=password]").count():
+        signals.add("password_or_login")
+    return tuple(sorted(signals))
+
+
 class CertifiedGreenhouseSubmitExecutor:
     """The sole admitted production implementation of the final click."""
 
@@ -654,7 +677,6 @@ class CertifiedGreenhouseSubmitExecutor:
 
     @staticmethod
     def _boundary_signals(page: Page) -> tuple[str, ...]:
-        signals: set[str] = set()
         # Greenhouse embeds an invisible reCAPTCHA component on every ordinary
         # application form.  Its mere presence is not a human-verification
         # boundary: treating the dormant widget as one parked every vacancy.
@@ -662,25 +684,11 @@ class CertifiedGreenhouseSubmitExecutor:
         # widget turns into a challenge after the legitimate submit click, the
         # post-intent reconciliation path quarantines the attempt and forbids a
         # second click; this detector never solves or bypasses the challenge.
-        frame_sources = page.locator("iframe:visible").evaluate_all(
-            "(frames) => frames.map((frame) => frame.getAttribute('src') || '')"
-        )
-        visible = page.locator("body").inner_text().casefold()
-        haystack = " ".join(str(value).casefold() for value in frame_sources)
-        for marker in BOUNDARY_MARKERS:
-            if marker in haystack or marker in visible:
-                signals.add(marker)
         # reCAPTCHA's visible anchor/badge frame and its explanatory footer are
         # present before any challenge.  The separate bframe is the interactive
         # image/audio challenge.  Detect that challenge specifically instead
         # of matching the provider name in ordinary form chrome.
-        if "recaptcha" in haystack and any(
-            marker in haystack for marker in ("/bframe", "challenge", "fallback")
-        ):
-            signals.add("recaptcha_challenge")
-        if page.locator("input[type=password]").count():
-            signals.add("password_or_login")
-        return tuple(sorted(signals))
+        return passive_greenhouse_boundary_signals(page)
 
     @classmethod
     def boundary_signals(cls, page: Page) -> tuple[str, ...]:
@@ -1906,6 +1914,7 @@ def capture_greenhouse_forensic_observation(
     runtime: Mapping[str, object],
     release_manifest_sha256: str | None = None,
     artifact_set_sha256: str | None = None,
+    passive_inventory: bool = False,
 ) -> ATSForensicReceipt:
     """Capture a no-submit Greenhouse preflight through the canonical executor.
 
@@ -1931,8 +1940,8 @@ def capture_greenhouse_forensic_observation(
         artifact_set_sha256=artifact_set_sha256,
     )
     recorder.attach_playwright(page)
-    inventory = collect_greenhouse_form_inventory(page)
-    signals = CertifiedGreenhouseSubmitExecutor.boundary_signals(page)
+    inventory = collect_greenhouse_form_inventory(page, **({"passive": True} if passive_inventory else {}))
+    signals = passive_greenhouse_boundary_signals(page)
     signals_bytes = _json_bytes(tuple(sorted(signals)))
     recorder.record_checkpoint(
         "greenhouse_preflight_inventory",
@@ -1940,6 +1949,7 @@ def capture_greenhouse_forensic_observation(
         inventory_sha256=_sha256(inventory),
         boundary_signal_count=len(signals),
         boundary_signals_sha256=_sha256(signals_bytes),
+        **({"passive_inventory": True} if passive_inventory else {}),
     )
     recorder.capture_page(page, label="preflight")
     if signals:
@@ -1962,6 +1972,7 @@ def capture_or_recover_greenhouse_forensic_observation(
     runtime: Mapping[str, object],
     release_manifest_sha256: str | None = None,
     artifact_set_sha256: str | None = None,
+    passive_inventory: bool = False,
 ) -> ATSForensicReceipt:
     """Return an exact existing passive observation, or capture it once.
 
@@ -1978,6 +1989,7 @@ def capture_or_recover_greenhouse_forensic_observation(
         "runtime": runtime,
         "release_manifest_sha256": release_manifest_sha256,
         "artifact_set_sha256": artifact_set_sha256,
+        **({"passive_inventory": True} if passive_inventory else {}),
     }
     try:
         return load_forensic_receipt(

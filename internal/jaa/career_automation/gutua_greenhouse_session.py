@@ -69,6 +69,7 @@ from .production_queue import LiveVacancy, QueueItem
 from .production_runner import (
     GeneratedRevisionSink,
     PreparedGreenhouseRelease,
+    PreparedGreenhouseReview,
     ProductionRunCandidate,
 )
 from .provider_observation_authority import load_provider_observation_authority
@@ -500,12 +501,14 @@ class GutuaGreenhouseSession:
         }
         self.gmail_confirmation_checker = (
             GmailAPIConfirmationChecker(repository_root=repository_root)
-            if os.environ.get(ACCESS_TOKEN_ENV)
+            if not getattr(arguments, "review_only", False) and os.environ.get(ACCESS_TOKEN_ENV)
             else None
         )
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=True)
-        self.page = self._browser.new_page()
+        self.page = self._browser.new_page(
+            **({"service_workers": "block"} if getattr(arguments, "review_only", False) else {})
+        )
 
     def open_vacancy(self, item: QueueItem, page) -> Mapping[str, object] | None:
         response = page.goto(
@@ -900,6 +903,16 @@ class GutuaGreenhouseSession:
         page,
         sink: GeneratedRevisionSink,
     ) -> PreparedGreenhouseRelease:
+        return self._prepare_application(item, recorder, page, sink, review_only=False)
+
+    def prepare_review(
+        self, item: QueueItem, recorder, page, sink: GeneratedRevisionSink,
+    ) -> PreparedGreenhouseReview:
+        return self._prepare_application(item, recorder, page, sink, review_only=True)
+
+    def _prepare_application(
+        self, item: QueueItem, recorder, page, sink: GeneratedRevisionSink, *, review_only: bool,
+    ) -> PreparedGreenhouseRelease | PreparedGreenhouseReview:
         vacancy = item.vacancy.vacancy
         source_body = self.complete_vacancy_by_key.get(vacancy.job_key)
         if source_body is None or hashlib.sha256(source_body).hexdigest() != (
@@ -978,28 +991,29 @@ class GutuaGreenhouseSession:
             answers_text=package.artifacts.editable.answers_text,
             intended_vacancy=intended,
         )
-        success_observation, observation_authority = (
-            load_provider_observation_authority(
-                source_url=vacancy.source_url,
-                archive_root=self.archive_root,
-                repository_root=self.repository_root,
+        if not review_only:
+            success_observation, observation_authority = (
+                load_provider_observation_authority(
+                    source_url=vacancy.source_url,
+                    archive_root=self.archive_root,
+                    repository_root=self.repository_root,
+                )
             )
-        )
-        observation = json.loads(success_observation)
-        paths = observation["provider_loader_paths"]
-        marker = " ".join(
-            re.sub(r"<[^>]+>", " ", str(paths["confirmation_message"])).strip().split()
-        )
-        if not marker:
-            raise ValueError("provider observation confirmation marker is empty")
-        success_evidence = GreenhouseSuccessEvidence(
-            observation_sha256=observation_authority.observation_sha256,
-            observed_at=str(observation["observed_at"]),
-            confirmation_url=urljoin(
-                vacancy.source_url, str(paths["confirmationPath"])
-            ),
-            required_visible_markers=(marker,),
-        )
+            observation = json.loads(success_observation)
+            paths = observation["provider_loader_paths"]
+            marker = " ".join(
+                re.sub(r"<[^>]+>", " ", str(paths["confirmation_message"])).strip().split()
+            )
+            if not marker:
+                raise ValueError("provider observation confirmation marker is empty")
+            success_evidence = GreenhouseSuccessEvidence(
+                observation_sha256=observation_authority.observation_sha256,
+                observed_at=str(observation["observed_at"]),
+                confirmation_url=urljoin(
+                    vacancy.source_url, str(paths["confirmationPath"])
+                ),
+                required_visible_markers=(marker,),
+            )
         client = LLMClient.from_config(
             cache_enabled=False,
             cache_dir=self.archive_root / "review-cache",
@@ -1009,16 +1023,20 @@ class GutuaGreenhouseSession:
             usage_log=self.archive_root / "review-usage.jsonl",
         )
         try:
-            sanity_receipt = review_application_package(
-                package_from_application(
+            sanity_package = package_from_application(
                     source=package.source,
                     artifacts=package.artifacts,
                     questions=None,
                     vacancy_requirements=package.vacancy_requirements,
                     vacancy_review_material=vacancy_review_material,
-                ),
-                client=client,
-            )
+                )
+            if review_only:
+                sanity_receipt = recorder.review_once(
+                    sanity_package,
+                    lambda: review_application_package(sanity_package, client=client),
+                )
+            else:
+                sanity_receipt = review_application_package(sanity_package, client=client)
         except ApplicationSanityReviewError as exc:
             if exc.result is not None:
                 recorder.add_revision(
@@ -1050,6 +1068,7 @@ class GutuaGreenhouseSession:
             runtime=forensic_runtime,
             release_manifest_sha256=None,
             artifact_set_sha256=publication.artifact_set_sha256,
+            **({"passive_inventory": True} if review_only else {}),
         )
         forensic_document = verify_forensic_receipt(forensic_root, forensic_receipt)
         if (
@@ -1079,6 +1098,26 @@ class GutuaGreenhouseSession:
             raise ProductionATSBoundaryError(
                 "passive ATS observation blocked release before any gate issue: "
                 + str(forensic_document.get("failure_class"))
+            )
+        if review_only:
+            return PreparedGreenhouseReview(
+                source=package.source,
+                artifacts=package.artifacts,
+                document_assurance_receipts=document_receipts,
+                sanity_review_receipt=sanity_receipt,
+                production_identity=ProductionIdentity(
+                    code_revision=exact_clean_head(self.repository_root),
+                    policy_identity=POLICY_SHA256,
+                    configuration_identity=content_hash({
+                        "candidate_decision": decision_row["receipt_sha256"],
+                        "contact_authority": contact_authority.authority_sha256,
+                    }),
+                ),
+                generation_authority=generation_authority,
+                vacancy_review_material=vacancy_review_material,
+                vacancy_requirements=package.vacancy_requirements,
+                forensic_root=forensic_root,
+                forensic_receipt=forensic_receipt,
             )
         gate_root = self.archive_root / "production-runtime"
         gate_root.mkdir(mode=0o700, exist_ok=True)
