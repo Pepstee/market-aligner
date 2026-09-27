@@ -146,6 +146,39 @@ def test_review_only_cli_selection_is_explicit_and_bounded(tmp_path, monkeypatch
     with pytest.raises(SystemExit) as exc:
         runner_module.main(["--repository-root", str(ROOT), "--archive-root", str(tmp_path), *flags])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("attempt_limit", [None, 2])
+def test_live_runner_requires_exactly_one_terminal_attempt(tmp_path, attempt_limit):
+    runner = GreenhouseProductionRunner(repository_root=ROOT, archive_root=tmp_path / "archive")
+    with pytest.raises(ValueError, match="exactly one terminal"):
+        runner.execute_all(
+            None, candidates=(), open_vacancy=lambda *args: None,
+            prepare_release=lambda *args: None, max_terminal_attempts=attempt_limit,
+        )
+
+
+@pytest.mark.parametrize("flags", [["--execute-live"], ["--execute-live", "--max-terminal-attempts", "2"]])
+def test_live_cli_requires_exactly_one_terminal_attempt(tmp_path, monkeypatch, flags):
+    def forbidden(*args):
+        raise AssertionError("session factory must not run")
+
+    monkeypatch.setattr(runner_module, "_load_factory", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        runner_module.main(["--repository-root", str(ROOT), "--archive-root", str(tmp_path), *flags])
+    assert exc.value.code == 2
+
+
+def test_live_cli_accepts_one_terminal_attempt(tmp_path, monkeypatch):
+    def reached_factory(*args):
+        raise AssertionError("valid canary arguments reached the session factory")
+
+    monkeypatch.setattr(runner_module, "_load_factory", reached_factory)
+    with pytest.raises(AssertionError, match="valid canary arguments"):
+        runner_module.main([
+            "--repository-root", str(ROOT), "--archive-root", str(tmp_path),
+            "--execute-live", "--max-terminal-attempts", "1",
+        ])
 PRIVATE_AUTHORITY_ROOT = ROOT.parents[1] / ".market-aligner-data" / "authority-inputs"
 AUTHORITY_PATH = (
     PRIVATE_AUTHORITY_ROOT
