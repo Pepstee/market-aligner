@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "01e434aa93d0fcc43b6a1bff935d4991450ca40d",
+  "source_base_commit": "82a0727469b580385a404825f0571226d7535b59",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -176,7 +176,7 @@
     "internal/jaa/career_automation/production_preparation_runner.py": "68b14b810b194b94e7975ef00da50f0cf73017dab0129b4c44660477d4d5f690",
     "internal/jaa/career_automation/production_queue.py": "5035176bdf6d8891ce7483a69c3c06c3cef26bc3fd1dc355e98e52ffaf8cdd45",
     "internal/jaa/career_automation/production_recruiter_assessor.py": "1855a2c93068aec02fdba78ce19cdf317ed18787a3c1e4b927d4f2506567897d",
-    "internal/jaa/career_automation/production_runner.py": "5df3bf1697ea6f409ee8017dc6e90d8291c8a97afa0c953d948a23cf3d3a4c61",
+    "internal/jaa/career_automation/production_runner.py": "8f0d5f2536c844985de97a85fc178b74182d456967ba3ca9f6536a9f61e1ec79",
     "internal/jaa/career_automation/protected_corpus_binding.py": "b4f14e610d4279577598a1a26f2e3f24dad9310e8314f8e5cefa33c5701ebb26",
     "internal/jaa/career_automation/provider_observation_authority.py": "20ad422f1a9ec140f5ffe5c17a82a63267f77058c49eb2abd59c43d4d6fda289",
     "internal/jaa/career_automation/provider_observation_capture.py": "5ea54cdff35e36dfa0a59ec5e191ced15aad8f0d5275a4ca5871bde9ed71ac25",

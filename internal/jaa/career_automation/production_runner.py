@@ -843,14 +843,14 @@ class GreenhouseProductionRunner:
         prepare_review: PrepareReview | None = None,
         max_terminal_attempts: int | None = None,
     ) -> tuple[ProductionSubmissionReceipt | ReviewOnlyCompletion, ...]:
+        if max_terminal_attempts is not None and max_terminal_attempts < 1:
+            raise ValueError("max_terminal_attempts must be at least one")
         if self.review_only:
             if max_terminal_attempts not in (None, 1):
                 raise ValueError("review-only invocation permits one terminal outcome")
             max_terminal_attempts = 1
         elif max_terminal_attempts != 1:
             raise ValueError("live execution requires exactly one terminal outcome")
-        if max_terminal_attempts is not None and max_terminal_attempts < 1:
-            raise ValueError("max_terminal_attempts must be at least one")
         receipts: list[ProductionSubmissionReceipt | ReviewOnlyCompletion] = []
         terminal_attempts = 0
         while self._queue(candidates).next_action is not None:
