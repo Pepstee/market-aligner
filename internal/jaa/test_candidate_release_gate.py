@@ -258,6 +258,27 @@ def test_candidate_gate_accepts_exact_cogna_market_materialization(
         == materialized.receipt.receipt_sha256
     )
 
+    market_only_files = replace(files, discovery_path=None)
+    market_only_verified = gate_module._verify_durable_candidate_authority(
+        market_only_files,
+        repository_root=ROOT,
+        vacancy_requirements=requirements,
+        market_decision_authority=market,
+        materialization_receipt=materialized.receipt,
+        required_environment="synthetic",
+    )
+    assert (
+        market_only_verified["market_decision_authority_sha256"]
+        == market.authority_sha256
+    )
+    with pytest.raises(ValueError, match="market release authority is required"):
+        gate_module._verify_durable_candidate_authority(
+            market_only_files,
+            repository_root=ROOT,
+            vacancy_requirements=requirements,
+            required_environment="synthetic",
+        )
+
     with pytest.raises(ValueError):
         replace(
             materialized.receipt,

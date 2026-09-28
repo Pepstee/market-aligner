@@ -846,6 +846,10 @@ class VerifiedApplicationInput:
     evidence_ledger_sha256: str = ""
     evidence_ledger_bytes: bytes = b""
     candidate_authority_bytes: bytes = b""
+    candidate_intent_sha256: str = ""
+    final_score: float = 0.0
+    opportunity_score: float = 0.0
+    geography_priority_rank: int = 5
 
 
 def _verified_market_decision_references(
@@ -895,6 +899,38 @@ def _verified_market_decision_references(
     vacancy = payload["vacancy"]
     provenance = vacancy["provenance"]
     fetched_at = provenance.get("fetched_at")
+    candidate_intent_sha256 = payload.get("candidate_intent_sha256")
+    final = assessment.get("final") if isinstance(assessment, dict) else None
+    opportunity = assessment.get("opportunity") if isinstance(assessment, dict) else None
+    geography_rank = (
+        selection.get("geography_priority_rank")
+        if isinstance(selection, dict)
+        else None
+    )
+    if integrated_shape:
+        if (
+            not isinstance(candidate_intent_sha256, str)
+            or len(candidate_intent_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in candidate_intent_sha256)
+            or isinstance(final, bool)
+            or not isinstance(final, (int, float))
+            or not 0.0 <= float(final) <= 1.0
+            or isinstance(opportunity, bool)
+            or not isinstance(opportunity, (int, float))
+            or not 0.0 <= float(opportunity) <= 1.0
+            or isinstance(geography_rank, bool)
+            or not isinstance(geography_rank, int)
+            or geography_rank not in {1, 2, 3, 4, 5}
+        ):
+            raise HandoffAdmissionError(
+                "market_decision_ranking",
+                "verified Market handoff lacks exact selection ranking authority",
+            )
+    else:
+        candidate_intent_sha256 = ""
+        final = 0.0
+        opportunity = 0.0
+        geography_rank = 5
     if integrated_shape and (not isinstance(fetched_at, str) or not fetched_at):
         raise HandoffAdmissionError(
             "market_decision_source_time",
@@ -909,6 +945,10 @@ def _verified_market_decision_references(
         "selection_receipt_sha256": payload["selection"]["selection_receipt_sha256"],
         "source_job_key": source_job_key,
         "source_observed_at": str(fetched_at or ""),
+        "candidate_intent_sha256": candidate_intent_sha256,
+        "final_score": float(final) * 100.0,
+        "opportunity_score": float(opportunity),
+        "geography_priority_rank": geography_rank,
         "evidence_ledger_sha256": payload["evidence_ledger_sha256"],
         "evidence_ledger_bytes": graph.objects["evidence_ledger"],
         "candidate_authority_bytes": graph.objects[

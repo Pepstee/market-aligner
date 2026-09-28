@@ -23,6 +23,9 @@ from career_automation.gutua_greenhouse_session import (
     _decision_receipt,
 )
 from career_automation.evidence_matching import canonical_json, content_hash
+from career_automation.market_aligner_preparation import (
+    MarketApplicationMaterializationContext,
+)
 from career_automation.candidate_authority import materialize_candidate_authority
 from career_automation.gmail_confirmation import GmailAPIConfirmationChecker
 from career_automation.application_archive import VacancyArchiveIdentity
@@ -256,6 +259,240 @@ def _eligible_decision() -> tuple[dict[str, object], dict[str, object]]:
         "receipt_sha256": hashlib.sha256(_json_bytes(receipt)).hexdigest(),
         "projection": projection,
     }
+
+
+def test_market_candidate_authority_is_content_addressed_and_private(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "private-archive"
+    archive.mkdir(mode=0o700)
+    value = b'{"authority":"exact"}\n'
+    path = session_module._store_market_candidate_authority(archive, value)
+    assert path.name == f"{hashlib.sha256(value).hexdigest()}.json"
+    assert path.read_bytes() == value
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert session_module._store_market_candidate_authority(archive, value) == path
+    path.write_bytes(b"substituted")
+    with pytest.raises(ValueError, match="content-addressed market candidate authority"):
+        session_module._store_market_candidate_authority(archive, value)
+
+
+def test_market_canary_must_be_lowest_ranked_before_browser_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt_path = tmp_path / "execution-receipt.json"
+    receipt_path.write_text("{}")
+    repository = Path(__file__).resolve().parents[1]
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    admission = SimpleNamespace(
+        operation="created",
+        environment="production",
+        application_id="app_" + "a" * 64,
+        handoff_root_sha256="b" * 64,
+        verification_receipt_sha256="c" * 64,
+        document=lambda: {
+            "release_token_issued": False,
+            "submission_authority": False,
+        },
+    )
+    monkeypatch.setattr(
+        session_module,
+        "run_production_handoff_admission",
+        lambda **_kwargs: admission,
+    )
+    context = object.__new__(MarketApplicationMaterializationContext)
+    object.__setattr__(context, "application_id", admission.application_id)
+    object.__setattr__(
+        context,
+        "market_decision_authority",
+        SimpleNamespace(
+            handoff_root_sha256=admission.handoff_root_sha256,
+            admission_receipt_sha256=admission.verification_receipt_sha256,
+            source_url="https://job-boards.greenhouse.io/example/jobs/123",
+        ),
+    )
+    object.__setattr__(context, "candidate_intent_sha256", "d" * 64)
+    object.__setattr__(context, "profile_id", "profile-test")
+    object.__setattr__(context, "profile_version", "v1")
+    object.__setattr__(context, "geography_priority_rank", 1)
+    object.__setattr__(context, "final_score", 90.0)
+    object.__setattr__(context, "opportunity_score", 0.9)
+    monkeypatch.setattr(
+        session_module,
+        "run_production_market_materialization",
+        lambda **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "selected_published_handoffs",
+        lambda *_args, **_kwargs: [
+            {
+                "application_id": admission.application_id,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 1,
+                "final_score": 90.0,
+                "opportunity": 0.9,
+                "job_key": "best-fit",
+                "handoff_root_sha256": admission.handoff_root_sha256,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+            {
+                "application_id": "app_" + "e" * 64,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 5,
+                "final_score": 20.0,
+                "opportunity": 0.1,
+                "job_key": "low-fit",
+                "handoff_root_sha256": "f" * 64,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_store_market_candidate_authority",
+        lambda *_args, **_kwargs: pytest.fail(
+            "candidate authority should not be stored for a best-fit canary"
+        ),
+    )
+    monkeypatch.setattr(
+        GutuaGreenhouseSession,
+        "_start_browser",
+        lambda *_args, **_kwargs: pytest.fail(
+            "browser must not start for a best-fit canary"
+        ),
+    )
+    arguments = SimpleNamespace(
+        archive_root=archive,
+        repository_root=repository,
+        market_execution_receipt=receipt_path,
+    )
+    with pytest.raises(ValueError, match="lowest-ranked selected handoff"):
+        GutuaGreenhouseSession(arguments)
+
+
+def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt_path = tmp_path / "execution-receipt.json"
+    receipt_path.write_text("{}")
+    repository = Path(__file__).resolve().parents[2]
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    admission = SimpleNamespace(
+        operation="created",
+        environment="production",
+        application_id="app_" + "e" * 64,
+        handoff_root_sha256="f" * 64,
+        operation_receipt_sha256="1" * 64,
+        execution_receipt_file_sha256="2" * 64,
+        execution_receipt_semantic_sha256="3" * 64,
+        verification_receipt_sha256="c" * 64,
+        document=lambda: {
+            "release_token_issued": False,
+            "submission_authority": False,
+        },
+    )
+    monkeypatch.setattr(
+        session_module,
+        "run_production_handoff_admission",
+        lambda **_kwargs: admission,
+    )
+    context = object.__new__(MarketApplicationMaterializationContext)
+    object.__setattr__(context, "application_id", admission.application_id)
+    object.__setattr__(
+        context,
+        "market_decision_authority",
+        SimpleNamespace(
+            handoff_root_sha256=admission.handoff_root_sha256,
+            admission_receipt_sha256=admission.verification_receipt_sha256,
+            source_url="https://job-boards.greenhouse.io/example/jobs/456",
+            source_job_key="greenhouse:example:456",
+            raw_listing_sha256=hashlib.sha256(b"low-ranked vacancy").hexdigest(),
+            role_title="Junior Support Associate",
+            company_name="Example",
+            assessment_receipt_sha256="a" * 64,
+        ),
+    )
+    object.__setattr__(
+        context,
+        "materialization",
+        SimpleNamespace(
+            source=SimpleNamespace(job_key="greenhouse:example:456"),
+            receipt=SimpleNamespace(decision_receipt_sha256="b" * 64),
+        ),
+    )
+    object.__setattr__(context, "candidate_authority_bytes", b'{"authority":"fixture"}\n')
+    object.__setattr__(context, "candidate_projection", {"fixture": True})
+    object.__setattr__(context, "decision_receipt", {"decision": "eligible"})
+    object.__setattr__(context, "raw_listing_bytes", b"low-ranked vacancy")
+    object.__setattr__(context, "contact_authority_path", tmp_path / "contact.json")
+    object.__setattr__(context, "source_observed_at", "2026-09-28T00:00:00Z")
+    object.__setattr__(context, "profile_id", "profile-test")
+    object.__setattr__(context, "profile_version", "v1")
+    object.__setattr__(context, "candidate_intent_sha256", "d" * 64)
+    object.__setattr__(context, "geography_priority_rank", 5)
+    object.__setattr__(context, "final_score", 20.0)
+    object.__setattr__(context, "opportunity_score", 0.1)
+    monkeypatch.setattr(
+        session_module,
+        "run_production_market_materialization",
+        lambda **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "selected_published_handoffs",
+        lambda *_args, **_kwargs: [
+            {
+                "application_id": "app_" + "a" * 64,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 1,
+                "final_score": 90.0,
+                "opportunity": 0.9,
+                "job_key": "greenhouse:example:123",
+                "handoff_root_sha256": "b" * 64,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+            {
+                "application_id": admission.application_id,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 5,
+                "final_score": 20.0,
+                "opportunity": 0.1,
+                "job_key": "greenhouse:example:456",
+                "handoff_root_sha256": admission.handoff_root_sha256,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+        ],
+    )
+    browser_started = []
+
+    def start_browser(session, _arguments):
+        browser_started.append(True)
+        session.page = object()
+
+    monkeypatch.setattr(GutuaGreenhouseSession, "_start_browser", start_browser)
+    session = GutuaGreenhouseSession(
+        SimpleNamespace(
+            archive_root=archive,
+            repository_root=repository,
+            market_execution_receipt=receipt_path,
+        )
+    )
+
+    assert browser_started == [True]
+    assert len(session.candidates) == 1
+    assert session.candidates[0].vacancy.vacancy.job_key == "greenhouse:example:456"
+    assert (
+        session.candidates[0].structured_vacancy["selected_handoff"]["application_id"]
+        == admission.application_id
+    )
 
 
 def test_session_requires_explicit_external_authority_paths(

@@ -15,10 +15,12 @@ from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import CandidateApplicationPackage
 from career_automation.production_queue import LiveVacancy
 from career_automation.production_attempt import GreenhouseAttemptRecorder
+from career_automation.production_ats_executor import ProductionSubmissionReceipt
 from career_automation.production_runner import (
     GeneratedRevisionSink,
     GreenhouseProductionRunner,
     ProductionRunCandidate,
+    ReviewOnlyCompletion,
 )
 
 
@@ -179,6 +181,135 @@ def test_live_cli_accepts_one_terminal_attempt(tmp_path, monkeypatch):
             "--repository-root", str(ROOT), "--archive-root", str(tmp_path),
             "--execute-live", "--max-terminal-attempts", "1",
         ])
+
+
+def _submission_receipt(*, job_key: str, vacancy_sha256: str) -> ProductionSubmissionReceipt:
+    document = {
+        "schema_version": "jaa.production-submission-receipt.v1",
+        "attempt_id": "jaa-20260928T000000Z-0123456789abcdef",
+        "provider": "greenhouse",
+        "job_key": job_key,
+        "vacancy_sha256": vacancy_sha256,
+        "confirmation_url": "https://job-boards.greenhouse.io/example/confirmation",
+        "page_title": "Application received",
+        "visible_text_sha256": "1" * 64,
+        "post_submit_screenshot_sha256": "2" * 64,
+        "submitted_at": "2026-09-28T00:00:00Z",
+        "provider_application_id": None,
+        "confirmation_email_checked": False,
+    }
+    receipt_sha256 = hashlib.sha256(
+        (runner_module.canonical_json(document) + "\n").encode()
+    ).hexdigest()
+    return ProductionSubmissionReceipt(
+        **document,
+        receipt_sha256=receipt_sha256,
+    )
+
+
+def _run_cli_with_terminal_result(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    outcomes: tuple[object, ...],
+    mode: tuple[str, ...],
+) -> tuple[int, SimpleNamespace]:
+    candidate = _candidate()
+    closed: list[bool] = []
+    session = SimpleNamespace(
+        page=object(),
+        candidates=(candidate,),
+        open_vacancy=lambda *_args: None,
+        prepare_release=lambda *_args: None,
+        prepare_review=lambda *_args: None,
+        gmail_confirmation_checker=None,
+        close=lambda: closed.append(True),
+    )
+
+    class FakeRunner:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_all(self, *_args, **_kwargs):
+            return outcomes
+
+    monkeypatch.setattr(runner_module, "_load_factory", lambda _reference: lambda _args: session)
+    monkeypatch.setattr(runner_module, "GreenhouseProductionRunner", FakeRunner)
+    args = [
+        "--repository-root", str(ROOT),
+        "--archive-root", str(ROOT / ".test-archive-placeholder"),
+        *mode,
+    ]
+    return runner_module.main(args), SimpleNamespace(session=session, candidate=candidate, closed=closed)
+
+
+def test_live_cli_returns_success_only_with_matching_submission_receipt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candidate = _candidate()
+    source = candidate.vacancy.vacancy
+    receipt = _submission_receipt(
+        job_key=source.job_key,
+        vacancy_sha256=source.vacancy_sha256,
+    )
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(receipt,),
+        mode=("--execute-live", "--max-terminal-attempts", "1"),
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert output["outcome"] == "submitted_success"
+    assert output["submission_receipt"]["receipt_sha256"] == receipt.receipt_sha256
+    assert result.closed == [True]
+
+
+def test_live_cli_exits_nonzero_when_no_terminal_submission_receipt_exists(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(),
+        mode=("--execute-live", "--max-terminal-attempts", "1"),
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert code == 2
+    assert error["outcome"] == "no_terminal_attempt"
+    assert error["submission_receipt"] is None
+    assert result.closed == [True]
+
+
+def test_live_cli_rejects_receipt_for_a_different_vacancy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt = _submission_receipt(job_key="other-job", vacancy_sha256="3" * 64)
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(receipt,),
+        mode=("--execute-live", "--max-terminal-attempts", "1"),
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert code == 2
+    assert error["outcome"] == "submission_receipt_candidate_mismatch"
+    assert result.closed == [True]
+
+
+def test_review_cli_labels_review_only_without_claiming_submission(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    review = ReviewOnlyCompletion(
+        attempt_id="jaa-20260928T000000Z-0123456789abcdef",
+        terminal_manifest_sha256="4" * 64,
+    )
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(review,),
+        mode=("--review-only",),
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert output["outcome"] == "review_only"
+    assert "submission_receipt" not in output
+    assert result.closed == [True]
 PRIVATE_AUTHORITY_ROOT = ROOT.parents[1] / ".market-aligner-data" / "authority-inputs"
 AUTHORITY_PATH = (
     PRIVATE_AUTHORITY_ROOT
@@ -925,6 +1056,7 @@ def test_private_worker_channel_archives_real_child_revisions(
     observed = {}
     sentinel = "SYNTHETIC-PRIVATE-REVISION-AND-ERROR"
     script = '''
+import sys
 from types import SimpleNamespace
 from career_automation import candidate_generation_worker as worker
 from career_automation.candidate_application_factory import CandidateApplicationPackage
@@ -935,6 +1067,7 @@ def generate(**arguments):
                  "document.cover_letter.final_pdf", "form.answers"):
         arguments["revision_writer"](role=role, value=SENTINEL.encode(), media_type="text/plain")
         if FAIL:
+            print("synthetic private worker diagnostic", file=sys.stderr)
             raise ValueError(SENTINEL)
     return CandidateApplicationPackage(source=SimpleNamespace(), artifacts=SimpleNamespace(),
                                        vacancy_requirements=())
@@ -973,19 +1106,59 @@ raise SystemExit(worker.main())
         durable = sink._verified_durable_revisions()
         assert len(durable) == (1 if failure else 9)
         assert durable[0].value == sentinel.encode()
+        if failure:
+            diagnostic_rows = [
+                row
+                for row in _recorder.attempt._objects(_recorder.attempt._events())
+                if row.role == "generation.worker.stderr"
+            ]
+            assert len(diagnostic_rows) == 1
+            diagnostic = _recorder.attempt.read_artifact(diagnostic_rows[0])
+            assert b"synthetic private worker diagnostic" in diagnostic
+            assert sentinel.encode() in diagnostic
         for channel, descriptor in observed.items():
             os.lseek(descriptor, 0, os.SEEK_SET)
             data = os.read(descriptor, 65536)
-            assert sentinel.encode() not in data
             assert base64.b64encode(sentinel.encode()) not in data
             if channel == "stderr":
-                assert data == b""
+                assert (sentinel.encode() in data) is failure
             else:
+                assert sentinel.encode() not in data
                 message = json.loads(data)
                 assert message["kind"] == ("failure" if failure else "result")
     finally:
         for descriptor in observed.values():
             os.close(descriptor)
+
+
+def test_private_worker_diagnostic_is_hash_only_when_archive_safety_rejects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    from career_automation.application_archive import ApplicationArchiveError
+
+    sink, recorder = _durable_sink(tmp_path)
+    diagnostic = b"synthetic diagnostic rejected by the archive safety scanner"
+
+    def reject_diagnostic(_value: bytes, _media_type: str) -> None:
+        raise ApplicationArchiveError("secret-like value cannot be archived")
+
+    monkeypatch.setattr(runner_module, "_scan_secret_bytes", reject_diagnostic)
+    sink._archive_worker_diagnostics(io.BytesIO(diagnostic), exit_code=2)
+
+    rows = recorder.attempt._objects(recorder.attempt._events())
+    assert not any(row.role == "generation.worker.stderr" for row in rows)
+    receipts = [
+        row for row in rows if row.role == "generation.worker.stderr_receipt"
+    ]
+    assert len(receipts) == 1
+    receipt = json.loads(recorder.attempt.read_artifact(receipts[0]))
+    assert receipt["content_state"] == "withheld_secret_like"
+    assert receipt["byte_length"] == len(diagnostic)
+    assert receipt["content_sha256"] == hashlib.sha256(diagnostic).hexdigest()
+    assert diagnostic.decode() not in json.dumps(receipt)
 
 
 @pytest.mark.parametrize("binding", [None, "1", "invalid", "9" * 5000])

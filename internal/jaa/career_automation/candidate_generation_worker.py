@@ -8,6 +8,7 @@ import json
 import os
 import pickle
 import sys
+import traceback
 from pathlib import Path
 from typing import BinaryIO
 
@@ -89,6 +90,7 @@ def main() -> int:
             _revision_stream = stream
             return _generate_from_request()
     except BaseException:
+        traceback.print_exc(file=sys.stderr)
         _write({"code": "GENERATION_FAILED", "kind": "failure"})
         return 2
     finally:

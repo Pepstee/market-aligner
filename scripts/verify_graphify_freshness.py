@@ -172,6 +172,12 @@ def canonicalize_graph(root: Path) -> tuple[int, int]:
         source, target = edge.get("source"), edge.get("target")
         if source not in valid_ids or target not in valid_ids:
             continue
+        if edge.get("relation") in {"cites", "disposes"} and not edge.get(
+            "source_file"
+        ):
+            source_file = nodes_by_id[source].get("source_file")
+            if isinstance(source_file, str) and source_file:
+                edge["source_file"] = source_file
         endpoints = (source, target)
         if endpoints not in edges_by_endpoints:
             edge_order.append(endpoints)
@@ -198,6 +204,14 @@ def verify(root: Path, receipt_path: Path = DEFAULT_RECEIPT) -> dict:
         raise FreshnessError(f"invalid Graphify freshness receipt: {exc}") from exc
     if receipt.get("schema") != SCHEMA:
         raise FreshnessError("unsupported Graphify freshness receipt schema")
+
+    freshness_status = receipt.get("freshness_status", "FRESH")
+    if freshness_status not in {"FRESH", "PARTIAL", "STALE"}:
+        raise FreshnessError("unsupported Graphify freshness status")
+    if freshness_status != "FRESH":
+        # A partial/redacted receipt intentionally omits excluded source paths.
+        # Fail before source-set diagnostics can echo those private filenames.
+        raise FreshnessError(f"Graphify freshness status is {freshness_status}")
 
     expected_sources = receipt.get("sources")
     if not isinstance(expected_sources, dict) or not expected_sources:

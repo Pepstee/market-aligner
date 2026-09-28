@@ -1014,11 +1014,6 @@
     "ast_hash": "2b059eb333080351f46f5f92000defb1",
     "semantic_hash": "2b059eb333080351f46f5f92000defb1"
   },
-  "internal/jaa/docs/applications/cloudcops-rank-32/artifacts/Artiom_Gutu_CV_CloudCops.pdf": {
-    "mtime": 1787222242.0,
-    "ast_hash": "48d7c9914eef888d6b6a2a741c389698",
-    "semantic_hash": "48d7c9914eef888d6b6a2a741c389698"
-  },
   "internal/jaa/docs/applications/cloudcops-rank-32/build_cloudcops_cv.py": {
     "mtime": 1787222242.0,
     "ast_hash": "2e4ed8351ed45a2478be41847ab94afc",
@@ -1178,71 +1173,6 @@
     "mtime": 1787222242.0,
     "ast_hash": "335b3eaad902a9223bab3728f94265f9",
     "semantic_hash": "335b3eaad902a9223bab3728f94265f9"
-  },
-  "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml": {
-    "mtime": 1787222242.0,
-    "ast_hash": "43cb0d404f43f10aa907c9b4c226178b",
-    "semantic_hash": "43cb0d404f43f10aa907c9b4c226178b"
-  },
-  "internal/jaa/runtime_evidence/application_resume/attempt-ledger.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "992b9f37680adef9d72b8f8ad68b3d3f",
-    "semantic_hash": "992b9f37680adef9d72b8f8ad68b3d3f"
-  },
-  "internal/jaa/runtime_evidence/application_sanity_review/live-smoke-20260806.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "1ce604b94598c02612d97d4980e016ac",
-    "semantic_hash": "1ce604b94598c02612d97d4980e016ac"
-  },
-  "internal/jaa/runtime_evidence/application_sanity_review/live-smoke-codex-20260810.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "0ad1683f483683a87291968b3e4c7b54",
-    "semantic_hash": "0ad1683f483683a87291968b3e4c7b54"
-  },
-  "internal/jaa/runtime_evidence/clean_document_canary/axiom-data-scientist/cover-letter.pdf": {
-    "mtime": 1787222242.0,
-    "ast_hash": "1891881a98aa125b3fe08d3e34f6dd05",
-    "semantic_hash": "1891881a98aa125b3fe08d3e34f6dd05"
-  },
-  "internal/jaa/runtime_evidence/clean_document_canary/axiom-data-scientist/cv.pdf": {
-    "mtime": 1787222242.0,
-    "ast_hash": "c664697eee96fe2bdf2366ac26d64b0a",
-    "semantic_hash": "c664697eee96fe2bdf2366ac26d64b0a"
-  },
-  "internal/jaa/runtime_evidence/clean_document_canary/axiom-data-scientist/manifest.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "bbc9155cd0e2cc68b3361cae713a143f",
-    "semantic_hash": "bbc9155cd0e2cc68b3361cae713a143f"
-  },
-  "internal/jaa/runtime_evidence/external_document_assurance/assurance-evidence.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "a52fe8d2a6af5e229102bb1c25d02a07",
-    "semantic_hash": "a52fe8d2a6af5e229102bb1c25d02a07"
-  },
-  "internal/jaa/runtime_evidence/jaa01/sha256-a8454e3515c95d73e7dc502016dd1c54bc4e78395c47430bb9fb34f254ec4d84.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "dd8552f152196df384dd02770f13e4ba",
-    "semantic_hash": "dd8552f152196df384dd02770f13e4ba"
-  },
-  "internal/jaa/runtime_evidence/jaa02/sha256-8d49a1543093644703e95a78d424c971f55465111baece7a45f6e3c0a71805d2.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "ae52ffd97c6e417bb712f7ba63e7149b",
-    "semantic_hash": "ae52ffd97c6e417bb712f7ba63e7149b"
-  },
-  "internal/jaa/runtime_evidence/jaa03/sha256-1dac4965ea4ef0b3861ed248b4c99c5aff215a6092ea5557bf13b2564f81c240.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "f93c76b4e5ff35b0bc2f0bc794653c22",
-    "semantic_hash": "f93c76b4e5ff35b0bc2f0bc794653c22"
-  },
-  "internal/jaa/runtime_evidence/jaa04/increment_a/sha256-80f9d79a5b9247fff842a1c3808cb206733be9907454edf9b0c1a2f0aa2d246e.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "e15031d8d1eb9533618c41753fa0cb92",
-    "semantic_hash": "e15031d8d1eb9533618c41753fa0cb92"
-  },
-  "internal/jaa/runtime_evidence/throughput/warm-browser-benchmark.json": {
-    "mtime": 1787222242.0,
-    "ast_hash": "4215186a4c2a4c60deb45d4b2cb8acb2",
-    "semantic_hash": "4215186a4c2a4c60deb45d4b2cb8acb2"
   },
   "internal/jaa/scraper/__init__.py": {
     "mtime": 1787222242.0,
@@ -3670,9 +3600,9 @@
     "semantic_hash": "b17f80f6360d41811d9328a4b327aa23"
   },
   "/Users/admin/Projects/market-aligner/docs/migration/source-manifests.json": {
-    "mtime": 1790450118.7649,
-    "ast_hash": "bce3b12c838e2592df7e85fb5a45a638",
-    "semantic_hash": "bce3b12c838e2592df7e85fb5a45a638"
+    "mtime": 1790547512.7586951,
+    "ast_hash": "6a09400fa47d00b5c2c6a8cbd3ecf915",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/ASSURANCE_MANIFEST.json": {
     "mtime": 1790450118.8786592,
@@ -3870,8 +3800,8 @@
     "semantic_hash": "3e65825d0cc64ad7e56a9bfecdbe1fb0"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/candidate_generation_worker.py": {
-    "mtime": 1790450118.8878987,
-    "ast_hash": "78b77f12539ce69ec47c68a3f2826e0a",
+    "mtime": 1790538355.905432,
+    "ast_hash": "457f391e06c8153dad1a372eddc0af19",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/candidate_graph.py": {
@@ -3885,9 +3815,9 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/candidate_release_gate.py": {
-    "mtime": 1790450118.8883922,
-    "ast_hash": "0c1e1f538241162a9f608ded6f85c1e9",
-    "semantic_hash": "0c1e1f538241162a9f608ded6f85c1e9"
+    "mtime": 1790552893.263071,
+    "ast_hash": "2b9ac691f2eabd8559afe8ff1cd3f2d3",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/certification_candidate_compiler.py": {
     "mtime": 1790450118.8885345,
@@ -4075,13 +4005,13 @@
     "semantic_hash": "77728078fe7055ff6902381085b7d4c6"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/gutua_greenhouse_session.py": {
-    "mtime": 1790478297.4427443,
-    "ast_hash": "ee983c1b7684890d733ff277bb0a59b5",
+    "mtime": 1790554302.5827599,
+    "ast_hash": "a01dbdc16d31382438d48228166c5067",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/handoff_admission.py": {
-    "mtime": 1790450118.8969722,
-    "ast_hash": "ae4fd7345da448056b2fbb275c88be88",
+    "mtime": 1790552801.0354538,
+    "ast_hash": "ec3c472ffcc4b86c41db561d23590949",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/hard_metrics_evaluation.py": {
@@ -4180,9 +4110,9 @@
     "semantic_hash": "55b3fa08a35e1539dca69c19fe931b72"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/market_aligner_preparation.py": {
-    "mtime": 1790450118.900969,
-    "ast_hash": "445d1272eb0de4291c93deb3a75f1155",
-    "semantic_hash": "445d1272eb0de4291c93deb3a75f1155"
+    "mtime": 1790553624.6073306,
+    "ast_hash": "eeeaf104af12abc20c95059e11f7c50a",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/migrations.py": {
     "mtime": 1790450118.901244,
@@ -4285,8 +4215,8 @@
     "semantic_hash": "612bdad539cc490cab2d44db8f270c69"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/production_preparation_runner.py": {
-    "mtime": 1790450118.9052973,
-    "ast_hash": "332c4e4db406c59c8aa5e36bdd12e01b",
+    "mtime": 1790552875.483797,
+    "ast_hash": "36b22a3f265581cada4f088309c60f49",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/production_queue.py": {
@@ -4300,8 +4230,8 @@
     "semantic_hash": "c7f98263adf99c50a7a96806ea3384db"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/production_runner.py": {
-    "mtime": 1790507245.7412374,
-    "ast_hash": "db308e8c47992e234ead8b3579617279",
+    "mtime": 1790554445.907847,
+    "ast_hash": "5322e06ad2d99054543335c41d9ccae4",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/career_automation/provider_observation_authority.py": {
@@ -4683,56 +4613,6 @@
     "mtime": 1790450118.9267633,
     "ast_hash": "cc84850517702e1811bd1905c0f7f8a1",
     "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/application_resume/attempt-ledger.json": {
-    "mtime": 1790450118.9275298,
-    "ast_hash": "992b9f37680adef9d72b8f8ad68b3d3f",
-    "semantic_hash": "992b9f37680adef9d72b8f8ad68b3d3f"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/application_sanity_review/live-smoke-20260806.json": {
-    "mtime": 1790450118.9276931,
-    "ast_hash": "1ce604b94598c02612d97d4980e016ac",
-    "semantic_hash": "1ce604b94598c02612d97d4980e016ac"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/application_sanity_review/live-smoke-codex-20260810.json": {
-    "mtime": 1790450118.9278178,
-    "ast_hash": "0ad1683f483683a87291968b3e4c7b54",
-    "semantic_hash": "0ad1683f483683a87291968b3e4c7b54"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/clean_document_canary/axiom-data-scientist/manifest.json": {
-    "mtime": 1790450118.9282694,
-    "ast_hash": "bbc9155cd0e2cc68b3361cae713a143f",
-    "semantic_hash": "bbc9155cd0e2cc68b3361cae713a143f"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/external_document_assurance/assurance-evidence.json": {
-    "mtime": 1790450118.9284348,
-    "ast_hash": "a52fe8d2a6af5e229102bb1c25d02a07",
-    "semantic_hash": "a52fe8d2a6af5e229102bb1c25d02a07"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-a8454e3515c95d73e7dc502016dd1c54bc4e78395c47430bb9fb34f254ec4d84.json": {
-    "mtime": 1790450118.9300148,
-    "ast_hash": "dd8552f152196df384dd02770f13e4ba",
-    "semantic_hash": "dd8552f152196df384dd02770f13e4ba"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa02/sha256-8d49a1543093644703e95a78d424c971f55465111baece7a45f6e3c0a71805d2.json": {
-    "mtime": 1790450118.9301794,
-    "ast_hash": "ae52ffd97c6e417bb712f7ba63e7149b",
-    "semantic_hash": "ae52ffd97c6e417bb712f7ba63e7149b"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa03/sha256-1dac4965ea4ef0b3861ed248b4c99c5aff215a6092ea5557bf13b2564f81c240.json": {
-    "mtime": 1790450118.9303408,
-    "ast_hash": "f93c76b4e5ff35b0bc2f0bc794653c22",
-    "semantic_hash": "f93c76b4e5ff35b0bc2f0bc794653c22"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa04/increment_a/sha256-80f9d79a5b9247fff842a1c3808cb206733be9907454edf9b0c1a2f0aa2d246e.json": {
-    "mtime": 1790450118.9305856,
-    "ast_hash": "e15031d8d1eb9533618c41753fa0cb92",
-    "semantic_hash": "e15031d8d1eb9533618c41753fa0cb92"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/throughput/warm-browser-benchmark.json": {
-    "mtime": 1790450118.930759,
-    "ast_hash": "4215186a4c2a4c60deb45d4b2cb8acb2",
-    "semantic_hash": "4215186a4c2a4c60deb45d4b2cb8acb2"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/scraper/__init__.py": {
     "mtime": 1790450118.9309149,
@@ -5505,9 +5385,9 @@
     "semantic_hash": "19dba2089266a05b718ec1e8ca877965"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_candidate_application_factory.py": {
-    "mtime": 1790450118.954301,
-    "ast_hash": "4bb6d8c8b475ea0f36b593f2ed6e9c0d",
-    "semantic_hash": "4bb6d8c8b475ea0f36b593f2ed6e9c0d"
+    "mtime": 1790553486.8899384,
+    "ast_hash": "ba1eb098d939a1518d29c3a2f50dc76a",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_candidate_authority.py": {
     "mtime": 1790450118.954471,
@@ -5530,8 +5410,8 @@
     "semantic_hash": "3f72e86e5fbf9ee0a37b843cad2d4e41"
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_candidate_release_gate.py": {
-    "mtime": 1790450118.9549742,
-    "ast_hash": "d37e4e8bdfab23fbd6d990c6c6fc6379",
+    "mtime": 1790553153.60187,
+    "ast_hash": "2656565522f11f3b156dbba4d8f16844",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_cover_letter_editorial_parity.py": {
@@ -5625,8 +5505,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_gutua_greenhouse_session.py": {
-    "mtime": 1790478596.27859,
-    "ast_hash": "390799a3abea74fd83c2cf105c962a38",
+    "mtime": 1790555959.9350488,
+    "ast_hash": "0f4f61f9f4a5fb4b88e7a7bab71bff09",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_import_legacy_application_archive.py": {
@@ -6375,8 +6255,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_production_runner.py": {
-    "mtime": 1790506932.6626484,
-    "ast_hash": "d1ad34da77e9178b4dbd2423ce65f5f2",
+    "mtime": 1790556074.0074096,
+    "ast_hash": "082d82a557428772935f5c7d32772dbf",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/internal/jaa/test_provider_observation_authority.py": {
@@ -6430,8 +6310,8 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/scripts/verify_graphify_freshness.py": {
-    "mtime": 1790450118.9830647,
-    "ast_hash": "cceb7cffe6f3a429aee3cb026b15b1a4",
+    "mtime": 1790538933.316763,
+    "ast_hash": "1998f88375ba33f12c8df65dfc67d82e",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/src/market_aligner/__init__.py": {
@@ -6990,8 +6870,8 @@
     "semantic_hash": "5612e9cdfccb83fc37b1f6ca59edc51b"
   },
   "/Users/admin/Projects/market-aligner/tests/test_graphify_freshness.py": {
-    "mtime": 1790450119.001907,
-    "ast_hash": "95af3cb704e161f466869779bf094b85",
+    "mtime": 1790538959.3631077,
+    "ast_hash": "bd882a715672a0a43fb59b81d51cd29c",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_ingest_cli.py": {
@@ -7025,9 +6905,9 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_migration_ledger.py": {
-    "mtime": 1790450119.0034866,
-    "ast_hash": "e6a78e9fa7fef97c12de1bb050b7382a",
-    "semantic_hash": "e6a78e9fa7fef97c12de1bb050b7382a"
+    "mtime": 1790512512.6849995,
+    "ast_hash": "990b680ba35017fb007f050066b0a101",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/tests/test_migrations.py": {
     "mtime": 1790450119.003588,
@@ -7110,8 +6990,8 @@
     "semantic_hash": "007e825cb39353c6f9cef40c863a39db"
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/CURRENT_ARCHITECTURE.md": {
-    "mtime": 1790450118.6043932,
-    "ast_hash": "9f42d4054aee192e6f4635af36a8e799",
+    "mtime": 1790514082.349449,
+    "ast_hash": "1326573a03b134b1d52d18de9576835c",
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/architecture/DETERMINISTIC_LLM_BOUNDARY.md": {
@@ -7130,9 +7010,9 @@
     "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/migration/REPORT_2026-08-01.md": {
-    "mtime": 1790450118.605622,
-    "ast_hash": "8a3a2b518f87b054ec2a23eb2f6f65a0",
-    "semantic_hash": "8a3a2b518f87b054ec2a23eb2f6f65a0"
+    "mtime": 1790547512.761783,
+    "ast_hash": "dbb43ca26e5325f19309804fb7237400",
+    "semantic_hash": ""
   },
   "/Users/admin/Projects/market-aligner/docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": {
     "mtime": 1790450118.7652535,
@@ -7354,11 +7234,6 @@
     "ast_hash": "335b3eaad902a9223bab3728f94265f9",
     "semantic_hash": "335b3eaad902a9223bab3728f94265f9"
   },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml": {
-    "mtime": 1790450118.927372,
-    "ast_hash": "43cb0d404f43f10aa907c9b4c226178b",
-    "semantic_hash": "43cb0d404f43f10aa907c9b4c226178b"
-  },
   "/Users/admin/Projects/market-aligner/internal/jaa/skeleton/AGENT_PROTOCOL.md": {
     "mtime": 1790450118.9495332,
     "ast_hash": "113ab6425f20cbfbdedcbd243e533dcb",
@@ -7383,21 +7258,6 @@
     "mtime": 1790450118.9502027,
     "ast_hash": "6ca4dc0987b8b6cfe984d9a5883db9c7",
     "semantic_hash": "6ca4dc0987b8b6cfe984d9a5883db9c7"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/docs/applications/cloudcops-rank-32/artifacts/Artiom_Gutu_CV_CloudCops.pdf": {
-    "mtime": 1790450118.921187,
-    "ast_hash": "48d7c9914eef888d6b6a2a741c389698",
-    "semantic_hash": "48d7c9914eef888d6b6a2a741c389698"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/clean_document_canary/axiom-data-scientist/cover-letter.pdf": {
-    "mtime": 1790450118.92805,
-    "ast_hash": "1891881a98aa125b3fe08d3e34f6dd05",
-    "semantic_hash": "1891881a98aa125b3fe08d3e34f6dd05"
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/clean_document_canary/axiom-data-scientist/cv.pdf": {
-    "mtime": 1790450118.92816,
-    "ast_hash": "c664697eee96fe2bdf2366ac26d64b0a",
-    "semantic_hash": "c664697eee96fe2bdf2366ac26d64b0a"
   },
   "/Users/admin/Projects/market-aligner/docs/migration/ledger.jsonl": {
     "mtime": 1787944302.99298,
@@ -7559,71 +7419,6 @@
     "ast_hash": "9d8e8cb33eb13202f9ac8f593e507ece",
     "semantic_hash": ""
   },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-00c183d2a13a11329e484abb52259953f939ac306251982d0e6d752cd94a37f0.json": {
-    "mtime": 1790450118.9286199,
-    "ast_hash": "6caf2c38bc67e926ad1139c0f8c2430d",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-1819a00f802a7d063151590bd220e192e6082f3b8de42c89342739659cd9055f.json": {
-    "mtime": 1790450118.92872,
-    "ast_hash": "e9914b2ab799701757116c5eaf5ee776",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-3224cd5bd2179f5f29ed610493abe12051db2b39ec0cc2432d0b7da916bcbb47.json": {
-    "mtime": 1790450118.9288266,
-    "ast_hash": "d3d71acddf84434ed219c233903fba29",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-44d89d384314f60e6394bc3dac4ff6bf2f6ede6dbc1ad6f17929fd3648869ce8.json": {
-    "mtime": 1790450118.928938,
-    "ast_hash": "73a595bdd2b56bb432f5c7fe22bc552d",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-451845896559a74fe2aaa3b4c58f69db0c2774a4218fc0324dda90c6284de80f.json": {
-    "mtime": 1790450118.9290466,
-    "ast_hash": "714c48a6fbf13af3e3a3bba44768dbce",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-47189ff355e93b4984d5c508a034eefeff8fdf19193eaf129c74fdb83ccf3626.json": {
-    "mtime": 1790450118.9291573,
-    "ast_hash": "864c27ad93ba94eee65908c9b2bb500b",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-4896858b30eb6107d7beed5b09bc418a037fb88f7efa1751c2e166db3c685539.json": {
-    "mtime": 1790450118.9292512,
-    "ast_hash": "7a806548e59b38e4bc22f8976608e7d0",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-4fa397257bc4c7558b359aeb494b936cff632d2403acfbc79c78380a50a52e06.json": {
-    "mtime": 1790450118.92936,
-    "ast_hash": "48cfa14a8a60fcf9bc586a28269bb8de",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-68ed4709f557928add02f57cb20addca156c40bbf89ac1d606cfb3b98c4fc213.json": {
-    "mtime": 1790450118.9294803,
-    "ast_hash": "a676a67cbced39d009cf78090b190036",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-73701789e09a08fce551181f74ef4454a108d6b8235b251224beca038452cb65.json": {
-    "mtime": 1790450118.9295835,
-    "ast_hash": "cbe0a295935817f4bef586ade037ee92",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-78e3cc56548875efea8a51f1533399a6333a08205e8604cf71ae87363d22eea5.json": {
-    "mtime": 1790450118.9296913,
-    "ast_hash": "1fc7728718ff567b41c769e17654b59d",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-886a45f58ee35656221a95b62da9ca1f2da570ed35d3926bd6c33e7ccf96fa88.json": {
-    "mtime": 1790450118.9297986,
-    "ast_hash": "cb925e04e4f68da2673bd4e884945b9a",
-    "semantic_hash": ""
-  },
-  "/Users/admin/Projects/market-aligner/internal/jaa/runtime_evidence/jaa01/sha256-a699f9ed0a74f8821e067761aa3f508ead82e9a0f479f2c2ccffa621390a7796.json": {
-    "mtime": 1790450118.929908,
-    "ast_hash": "18d9cf6028065e0f2c17957076b7fbd5",
-    "semantic_hash": ""
-  },
   "/Users/admin/Projects/market-aligner/internal/jaa/scripts/generate_jaa_event_golden.py": {
     "mtime": 1790450118.9442613,
     "ast_hash": "a6f715b7e62b9fcfcc5cb419cbbe64eb",
@@ -7732,6 +7527,141 @@
   "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_102404_can_ma_itself_apply_and_submit_a_real_job_applicat.md": {
     "mtime": 1790504644.8435385,
     "ast_hash": "3ebe710d3d094176410d9c945cf4b418",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/Activate.ps1": {
+    "mtime": 1790492477.0252936,
+    "ast_hash": "ffb074b8336789578f50a6c1a1632342",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/cffi-gen-src": {
+    "mtime": 1790492486.9417143,
+    "ast_hash": "af0ba8c19dd2899ccee75673afad7af4",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/curl-cffi": {
+    "mtime": 1790492488.969638,
+    "ast_hash": "901e871d24da887e060aeb99a87a8a04",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/httpx2": {
+    "mtime": 1790492488.877912,
+    "ast_hash": "55710f81ceaffdd45c20b3677419e816",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/idna": {
+    "mtime": 1790492484.9511137,
+    "ast_hash": "190da603f34c1414ebdda2f5bef4a97a",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/ipython": {
+    "mtime": 1790492488.806064,
+    "ast_hash": "d9b60d68ecfb94d39d72a33afdd3cc66",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/ipython3": {
+    "mtime": 1790492488.8062155,
+    "ast_hash": "d9b60d68ecfb94d39d72a33afdd3cc66",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/jsonschema": {
+    "mtime": 1790492489.2131953,
+    "ast_hash": "29943345ec52f93869ca116374d24f58",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/markdownify": {
+    "mtime": 1790492488.4816368,
+    "ast_hash": "fa4e038f1fa4427060a9e600dfa6f02b",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/mcp": {
+    "mtime": 1790492489.409655,
+    "ast_hash": "92390c88ee2e6c8fdc9df9de6fd84579",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/patchright": {
+    "mtime": 1790492488.469803,
+    "ast_hash": "c951039c8a1f6f2a53e57b943dcf1d1f",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/pip": {
+    "mtime": 1790492478.8276374,
+    "ast_hash": "368e1f4f6990511133bad28dbdc64f90",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/pip3": {
+    "mtime": 1790492478.8278131,
+    "ast_hash": "368e1f4f6990511133bad28dbdc64f90",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/playwright": {
+    "mtime": 1790492487.9582508,
+    "ast_hash": "d6d0fbfb27014217bee59464e318a803",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/pygmentize": {
+    "mtime": 1790492484.5719168,
+    "ast_hash": "6db7d152a307b21d9833eb182a86e53f",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/scrapling": {
+    "mtime": 1790492485.3745275,
+    "ast_hash": "d4cfe407e1160c22d8afc6b11656b899",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/update-tld-names": {
+    "mtime": 1790492483.838686,
+    "ast_hash": "14a5135e2ec3dc2aa1de6076e8eb1fbe",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/uvicorn": {
+    "mtime": 1790492485.254451,
+    "ast_hash": "6167638edd7c49a6aa7681f886bdedaa",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/bin/wheel": {
+    "mtime": 1790492478.992653,
+    "ast_hash": "4c0076f762c66c1aa0254f2ba864830b",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/internal/jaa/.venv-scrapling/include/site/python3.12/greenlet/greenlet.h": {
+    "mtime": 1790492484.9872737,
+    "ast_hash": "6c9c3b83ecae50dcd2ea5ce90fb157cb",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_153519_which_historical_ma_executable_features_are_alread.md": {
+    "mtime": 1790523319.5989435,
+    "ast_hash": "750449c57f0b29f65fc6891292a65668",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_172151_continue_merging.md": {
+    "mtime": 1790529711.0382817,
+    "ast_hash": "378ea3d23e2a3d487dc136470ff83f9e",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_174755_continue_merging.md": {
+    "mtime": 1790531275.5158157,
+    "ast_hash": "b0bbd4d42adab8ebff1fbf0872623864",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_182507_continue_merging.md": {
+    "mtime": 1790533507.166673,
+    "ast_hash": "7bd3f03000b6d10c8323786975d1b31c",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_183812_check_canonical_owners_for_historical_application.md": {
+    "mtime": 1790534292.9749987,
+    "ast_hash": "671e02f176e28b02512a1e0f8284cd48",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_192037_which_canonical_ma_owners_relate_to_application_ar.md": {
+    "mtime": 1790536837.95238,
+    "ast_hash": "339ae7c03a033321ce1f1b370a8a6993",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Projects/market-aligner/graphify-out/memory/query_20260927_201758_what_supports_the_canonical_jaa_application_genera.md": {
+    "mtime": 1790540278.1901603,
+    "ast_hash": "75963978dc26b85d7814de24b236dc15",
     "semantic_hash": ""
   }
 }

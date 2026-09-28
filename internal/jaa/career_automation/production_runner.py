@@ -16,11 +16,15 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Protocol, Sequence
+from typing import BinaryIO, Callable, Iterable, Mapping, Protocol, Sequence
 
 from playwright.sync_api import Page
 
-from .application_archive import ApplicationArchive
+from .application_archive import (
+    ApplicationArchive,
+    ApplicationArchiveError,
+    _scan_secret_bytes,
+)
 from .application_compiler import ApplicationSource, CandidateContact
 from .application_sanity_review import SanityReviewReceipt, VacancyReviewMaterial
 from .application_quality import ApplicationQualityInput
@@ -78,6 +82,7 @@ _GENERATOR_SOURCE_PATHS = (
     "career_automation/models.py",
     "career_automation/rendering.py",
 )
+MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -277,14 +282,18 @@ class GeneratedRevisionSink:
                                 approved=message.get("approved"),
                                 rejection_codes=message.get("rejection_codes", ()),
                             )
-                        if process.wait() != 0:
-                            raise RuntimeError("isolated candidate generator failed")
                     finally:
                         if process.poll() is None:
                             process.kill()
-                        process.wait()
+                        exit_code = process.wait()
                         if process.stdin is not None:
                             process.stdin.close()
+                        self._archive_worker_diagnostics(
+                            diagnostics,
+                            exit_code=exit_code,
+                        )
+                    if process.returncode != 0:
+                        raise RuntimeError("isolated candidate generator failed")
                 status.seek(0)
                 try:
                     result = json.load(status)
@@ -343,6 +352,64 @@ class GeneratedRevisionSink:
             self._marker,
         )
         return package
+
+    def _archive_worker_diagnostics(
+        self,
+        diagnostics: BinaryIO,
+        *,
+        exit_code: int,
+    ) -> None:
+        """Keep child diagnostics in the private attempt archive, never in errors."""
+        diagnostics.seek(0)
+        digest = hashlib.sha256()
+        captured = bytearray()
+        byte_length = 0
+        while chunk := diagnostics.read(64 * 1024):
+            byte_length += len(chunk)
+            digest.update(chunk)
+            remaining = MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES - len(captured)
+            if remaining > 0:
+                captured.extend(chunk[:remaining])
+        if byte_length == 0:
+            return
+
+        diagnostic_bytes = bytes(captured)
+        content_state = "archived"
+        if byte_length > MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES:
+            content_state = "withheld_size_limit"
+        else:
+            try:
+                _scan_secret_bytes(diagnostic_bytes, "text/plain")
+            except ApplicationArchiveError:
+                content_state = "withheld_secret_like"
+
+        attempt = self._recorder.attempt
+        metadata = {"exit_code": exit_code, "phase": "candidate_generation"}
+        if content_state == "archived":
+            attempt.add_artifact(
+                "generation.worker.stderr",
+                diagnostic_bytes,
+                media_type="text/plain",
+                disposition="observed",
+                metadata=metadata,
+            )
+            return
+
+        receipt = {
+            "schema_version": "jaa.worker-diagnostic-receipt.v1",
+            "byte_length": byte_length,
+            "content_sha256": digest.hexdigest(),
+            "content_state": content_state,
+            "exit_code": exit_code,
+            "phase": "candidate_generation",
+        }
+        attempt.add_artifact(
+            "generation.worker.stderr_receipt",
+            canonical_json(receipt).encode("utf-8"),
+            media_type="application/json",
+            disposition="observed",
+            metadata={"phase": "candidate_generation"},
+        )
 
     def _archive_owned_revision(
         self, **arguments: object
@@ -900,6 +967,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, required=True)
     parser.add_argument("--archive-root", type=Path, required=True)
+    parser.add_argument(
+        "--market-execution-receipt",
+        type=Path,
+        help=(
+            "run one verified Market Aligner handoff through the production "
+            "Greenhouse flow"
+        ),
+    )
     parser.add_argument("--factory", default=PRODUCTION_FACTORY_REFERENCE)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--review-only", action="store_true", help="prepare one review-only terminal attempt without release or submission")
@@ -928,7 +1003,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--execute-live requires --max-terminal-attempts 1")
     session: ProductionRunnerSession = _load_factory(arguments.factory)(arguments)
     try:
-        GreenhouseProductionRunner(
+        outcomes = GreenhouseProductionRunner(
             repository_root=arguments.repository_root,
             archive_root=arguments.archive_root,
             gmail_confirmation_checker=session.gmail_confirmation_checker,
@@ -943,9 +1018,64 @@ def main(argv: Sequence[str] | None = None) -> int:
             **({"prepare_review": session.prepare_review} if arguments.review_only else {"prepare_release": session.prepare_release}),
             max_terminal_attempts=arguments.max_terminal_attempts,
         )
+        if not outcomes:
+            print(
+                canonical_json(
+                    {
+                        "outcome": "no_terminal_attempt",
+                        "submission_receipt": None,
+                    }
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        if arguments.review_only:
+            if len(outcomes) != 1 or type(outcomes[0]) is not ReviewOnlyCompletion:
+                print(
+                    canonical_json({"outcome": "unexpected_review_result"}),
+                    file=sys.stderr,
+                )
+                return 2
+            review = outcomes[0]
+            print(
+                canonical_json(
+                    {
+                        "attempt_id": review.attempt_id,
+                        "outcome": "review_only",
+                        "terminal_manifest_sha256": review.terminal_manifest_sha256,
+                    }
+                )
+            )
+            return 0
+        if len(outcomes) != 1 or type(outcomes[0]) is not ProductionSubmissionReceipt:
+            print(
+                canonical_json({"outcome": "unexpected_live_result"}),
+                file=sys.stderr,
+            )
+            return 2
+        receipt = outcomes[0]
+        receipt.__post_init__()
+        if not any(
+            candidate.vacancy.vacancy.job_key == receipt.job_key
+            and candidate.vacancy.vacancy.vacancy_sha256 == receipt.vacancy_sha256
+            for candidate in session.candidates
+        ):
+            print(
+                canonical_json({"outcome": "submission_receipt_candidate_mismatch"}),
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            canonical_json(
+                {
+                    "outcome": "submitted_success",
+                    "submission_receipt": receipt.document(),
+                }
+            )
+        )
+        return 0
     finally:
         session.close()
-    return 0
 
 
 if __name__ == "__main__":

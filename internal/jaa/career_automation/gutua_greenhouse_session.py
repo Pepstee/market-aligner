@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -57,7 +57,7 @@ from .external_document_assurance import (
 from .gmail_confirmation import ACCESS_TOKEN_ENV, GmailAPIConfirmationChecker
 from .live_vacancy_discovery import verify_vacancy_body_equivalence
 from .production_attempt import GreenhouseAttemptRecorder, ProductionIdentity
-from .production_ats_executor import ProductionATSBoundaryError
+from .production_ats_executor import GREENHOUSE_HOSTS, ProductionATSBoundaryError
 from .production_ats_executor import capture_or_recover_greenhouse_forensic_observation
 from .production_ats_executor import compile_greenhouse_ats_plans
 from .production_ats_executor import collect_greenhouse_form_inventory
@@ -72,6 +72,12 @@ from .production_runner import (
     PreparedGreenhouseReview,
     ProductionRunCandidate,
 )
+from .market_aligner_preparation import MarketApplicationMaterializationContext
+from .production_handoff_admission_runner import (
+    run_production_handoff_admission,
+    selected_published_handoffs,
+)
+from .production_preparation_runner import run_production_market_materialization
 from .provider_observation_authority import load_provider_observation_authority
 from .provider_observation_capture import exact_clean_head
 from llm.client import LLMClient
@@ -105,6 +111,92 @@ def _file_sha256(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _store_market_candidate_authority(archive_root: Path, value: bytes) -> Path:
+    if not isinstance(value, bytes):
+        raise TypeError("market candidate authority must be exact bytes")
+    digest = hashlib.sha256(value).hexdigest()
+    directory = archive_root / "candidate-authorities"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("candidate authority archive directory is unsafe")
+    directory.chmod(0o700)
+    path = directory / f"{digest}.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != value:
+            raise ValueError("content-addressed market candidate authority differs")
+        if path.stat().st_mode & 0o777 != 0o600:
+            raise ValueError("market candidate authority permissions differ")
+        return path
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if _file_sha256(path) != digest:
+        raise ValueError("stored market candidate authority hash differs")
+    return path
+
+
+def _require_lowest_ranked_market_handoff(
+    context: MarketApplicationMaterializationContext,
+    rows: list[dict[str, object]],
+) -> dict[str, object]:
+    from market_aligner.assessment.geography import selection_sort_key
+
+    if len(rows) < 2:
+        raise ValueError(
+            "a Market canary requires at least two verified selected handoffs"
+        )
+    application_ids = [row.get("application_id") for row in rows]
+    if any(not isinstance(value, str) for value in application_ids) or len(
+        set(application_ids)
+    ) != len(application_ids):
+        raise ValueError("verified Market selections contain ambiguous application IDs")
+    try:
+        expected_order = sorted(
+            rows,
+            key=lambda row: (
+                *selection_sort_key(
+                    row["geography_rank"],
+                    row["final_score"],
+                    row["opportunity"],
+                    row["job_key"],
+                ),
+                row["application_id"],
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("verified Market selection ranking is malformed") from exc
+    if rows != expected_order:
+        raise ValueError("verified Market selections are not in canonical rank order")
+    matching = [
+        row for row in rows if row.get("application_id") == context.application_id
+    ]
+    if len(matching) != 1:
+        raise ValueError("admitted MA application is absent from verified selections")
+    selected = matching[0]
+    authority = context.market_decision_authority
+    if (
+        selected.get("handoff_root_sha256") != authority.handoff_root_sha256
+        or selected.get("candidate_intent_sha256") != context.candidate_intent_sha256
+        or selected.get("geography_rank") != context.geography_priority_rank
+        or selected.get("final_score") != context.final_score
+        or selected.get("opportunity") != context.opportunity_score
+        or selected.get("release_authority") is not False
+        or selected.get("submission_authority") is not False
+    ):
+        raise ValueError("admitted MA ranking differs from verified selection")
+    if rows[-1].get("application_id") != context.application_id:
+        raise ValueError("MA canary must be the lowest-ranked selected handoff")
+    return selected
 
 
 def _vacancy_description_hashes(job_keys: set[str]) -> dict[str, str]:
@@ -294,6 +386,15 @@ def _required_file(environment_name: str) -> Path:
 
 class GutuaGreenhouseSession:
     def __init__(self, arguments) -> None:
+        market_receipt = getattr(arguments, "market_execution_receipt", None)
+        if market_receipt is not None:
+            self.archive_root = Path(arguments.archive_root).resolve(strict=True)
+            self.repository_root = Path(arguments.repository_root).resolve(strict=True)
+            self.market_context_by_key: dict[
+                str, MarketApplicationMaterializationContext
+            ] = {}
+            self._initialize_market_execution(arguments, Path(market_receipt))
+            return
         discovery_path = _required_file(DISCOVERY_ENV)
         eligibility_path = _required_file(ELIGIBILITY_ENV)
         discovery_bytes = discovery_path.read_bytes()
@@ -414,6 +515,9 @@ class GutuaGreenhouseSession:
             raise ValueError("eligibility decisions must exactly cover live vacancies")
         archive_root = Path(arguments.archive_root).resolve(strict=True)
         repository_root = Path(arguments.repository_root).resolve(strict=True)
+        self.archive_root = archive_root
+        self.repository_root = repository_root
+        self.market_context_by_key = {}
         expected_authority = build_candidate_authority_document(
             discovery_path=discovery_path,
             archive_root=archive_root,
@@ -499,9 +603,143 @@ class GutuaGreenhouseSession:
             candidate.vacancy.vacancy.job_key: candidate.complete_vacancy
             for candidate in self.candidates
         }
+        self._start_browser(arguments)
+
+    def _initialize_market_execution(self, arguments, execution_receipt: Path) -> None:
+        if (
+            not execution_receipt.is_absolute()
+            or execution_receipt.is_symlink()
+            or not execution_receipt.is_file()
+        ):
+            raise ValueError("Market execution receipt must be an absolute regular file")
+        admission = run_production_handoff_admission(
+            execution_receipt_path=execution_receipt
+        )
+        admission_document = admission.document()
+        if (
+            admission.operation not in {"created", "replay"}
+            or admission.environment != "production"
+            or admission_document.get("release_token_issued") is not False
+            or admission_document.get("submission_authority") is not False
+        ):
+            raise ValueError("Market handoff admission did not retain the no-release boundary")
+        context = run_production_market_materialization(
+            application_id=admission.application_id
+        )
+        if type(context) is not MarketApplicationMaterializationContext:
+            raise TypeError("production Market materializer returned an invalid context")
+        authority = context.market_decision_authority
+        if (
+            context.application_id != admission.application_id
+            or authority.handoff_root_sha256 != admission.handoff_root_sha256
+            or authority.admission_receipt_sha256
+            != admission.verification_receipt_sha256
+        ):
+            raise ValueError("Market materialization differs from admitted handoff")
+        try:
+            parsed_source = urlsplit(authority.source_url)
+            supported_greenhouse_source = (
+                parsed_source.scheme == "https"
+                and parsed_source.hostname in GREENHOUSE_HOSTS
+                and parsed_source.username is None
+                and parsed_source.password is None
+                and parsed_source.port is None
+            )
+        except ValueError:
+            supported_greenhouse_source = False
+        if not supported_greenhouse_source:
+            raise ValueError(
+                "the certified production runner supports only Greenhouse handoffs"
+            )
+        selected_rows = selected_published_handoffs(
+            context.profile_id,
+            profile_version=context.profile_version,
+            candidate_intent_sha256=context.candidate_intent_sha256,
+        )
+        selected = _require_lowest_ranked_market_handoff(context, selected_rows)
+
+        authority_path = _store_market_candidate_authority(
+            self.archive_root, context.candidate_authority_bytes
+        )
+        job_key = authority.source_job_key
+        if context.materialization.source.job_key != job_key:
+            raise ValueError("materialized source differs from Market job identity")
+        vacancy = VacancyArchiveIdentity(
+            job_key=job_key,
+            vacancy_sha256=authority.raw_listing_sha256,
+            role_title=authority.role_title,
+            company_name=authority.company_name,
+            source_url=authority.source_url,
+        )
+        candidate = ProductionRunCandidate(
+            vacancy=LiveVacancy.create(
+                vacancy=vacancy,
+                provider="greenhouse",
+                fit_score=context.final_score / 100.0,
+                live=True,
+                eligible=True,
+                duplicate=False,
+                live_verified_at=context.source_observed_at,
+                scoring_inputs_sha256=authority.assessment_receipt_sha256,
+            ),
+            complete_vacancy=context.raw_listing_bytes,
+            structured_vacancy={
+                "application_id": context.application_id,
+                "candidate_intent_sha256": context.candidate_intent_sha256,
+                "company_name": authority.company_name,
+                "final_score": context.final_score,
+                "geography_priority_rank": context.geography_priority_rank,
+                "handoff_root_sha256": authority.handoff_root_sha256,
+                "job_key": job_key,
+                "market_admission": {
+                    "admission_operation": admission.operation,
+                    "admission_operation_receipt_sha256": (
+                        admission.operation_receipt_sha256
+                    ),
+                    "execution_receipt_file_sha256": (
+                        admission.execution_receipt_file_sha256
+                    ),
+                    "execution_receipt_semantic_sha256": (
+                        admission.execution_receipt_semantic_sha256
+                    ),
+                    "verification_receipt_sha256": (
+                        admission.verification_receipt_sha256
+                    ),
+                },
+                "opportunity_score": context.opportunity_score,
+                "role_title": authority.role_title,
+                "selected_handoff": dict(selected),
+                "selection_snapshot": [dict(row) for row in selected_rows],
+                "source_observed_at": context.source_observed_at,
+                "source_url": authority.source_url,
+            },
+            assessment={
+                "live": True,
+                "eligible": True,
+                "duplicate": False,
+                "fit_score": context.final_score,
+                "candidate_authority_receipt": dict(context.decision_receipt),
+            },
+        )
+        self.discovery_path = None
+        self.eligibility_path = authority_path
+        self.candidate_projection = dict(context.candidate_projection)
+        self.decision_by_key = {
+            job_key: {
+                "receipt": dict(context.decision_receipt),
+                "receipt_sha256": context.materialization.receipt.decision_receipt_sha256,
+            }
+        }
+        self.market_context_by_key = {job_key: context}
+        self.candidates = (candidate,)
+        self.complete_vacancy_by_key = {job_key: context.raw_listing_bytes}
+        self._start_browser(arguments)
+
+    def _start_browser(self, arguments) -> None:
         self.gmail_confirmation_checker = (
-            GmailAPIConfirmationChecker(repository_root=repository_root)
-            if not getattr(arguments, "review_only", False) and os.environ.get(ACCESS_TOKEN_ENV)
+            GmailAPIConfirmationChecker(repository_root=self.repository_root)
+            if not getattr(arguments, "review_only", False)
+            and os.environ.get(ACCESS_TOKEN_ENV)
             else None
         )
         self._playwright = sync_playwright().start()
@@ -914,6 +1152,9 @@ class GutuaGreenhouseSession:
         self, item: QueueItem, recorder, page, sink: GeneratedRevisionSink, *, review_only: bool,
     ) -> PreparedGreenhouseRelease | PreparedGreenhouseReview:
         vacancy = item.vacancy.vacancy
+        market_context = getattr(self, "market_context_by_key", {}).get(
+            vacancy.job_key
+        )
         source_body = self.complete_vacancy_by_key.get(vacancy.job_key)
         if source_body is None or hashlib.sha256(source_body).hexdigest() != (
             vacancy.vacancy_sha256
@@ -950,12 +1191,20 @@ class GutuaGreenhouseSession:
             prior_sha256=None,
             approved=True,
         )
-        contact_path = _required_file(CONTACT_ENV)
+        contact_path = (
+            market_context.contact_authority_path
+            if market_context is not None
+            else _required_file(CONTACT_ENV)
+        )
         contact_authority = load_candidate_contact_authority(
             contact_path, repository_root=self.repository_root
         )
         decision_row = self.decision_by_key[vacancy.job_key]
-        decision = decision_row["receipt"]
+        decision = (
+            market_context.market_decision_authority.decision_receipt()
+            if market_context is not None
+            else decision_row["receipt"]
+        )
 
         product = sink.generate_candidate_application(
             decision_receipt=decision,
@@ -970,6 +1219,10 @@ class GutuaGreenhouseSession:
         if type(product) is not CandidateApplicationPackage:
             raise TypeError("owned candidate generator returned an invalid package")
         package = product
+        if market_context is not None and package.source != market_context.materialization.source:
+            raise ValueError(
+                "owned candidate generator differs from admitted Market materialization"
+            )
         generation_authority = sink.seal()
         artifact_root = self.archive_root / "production-artifacts"
         publication = publish_application_artifacts(
@@ -1132,6 +1385,18 @@ class GutuaGreenhouseSession:
                 contact_authority_path=contact_path,
                 job_key=vacancy.job_key,
                 decision_receipt_sha256=str(decision_row["receipt_sha256"]),
+            ),
+            **(
+                {
+                    "market_decision_authority": (
+                        market_context.market_decision_authority
+                    ),
+                    "materialization_receipt": (
+                        market_context.materialization.receipt
+                    ),
+                }
+                if market_context is not None
+                else {}
             ),
         )
         issued = gate.issue(

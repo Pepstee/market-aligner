@@ -1,10 +1,14 @@
 # Current canonical architecture
 
-Updated 2026-08-30 during the two-laptop and GitHub archaeology pass. The only
-canonical repository is `/Users/admin/Projects/market-aligner`; its GitHub
-authority is `Pepstee/market-aligner`. The consolidation branch is
-`codex/market-aligner-canonical-union-20260828`, based on `466ad4b`. No
-Gigabyte or GitHub ref is a descendant of that base.
+Updated 2026-09-27. The only active Mac source repository is
+`/Users/admin/Projects/market-aligner`; its GitHub authority is
+`Pepstee/market-aligner`, branch `codex/ma0112-successor`, at
+`6762eb8213de3d53c7f6f70c2528b99c3c76003b`. The operator-designated Mac source owner is this path. The two former GIGA source
+trees were reconciled, their private inputs were moved to the owner-only data
+home, and the trees were removed. ArtVault remains the intended operation home;
+its SSH connection timed out during this reconciliation, so remote sync is
+unverified. Dated repositories under the designated graveyard remain preserved
+as historical evidence; they are not active development or execution owners.
 
 ```text
 public vacancy sources
@@ -144,6 +148,12 @@ candidate authority.
 The current branch is an integration authority, not yet a mass-application release. Recovery
 uses small runnable increments: preserve the last passing state, add one real capability,
 exercise it against real conditions, and only then improve quality.
+
+The Mac source owner is the Projects repository above. Historical recovery trees and graph inputs
+are archival evidence only; they are not alternate development or execution owners. This document
+does not claim that every on-disk historical snapshot has been deleted or fully reconciled. The private
+reconciliation input archive is stored outside Git under the MA Application Support data home and
+contains no runnable source tree.
 
 The immediate walking skeleton is:
 

@@ -8,7 +8,12 @@
       "git_status": "untracked-in-parent",
       "selected_files": 70,
       "selected_bytes": 450335,
-      "manifest_sha256": "46e6b8d1774bb8b6a705fd12befdd63eab8585a60d1f82d108423e9ba60b4b14"
+      "manifest_sha256": "46e6b8d1774bb8b6a705fd12befdd63eab8585a60d1f82d108423e9ba60b4b14",
+      "status": "deleted-after-consolidation",
+      "consolidated_into": "/Users/admin/Projects/market-aligner",
+      "private_archive_manifest_sha256": "042742d0af9d0d63541102445d63c3f386282bd2484abad96babd07aebac4ba0",
+      "private_archive_files": 5677,
+      "private_archive_bytes": 122704338
     },
     {
       "id": "redundant-person-fork",
@@ -16,7 +21,12 @@
       "git_status": "untracked-in-parent",
       "selected_files": 65,
       "selected_bytes": 405108,
-      "manifest_sha256": "7ae2c49c82f1e7760df9b27f9f209249680475d950c866785d136df5538c2033"
+      "manifest_sha256": "7ae2c49c82f1e7760df9b27f9f209249680475d950c866785d136df5538c2033",
+      "status": "deleted-after-consolidation",
+      "consolidated_into": "/Users/admin/Projects/market-aligner",
+      "private_archive_manifest_sha256": "042742d0af9d0d63541102445d63c3f386282bd2484abad96babd07aebac4ba0",
+      "private_archive_files": 5677,
+      "private_archive_bytes": 122704338
     },
     {
       "id": "korea-project-selected-code",
@@ -42,6 +52,1151 @@
   "audit_report": {
     "path": "/Users/admin/Documents/market-aligner-audit/READ_ONLY_RECONCILIATION_2026-07-31.md",
     "sha256": "856c590aeac543053efc50e29f558df40bcc5b3513635c974f56afbd6e338830"
-  }
+  },
+  "reconciled_at": "2026-09-27",
+  "canonical_mac_owner": "/Users/admin/Projects/market-aligner",
+  "historical_variant_audit": {
+    "audited_at": "2026-09-28",
+    "comparison_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+    "scope": [
+      "Git-tracked src/",
+      "Git-tracked internal/",
+      "Git-tracked tests/",
+      "Git-tracked docs/migration/",
+      "Git-tracked docs/architecture/",
+      "Git-tracked .github/"
+    ],
+    "snapshots": [
+      {
+        "id": "graveyard-successor-lane",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Projects/market-aligner-ma0112-successor-lane/repo",
+        "branch": "codex/ma0112-successor",
+        "head": "dc5fca447b16b464644f036b5367615ed569fae8",
+        "tracked_scope_files": 812,
+        "shared_paths": 812,
+        "byte_identical_paths": 795,
+        "changed_paths": 17,
+        "canonical_only_paths": 0,
+        "historical_only_paths": 0
+      },
+      {
+        "id": "graveyard-canonical-union",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Projects/market-aligner",
+        "branch": "codex/market-aligner-canonical-union-20260828",
+        "head": "1ddc95dc0e29cf493dee53bbfe8b730548688c25",
+        "tracked_scope_files": 767,
+        "shared_paths": 767,
+        "byte_identical_paths": 601,
+        "changed_paths": 166,
+        "canonical_only_paths": 45,
+        "historical_only_paths": 0
+      },
+      {
+        "id": "graveyard-ox-alpha",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Documents/ox-alpha-giga-workspace/projects/market-aligner",
+        "branch": "ox-alpha-work",
+        "head": "acf57e05feca284ed767754a3c0cb7320d26077d",
+        "tracked_scope_files": 116,
+        "shared_paths": 116,
+        "byte_identical_paths": 65,
+        "changed_paths": 51,
+        "canonical_only_paths": 696,
+        "historical_only_paths": 0
+      },
+      {
+        "id": "graveyard-canonical-union-r1-worktree",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Documents/ox-alpha-giga-workspace/worktrees/market-aligner-canonical-union-r1",
+        "branch": "codex/market-aligner-canonical-union-r1",
+        "head": "63f73e2da9fd1b8c1c8ebdd9446f2ec1c6fbe6b8",
+        "tracked_scope_files": 735,
+        "shared_paths": 733,
+        "byte_identical_paths": 529,
+        "changed_paths": 204,
+        "canonical_only_paths": 79,
+        "historical_only_paths": 2,
+        "historical_only_paths_list": [
+          "internal/jaa/test_jaa05_package023_canary_execution_amendment.py",
+          "internal/jaa/test_jaa05_package024_command_identity_remediation.py"
+        ]
+      },
+      {
+        "id": "graveyard-ingest-001-worktree",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Documents/ox-alpha-giga-workspace/worktrees/market-aligner-ingest-001",
+        "branch": "ox/market-aligner-ingest-001",
+        "head": "8c67b98e30c0e8da4352a5bfbd03f7390527d158",
+        "tracked_scope_files": 121,
+        "shared_paths": 121,
+        "byte_identical_paths": 68,
+        "changed_paths": 53,
+        "canonical_only_paths": 691,
+        "historical_only_paths": 0
+      },
+      {
+        "id": "graveyard-jaa-learning-r1-worktree",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Documents/ox-alpha-giga-workspace/worktrees/market-aligner-jaa-learning-r1",
+        "branch": "codex/market-aligner-jaa-learning-r1",
+        "head": "df464fe9e6fc8a61672c018c172cdac540441dd7",
+        "tracked_scope_files": 123,
+        "shared_paths": 123,
+        "byte_identical_paths": 68,
+        "changed_paths": 55,
+        "canonical_only_paths": 689,
+        "historical_only_paths": 0
+      },
+      {
+        "id": "graveyard-jaa-union-r1-worktree",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Documents/ox-alpha-giga-workspace/worktrees/market-aligner-jaa-union-r1",
+        "branch": "codex/market-aligner-jaa-union-r1",
+        "head": "eefe73c8ed9c37a7c01e4fa8f4d9704f15720c3a",
+        "also_referenced_by": [
+          "codex/market-private-sqlite-canary-r1",
+          "detached market-eefe-runtime-authority-mvp-r3"
+        ],
+        "tracked_scope_files": 123,
+        "shared_paths": 123,
+        "byte_identical_paths": 68,
+        "changed_paths": 55,
+        "canonical_only_paths": 689,
+        "historical_only_paths": 0
+      },
+      {
+        "id": "graveyard-private-sqlite-canary-r2-worktree",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Documents/ox-alpha-giga-workspace/worktrees/market-private-sqlite-canary-r2",
+        "branch": "codex/market-private-sqlite-canary-r2",
+        "head": "cf68bacc61db1c14ec991461ed9cccd5ab324c76",
+        "tracked_scope_files": 123,
+        "shared_paths": 123,
+        "byte_identical_paths": 68,
+        "changed_paths": 55,
+        "canonical_only_paths": 689,
+        "historical_only_paths": 0
+      }
+    ],
+    "unresolved_worktree_admin_record": {
+      "path": "/private/tmp/market-ma0157-clean-canary",
+      "path_exists": false,
+      "reported_state": "prunable",
+      "cleanup_performed": false
+    },
+    "classification_status": "partial; symbol-presence inventory completed for all six independent historical snapshot heads (ma-0309 and ma-0310); selected application, collector, eligibility, profile-store, and reporting behavior is classified. The three dirty snapshot working trees were inventoried and their executable overlays classified under ma-0311; the donor-only mvp-canary surface remains a test-only integration gap. The 59-file source-overlay semantic review, ma-0290/ma-0291 scope, remaining changed-body review, historical external controls, and ArtVault state remain unresolved. Two other snapshot heads are proven ancestors of canonical HEAD 6762eb8213de3d53c7f6f70c2528b99c3c76003b. Selected MA-to-JAA preparation and handoff-selection surfaces were reconciled under ma-0312; their system-level submit composition remains unproven.",
+    "python_symbol_presence_review": {
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "AST-qualified class/function name comparison in tracked Python files; tests and test_*.py files excluded from production counts",
+      "historical_only_callable_counts_by_snapshot": {
+        "graveyard-successor-lane": 0,
+        "graveyard-canonical-union": 0,
+        "graveyard-ox-alpha": 8,
+        "graveyard-canonical-union-r1-worktree": 10,
+        "graveyard-ingest-001-worktree": 6,
+        "graveyard-jaa-learning-r1-worktree": 6,
+        "graveyard-jaa-union-r1-worktree": 6,
+        "graveyard-private-sqlite-canary-r2-worktree": 6
+      },
+      "distinct_historical_only_production_symbols": [
+        {
+          "symbol": "ApplicationEvent",
+          "canonical_classification": "retained alias to LegacyV0ApplicationEvent"
+        },
+        {
+          "symbol": "ApplicationEvent.__post_init__",
+          "canonical_classification": "retained through the aliased LegacyV0ApplicationEvent validation"
+        },
+        {
+          "symbol": "ApplicationHandoff",
+          "canonical_classification": "retained alias to LegacyV0ApplicationHandoff"
+        },
+        {
+          "symbol": "ApplicationHandoff.__post_init__",
+          "canonical_classification": "retained through the aliased LegacyV0ApplicationHandoff validation"
+        },
+        {
+          "symbol": "_sha256",
+          "canonical_classification": "replaced by shared require_sha256"
+        },
+        {
+          "symbol": "validate_public_listing_url",
+          "canonical_classification": "retained in collectors/evidence.py and reused by handoff parsing"
+        },
+        {
+          "symbol": "_normal",
+          "canonical_classification": "intentionally retired; exact canonical eligibility values are required"
+        },
+        {
+          "symbol": "Collector._save_scrapling_failure",
+          "canonical_classification": "replaced by configured-chain transport receipts"
+        },
+        {
+          "symbol": "_atomic_text",
+          "canonical_classification": "replaced by ProfileStore generation publication and recovery"
+        },
+        {
+          "symbol": "_wrapped_lines",
+          "canonical_classification": "replaced by measured _wrap_text and layout logic"
+        }
+      ],
+      "historical_only_test_surfaces": {
+        "files": [
+          "internal/jaa/test_jaa05_package023_canary_execution_amendment.py",
+          "internal/jaa/test_jaa05_package024_command_identity_remediation.py"
+        ],
+        "additional_removed_test_symbol": "internal/jaa/baseline_adoption/test_runtime_evidence_contract.py::test_tracked_online_snapshot_evidence_matches_frozen_receipt_and_public_commands",
+        "ledger_entry": "ma-0297"
+      },
+      "limitations": "Symbol presence is not function-body equivalence. This does not close broader source-overlay review ma-0290/ma-0291 or ArtVault payload uncertainty."
+    },
+    "scoped_donors": [
+      {
+        "id": "source-0247-runtime-optimisation",
+        "path": "/Users/admin/Documents/graveyard of copies/Mac/Users/admin/Projects/job-application-automation-gutua-20260803-runtime-optimisation",
+        "branch": "codex/jaa-runtime-optimisation",
+        "head": "f65b1e22999bc2eb3de26dfa485ed6843b411b81",
+        "git_status": "clean",
+        "files": [
+          {
+            "path": "career_automation/deterministic_ats.py",
+            "sha256": "cd63f034db691886f8d327eda4ae04885ea2744058e6bbcd5d035d8ff8ee2149"
+          },
+          {
+            "path": "career_automation/live_application_runtime.py",
+            "sha256": "efe6cd35e2da425b171c5c470a0b996e7911da8ee5c41d702b0a40593588fc9e"
+          }
+        ],
+        "classification": {
+          "greenhouse_adapter": "superseded by canonical certified Greenhouse submit executor",
+          "firststage_adapter": "missing canonical certified executor and runner integration; donor-local direct submit hook is not adoptable as-is",
+          "second_sqlite_queue": "intentionally not migrated; canonical production queue, archive and checkpoint owners already exist",
+          "session_rotation": "deferred; canonical live runner admits one terminal attempt and lacks the donor transcript-byte input; donor time check is between applications"
+        },
+        "ledger_entry": "ma-0298"
+      }
+    ],
+    "graphify_exclusion_record": {
+      "policy_file": ".graphifyignore",
+      "excluded_inputs": [
+        "internal/jaa/runtime_evidence/**",
+        "*.pdf",
+        "*.doc",
+        "*.docx",
+        "*.xls",
+        "*.xlsx",
+        "*.ppt",
+        "*.pptx"
+      ],
+      "reason": "Runtime evidence can contain private canary documents and identity evidence; office/PDF payloads are not architecture sources.",
+      "previous_graph_sha256": "5e46e006d31dea7c2be318b55a7d3e891c73751cbb49f76a7a45ba303a455dd0",
+      "removed_nodes": 1627,
+      "removed_edges": 1619,
+      "removed_manifest_entries": 41,
+      "redacted_source_hash_paths": 27,
+      "current_graph_counts": {
+        "nodes": 70844,
+        "edges": 143463
+      },
+      "current_output_sha256": {
+        "graph.json": "3341fb4972a0747ab2aa1759c2bacff0752eeb003ada4aaf92f61342709d513c",
+        "GRAPH_REPORT.md": "4735375d02b71f38561d9efcf3f8cf0b038624258f54eca126b0d84602e349dc",
+        ".graphify_labels.json": "bc552939598a2d25ad3199bf702cc34841369f6f398706d75cfd97f1aa9634af"
+      },
+      "privacy_validation": "PASS; no runtime-evidence or binary-document source path remains in graph nodes, links, input manifest, or freshness source map; community labels are placeholders.",
+      "freshness": "PARTIAL; seven tracked sources and the new exclusion policy are not reflected in a full semantic refresh; see graphify-out/freshness.json.",
+      "uncovered_source_paths": [
+        ".graphifyignore",
+        "docs/architecture/CURRENT_ARCHITECTURE.md",
+        "docs/migration/REPORT_2026-08-01.md",
+        "docs/migration/ledger.jsonl",
+        "docs/migration/source-manifests.json",
+        "scripts/verify_graphify_freshness.py",
+        "tests/test_graphify_freshness.py",
+        "tests/test_migration_ledger.py"
+      ]
+    },
+    "git_ancestry_resolution": {
+      "checked_at": "2026-09-28",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "read-only git object lookup and merge-base ancestry check",
+      "results": [
+        {
+          "id": "graveyard-successor-lane",
+          "head": "dc5fca447b16b464644f036b5367615ed569fae8",
+          "tree": "8d2ba6f31c383b5774beceb7519827a4f9c5e12f",
+          "relation": "ancestor",
+          "commits_behind": 3
+        },
+        {
+          "id": "graveyard-canonical-union",
+          "head": "1ddc95dc0e29cf493dee53bbfe8b730548688c25",
+          "tree": "f31c5a5eb9a52125eac15cc1344ada9aa1fa9f6d",
+          "relation": "ancestor",
+          "commits_behind": 890
+        }
+      ],
+      "scope": "commit-history inclusion only; does not establish current working-tree equality or semantic equivalence",
+      "evidence_sha256": "ff2c5c6d1b573a6de34f7cf808fe18752149ca30487a4fc8211c03d9c44c0526"
+    },
+    "critical_path_behavior_review": {
+      "checked_at": "2026-09-28",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only Git-blob-bound line and AST comparison of selected callable bodies; no historical source was copied or executed.",
+      "reviewed_callables": {
+        "graveyard-ingest-001-worktree": [
+          "src/market_aligner/processing.py::_eligibility_one_under_scope",
+          "src/market_aligner/processing.py::classify_eligibility_durable_graph",
+          "src/market_aligner/processing.py::bind_fit_authority",
+          "src/market_aligner/collectors/engine.py::Collector.cycle",
+          "src/market_aligner/collectors/engine.py::Collector._discover_board",
+          "src/market_aligner/collectors/engine.py::Collector._fetch_row"
+        ],
+        "graveyard-ox-alpha": [
+          "src/market_aligner/assessment/scoring.py::_normalise_weights",
+          "src/market_aligner/assessment/scoring.py::power_mean",
+          "src/market_aligner/reporting/reports.py::write_reports"
+        ]
+      },
+      "source_git_blob_pairs": [
+        {
+          "snapshot_id": "graveyard-ingest-001-worktree",
+          "source_commit": "8c67b98e30c0e8da4352a5bfbd03f7390527d158",
+          "path": "src/market_aligner/collectors/engine.py",
+          "source_git_blob": "34c50a71a6de765eeea8c893cb2c6e614770f413",
+          "canonical_git_blob": "8800f82fbe9b47557aa2cd3149e3f357b8400b9c"
+        },
+        {
+          "snapshot_id": "graveyard-ingest-001-worktree",
+          "source_commit": "8c67b98e30c0e8da4352a5bfbd03f7390527d158",
+          "path": "src/market_aligner/processing.py",
+          "source_git_blob": "37a58f05c3040138f37adf87abb7ce34a112c6d2",
+          "canonical_git_blob": "d297c7b9630fb9391b3d0e99da86ae564310e6ef"
+        },
+        {
+          "snapshot_id": "graveyard-ox-alpha",
+          "source_commit": "acf57e05feca284ed767754a3c0cb7320d26077d",
+          "path": "src/market_aligner/assessment/scoring.py",
+          "source_git_blob": "ef3c247a29a5c42b401cdc88ee9ce7cf7f536445",
+          "canonical_git_blob": "b5db5ba38c6f80d8a23a4f6306ce1cdc2b928b96"
+        },
+        {
+          "snapshot_id": "graveyard-ox-alpha",
+          "source_commit": "acf57e05feca284ed767754a3c0cb7320d26077d",
+          "path": "src/market_aligner/reporting/reports.py",
+          "source_git_blob": "94321f4b6bba353dfa22dc2af20c29cf5af1a566",
+          "canonical_git_blob": "816370a4f5b0e3fd0b2498bb335c66a6d1e66006"
+        }
+      ],
+      "evidence_sha256": "7b6ad26646d2ef48d84a569883cba39a43b9e740ba115bda113b5c2f553ce1bd",
+      "classification": {
+        "collector_discovery_and_fetch": "Retained under the canonical collector with deadline and target budgets, pending-discovery recovery, public-URL validation, bounded retries, privacy binding, and configured-chain transport receipts. The old single fallback-attempt writer is superseded by the receipt owner.",
+        "eligibility_receipt_validation": "Retained through the canonical envelope reconstruction helper; current code additionally closes the leased snapshot in a nested finally and supports the separately admitted promoted-fit projection.",
+        "assessment_scoring": "Retained with stricter finite, non-negative weight validation and guards for invalid epsilon and power inputs.",
+        "ranked_reporting": "Retained with canonical ranking, profile and optional scope-namespaced output, plus JSON and PNG outputs beyond the historical CSV/HTML outputs."
+      },
+      "scope_limit": "This closes only the nine named callable comparisons across four files. It does not close the 59-file overlay review, all changed function bodies, the six independent snapshot heads, historical controls, or ArtVault state."
+    },
+    "signed_observation_acceptance_review": {
+      "checked_at": "2026-09-28",
+      "snapshot_id": "graveyard-jaa-learning-r1-worktree",
+      "source_commit": "df464fe9e6fc8a61672c018c172cdac540441dd7",
+      "source_parent_commit": "80b73eaa2a0db4a0c33a7db9e31e749d7e320356",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only commit-delta symbol and AST comparison for the signed ATS observation acceptance feature; source content was not copied or executed.",
+      "source_git_blob_pairs": [
+        {
+          "path": "src/market_aligner/applications/__init__.py",
+          "source_git_blob": "2d1e23dad94a76009e41a0f1bbf552f14eb2ca5a",
+          "canonical_git_blob": "eac4618fd6ebd9a28225267de15dd6006cfd3c22"
+        },
+        {
+          "path": "src/market_aligner/applications/jaa.py",
+          "source_git_blob": "fd4fc7506aa4e0dec2c19aeff00f8c36470ea8fb",
+          "canonical_git_blob": "9c48c5b77f17a8c34594ef763ee2267297397669"
+        }
+      ],
+      "feature_symbol_comparison": {
+        "introduced_by_source_commit": 27,
+        "present_in_canonical": 27,
+        "AST_identical": 24,
+        "AST_refactored": [
+          "_AcceptanceStore",
+          "_AcceptanceStore.verify",
+          "_open_acceptance_store"
+        ],
+        "missing": []
+      },
+      "evidence_sha256": "ebc5a0a4a5482afd145502215e3975bbf6e73b73f028e02c7709804bf0753c7e",
+      "classification": "Adopted in the canonical applications JAA owner. The three changed nodes use the shared _open_owned_store lifecycle; the acceptance still binds one public request, a signed envelope, a bounded time window, and one-use consumption. Its authority fields remain observation-only, with login, cookies, identity, vault, fill, upload, click, and submission authority false.",
+      "scope_limit": "Symbol presence and AST comparison do not prove live provider compatibility or submission. This closes only the named signed observation acceptance feature, not all 59 overlay files or all bodies in the six independent heads."
+    },
+    "faceless_jaa_diagnostic_corridor_review": {
+      "checked_at": "2026-09-28",
+      "snapshot_id": "graveyard-jaa-union-r1-worktree",
+      "source_commit": "eefe73c8ed9c37a7c01e4fa8f4d9704f15720c3a",
+      "source_parent_commit": "8c67b98e30c0e8da4352a5bfbd03f7390527d158",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only source-commit delta, public-export, AST symbol, and selected body comparison; source files were not copied or executed.",
+      "source_git_blob_pairs": [
+        {
+          "path": "src/market_aligner/applications/__init__.py",
+          "source_git_blob": "6600e6a86e8a80703f17d187f528aec7b0692301",
+          "canonical_git_blob": "eac4618fd6ebd9a28225267de15dd6006cfd3c22"
+        },
+        {
+          "path": "src/market_aligner/applications/jaa.py",
+          "source_git_blob": "b2518e93af74c84c1a575d52b03b342e862bda0e",
+          "canonical_git_blob": "9c48c5b77f17a8c34594ef763ee2267297397669"
+        },
+        {
+          "path": "src/market_aligner/cli.py",
+          "source_git_blob": "9bda062ec8406ed9c58ccc0fbd2c526db00b1dc2",
+          "canonical_git_blob": "18a309a8abe7a9b1d9191cbf5cecee006d799d87"
+        },
+        {
+          "path": "src/market_aligner/service/api.py",
+          "source_git_blob": "583098571b1a463862b8a637cb4688dc5e07e99e",
+          "canonical_git_blob": "bad5bb394c0b4ae17c259ad87c07fdc3bb8c807c"
+        }
+      ],
+      "evidence_sha256": "7610c69b382baa9d85b48565ff915573d41b4971b37dbaaebec528d3e28cb8c9",
+      "feature_comparison": {
+        "historical_public_exports": 12,
+        "exports_present_in_canonical_lazy_surface": 12,
+        "jaa_module_symbol_nodes": 31,
+        "symbols_present_in_canonical": 31,
+        "AST_identical": 28,
+        "AST_refactored": [
+          "ATSForensicRecorder",
+          "ATSForensicRecorder.checkpoint",
+          "load_forensic_receipt"
+        ],
+        "missing": []
+      },
+      "classification": "Adopted in the existing internal-JAA preparation and diagnostics corridor. The canonical CLI/service methods are retained in refactored form; the forensic recorder extends prepared/blocked checkpoints with validated passive-observation and pre-submit evidence, and revalidates observation-bearing manifests on load.",
+      "scope_limit": "This establishes static symbol/export preservation and selected behavior continuity only. It does not prove application submission, live provider compatibility, or complete review of the other snapshot bodies and 59-file source overlay."
+    },
+    "certified_greenhouse_submit_boundary_review": {
+      "checked_at": "2026-09-28",
+      "snapshot_id": "graveyard-canonical-union-r1-worktree",
+      "source_commit": "63f73e2da9fd1b8c1c8ebdd9446f2ec1c6fbe6b8",
+      "source_parent_commit": "83291868665409e9534a78e10f6f23ce70def6a1",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only AST and line comparison of the historical certified Greenhouse executor and live/review runner split; no browser action or source copy.",
+      "reviewed_callables": [
+        "internal/jaa/career_automation/production_ats_executor.py::CertifiedGreenhouseSubmitExecutor.execute",
+        "internal/jaa/career_automation/production_runner.py::GreenhouseProductionRunner.execute_next"
+      ],
+      "source_git_blob_pairs": [
+        {
+          "path": "internal/jaa/career_automation/production_ats_executor.py",
+          "source_git_blob": "7b8014601986849cfc65c2016b07e5ab58404175",
+          "canonical_git_blob": "616eb6a4b009c5138a398b9ea78dc8cbb9e7253d"
+        },
+        {
+          "path": "internal/jaa/career_automation/production_runner.py",
+          "source_git_blob": "ae28e9a718baa305a5aefa8e17d00bb07e7f4951",
+          "canonical_git_blob": "e71e3487adea41ab5703412a1c49347614b4a90f"
+        }
+      ],
+      "evidence_sha256": "8281d1eb96cd12f0079795e06a0a409647c42523a4e06a65e75b898cb511812f",
+      "classification": "The historical executor's consequential path is retained; its only line-level changes in execute inject self.now() for timestamps and immediate revalidation. The current runner adds a mutually exclusive review-only path that allows GET requests only, rejects review-only attempts resuming as live, and returns before executor invocation. The live release path remains separate and delegates to the certified Greenhouse executor.",
+      "scope_limit": "This is static source evidence only. It does not prove a live browser flow, successful ATS submission, or complete semantic equivalence of the production runner's other changed methods. The two historical Package 023/024 test specifications remain deferred under ma-0297."
+    },
+    "application_archive_and_artifact_review": {
+      "checked_at": "2026-09-28",
+      "snapshot_id": "graveyard-canonical-union-r1-worktree",
+      "source_commit": "63f73e2da9fd1b8c1c8ebdd9446f2ec1c6fbe6b8",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Direct read-only Git blob comparison, AST-qualified symbol inventory, and unified function-body diffs for every changed existing symbol in the two selected modules.",
+      "source_git_blob_pairs": {
+        "internal/jaa/career_automation/application_archive.py": {
+          "historical_git_blob": "89fdd5fe25a9c0d537c0bf5c770b04816c948dd4",
+          "historical_content_sha256": "f492a95dab0a29b03e53b308bd46d92922b13773b802ea229290ca7d58e4243f",
+          "canonical_git_blob": "8276361e9d6b898d120175ba5043b4c23a341537",
+          "canonical_content_sha256": "48e50ca7a002025c99ed3f90b56bd76644dabaa5030b7e6d44c7187a94d46656"
+        },
+        "internal/jaa/career_automation/application_artifacts.py": {
+          "historical_git_blob": "e9cc3ce9663c4dcf80514d9a33b0443b4eb04dd0",
+          "historical_content_sha256": "1636ff9825c5e2bc1e871f25d8d75f0b69cbc0357a67ae8655d511805e4fba6c",
+          "canonical_git_blob": "59076cfba05e35958031ce7d028e95d94de2ebd6",
+          "canonical_content_sha256": "8c4fb656b882396af857c58ea6eeb5f8c7706169b67624ee2715d78fdac44c2d"
+        }
+      },
+      "symbol_comparison": {
+        "application_archive.py": {
+          "historical_symbols": 60,
+          "canonical_symbols": 68,
+          "historical_only": [],
+          "canonical_only": [
+            "AttemptArchive.begin_review_only",
+            "AttemptArchive.read_artifact",
+            "_forensic_command",
+            "_review_event_allowed",
+            "_verify_review_history",
+            "_verify_review_only_evidence",
+            "_verify_review_only_evidence.document",
+            "_verify_review_only_evidence.value"
+          ],
+          "changed_existing_symbols": [
+            "AttemptArchive.__init__",
+            "AttemptArchive._append_event",
+            "AttemptArchive.add_artifact",
+            "AttemptArchive.finalize_release",
+            "AttemptArchive.finalize_terminal",
+            "_parser",
+            "_terminal_required_roles",
+            "_verify_terminal_evidence",
+            "main",
+            "verify_complete_attempt"
+          ]
+        },
+        "application_artifacts.py": {
+          "historical_symbols": 13,
+          "canonical_symbols": 14,
+          "historical_only": [],
+          "canonical_only": [
+            "verify_application_artifact_receipt"
+          ],
+          "changed_existing_symbols": [
+            "PublishedArtifactReceipt.__post_init__",
+            "_artifact_payloads",
+            "_read_receipt"
+          ]
+        }
+      },
+      "classification": "All historical symbol names are retained. The changed existing function bodies contain no removed source lines in this scoped text diff. The canonical archive adds review-only replay restrictions and prevents release authority; artifact publication adds exact source-rerender checks and rejects unreceipted content. This behavior is already in the canonical owner, so no donor source was copied.",
+      "scope_limit": "Static source comparison only. No tests, application payload, runtime database, browser, or ATS were accessed. Other historical modules, the broader source-overlay audit, remaining six independent snapshot heads, external control sources, and ArtVault state remain open.",
+      "evidence_sha256": "c241f65519f3f50684eae1e13e4eba4528acd32d0772d84232c2c89b0ff7fffd"
+    },
+    "candidate_document_authority_review": {
+      "checked_at": "2026-09-28",
+      "snapshot_id": "graveyard-canonical-union-r1-worktree",
+      "source_commit": "63f73e2da9fd1b8c1c8ebdd9446f2ec1c6fbe6b8",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only exact Git blob and AST-qualified symbol comparison; exact outward rewrite mappings compared in memory without recording candidate text; changed existing callables reviewed for replacement authority and deterministic ordering.",
+      "source_git_blob_pairs": {
+        "internal/jaa/career_automation/application_compiler.py": {
+          "historical_git_blob": "17a99c864d38362f3a6614f4c098a1552369c72b",
+          "historical_content_sha256": "a4f6ec646dd6297e95efc91a3baf27170848d339ed3eeb329560f309bcb94331",
+          "canonical_git_blob": "8313e676009b87e8dda3b1ec70a048c7d7ee4330",
+          "canonical_content_sha256": "1dd3bdbc2cae16bef7fd4ef162a78bd2b8bbdd8ee7e8c771112ef3e2435d587d"
+        },
+        "internal/jaa/career_automation/candidate_application_factory.py": {
+          "historical_git_blob": "dd3d1aac125c250344f46a109d5d36369b077e8d",
+          "historical_content_sha256": "477f407ed541e666fcaef994d5dd4436ee1d343c41511121194b770a6988197d",
+          "canonical_git_blob": "fa3a14cf3332dfcfe9da4f9eecd0c731ded972a6",
+          "canonical_content_sha256": "e09787bb23c21c8d8464df915b946ccd5ddeaa807590c52a3b9c4009e83176de"
+        }
+      },
+      "symbol_comparison": {
+        "application_compiler.py": {
+          "historical_symbols": 43,
+          "canonical_symbols": 59,
+          "historical_only": [],
+          "new_canonical_surfaces": 16,
+          "changed_existing_callables": [
+            "FactAuthority.__post_init__",
+            "FactualSentence.__post_init__",
+            "FactualSentence.document",
+            "ProductionApplicationCompiler.compile",
+            "ProfileFactAuthority.__post_init__"
+          ]
+        },
+        "candidate_application_factory.py": {
+          "historical_symbols": 36,
+          "canonical_symbols": 36,
+          "historical_only": [],
+          "new_canonical_surfaces": 0,
+          "changed_existing_callables": [
+            "_outward_profile_text",
+            "_profile_sentence"
+          ]
+        }
+      },
+      "policy_equivalence": {
+        "profile_rewrite_policy_same_keys_and_exact_text": true,
+        "cover_letter_rewrite_policy_same_keys_and_exact_text": true,
+        "profile_rewrite_count": 10,
+        "cover_letter_rewrite_count": 1
+      },
+      "classification": "Historical rewrite behavior and exact approved wording remain represented in the canonical policy owner. The factory delegates to that shared owner. Changed candidate-fact handling now verifies a source-bound rewrite receipt against pinned evidence and current policy; compilation orders question rows deterministically. These changes replace the earlier unbound digest pair with a stronger provenance boundary. No historical-only symbols or wording entries were found, so no source code was copied.",
+      "scope_limit": "Static source comparison only. No raw candidate text was placed in the receipt, report, or graph query. Tests and runtime were not run. Other historical modules, remaining source overlays and independent snapshot heads, external control sources, and ArtVault state remain open.",
+      "evidence_sha256": "b991ef5e9b353e5a1a3d02da19a5e1dd32e77e137728d24e65b453f3a5ca68ea"
+    },
+    "production_queue_attempt_runner_review": {
+      "checked_at": "2026-09-28",
+      "snapshot_id": "graveyard-canonical-union-r1-worktree",
+      "source_commit": "63f73e2da9fd1b8c1c8ebdd9446f2ec1c6fbe6b8",
+      "canonical_base_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only exact Git blob and AST-qualified symbol comparison for the queue, attempt recorder, production runner, Greenhouse session, and generation worker; critical live-path call order and worker request-body relocation also checked.",
+      "source_git_blob_pairs": {
+        "internal/jaa/career_automation/production_queue.py": {
+          "historical_git_blob": "529ab8cf9f34ad0a0f1be19270473293cb6a873f",
+          "historical_content_sha256": "d4c386919d49c9cb48561b9d2fd1dca63412e2988b0c4adee9762b3668a5671c",
+          "canonical_git_blob": "ffb616202a680c1e6a490a1de584ef14f9c7b990",
+          "canonical_content_sha256": "5035176bdf6d8891ce7483a69c3c06c3cef26bc3fd1dc355e98e52ffaf8cdd45"
+        },
+        "internal/jaa/career_automation/production_attempt.py": {
+          "historical_git_blob": "13894c74240c9d060e2a768be83616b30b4d71e2",
+          "historical_content_sha256": "950c67c6db4ca1ac0f3d94310f7a17894ce8999ff42da58dd36fdf1a2b0b2d48",
+          "canonical_git_blob": "ae5edd36793fb95e0888ccaa68cff92bb0811b4c",
+          "canonical_content_sha256": "29ed023796ed547b6afc2e22573f2a7cf6c607636fb3916f9e6239bdbbf071ac"
+        },
+        "internal/jaa/career_automation/production_runner.py": {
+          "historical_git_blob": "ae28e9a718baa305a5aefa8e17d00bb07e7f4951",
+          "historical_content_sha256": "8fea543f008265ed30d11a611b16fb55daeacc074a6eac783260ea010ffe2a77",
+          "canonical_git_blob": "e71e3487adea41ab5703412a1c49347614b4a90f",
+          "canonical_content_sha256": "8f0d5f2536c844985de97a85fc178b74182d456967ba3ca9f6536a9f61e1ec79"
+        },
+        "internal/jaa/career_automation/gutua_greenhouse_session.py": {
+          "historical_git_blob": "9f5c243c44428bee9eac19ecdcc0b57b780031c6",
+          "historical_content_sha256": "2149606facffab1fa91609817dc646a77914a899bc66fc915ac02a6e25136c9b",
+          "canonical_git_blob": "24572a4547fcb83a3d27f8fb4ef0443e2600d08f",
+          "canonical_content_sha256": "994578232b054cdbf68110d614a468cc28f841b3051cd0ff47c51230d706f429"
+        },
+        "internal/jaa/career_automation/candidate_generation_worker.py": {
+          "historical_git_blob": "7b47122de5c14b63cd5ad32b7d7633c126dcea30",
+          "historical_content_sha256": "8134fab4953737040b6844844772ee7fd56e2cf3747e496db5abcfc7005132cc",
+          "canonical_git_blob": "261bc491ca48fd2ac41c62a01117f5a19a47dc79",
+          "canonical_content_sha256": "37efcca11e0b2fdf1880ef4ed24f0136d59af6dab16032a2af7804e81320918a"
+        }
+      },
+      "symbol_comparison": {
+        "production_queue.py": {
+          "historical_symbols": 31,
+          "canonical_symbols": 31,
+          "historical_only": [],
+          "canonical_only": [],
+          "changed_existing_symbols": [],
+          "source_difference": "QUARANTINE_OUTCOMES adds review_only; no queue symbol body changed."
+        },
+        "production_attempt.py": {
+          "historical_symbols": 27,
+          "canonical_symbols": 31,
+          "historical_only": [],
+          "canonical_only": [
+            "GreenhouseAttemptRecorder.begin_review_only",
+            "GreenhouseAttemptRecorder.finalize_review_only",
+            "GreenhouseAttemptRecorder.recover_review_only_completion",
+            "GreenhouseAttemptRecorder.review_once"
+          ],
+          "changed_existing_symbol_count": 5
+        },
+        "production_runner.py": {
+          "historical_symbols": 26,
+          "canonical_symbols": 28,
+          "historical_only": [],
+          "canonical_only": [
+            "PreparedGreenhouseReview",
+            "ReviewOnlyCompletion"
+          ],
+          "changed_existing_symbol_count": 9
+        },
+        "gutua_greenhouse_session.py": {
+          "historical_symbols": 17,
+          "canonical_symbols": 19,
+          "historical_only": [],
+          "canonical_only": [
+            "GutuaGreenhouseSession._prepare_application",
+            "GutuaGreenhouseSession.prepare_review"
+          ],
+          "changed_existing_symbol_count": 4
+        },
+        "candidate_generation_worker.py": {
+          "historical_symbols": 3,
+          "canonical_symbols": 4,
+          "historical_only": [],
+          "canonical_only": [
+            "_generate_from_request"
+          ],
+          "changed_existing_symbol_count": 2,
+          "historical_request_generation_body_ast_equal_to_new_helper": true
+        }
+      },
+      "live_release_boundary": {
+        "historical_critical_operation_sequence_retained_in_canonical_live_helper": true,
+        "review_only_branch_returns_before_release_gate_or_form_fill": true,
+        "live_and_review_cli_modes_mutually_exclusive": true
+      },
+      "classification": "Historical queue, recorder, runner, session, and generation-worker surfaces are retained or factored into canonical owners. The canonical tree adds review-only quarantine and execution, passive observation, authority revalidation, and a separate revision file descriptor. The former public stderr detail was intentionally replaced by a generic public failure contract; the dropped diagnostic datum is restored privately under ma-0308.",
+      "scope_limit": "Static source comparison; no live browser, ATS, or applicant payload was used. Broader function-body equivalence and the remaining six-head source overlay remain open.",
+      "evidence_sha256": "000f22df7c8ed72a2129765d57d598b5b820a571ba8208478cce3280885449b2"
+    },
+    "production_diagnostics_repair": {
+      "checked_at": "2026-09-28",
+      "canonical_base_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "source_id": "graveyard-canonical-union-r1-generation-worker-private-diagnostics",
+      "source_sha256": "048a63c1341927f82ca0c1144d1af7aa483f29b432e83411dfde55e603fa07f8",
+      "historical_source_git_blobs": {
+        "internal/jaa/career_automation/production_runner.py": "ae28e9a718baa305a5aefa8e17d00bb07e7f4951",
+        "internal/jaa/career_automation/candidate_generation_worker.py": "7b47122de5c14b63cd5ad32b7d7633c126dcea30"
+      },
+      "working_tree_sha256": {
+        "internal/jaa/career_automation/candidate_generation_worker.py": "82fe4385d9b14390e20ec7ae066cd6951af4cb99dcad30f6ffd06ecce3b510ed",
+        "internal/jaa/career_automation/production_runner.py": "5f8a35a5c5c31461082bc758a4b941b9953618ccfd2787526029b10644114e51",
+        "internal/jaa/test_production_runner.py": "00e4d63405bf2cdcf701c2c04e30faf3af604479ee3ee0438e84771e8472cab9"
+      },
+      "diff_sha256": "3fd51755426bcb62aa0d6c866b9b7a61aa6184e18e17240e0bb12a8dc71bdab7",
+      "diff_bytes": 9317,
+      "behavior": "Worker tracebacks are emitted only to the parent-owned temporary stderr stream. Safe bytes are archived as a content-addressed attempt artifact; secret-like bytes or streams above 1 MiB are represented only by SHA-256, byte length, and explicit withheld state. The caller continues to receive the generic failure message.",
+      "tests": {
+        "focused_worker_and_redaction_and_graph_canonicalization": "4 passed",
+        "production_runner_module": "31 passed, 9 skipped",
+        "full_repository_suite": "pending"
+      },
+      "classification": "Useful private diagnostic content from the historical failure path is retained inside the existing restricted attempt archive without restoring public stderr leakage. No parallel archive or queue was added.",
+      "scope_limit": "Synthetic diagnostic data only; no live application or real profile corpus was processed.",
+      "evidence_sha256": "a3cd74f156109fbdf175fe2df9eaeb7495fe5e70cccaf55e9d137a0a31cd9951"
+    },
+    "graphify_refresh_repair": {
+      "updated_at": "2026-09-28",
+      "canonicalizer_policy": "For legacy cites/disposes edges without source_file, bind source_file from the source node; do not infer it for other relation types.",
+      "verification": "A repeated graph update completed without the missing-source-file warning; tests cover the two repaired relation types and leave unrelated relation types unchanged. The exact source/output binding is in graphify-out/freshness.json.",
+      "scope_limit": "Graphify remains a navigation aid; static source comparisons remain required for feature equivalence."
+    },
+    "helper_and_contract_behavior_review": {
+      "checked_at": "2026-09-28T05:27:42+09:00",
+      "snapshot_id": "graveyard-canonical-union-r1-worktree",
+      "source_commit": "63f73e2da9fd1b8c1c8ebdd9446f2ec1c6fbe6b8",
+      "canonical_base_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "read-only Git blob comparison plus Python AST-qualified callable/class inventory; no checkout, test fixture copy, runtime or application data",
+      "tree_scope": "tracked Python under src/, internal/jaa/, tests/",
+      "counts": {
+        "source_python_files": 604,
+        "canonical_python_files": 650,
+        "shared_python_files": 602,
+        "changed_files": 190,
+        "added_in_canonical": 48,
+        "removed_in_canonical": 2,
+        "changed_callable_or_class_ast_bodies": 450,
+        "historical_only_callable_or_class_symbols": 13,
+        "historical_only_production_symbols": 10,
+        "historical_only_test_symbols": 3
+      },
+      "source_git_blobs": {
+        "internal/jaa/career_automation/rendering.py": "3b4ad91778cde61d88fdf65228cec08655f68835",
+        "src/market_aligner/applications/contracts.py": "73786fd73ae89b59303e21e9091805cbad32ff79",
+        "src/market_aligner/applications/handoff.py": "d2443c91c8c69d5a5469f05f8df7d4d201e74626",
+        "src/market_aligner/assessment/eligibility.py": "100c7dacff72f8e487b54dbe04045ec2bdc47db7",
+        "src/market_aligner/collectors/engine.py": "3f00908096a98260d5274e7b13ef536a0cd93fd2",
+        "src/market_aligner/profiler/store.py": "4e6be845f962afdecd57a3d385858f68feeda420",
+        "tests/test_service.py": "e9c4a307326e683ca72582bee8712dd187fb8afa",
+        "internal/jaa/baseline_adoption/test_runtime_evidence_contract.py": "efd7082d8e54ac1c10d62568603d8004cd8db7de",
+        "internal/jaa/test_durable_live_evidence_separation.py": "d0648f7784210ef0a37df74ab3d82d849ed9c5e1"
+      },
+      "canonical_git_blobs": {
+        "internal/jaa/career_automation/rendering.py": "a50de2e161d21602eec51b4c6f947db548a23514",
+        "src/market_aligner/applications/contracts.py": "f7f26b1aee87ea55fa05889c5c0211542c7ff4a0",
+        "src/market_aligner/applications/handoff.py": "0d6a60400b3d7344d251d2e5292c68cd08a4afcf",
+        "src/market_aligner/assessment/eligibility.py": "c894355142f042da98099bbda80b80e71dc3912b",
+        "src/market_aligner/collectors/engine.py": "8800f82fbe9b47557aa2cd3149e3f357b8400b9c",
+        "src/market_aligner/profiler/store.py": "5ca13b4a9e7096a9222bc91936ecd10cd1d97fe9",
+        "tests/test_service.py": "4342a29692923bf7ebe10112f654f4cfcc726722",
+        "internal/jaa/baseline_adoption/test_runtime_evidence_contract.py": "b69e89466f3bddd32baeaf878b5af749c957a78b",
+        "internal/jaa/test_durable_live_evidence_separation.py": "e1d819492cb95b7783318e06df27519caf21246a"
+      },
+      "dispositions": {
+        "internal/jaa/career_automation/rendering.py::_wrapped_lines": "replaced by width-measured _wrap_text and geometry-aware pagination; rejects controls and overlong tokens while enforcing page geometry",
+        "src/market_aligner/applications/contracts.py::ApplicationEvent+ApplicationHandoff+_sha256": "retained through explicit legacy-v0 aliases with stricter release-blocked inspection; current v1 envelopes and shared require_sha256 are the active contract owners",
+        "src/market_aligner/applications/handoff.py::validate_public_listing_url": "relocated to src/market_aligner/collectors/evidence.py and strengthened with credential, nested URL, and secret-shaped input checks",
+        "src/market_aligner/assessment/eligibility.py::_normal": "intentionally removed by accepted exact-canonical-input repair T5; intake validates canonical values and decision rules preserve T1-T4 UNKNOWN/sponsorship semantics",
+        "src/market_aligner/collectors/engine.py::Collector._save_scrapling_failure": "replaced by sanitized transport receipts that retain allowlisted attempt evidence, omit raw URL, and bind a schema version",
+        "src/market_aligner/profiler/store.py::_atomic_text": "replaced by same-directory private temp, fsync, exclusive publication, and crash-coherent generation recovery",
+        "tests/test_service.py::ServiceTests.test_process_one_cli_requires_exact_job_key": "test-only surface mapped to current exact job-key CLI/service behavior and active exact-key tests",
+        "internal/jaa/baseline_adoption/test_runtime_evidence_contract.py::test_tracked_online_snapshot_evidence_matches_frozen_receipt_and_public_commands": "historical test-only contract surface; exact test coverage mapping remains unverified and is retained as historical evidence",
+        "internal/jaa/test_durable_live_evidence_separation.py::_receipt": "test fixture helper only; no product behavior"
+      },
+      "classification": "adopted",
+      "scope_limit": "This reconciles the named 13 historical-only symbols across nine files only. It does not review the remaining changed callable bodies, 59-file source-overlay audit, other six independent snapshot heads, historical controls, test coverage for the retained runtime-evidence test spec, or ArtVault state.",
+      "evidence_sha256": "f06acba8a2080e37f282529cc5c42a764597f7129e4fc0a18989b024ef604d8f"
+    },
+    "independent_snapshot_surface_review": {
+      "checked_at": "2026-09-28",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only Git blob comparison against canonical HEAD; AST-qualified class/function inventory over registered snapshot Python sources under src/, internal/jaa/, and tests/. Excluded private, runtime-evidence, canary-payload, and corpus paths. No snapshots were checked out, copied, executed, or modified.",
+      "scope": "Five of the six independent historical heads; canonical-union-r1 has its scoped symbol and helper behavior review under ma-0309. Two other listed heads are proven ancestors of canonical HEAD.",
+      "snapshots": [
+        {
+          "id": "graveyard-jaa-learning-r1-worktree",
+          "source_commit": "df464fe9e6fc8a61672c018c172cdac540441dd7",
+          "python_files_scanned": 103,
+          "changed_files_vs_canonical_head": 49,
+          "changed_class_or_callable_bodies": 155,
+          "historical_only_symbols": 7,
+          "historical_only_source_paths": 0,
+          "source_git_blobs": {
+            "src/market_aligner/applications/contracts.py": "73786fd73ae89b59303e21e9091805cbad32ff79",
+            "src/market_aligner/collectors/engine.py": "34c50a71a6de765eeea8c893cb2c6e614770f413",
+            "src/market_aligner/reporting/reports.py": "94321f4b6bba353dfa22dc2af20c29cf5af1a566",
+            "tests/test_reporting.py": "646c19d0bc46eee508b3f378ca66b9272dd360f3"
+          }
+        },
+        {
+          "id": "graveyard-jaa-union-r1-worktree",
+          "source_commit": "eefe73c8ed9c37a7c01e4fa8f4d9704f15720c3a",
+          "python_files_scanned": 103,
+          "changed_files_vs_canonical_head": 49,
+          "changed_class_or_callable_bodies": 149,
+          "historical_only_symbols": 7,
+          "historical_only_source_paths": 0,
+          "source_git_blobs": {
+            "src/market_aligner/applications/contracts.py": "73786fd73ae89b59303e21e9091805cbad32ff79",
+            "src/market_aligner/collectors/engine.py": "34c50a71a6de765eeea8c893cb2c6e614770f413",
+            "src/market_aligner/reporting/reports.py": "94321f4b6bba353dfa22dc2af20c29cf5af1a566",
+            "tests/test_reporting.py": "646c19d0bc46eee508b3f378ca66b9272dd360f3"
+          }
+        },
+        {
+          "id": "graveyard-private-sqlite-canary-r2-worktree",
+          "source_commit": "cf68bacc61db1c14ec991461ed9cccd5ab324c76",
+          "python_files_scanned": 103,
+          "changed_files_vs_canonical_head": 49,
+          "changed_class_or_callable_bodies": 151,
+          "historical_only_symbols": 7,
+          "historical_only_source_paths": 0,
+          "source_git_blobs": {
+            "src/market_aligner/applications/contracts.py": "73786fd73ae89b59303e21e9091805cbad32ff79",
+            "src/market_aligner/collectors/engine.py": "34c50a71a6de765eeea8c893cb2c6e614770f413",
+            "src/market_aligner/reporting/reports.py": "94321f4b6bba353dfa22dc2af20c29cf5af1a566",
+            "tests/test_reporting.py": "646c19d0bc46eee508b3f378ca66b9272dd360f3"
+          }
+        },
+        {
+          "id": "graveyard-ox-alpha",
+          "source_commit": "acf57e05feca284ed767754a3c0cb7320d26077d",
+          "python_files_scanned": 96,
+          "changed_files_vs_canonical_head": 45,
+          "changed_class_or_callable_bodies": 113,
+          "historical_only_symbols": 9,
+          "historical_only_source_paths": 0,
+          "source_git_blobs": {
+            "src/market_aligner/applications/contracts.py": "73786fd73ae89b59303e21e9091805cbad32ff79",
+            "src/market_aligner/collectors/engine.py": "b7a64b5010ed51a5604a859e27f7a8bcd6ee3d0c",
+            "src/market_aligner/reporting/reports.py": "94321f4b6bba353dfa22dc2af20c29cf5af1a566",
+            "tests/test_reporting.py": "646c19d0bc46eee508b3f378ca66b9272dd360f3",
+            "src/market_aligner/assessment/eligibility.py": "100c7dacff72f8e487b54dbe04045ec2bdc47db7",
+            "src/market_aligner/profiler/store.py": "0a60940c82912031626b3ce142e9027e5ee2dda7"
+          }
+        },
+        {
+          "id": "graveyard-ingest-001-worktree",
+          "source_commit": "8c67b98e30c0e8da4352a5bfbd03f7390527d158",
+          "python_files_scanned": 101,
+          "changed_files_vs_canonical_head": 47,
+          "changed_class_or_callable_bodies": 143,
+          "historical_only_symbols": 7,
+          "historical_only_source_paths": 0,
+          "source_git_blobs": {
+            "src/market_aligner/applications/contracts.py": "73786fd73ae89b59303e21e9091805cbad32ff79",
+            "src/market_aligner/collectors/engine.py": "34c50a71a6de765eeea8c893cb2c6e614770f413",
+            "src/market_aligner/reporting/reports.py": "94321f4b6bba353dfa22dc2af20c29cf5af1a566",
+            "tests/test_reporting.py": "646c19d0bc46eee508b3f378ca66b9272dd360f3"
+          }
+        }
+      ],
+      "canonical_git_blobs": {
+        "src/market_aligner/applications/contracts.py": "f7f26b1aee87ea55fa05889c5c0211542c7ff4a0",
+        "src/market_aligner/applications/legacy_v0.py": "4bf93c21dfb0ece1e5f6102152470ffc5c9d93ff",
+        "src/market_aligner/assessment/eligibility.py": "c894355142f042da98099bbda80b80e71dc3912b",
+        "src/market_aligner/collectors/engine.py": "8800f82fbe9b47557aa2cd3149e3f357b8400b9c",
+        "src/market_aligner/collectors/evidence.py": "7b4ff71d029b68593bd2467a3c947c5af81e94cb",
+        "src/market_aligner/profiler/store.py": "5ca13b4a9e7096a9222bc91936ecd10cd1d97fe9",
+        "src/market_aligner/reporting/reports.py": "816370a4f5b0e3fd0b2498bb335c66a6d1e66006",
+        "tests/test_assessment.py": "4d8cc30e6c04f2d6f4baa072ba57f89eec8a42fd",
+        "tests/test_collector_evidence.py": "9acf4658853544f6d4509d04fe2f662667f3c374",
+        "tests/test_jaa_events_v1.py": "ec9e56497eda74debadd266023dd991ee2cf5078",
+        "tests/test_profiles.py": "a9c975a40812c3696364e4683c6202fe3b33128c",
+        "tests/test_reporting.py": "21375610ff09515ff89850fb943bb5afacda5fb3"
+      },
+      "historical_only_symbol_sets": {
+        "three_jaa_snapshots": [
+          "src/market_aligner/applications/contracts.py::ApplicationEvent",
+          "src/market_aligner/applications/contracts.py::ApplicationEvent.__post_init__",
+          "src/market_aligner/applications/contracts.py::ApplicationHandoff",
+          "src/market_aligner/applications/contracts.py::ApplicationHandoff.__post_init__",
+          "src/market_aligner/applications/contracts.py::_sha256",
+          "src/market_aligner/collectors/engine.py::Collector._save_scrapling_failure",
+          "tests/test_reporting.py::ReportingTests.test_ranked_jobs_requirements_and_interactive_scatter"
+        ],
+        "graveyard-ox-alpha_additional": [
+          "src/market_aligner/assessment/eligibility.py::_normal",
+          "src/market_aligner/profiler/store.py::_atomic_text"
+        ],
+        "graveyard-ingest-001_additional": []
+      },
+      "behavior_dispositions": [
+        {
+          "surface": "provisional v0 ApplicationEvent/ApplicationHandoff records",
+          "disposition": "retained_as_release_blocked_inspection_aliases",
+          "canonical_owner": "applications/contracts.py -> LegacyV0 types in applications/legacy_v0.py",
+          "evidence": "v0-only schema validation, legacy_v0 admission kind, verified_v1=false, release_blocked=true; test_v0_is_retained_for_inspection_but_release_blocked passes"
+        },
+        {
+          "surface": "Collector._save_scrapling_failure",
+          "disposition": "replaced_by_sanitized_transport_receipts",
+          "evidence": "donor writes row.url and complete attempt mappings to raw_cache; canonical _save_transport_receipt persists sanitized_attempts without the listing URL and returns a generic failure; collector evidence tests pass"
+        },
+        {
+          "surface": "assessment._normal casefold/strip helper",
+          "disposition": "intentionally_retired_by_accepted_eligibility_repairs",
+          "evidence": "accepted contract repairs ma-0150/ma-0160 replace truthy-string normalization and old sponsor/jurisdiction comparisons with typed fact validation and explicit UNKNOWN outcomes"
+        },
+        {
+          "surface": "profiler.store._atomic_text",
+          "disposition": "replaced_by_durable_revision_store",
+          "evidence": "canonical ProfileStore uses same-directory temporary writes, fsync, atomic publication, retained revisions, and recovery checks"
+        },
+        {
+          "surface": "interactive opportunity-versus-fit scatter",
+          "disposition": "retained",
+          "evidence": "canonical report writer emits interactive HTML and PNG; test_ranked_jobs_requirements_and_scatter_outputs passes"
+        }
+      ],
+      "focused_verification": {
+        "result": "54 passed, 113 subtests passed",
+        "scope": "tests/test_jaa_events_v1.py v0 inspection case; tests/test_collector_evidence.py; tests/test_reporting.py; tests/test_profiles.py; tests/test_assessment.py; tests/test_migration_ledger.py",
+        "environment": "repository .venv"
+      },
+      "scope_limit": "This is a symbol inventory plus five selected behavior checks, not a semantic review of every changed body. The 59-file source-overlay review, ma-0290 and ma-0291, the 450 AST differences recorded under ma-0309, historical external controls, and ArtVault state remain open. No no-feature-loss claim is made.",
+      "evidence_sha256": "4352f12dafcb9d672a8bc571574cc6456bd9eb7f9a95c00bcbb72b30935a0e76"
+    },
+    "working_tree_overlay_review": {
+      "checked_at": "2026-09-28",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only git status of all eight registered graveyard snapshots; AST callable comparison of the dirty JAA observer and 14 untracked JAA donor modules; static comparison of donor and canonical bridge test/API surfaces. No donor code executed.",
+      "snapshot_worktree_status": [
+        {
+          "id": "graveyard-successor-lane",
+          "tracked_changes": 0,
+          "untracked_paths": 0
+        },
+        {
+          "id": "graveyard-canonical-union",
+          "tracked_changes": 0,
+          "untracked_paths": 0
+        },
+        {
+          "id": "graveyard-ox-alpha",
+          "tracked_changes": 0,
+          "untracked_paths": 0
+        },
+        {
+          "id": "graveyard-canonical-union-r1-worktree",
+          "tracked_changes": 0,
+          "untracked_paths": 0
+        },
+        {
+          "id": "graveyard-ingest-001-worktree",
+          "tracked_changes": 0,
+          "untracked_paths": 77
+        },
+        {
+          "id": "graveyard-jaa-learning-r1-worktree",
+          "tracked_changes": 1,
+          "untracked_paths": 0
+        },
+        {
+          "id": "graveyard-jaa-union-r1-worktree",
+          "tracked_changes": 0,
+          "untracked_paths": 14
+        },
+        {
+          "id": "graveyard-private-sqlite-canary-r2-worktree",
+          "tracked_changes": 0,
+          "untracked_paths": 0
+        }
+      ],
+      "overlay_findings": [
+        {
+          "id": "graveyard-jaa-learning-r1-worktree",
+          "source_commit": "df464fe9e6fc8a61672c018c172cdac540441dd7",
+          "tracked_overlay_paths": 1,
+          "overlay_patch_sha256": "df4ec1f41e388672d27fd4f5fadc9f2472ba39814c1dd4c2def1997d06f66adb",
+          "file": "src/market_aligner/applications/jaa.py",
+          "canonical_difference": "All public-observation additions are already present in the canonical owner. Four callable bodies differ only by browser channel launch/policy values plus observation docstring and argument-check order.",
+          "disposition": "No unique feature to migrate. Keep canonical default-browser policy, which is content-hash bound in the operation and records the observed browser version."
+        },
+        {
+          "id": "graveyard-jaa-union-r1-worktree",
+          "source_commit": "eefe73c8ed9c37a7c01e4fa8f4d9704f15720c3a",
+          "untracked_python_files": 14,
+          "untracked_python_tree_sha256": "6f4849346f6ce797bad5e7798f70ab1cbe5e4ded6fe9fc695bc32d3afeae23b0",
+          "production_module_disposition": "All 13 production modules are represented by active owners, with module-specific mappings recorded separately; no production code copied.",
+          "test_module_disposition": "The remaining file is a test-only acceptance specification for APIs/command absent from canon; it is not an implementation."
+        },
+        {
+          "id": "graveyard-ingest-001-worktree",
+          "source_commit": "8c67b98e30c0e8da4352a5bfbd03f7390527d158",
+          "untracked_paths": 77,
+          "untracked_temp_or_runtime_paths": 76,
+          "untracked_design_documents": 1,
+          "design_document": "docs/research/RESEARCH-001A_CITED_DOSSIER_ADMISSION_CONTRACT.md",
+          "design_document_contents_read": false,
+          "disposition": "Preserve temp/runtime paths unopened. The untracked research document is design-only and its proposed admission implementation remains separately gated under ma-0290."
+        }
+      ],
+      "donor_module_dispositions": [
+        {
+          "module": "career_automation/__init__.py",
+          "classification": "superseded",
+          "canonical_owner": "internal/jaa/career_automation/__init__.py",
+          "reason": "Current package initializer owns the broader active surface."
+        },
+        {
+          "module": "career_automation/application_artifacts.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/career_automation/application_artifacts.py",
+          "reason": "Canonical adds exact rerender and stricter receipt verification."
+        },
+        {
+          "module": "career_automation/application_compiler.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/career_automation/application_compiler.py; CandidateContact at internal/jaa/jaa_core/contracts.py",
+          "reason": "Same compiler owner with additional authenticated rewrite/materialization behavior."
+        },
+        {
+          "module": "career_automation/application_sanity_review.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/career_automation/application_sanity_review.py and application_quality.py",
+          "reason": "Donor deterministic text contracts are owned by application_quality; current reviewer additionally binds vacancy material."
+        },
+        {
+          "module": "career_automation/ats_forensics.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/form_filling/ats_forensics.py; src/market_aligner/applications/jaa.py; internal/jaa/career_automation/canary_forensic_evidence.py",
+          "reason": "Diagnostic recorder, typed receipt-bound learning events, and private exact-byte canary events already have active owners."
+        },
+        {
+          "module": "career_automation/candidate_application_factory.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/career_automation/candidate_application_factory.py",
+          "reason": "Current factory adds deployment binding and materialization."
+        },
+        {
+          "module": "career_automation/evidence_matching.py",
+          "classification": "byte_identical",
+          "canonical_owner": "internal/jaa/career_automation/evidence_matching.py",
+          "reason": "AST definitions match exactly; file is byte-identical."
+        },
+        {
+          "module": "career_automation/external_document_assurance.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/career_automation/external_document_assurance.py",
+          "reason": "Current owner adds nonblocking file open to prevent FIFO hangs."
+        },
+        {
+          "module": "career_automation/production_ats_executor.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/career_automation/production_ats_executor.py",
+          "reason": "Current certified executor owns the provider path and adds ATS plan compilation/inventory; no donor-only executor entrypoint."
+        },
+        {
+          "module": "career_automation/rendering.py",
+          "classification": "replaced",
+          "canonical_owner": "internal/jaa/career_automation/rendering.py",
+          "reason": "Character-count wrapping is replaced by measured-width wrapping and page-geometry validation."
+        },
+        {
+          "module": "career_automation/testing_sanity_review.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/career_automation/testing_sanity_review.py",
+          "reason": "Test-only helper exists in canon with vacancy review support."
+        },
+        {
+          "module": "llm/__init__.py",
+          "classification": "byte_identical",
+          "canonical_owner": "internal/jaa/llm/__init__.py",
+          "reason": "File is byte-identical."
+        },
+        {
+          "module": "llm/client.py",
+          "classification": "represented",
+          "canonical_owner": "internal/jaa/llm/client.py",
+          "reason": "Same client owner; canon adds private-directory and file protections."
+        },
+        {
+          "module": "test_jaa_bridge.py",
+          "classification": "unresolved_test_only_contract",
+          "canonical_owner": "tests/test_jaa_bridge.py; market_aligner.applications.production_handoff; internal/jaa/career_automation/production_handoff_admission_runner.py and production_preparation_runner.py",
+          "reason": "Donor-only mvp-canary command and bridge functions are absent; donor test asserts pre-submit refusal and supplies no implementation. Existing production pieces are separate, and their full composition is not proven here."
+        }
+      ],
+      "mvp_canary_contract_gap": {
+        "donor_test_count": 14,
+        "canonical_bridge_test_count": 34,
+        "shared_test_names": 0,
+        "absent_symbols": [
+          "build_ranked_handoff",
+          "publish_ranked_handoff",
+          "ranked_handoff_bytes",
+          "capture_or_recover_ats_from_market",
+          "prepare_application_from_market"
+        ],
+        "absent_cli_route": "market-aligner applications mvp-canary",
+        "behavioral_limit": "The donor test expects --execute-live to be refused and submit_clicks to remain zero; it does not provide a system-owned submission implementation.",
+        "status": "Unresolved integration evidence; do not claim end-to-end composition from these tests."
+      },
+      "privacy_and_mutation": "Historical sources were read-only. No private/temp/runtime/canary payload was opened. No source, graveyard tree, or copy was modified or deleted.",
+      "classification": "partial; no production source behavior from these dirty overlays was missing in the active owners, but the test-only one-command bridge and the broader 59-file body comparison remain open.",
+      "scope_limit": "Does not close ma-0290/ma-0291, the 59-file source-overlay review, all remaining changed function bodies, historical external controls, ArtVault state, or system-level MA-to-certified-submit end-to-end execution.",
+      "evidence_sha256": "07cbbbffe82b25e8b6b15b7b03ac4718348dc2ef00d5ff606423e63402d7483a"
+    },
+    "production_path_bridge_review": {
+      "checked_at": "2026-09-28",
+      "snapshot_id": "graveyard-canonical-union-r1-worktree",
+      "source_commit": "63f73e2da9fd1b8c1c8ebdd9446f2ec1c6fbe6b8",
+      "canonical_head": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+      "method": "Read-only comparison of exact tracked Git blobs and changed callable bodies for the MA-to-JAA application preparation path. No donor code was executed or copied.",
+      "source_git_blob_pairs": [
+        {
+          "path": "internal/jaa/career_automation/market_aligner_preparation.py",
+          "source_git_blob": "2872383274f83a3b6a3c8957c0e3fa6da2ce033a",
+          "source_sha256": "ae78ad7e5cf588f4b97fc3d870243808b67e61495548e56316990602fd13d0ce",
+          "canonical_git_blob": "6dedeeef6068bf2fe28585f6ba8661a81dd9a84b",
+          "canonical_sha256": "abd23436e4dca186bb458e1770561969c3a1b2a881e993035035ae0cb52bd985"
+        },
+        {
+          "path": "internal/jaa/career_automation/production_preparation_runner.py",
+          "source_git_blob": "d395e25669148f6a34fa51503bbb5d184ddd463f",
+          "source_sha256": "61de425a1b436762ba8d7ee75bc03c18837c9911ff1a21847d76d8c5ef8398de",
+          "canonical_git_blob": "657b2097db52710ec04c9d163138693a2a484697",
+          "canonical_sha256": "68b14b810b194b94e7975ef00da50f0cf73017dab0129b4c44660477d4d5f690"
+        },
+        {
+          "path": "internal/jaa/career_automation/production_handoff_admission_runner.py",
+          "source_git_blob": "ab868cebf534563549add3c50adec9706d72ef8b",
+          "source_sha256": "bfab65a79217a71b76a8a5aab64f30e29e34d4e34e45793582ac77230dd53b8b",
+          "canonical_git_blob": "cbbf50063b92ce2dcff774abb453eb3cea92d6fc",
+          "canonical_sha256": "09a7a0562490fb99def487a690057b8da9b0d63670d3327ab20f5ebaee69c274"
+        }
+      ],
+      "reviewed_callables": [
+        "market_aligner_preparation.prepare_admitted_market_application_from_authorities",
+        "production_preparation_runner._require_compatible_admitted_producer",
+        "production_preparation_runner._verify_preparation_output",
+        "production_handoff_admission_runner._read_published_handoff_pinned",
+        "production_handoff_admission_runner._run_production_handoff_admission_pinned",
+        "production_handoff_admission_runner._selected_published_handoffs",
+        "production_handoff_admission_runner.selected_published_handoffs"
+      ],
+      "behavior_dispositions": [
+        {
+          "surface": "Cover-letter composition within admitted MA preparation",
+          "disposition": "retained_with_specialized_canonical_runtime",
+          "evidence": "The canonical preparation owner calls run_cover_letter_composition_runtime; no historical-only preparation behavior was found."
+        },
+        {
+          "surface": "Producer commit and output-directory identity during preparation",
+          "disposition": "canonical_hardening",
+          "evidence": "The canonical owner resolves an already-open directory descriptor on macOS/Linux and rechecks inode/device identity; it retains admitted-producer ancestry and exact output inventory validation."
+        },
+        {
+          "surface": "Published handoff validation and selected application listing",
+          "disposition": "retained_and_extended_without_release_authority",
+          "evidence": "The canonical owner separates passive published-byte validation from admission-state creation and adds selected_published_handoffs; returned rows explicitly set release_authority=false and submission_authority=false."
+        }
+      ],
+      "classification": "These selected bridge and preparation behaviors are already represented by the canonical owners, with additional path-identity and authority checks. No donor code was copied.",
+      "integration_limit": "Published-handoff selection, production admission, application preparation, and the certified Greenhouse submit runner remain distinct surfaces. This review does not prove their end-to-end composition or a successful ATS submission.",
+      "scope_limit": "Static review of three named files and seven callable surfaces only. The 59-file source-overlay review, remaining changed bodies, historical controls, ArtVault state, and MA-to-certified-submit runtime path remain open.",
+      "evidence_sha256": "652c9a1ff7f646a031aef0f071f99a548245aba33fbbc4f3f2994c6ec713f118"
+    }
+  },
+  "classification_status": "partial; eight-head symbol-presence and scoped behavior reviews completed; helper and contract behavior reconciled under ma-0309; dirty working-tree overlays reviewed under ma-0311. The 59-file source-overlay semantic review, remaining body differences, historical controls, MA-to-certified-submit end-to-end execution, and ArtVault state remain open. Two snapshot heads are verified ancestors of canonical HEAD 6762eb8213de3d53c7f6f70c2528b99c3c76003b. Selected MA-to-JAA preparation and handoff-selection surfaces were reconciled under ma-0312; their system-level submit composition remains unproven."
 }
-

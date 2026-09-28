@@ -673,6 +673,7 @@ def test_authority_runner_requires_fresh_graph_identity_and_exact_materializatio
     )
     assert captured["calls"] == 1
 
+
     for field in ("registry_sha256", "signer_public_key_sha256"):
         substituted = replace(inputs["contact_authority"], **{field: "0" * 64})
         with pytest.raises(ValueError, match="differs from admitted candidate"):
@@ -770,6 +771,70 @@ def test_authority_runner_requires_fresh_graph_identity_and_exact_materializatio
             environment="synthetic",
             contact_authority_loader=lambda *args, **kwargs: inputs["contact_authority"],
         )
+
+
+def test_materialization_only_returns_admitted_market_context_without_writers(
+    tmp_path: Path,
+) -> None:
+    market, inputs, projection = _integrated_decision(tmp_path)
+    raw_listing = b'{"fixture":"exact Workable listing"}'
+    materialized = materialize_candidate_application_source(
+        candidate_authority_path=AUTHORITY_PATH,
+        deployment_binding=inputs["deployment_binding"],
+        contact_authority=inputs["contact_authority"],
+        decision_receipt=market.decision_receipt(),
+        candidate_projection=projection,
+        job_key=market.source_job_key,
+        vacancy_sha256=market.raw_listing_sha256,
+        source_url=market.source_url,
+        role_title=market.role_title,
+        company_name=market.company_name,
+        contact=inputs["contact"],
+        market_decision_authority=market,
+    )
+    binding = inputs["deployment_binding"]
+    verified = SimpleNamespace(
+        application_id=binding.application_id,
+        environment="synthetic",
+        handoff_root_sha256=binding.handoff_root_sha256,
+        admission_receipt_sha256=binding.admission_receipt_sha256,
+        current_boundary_receipt_sha256=binding.current_boundary_receipt_sha256,
+        candidate_authority_sha256=AUTHORITY_PATH.stem,
+        profile_id="profile-test",
+        profile_version="v1",
+        candidate_intent_sha256="6" * 64,
+        final_score=42.0,
+        opportunity_score=0.25,
+        geography_priority_rank=5,
+        raw_listing_bytes=raw_listing,
+        source_observed_at=market.observed_at,
+    )
+    store = SimpleNamespace(for_boundary=lambda _application_id, _boundary: verified)
+    result = market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+        admission_store=store,
+        application_id=verified.application_id,
+        repository_root=Path(__file__).resolve().parents[1],
+        data_home=tmp_path / "data-home",
+        candidate_authority_path=AUTHORITY_PATH,
+        contact_authority_path=inputs["contact_authority"].source_path,
+        input_materializer=lambda *_args: {
+            "base_source": materialized.source,
+            "candidate_projection": projection,
+            "decision_receipt": market.decision_receipt(),
+            "market_decision_authority": market,
+            "materialization": materialized,
+        },
+        environment="synthetic",
+        contact_authority_loader=lambda *_args, **_kwargs: inputs[
+            "contact_authority"
+        ],
+        materialization_only=True,
+    )
+    assert type(result) is market_aligner_preparation.MarketApplicationMaterializationContext
+    assert result.application_id == binding.application_id
+    assert result.materialization == materialized
+    assert result.raw_listing_bytes == raw_listing
+    assert result.release_authority is False
 
 
 def test_rejects_noneligible_or_vacancy_swapped_decision() -> None:

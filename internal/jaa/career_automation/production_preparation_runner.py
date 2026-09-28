@@ -40,6 +40,7 @@ from .current_time import installed_production_current_time_witness
 from .handoff_admission import HandoffAdmissionStore, ProtectedLocalOutbox
 from .market_aligner_preparation import (
     CanonicalPreparationInputMaterializer,
+    MarketApplicationMaterializationContext,
     MarketApplicationPreparation,
     prepare_admitted_market_application_from_authorities,
 )
@@ -875,7 +876,8 @@ def _run_production_preparation(
     deployment: _ProductionPreparationDeployment,
     *,
     after_preflight_hook: Callable[[str], None] | None = None,
-) -> MarketApplicationPreparation:
+    materialization_only: bool = False,
+) -> MarketApplicationPreparation | MarketApplicationMaterializationContext:
     if (
         not application_id.startswith("app_")
         or len(application_id) != 68
@@ -1043,40 +1045,52 @@ def _run_production_preparation(
             expected_library_sha256=PRODUCTION_POPPLER_LIBRARY_SHA256,
         )
 
-        def runtime(kind: str) -> EditorialCompositionRuntime:
-            prefix = "cover_letter_" if kind == "cover_letter" else ""
-            return EditorialCompositionRuntime(
-                environment="production",
-                writer=DetachedCodexEditorialAdapter(
-                    stage=f"{prefix}writer" if prefix else "resume_writer",
-                    model=deployment.model,
-                    codex_binary=str(deployment.codex_binary),
+        editorial_runtime = None
+        cover_letter_editorial_runtime = None
+        orchestration_extras = None
+        if not materialization_only:
+            def runtime(kind: str) -> EditorialCompositionRuntime:
+                prefix = "cover_letter_" if kind == "cover_letter" else ""
+                return EditorialCompositionRuntime(
                     environment="production",
-                    timeout_seconds=deployment.timeout_seconds,
-                    codex_binary_fd=codex_descriptor,
-                ),
-                humanizer=DetachedCodexEditorialAdapter(
-                    stage=f"{prefix}humanizer" if prefix else "humanizer",
-                    model=deployment.model,
-                    codex_binary=str(deployment.codex_binary),
-                    environment="production",
-                    timeout_seconds=deployment.timeout_seconds,
-                    codex_binary_fd=codex_descriptor,
-                ),
-                document_kind=kind,
-            )
+                    writer=DetachedCodexEditorialAdapter(
+                        stage=f"{prefix}writer" if prefix else "resume_writer",
+                        model=deployment.model,
+                        codex_binary=str(deployment.codex_binary),
+                        environment="production",
+                        timeout_seconds=deployment.timeout_seconds,
+                        codex_binary_fd=codex_descriptor,
+                    ),
+                    humanizer=DetachedCodexEditorialAdapter(
+                        stage=f"{prefix}humanizer" if prefix else "humanizer",
+                        model=deployment.model,
+                        codex_binary=str(deployment.codex_binary),
+                        environment="production",
+                        timeout_seconds=deployment.timeout_seconds,
+                        codex_binary_fd=codex_descriptor,
+                    ),
+                    document_kind=kind,
+                )
 
-        assessor = ProductionDetachedRecruiterAssessor(
-            model=deployment.model,
-            archive_root=deployment.recruiter_archive_root,
-            repository_root=deployment.repository_root,
-            cli_timeout_seconds=deployment.timeout_seconds,
-            codex_binary=str(deployment.codex_binary),
-            codex_binary_fd=codex_descriptor,
-            archive_descriptor=resources.directory_descriptor(
-                deployment.recruiter_archive_root
-            ),
-        )
+            editorial_runtime = runtime("cv")
+            cover_letter_editorial_runtime = runtime("cover_letter")
+            assessor = ProductionDetachedRecruiterAssessor(
+                model=deployment.model,
+                archive_root=deployment.recruiter_archive_root,
+                repository_root=deployment.repository_root,
+                cli_timeout_seconds=deployment.timeout_seconds,
+                codex_binary=str(deployment.codex_binary),
+                codex_binary_fd=codex_descriptor,
+                archive_descriptor=resources.directory_descriptor(
+                    deployment.recruiter_archive_root
+                ),
+            )
+            orchestration_extras = {
+                "bindings": (),
+                "form_fields": (),
+                "production_recruiter_assessor": assessor,
+                "poppler_runtime": poppler_runtime,
+            }
         result = prepare_admitted_market_application_from_authorities(
             admission_store=store,
             application_id=application_id,
@@ -1090,27 +1104,24 @@ def _run_production_preparation(
                 contact_authority_bytes=contact_lease.authority_bytes,
             ),
             environment="production",
-            editorial_runtime=runtime("cv"),
-            cover_letter_editorial_runtime=runtime("cover_letter"),
-            orchestration_extras={
-                "bindings": (),
-                "form_fields": (),
-                "production_recruiter_assessor": assessor,
-                "poppler_runtime": poppler_runtime,
-            },
+            editorial_runtime=editorial_runtime,
+            cover_letter_editorial_runtime=cover_letter_editorial_runtime,
+            orchestration_extras=orchestration_extras,
             candidate_authority_bytes=candidate_bytes,
             contact_resource_lease=contact_lease,
             output_root_descriptor=resources.directory_descriptor(
                 deployment.output_root
             ),
+            materialization_only=materialization_only,
         )
-        _verify_preparation_output(
-            result,
-            deployment.output_root,
-            output_root_descriptor=resources.directory_descriptor(
-                deployment.output_root
-            ),
-        )
+        if not materialization_only:
+            _verify_preparation_output(
+                result,
+                deployment.output_root,
+                output_root_descriptor=resources.directory_descriptor(
+                    deployment.output_root
+                ),
+            )
         pinned.verify_references()
         resources.verify()
     finally:
@@ -1137,10 +1148,26 @@ def run_production_preparation(*, application_id: str) -> MarketApplicationPrepa
     )
 
 
+def run_production_market_materialization(
+    *, application_id: str
+) -> MarketApplicationMaterializationContext:
+    result = _run_production_preparation(
+        application_id,
+        installed_production_preparation_deployment(),
+        materialization_only=True,
+    )
+    if type(result) is not MarketApplicationMaterializationContext:
+        raise ProductionPreparationDeploymentError(
+            "production materialization returned a non-canonical context"
+        )
+    return result
+
+
 __all__ = [
     "PRODUCTION_PREPARATION_CONFIG_PATH",
     "ProductionPreparationDeploymentError",
     "installed_production_preparation_deployment",
     "production_preparation_configuration_bytes",
     "run_production_preparation",
+    "run_production_market_materialization",
 ]
