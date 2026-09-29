@@ -78,6 +78,16 @@ class ProductionHandoffAdmissionError(ValueError):
     """The supplied receipt or installed production authority differs."""
 
 
+def _admission_deployment_for_handoff(handoff) -> _ProductionAdmissionDeployment:
+    return _ProductionAdmissionDeployment(
+        data_home=handoff.data_home,
+        repository_root=handoff.repository_root,
+        outbox_root=handoff.output_root,
+        execution_receipt_root=handoff.output_root / "receipts",
+        admission_root=handoff.data_home / "state" / "jaa-production-admissions",
+    )
+
+
 @dataclass(frozen=True)
 class _ProductionAdmissionDeployment:
     data_home: Path
@@ -891,20 +901,14 @@ def _selected_published_handoffs(
 def selected_published_handoffs(
     profile_id: str, *, profile_version: str, candidate_intent_sha256: str
 ) -> list[dict[str, object]]:
-    """List verified fixed-deployment selections, explicitly without release authority."""
+    """List verified installed-deployment selections, without release authority."""
     deployment = installed_production_handoff_deployment()
     _validate_deployment_roots(deployment)
     return _selected_published_handoffs(
         profile_id=profile_id,
         profile_version=profile_version,
         candidate_intent_sha256=candidate_intent_sha256,
-        deployment=_ProductionAdmissionDeployment(
-            data_home=PRODUCTION_MARKET_DATA_HOME,
-            repository_root=PRODUCTION_MARKET_REPOSITORY_ROOT,
-            outbox_root=PRODUCTION_MARKET_OUTBOX_ROOT,
-            execution_receipt_root=PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT,
-            admission_root=PRODUCTION_ADMISSION_ROOT,
-        ),
+        deployment=_admission_deployment_for_handoff(deployment),
         commit_resolver=lambda repository, descriptor: _git_commit(
             repository, repository_descriptor=descriptor
         ),
@@ -914,16 +918,10 @@ def selected_published_handoffs(
 def run_production_handoff_admission(
     *, execution_receipt_path: str | Path
 ) -> ProductionHandoffAdmissionReceipt:
-    """Admit one fixed-root production Market receipt; never release or submit."""
+    """Admit one installed-root production Market receipt; never release or submit."""
     handoff = installed_production_handoff_deployment()
     _validate_deployment_roots(handoff)
-    deployment = _ProductionAdmissionDeployment(
-        data_home=PRODUCTION_MARKET_DATA_HOME,
-        repository_root=PRODUCTION_MARKET_REPOSITORY_ROOT,
-        outbox_root=PRODUCTION_MARKET_OUTBOX_ROOT,
-        execution_receipt_root=PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT,
-        admission_root=PRODUCTION_ADMISSION_ROOT,
-    )
+    deployment = _admission_deployment_for_handoff(handoff)
     return _run_production_handoff_admission(
         execution_receipt_path=execution_receipt_path,
         deployment=deployment,

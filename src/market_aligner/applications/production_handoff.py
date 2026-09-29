@@ -80,6 +80,8 @@ class _ProductionHandoffDeployment:
     collection_config_file_sha256: str
     deployment_configuration_sha256: str
     research_archive_root_identity: str
+    candidate_authority_path: Path = PRODUCTION_CANDIDATE_AUTHORITY_PATH
+    candidate_authority_sha256: str = PRODUCTION_CANDIDATE_AUTHORITY_SHA256
 
 
 @dataclass(frozen=True)
@@ -1344,7 +1346,7 @@ def _build_production_handoff_from_authenticated_time(
         raise ProductionHandoffError(
             "candidate_projection", "canonical profile projection receipt differs"
         )
-    authority_path = PRODUCTION_CANDIDATE_AUTHORITY_PATH
+    authority_path = deployment.candidate_authority_path
     repository = deployment.repository_root.absolute()
     if authority_path == repository or repository in authority_path.parents:
         raise ProductionHandoffError(
@@ -1352,7 +1354,7 @@ def _build_production_handoff_from_authenticated_time(
             "protected candidate authority must be outside the repository",
         )
     candidate_authority_bytes = _protected_candidate_authority(
-        authority_path, projection, PRODUCTION_CANDIDATE_AUTHORITY_SHA256
+        authority_path, projection, deployment.candidate_authority_sha256
     )
 
     try:

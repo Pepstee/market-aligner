@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pickle
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +28,23 @@ from career_automation.production_runner import (
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def test_cli_help_bootstraps_from_unrelated_working_directory(tmp_path: Path) -> None:
+    script = ROOT / "scripts" / "run_greenhouse_production.py"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--execute-live" in completed.stdout
+    assert "--review-only" in completed.stdout
 
 
 @pytest.mark.parametrize("terminal_pending", [False, "event", "summary"])

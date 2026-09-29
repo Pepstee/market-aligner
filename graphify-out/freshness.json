@@ -1,30 +1,32 @@
 {
-  "community_count": 30404,
-  "edge_count": 144334,
-  "freshness_status": "STALE",
-  "node_count": 71353,
+  "community_count": 30439,
+  "edge_count": 144340,
+  "freshness_status": "PARTIAL",
+  "node_count": 71356,
   "outputs": {
-    ".graphify_labels.json": "29e6d21510b655b8af40247ab2a10028a7175add2574a24cd87867ad9cf902fb",
-    "GRAPH_REPORT.md": "a8503d758706437707c4421e071c92d8e98f12b8887ad899b84a53b5eb382868",
-    "graph.json": "a1205a422678e2be60c38939892d58b5d19a09db2dfa5b358b72c8a387e20c7a"
+    ".graphify_labels.json": "8182d740359ddcb779c94578d29826c4a0182ca20fca80a703ab3b90b83403dc",
+    "GRAPH_REPORT.md": "81952062f8fdc79ddd318b24397cafa247d88e407969fe3054f549453f1832be",
+    "graph.json": "dd66a66f682c721e477493ab0d466d6c109ccca5e7f3a2e9ea5f6c2c695b5e9e"
   },
   "refresh_attempt": {
-    "attempted_at_utc": "2026-09-28T01:24:35Z",
+    "attempted_at_utc": "2026-09-29T06:27:15.255493Z",
     "changed_sources": [
-      "internal/jaa/test_gutua_greenhouse_session.py"
-    ],
-    "graph_manifest_sha256": "1c56c56d9b34cbfc106c99b7fa3f3e20c8017613fc0d640a5f6373c0a8c507f7",
-    "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-    "outcome": "refresh_pending_after_new_source_change",
-    "reason": "The graph outputs were preserved. The last code AST refresh predates the new synthetic lowest-ranked canary test; three changed migration documents still need semantic extraction. No claim of current architecture or feature-loss closure is made.",
-    "skipped_sensitive_inputs": "No private canary payload or runtime evidence was read.",
-    "source_base_commit": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
-    "tracked_worktree_diff_sha256": "3ca9372d514e3a25bb7143af99665f3bc1fa7f76513a6f292e315483414bf8cc",
-    "uncovered_changed_sources": [
       "docs/migration/REPORT_2026-08-01.md",
       "docs/migration/ledger.jsonl",
       "docs/migration/source-manifests.json",
       "internal/jaa/test_gutua_greenhouse_session.py"
+    ],
+    "graph_manifest_sha256": "1b5cfe4ecd47782130ddb502e619817ed61f6ac76a40264c0c3f3605defb79c2",
+    "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
+    "outcome": "code_ast_refreshed_document_semantics_blocked",
+    "reason": "Incremental Graphify refreshed code AST, including the canary guard. Three changed migration documents remain unextracted. Semantic extraction requires an Agent worker; the available MA GLM worker route is not configured for the registered canonical directory, and no Gemini key is present. The graph is recorded PARTIAL.",
+    "skipped_sensitive_inputs": "No private candidate corpus, raw identity material, canary payload, or runtime evidence was read.",
+    "source_base_commit": "9d1510ce364ac1ea9e802c3029b6028313ba0867",
+    "tracked_worktree_diff_sha256": "ff2ea6e63c648e35d79aebb2b7f3af321c05c0700fefed55224800e8c8c1c4bf",
+    "uncovered_changed_sources": [
+      "docs/migration/REPORT_2026-08-01.md",
+      "docs/migration/ledger.jsonl",
+      "docs/migration/source-manifests.json"
     ]
   },
   "refresh_history": [
@@ -103,6 +105,27 @@
         "docs/migration/source-manifests.json",
         "internal/jaa/test_gutua_greenhouse_session.py"
       ]
+    },
+    {
+      "attempted_at_utc": "2026-09-29T06:27:15.255493Z",
+      "changed_sources": [
+        "docs/migration/REPORT_2026-08-01.md",
+        "docs/migration/ledger.jsonl",
+        "docs/migration/source-manifests.json",
+        "internal/jaa/test_gutua_greenhouse_session.py"
+      ],
+      "graph_manifest_sha256": "1b5cfe4ecd47782130ddb502e619817ed61f6ac76a40264c0c3f3605defb79c2",
+      "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
+      "outcome": "code_ast_refreshed_document_semantics_blocked",
+      "reason": "Incremental Graphify refreshed code AST, including the canary guard. Three changed migration documents remain unextracted. Semantic extraction requires an Agent worker; the available MA GLM worker route is not configured for the registered canonical directory, and no Gemini key is present. The graph is recorded PARTIAL.",
+      "skipped_sensitive_inputs": "No private candidate corpus, raw identity material, canary payload, or runtime evidence was read.",
+      "source_base_commit": "9d1510ce364ac1ea9e802c3029b6028313ba0867",
+      "tracked_worktree_diff_sha256": "ff2ea6e63c648e35d79aebb2b7f3af321c05c0700fefed55224800e8c8c1c4bf",
+      "uncovered_changed_sources": [
+        "docs/migration/REPORT_2026-08-01.md",
+        "docs/migration/ledger.jsonl",
+        "docs/migration/source-manifests.json"
+      ]
     }
   ],
   "release_authority": false,
@@ -112,10 +135,11 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
+  "source_base_commit": "9d1510ce364ac1ea9e802c3029b6028313ba0867",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
+    ".graphifyignore": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
     "AGENTS.md": "073f479c9e39ff57c3fc5e258779132c9fe9180d873e32ebc4f95e497855f20c",
     "README.md": "e3818bd7f539a15d2a6a2033cde6a094302eb4ce1fd2a3cc223487fa3c22478a",
     "docs/applications/JAA_IMPORT_PLAN.md": "be67449a701683aae02ce9ec52d1cc87562bd9bad02a488b10b22776e61515d6",
@@ -626,7 +650,7 @@
     "internal/jaa/test_gigabyte_current_time_service.py": "7d77ccca9a84a6d11343e0b28dcc7dde6c1d0ba9513b7890d78d5e29b0e029c1",
     "internal/jaa/test_gmail_confirmation.py": "a1ad2ec2ec5ce9bc04ebec9bf6d168fa62ea633ef9b5fc24074dc63e1ccdf584",
     "internal/jaa/test_greenhouse_live_discovery.py": "a67169754a402f974962843215348e920d9aecac87ab5af7c02d1944da05435c",
-    "internal/jaa/test_gutua_greenhouse_session.py": "8858d7e3fddebbb32dccaf74578cf527785158f1874756ab26246dda66a818f2",
+    "internal/jaa/test_gutua_greenhouse_session.py": "33439ccdc2a32f53b7deba35059a2fd95b74d6abc7996c6d2c5144d64df140b3",
     "internal/jaa/test_import_legacy_application_archive.py": "6c868c50c7a3011e77d5de62cb4cd6e2b9461d29c10eb9255eb5425a80c0197a",
     "internal/jaa/test_install_market_handoff_config.py": "3edcf13fcd4ff6c281bc4880dc0127cfe4d962ae0876206ca31286a059eaf011",
     "internal/jaa/test_jaa01_adversarial_runtime.py": "05f1bc558d7bdee2bc47d9e5b9d3057fd34583a703f5e8ac7be2067d579bcbef",

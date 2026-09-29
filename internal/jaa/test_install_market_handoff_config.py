@@ -211,6 +211,33 @@ def test_print_config_cli_is_byte_exact(capsys) -> None:
     )
 
 
+def test_print_config_cli_accepts_complete_host_deployment(capsys, tmp_path: Path) -> None:
+    values = {
+        "data_home": tmp_path / "private-state",
+        "repository_root": tmp_path / "deployed-repository",
+        "output_root": tmp_path / "private-outbox",
+        "candidate_authority_path": tmp_path / "private" / "candidate.json",
+        "candidate_authority_sha256": "a" * 64,
+    }
+    args = ["--print-config"]
+    for key, value in values.items():
+        args.extend(("--" + key.replace("_", "-"), str(value)))
+
+    assert installer.main(args) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.encode() == runner.production_handoff_deployment_configuration_bytes(
+        **values
+    )
+
+
+def test_host_deployment_cli_rejects_partial_configuration(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        installer.main(["--print-config", "--data-home", "/tmp/ma-state"])
+    assert raised.value.code == 2
+    assert "requires --data-home" in capsys.readouterr().err
+
+
 def test_print_preparation_config_cli_is_byte_exact(capsys) -> None:
     assert installer.main(["--print-preparation-config"]) == 0
     captured = capsys.readouterr()

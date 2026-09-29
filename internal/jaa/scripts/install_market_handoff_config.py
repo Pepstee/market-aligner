@@ -262,11 +262,12 @@ def _create_or_exact_at(
         os.close(parent_descriptor)
 
 
-def install() -> dict[str, object]:
-    """Install the exact compiled deployment authority at its fixed target."""
+def install(value: bytes | None = None) -> dict[str, object]:
+    """Install one validated host deployment authority at its fixed target."""
     if os.geteuid() != 0:
         raise PermissionError("installation requires root")
-    value = production_handoff_deployment_configuration_bytes()
+    if value is None:
+        value = production_handoff_deployment_configuration_bytes()
     outcome = _create_or_exact_at(
         PRODUCTION_HANDOFF_DEPLOYMENT_CONFIG_PATH,
         value,
@@ -327,9 +328,44 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="create-or-exact install the fixed preparation configuration",
     )
+    parser.add_argument("--data-home", help="host-private Market live-data root")
+    parser.add_argument("--repository-root", help="deployed MA repository root")
+    parser.add_argument("--output-root", help="host-private handoff outbox root")
+    parser.add_argument(
+        "--candidate-authority-path", help="host-private candidate authority file"
+    )
+    parser.add_argument(
+        "--candidate-authority-sha256", help="SHA-256 of the candidate authority"
+    )
     args = parser.parse_args(argv)
+    host_values = (
+        args.data_home,
+        args.repository_root,
+        args.output_root,
+        args.candidate_authority_path,
+        args.candidate_authority_sha256,
+    )
+    custom_host = any(value is not None for value in host_values)
+    if custom_host and not all(value is not None for value in host_values):
+        parser.error(
+            "host deployment requires --data-home, --repository-root, --output-root, "
+            "--candidate-authority-path and --candidate-authority-sha256 together"
+        )
+    if custom_host and (args.print_preparation_config or args.install_preparation):
+        parser.error("host deployment options apply only to the production handoff")
+    value = (
+        production_handoff_deployment_configuration_bytes(
+            data_home=args.data_home,
+            repository_root=args.repository_root,
+            output_root=args.output_root,
+            candidate_authority_path=args.candidate_authority_path,
+            candidate_authority_sha256=args.candidate_authority_sha256,
+        )
+        if custom_host
+        else production_handoff_deployment_configuration_bytes()
+    )
     if args.print_config:
-        sys.stdout.buffer.write(production_handoff_deployment_configuration_bytes())
+        sys.stdout.buffer.write(value)
         sys.stdout.buffer.flush()
         return 0
     if args.print_preparation_config:
@@ -337,7 +373,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.buffer.flush()
         return 0
     try:
-        result = install_preparation() if args.install_preparation else install()
+        if args.install_preparation:
+            result = install_preparation()
+        else:
+            result = install(value)
     except (OSError, ValueError) as exc:
         print(
             f"market-handoff configuration installation refused: {exc}", file=sys.stderr
