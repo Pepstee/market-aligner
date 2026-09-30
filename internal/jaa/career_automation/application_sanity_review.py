@@ -20,7 +20,7 @@ from llm.client import (
     LLMClient,
     LLMError,
     MockBackend,
-    redact_backend_diagnostic,
+    sanitize_backend_failure_record,
     validate_json,
 )
 
@@ -643,33 +643,16 @@ def review_application_package(
     except (LLMError, TimeoutError) as exc:
         raw_failure = getattr(exc, "backend_failure", None)
         if isinstance(raw_failure, Mapping):
-            raw_category = raw_failure.get("error_category")
-            category = (
-                re.sub(r"[^a-zA-Z0-9_.-]", "_", raw_category)[:80]
-                if isinstance(raw_category, str)
-                else "backend_error"
-            )
-            raw_exit_code = raw_failure.get("exit_code")
-            exit_code = (
-                raw_exit_code
-                if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool)
-                else None
-            )
-            raw_diagnosis = raw_failure.get("stderr_diagnosis")
-            diagnosis = (
-                redact_backend_diagnostic(raw_diagnosis)
-                if isinstance(raw_diagnosis, str)
-                else None
-            )
+            backend_failure = sanitize_backend_failure_record(raw_failure)
         else:
-            category = "timeout" if isinstance(exc, TimeoutError) else "backend_error"
-            exit_code = None
-            diagnosis = None
-        backend_failure = {
-            "error_category": category or "backend_error",
-            "exit_code": exit_code,
-            "stderr_diagnosis": diagnosis,
-        }
+            backend_failure = sanitize_backend_failure_record(
+                {
+                    "error_category": "timeout" if isinstance(exc, TimeoutError) else "backend_error",
+                    "exit_code": None,
+                }
+            )
+        exit_code = backend_failure["exit_code"]
+        diagnosis = backend_failure["stderr_diagnosis"]
         message = f"backend execution failed ({backend_failure['error_category']}"
         if exit_code is not None:
             message += f", exit {exit_code}"

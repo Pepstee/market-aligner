@@ -1,182 +1,12 @@
 {
-  "community_count": 30095,
-  "edge_count": 72335,
-  "freshness_status": "PARTIAL",
-  "node_count": 56321,
+  "community_count": 30053,
+  "edge_count": 72376,
+  "node_count": 56336,
   "outputs": {
-    ".graphify_labels.json": "1dbc00d2b93826b29f77f6500d4196708bab075b19e2b56f1ec453246e5abc2b",
-    "GRAPH_REPORT.md": "b359c78c65be4ced8546d0a8c8ede70ccb29bdecc13b47622a5a993ad725e68c",
-    "graph.json": "1b032249707cc031874f027ec36bad580ffdb6da4e503cee44dfa159b57d1d59"
+    ".graphify_labels.json": "a983b94d3507f24ed57c5fb30b26957661c42c53c530f5271fe566888e04ebcd",
+    "GRAPH_REPORT.md": "ee41006e3f0b12247a9a2107321e4cbe1079f822b8899ab72486a9a4db55298e",
+    "graph.json": "fc3a24666c92091053ec23bec1d33ce6a33b05334c2b898c4a4c40cd9343e628"
   },
-  "partial_reasons": [
-    {
-      "reason": "changed migration documentation lacks Graphify semantic coverage",
-      "source": "docs/migration/REPORT_2026-08-01.md"
-    },
-    {
-      "reason": "changed migration documentation lacks Graphify semantic coverage",
-      "source": "docs/migration/ledger.jsonl"
-    },
-    {
-      "reason": "changed migration documentation lacks Graphify semantic coverage",
-      "source": "docs/migration/source-manifests.json"
-    }
-  ],
-  "refresh_attempt": {
-    "attempted_at_utc": "2026-09-30T11:38:35Z",
-    "changed_sources": [
-      "internal/jaa/llm/client.py",
-      "internal/jaa/test_application_sanity_review.py"
-    ],
-    "graph_manifest_sha256": "e16e8d0d01e8476a5943a238dc9f648996c9776781b930c76786d561fc836673",
-    "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-    "outcome": "code_ast_refreshed_document_semantics_still_partial",
-    "reason": "Recorded Graphify code-only update re-extracted 860/860 code files (71831 nodes, 145100 edges, 30475 communities). Focused synthetic diagnostic tests passed 10/10. The same three migration documents remain without semantic coverage; whole-graph status stays PARTIAL. No semantic document extraction, verifier change, or source exclusion was performed.",
-    "skipped_sensitive_inputs": "No candidate corpus, raw identity material, application package, or runtime evidence was read or sent to GLM.",
-    "source_base_commit": "2178a1505fc9e5cedf88ee4fb2e1ae313395a5bc",
-    "tracked_worktree_diff_sha256": "55cca98ab455ca92ca9da6f896a76c9c6d1722892bb949c21bc08ac2f22e8120",
-    "uncovered_changed_sources": [
-      "docs/migration/REPORT_2026-08-01.md",
-      "docs/migration/ledger.jsonl",
-      "docs/migration/source-manifests.json"
-    ]
-  },
-  "refresh_history": [
-    {
-      "attempted_at_utc": "2026-09-27T22:15:03Z",
-      "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-      "incremental_detection": {
-        "deleted_graph_input_paths": 740,
-        "deleted_venv_paths_excluded": 20,
-        "new_code_paths": 234,
-        "new_document_paths": 23,
-        "skipped_sensitive_count_reported_by_detector": 0
-      },
-      "outcome": "blocked_before_extraction_merge",
-      "preserved_outputs": {
-        "graph_json_sha256": "d3a20444498c56fcb516213e30e5024a41664e8c0bf065145d4881b991bacee5",
-        "graph_report_sha256": "156d6905543b6e86921e1b9ace3480a07a1e095845c07a80d41bb435dde33353",
-        "labels_sha256": "903975878ed0b865b31e1bee8270fc3a087ccce06dfc9f6eeafa871861f24026",
-        "manifest_sha256": "299d7942d532a599ba5e4ba51e2ea6cd90e9d1700af1a88f7577c814841a9b23"
-      },
-      "privacy_scope": "Graphify excludes internal/jaa/runtime_evidence, office/PDF payloads, and the untracked internal/jaa/.venv-scrapling environment. No private canary payload was read.",
-      "reason": "Semantic extraction worker was stopped after verifying its working directory did not match the registered MA canon. It confirmed no listed files were read and no output was written. The prior graph outputs remain unchanged.",
-      "source_base_commit": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
-      "tracked_worktree_diff_excluding_receipt_sha256": "38f3cb26caa392f22d073a4e27f07400e4a2ade9b9efd27c3ce5a96749358743",
-      "uncovered_changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json",
-        ".graphifyignore"
-      ]
-    },
-    {
-      "attempted_at_utc": "2026-09-28T00:19:18Z",
-      "changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json",
-        "internal/jaa/career_automation/candidate_release_gate.py",
-        "internal/jaa/career_automation/gutua_greenhouse_session.py",
-        "internal/jaa/career_automation/handoff_admission.py",
-        "internal/jaa/career_automation/market_aligner_preparation.py",
-        "internal/jaa/career_automation/production_preparation_runner.py",
-        "internal/jaa/career_automation/production_runner.py",
-        "internal/jaa/test_candidate_application_factory.py",
-        "internal/jaa/test_candidate_release_gate.py",
-        "internal/jaa/test_gutua_greenhouse_session.py"
-      ],
-      "graph_manifest_sha256": "bd83a251a085bb2e97368dfd32db64f9d5f50caed47ed15e7f4468de35283941",
-      "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-      "outcome": "code_ast_refreshed_document_semantics_pending",
-      "reason": "Graphify refreshed the AST graph for all detected code files. Changed document sources still require semantic extraction. Neither GEMINI_API_KEY nor GOOGLE_API_KEY is configured, and this task runtime cannot launch a semantic worker with the MA canonical directory as its working directory. Preserve PARTIAL.",
-      "skipped_sensitive_inputs": "Private canary payloads and runtime evidence remained excluded; no private canary payload was read.",
-      "source_base_commit": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
-      "tracked_worktree_diff_sha256": "e5426687b5707bf9606ecf3696a2c8d569e2d6d3b92911f815366fa15be28418",
-      "uncovered_changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json"
-      ]
-    },
-    {
-      "attempted_at_utc": "2026-09-28T01:24:35Z",
-      "changed_sources": [
-        "internal/jaa/test_gutua_greenhouse_session.py"
-      ],
-      "graph_manifest_sha256": "1c56c56d9b34cbfc106c99b7fa3f3e20c8017613fc0d640a5f6373c0a8c507f7",
-      "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-      "outcome": "refresh_pending_after_new_source_change",
-      "reason": "The graph outputs were preserved. The last code AST refresh predates the new synthetic lowest-ranked canary test; three changed migration documents still need semantic extraction. No claim of current architecture or feature-loss closure is made.",
-      "skipped_sensitive_inputs": "No private canary payload or runtime evidence was read.",
-      "source_base_commit": "6762eb8213de3d53c7f6f70c2528b99c3c76003b",
-      "tracked_worktree_diff_sha256": "3ca9372d514e3a25bb7143af99665f3bc1fa7f76513a6f292e315483414bf8cc",
-      "uncovered_changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json",
-        "internal/jaa/test_gutua_greenhouse_session.py"
-      ]
-    },
-    {
-      "attempted_at_utc": "2026-09-29T06:27:15.255493Z",
-      "changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json",
-        "internal/jaa/test_gutua_greenhouse_session.py"
-      ],
-      "graph_manifest_sha256": "1b5cfe4ecd47782130ddb502e619817ed61f6ac76a40264c0c3f3605defb79c2",
-      "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-      "outcome": "code_ast_refreshed_document_semantics_blocked",
-      "reason": "Incremental Graphify refreshed code AST, including the canary guard. Three changed migration documents remain unextracted. Semantic extraction requires an Agent worker; the available MA GLM worker route is not configured for the registered canonical directory, and no Gemini key is present. The graph is recorded PARTIAL.",
-      "skipped_sensitive_inputs": "No private candidate corpus, raw identity material, canary payload, or runtime evidence was read.",
-      "source_base_commit": "9d1510ce364ac1ea9e802c3029b6028313ba0867",
-      "tracked_worktree_diff_sha256": "ff2ea6e63c648e35d79aebb2b7f3af321c05c0700fefed55224800e8c8c1c4bf",
-      "uncovered_changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json"
-      ]
-    },
-    {
-      "attempted_at_utc": "2026-09-30T11:22:41.417768Z",
-      "changed_sources": [
-        "internal/jaa/test_application_sanity_review.py"
-      ],
-      "graph_manifest_sha256": "af230440eac6f8b2c961ace1e62b372066f00cc94dfc78421757453527c27751",
-      "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-      "outcome": "code_ast_refreshed_document_semantics_still_partial",
-      "reason": "Code-only Graphify update re-extracted 860/860 code files. The same three changed migration documents remain without semantic coverage; whole-graph freshness stays PARTIAL. No semantic document extraction, verifier change, or source exclusion was performed.",
-      "skipped_sensitive_inputs": "No candidate corpus, raw identity material, application package, or runtime evidence was read or sent to GLM.",
-      "source_base_commit": "2178a1505fc9e5cedf88ee4fb2e1ae313395a5bc",
-      "tracked_worktree_diff_sha256": "559dc0f2d0ad8024e406972f01b9fb71d012e9415b6e31ca56e9a9f514705870",
-      "uncovered_changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json"
-      ]
-    },
-    {
-      "attempted_at_utc": "2026-09-30T11:38:35Z",
-      "changed_sources": [
-        "internal/jaa/llm/client.py",
-        "internal/jaa/test_application_sanity_review.py"
-      ],
-      "graph_manifest_sha256": "e16e8d0d01e8476a5943a238dc9f648996c9776781b930c76786d561fc836673",
-      "graphifyignore_sha256": "3d635334ba5cc24bd5b70c8c0501908b670e4779bb7c8b77b5389ac3a26b7189",
-      "outcome": "code_ast_refreshed_document_semantics_still_partial",
-      "reason": "Recorded Graphify code-only update re-extracted 860/860 code files (71831 nodes, 145100 edges, 30475 communities). Focused synthetic diagnostic tests passed 10/10. The same three migration documents remain without semantic coverage; whole-graph status stays PARTIAL. No semantic document extraction, verifier change, or source exclusion was performed.",
-      "skipped_sensitive_inputs": "No candidate corpus, raw identity material, application package, or runtime evidence was read or sent to GLM.",
-      "source_base_commit": "2178a1505fc9e5cedf88ee4fb2e1ae313395a5bc",
-      "tracked_worktree_diff_sha256": "55cca98ab455ca92ca9da6f896a76c9c6d1722892bb949c21bc08ac2f22e8120",
-      "uncovered_changed_sources": [
-        "docs/migration/REPORT_2026-08-01.md",
-        "docs/migration/ledger.jsonl",
-        "docs/migration/source-manifests.json"
-      ]
-    }
-  ],
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
   "semantic_token_usage": {
@@ -184,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "6cc4e164cd2174d2c8a61a52234002c02433cff4",
+  "source_base_commit": "fc9480cd10d14dbadc2418414ebec68862efd5b6",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -241,7 +71,7 @@
     "internal/jaa/career_automation/application_preview.py": "f1d85977ab8adf914ca365ba44082ee8d33f12917d8a7e3c8198dee856499309",
     "internal/jaa/career_automation/application_quality.py": "290ffa0d41c9bf78eb66066e99ec758a35f7bc1721655b060ac5378ca306a360",
     "internal/jaa/career_automation/application_quality_contracts.py": "bb76d13b10ad74aaac82653b45825dd086312e16fb7a2c22437966f62479fd1a",
-    "internal/jaa/career_automation/application_sanity_review.py": "cd3565acfe174a40e2fa9648377fc1fbc6ded4582188db2237fea2369e48f81e",
+    "internal/jaa/career_automation/application_sanity_review.py": "dfb513ea64641b9c385e57cb40b3c4cf28e2af723b719fbc7460a64fd16f1a9d",
     "internal/jaa/career_automation/application_strategy.py": "58ff3d1ed0e0ca6838335c398ff7771ec6c4acacee0ad856975732a2da691c7a",
     "internal/jaa/career_automation/ashby_live_adapter.py": "e55c5f5056a30a6ba0be05452e4eb2c453a6a460a4b826974d1e575d97d0dccc",
     "internal/jaa/career_automation/ats_application_authority.py": "f28df747584d6f1a5af7c08ad29914619d2b3d828ad6bb3404d0a4845b3d5c8d",
@@ -445,7 +275,7 @@
     "internal/jaa/jaa_core/module_boundaries.py": "56580d531a879978f0e667113a82bbbc3c2a184a7afff18dec312f4bac8303d2",
     "internal/jaa/llm/__init__.py": "11c07124fb98d46d6be340d65e7e299bb2b815d09a78a66527a3b941badc9df3",
     "internal/jaa/llm/capabilities.py": "05ce540661560ce8428cf7212daab439b0a84aab7078a28d4a1572515647b7bc",
-    "internal/jaa/llm/client.py": "b02008864f5ea5ea7777ae102c097ad782efaadb8b0077c14e9e4f61aeb1bdbd",
+    "internal/jaa/llm/client.py": "b8351ac83eb58c6412a993009a7266a5492899a3b18487672fb691ec33b7701d",
     "internal/jaa/llm/openai_responses.py": "886a373cb1e62fc96fa21e6ecc5f84642c6e82394080a5f7a8232049ee52487b",
     "internal/jaa/llm/prompt_loader.py": "92ae3f346f0bc0ec5dd7b0a9a07674a25150a2d58dc7a18bd82770e9cee2132a",
     "internal/jaa/llm/prompts/assess_portfolio.txt": "b6f71194a1ad1928ee3aeabeaf0ed7983f3b74f4fdacaaa10dda409d2267e1d2",
@@ -463,7 +293,7 @@
     "internal/jaa/llm/schemas/job_extract.json": "a449ef81ac9394f1a19cd65c19636a486ff16c3cd56948fa20a0f516e511c2c4",
     "internal/jaa/llm/schemas/portfolio_assess.json": "27363de1f51fec512765acf48c7e9836fb361ce439271d2c7837b669615e6015",
     "internal/jaa/llm/schemas/skill_normalise.json": "5231012fe943225bdfbdb6ebbb23fcbd26b354dda08230cc131b1f300c9fa441",
-    "internal/jaa/llm/test_llm.py": "d9c9823211d8b0c877d07bac94a448d8f2c9d8637f1184123943a157ddddce8f",
+    "internal/jaa/llm/test_llm.py": "188427c969a486bc5ada615fe65adad050950d2f7a3369267fc16f7b9520a1e1",
     "internal/jaa/llm/test_openai_responses.py": "22fce3bea284ee042314684b935229ea19d1b72d0b2f7b36de458090fcf0b413",
     "internal/jaa/profiler/README.md": "0dcfacea968fe6eb81143e283ff78acb20392da99e9e23c04ed9aad04f158d02",
     "internal/jaa/profiler/__init__.py": "c534d914bc9425930391f29420321c835eda759ee60942336f0d7b226b94bd9e",
@@ -669,7 +499,7 @@
     "internal/jaa/test_application_evidence_safe_rebuild.py": "8e2c0e56cbde5669b64be21ba12922c1a58d289058fcab7491d97a9b523e5570",
     "internal/jaa/test_application_preview.py": "49476fe8be2c98b7560595ab64e66c066f751b20777cd616f1bdebfc8e505985",
     "internal/jaa/test_application_quality.py": "f6449894482eb9f44d81c618efd9cc0a97615032705cd98dd518adf1bb799c2c",
-    "internal/jaa/test_application_sanity_review.py": "f52937a477f183df1e4de054b290452b939a5916a5b272214832b7adc0429452",
+    "internal/jaa/test_application_sanity_review.py": "27753ed0a4fefcd4759737b6a943d0d4de8fb91c88072884e1f728468168686f",
     "internal/jaa/test_archive_observation_bundle.py": "7a4edc71c2437d7704ed90a0ae16962d646f046655c5b2679a239e4a00e1eb98",
     "internal/jaa/test_assurance_manifest_truth.py": "7c332645e440d38b38b42e0ad9b914a8bc737db7b72473d09b146ad818cdc969",
     "internal/jaa/test_ats_application_authority.py": "f1c5dddae68334d7ed5af23ad885966e79be99d2d88ddbaa702d756d4d117d70",

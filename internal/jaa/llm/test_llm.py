@@ -33,6 +33,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from llm.client import (  # noqa: E402
+    BackendProcessFailure,
     ClaudeCliBackend,
     CodexCliBackend,
     LLMClient,
@@ -307,4 +308,172 @@ def test_codex_cli_backend_uses_ephemeral_session(monkeypatch):
     response = CodexCliBackend(model="gpt-6-luna").complete("synthetic system", "synthetic user", 0.0)
 
     assert response.text == "synthetic sanity result"
-    assert commands[0][:3] == ["/test/codex", "exec", "--ephemeral"]
+    assert commands[0][:4] == ["/test/codex", "exec", "--json", "--ephemeral"]
+    assert "-s" in commands[0]
+    assert commands[0][commands[0].index("-s") + 1] == "read-only"
+
+
+def test_codex_cli_backend_redacts_structured_stdout_failure(monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    command = []
+    diagnostic = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "reason": "sandbox_runtime_denied",
+                "operation": "open",
+                "errno": "EACCES",
+                "path": "/tmp/synthetic private/profile.json",
+                "api_key": "synthetic-secret-value",
+                "details": "synthetic unknown payload",
+            },
+        }
+    )
+
+    def fake_run(args, **kwargs):
+        command.extend(args)
+        return SimpleNamespace(
+            returncode=17,
+            stdout=diagnostic,
+            stderr="synthetic unstructured stderr",
+        )
+
+    monkeypatch.setattr(CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex"))
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    try:
+        CodexCliBackend(model="gpt-6-luna").complete(
+            "synthetic system", "synthetic user", 0.0
+        )
+    except BackendProcessFailure as error:
+        failure = error.backend_failure
+    else:
+        raise AssertionError("nonzero Codex CLI result should fail closed")
+
+    assert "--json" in command
+    assert failure == {
+        "error_category": "sandbox_runtime_denied",
+        "exit_code": 17,
+        "operation": "open",
+        "path_class": "tmp",
+        "errno": "EACCES",
+        "diagnostic_sha256": hashlib.sha256(
+            (diagnostic + "\nsynthetic unstructured stderr").encode("utf-8")
+        ).hexdigest(),
+        "stderr_diagnosis": (
+            "sandbox_runtime_denied operation=open errno=EACCES path=[PATH]"
+        ),
+        "private_capture_status": "not_requested",
+        "private_capture_sha256": None,
+        "private_capture_errno": None,
+    }
+    assert "synthetic-secret-value" not in str(failure)
+    assert "/tmp/synthetic private/profile.json" not in str(failure)
+    assert "synthetic unknown payload" not in str(failure)
+    assert "synthetic unstructured stderr" not in str(failure)
+
+
+def test_backend_failure_capture_is_bounded_and_classifies_read_only_path():
+    import hashlib
+
+    diagnostic = (
+        "x" * 24000
+        + ' fatal error: read-only file system errno=EROFS operation="write" '
+        + 'path="/run/synthetic directory/state.sock" token=synthetic-secret'
+    )
+    failure = BackendProcessFailure(
+        "Codex CLI", exit_code=1, stdout=diagnostic, stderr=""
+    )
+
+    assert failure.backend_failure["error_category"] == "filesystem_read_only"
+    assert failure.backend_failure["operation"] == "write"
+    assert failure.backend_failure["path_class"] == "run"
+    assert failure.backend_failure["errno"] == "EROFS"
+    assert failure.backend_failure["diagnostic_sha256"] == hashlib.sha256(
+        (diagnostic + "\n").encode("utf-8")
+    ).hexdigest()
+    assert "x" * 100 not in str(failure)
+    assert "synthetic-secret" not in str(failure)
+    assert "/run/synthetic directory/state.sock" not in str(failure)
+
+
+def test_backend_failure_does_not_promote_path_alias_warning():
+    failure = BackendProcessFailure(
+        "Codex CLI",
+        exit_code=1,
+        stderr="warning: failed to configure path aliases: read-only file system (os error 30)",
+    )
+
+    assert failure.backend_failure["error_category"] == "process_exit"
+    assert failure.backend_failure["errno"] is None
+
+
+def test_backend_failure_keeps_distinct_fatal_error_after_path_alias_warning():
+    failure = BackendProcessFailure(
+        "Codex CLI",
+        exit_code=1,
+        stderr=(
+            "warning: failed to configure path aliases: read-only file system (os error 30)\n"
+            'fatal: permission denied operation="open" '
+            'path="/tmp/synthetic file" errno=EACCES'
+        ),
+    )
+
+    assert failure.backend_failure["error_category"] == "permission_denied"
+    assert failure.backend_failure["operation"] == "open"
+    assert failure.backend_failure["path_class"] == "tmp"
+    assert failure.backend_failure["errno"] == "EACCES"
+
+
+def test_codex_cli_backend_writes_bounded_failure_output_privately(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import pytest
+    from types import SimpleNamespace
+
+    import llm.client as client_module
+
+    diagnostic_dir = tmp_path / "diagnostics"
+    diagnostic_dir.mkdir(mode=0o700)
+    diagnostic_dir.chmod(0o700)
+    monkeypatch.setenv("JAA_LLM_DIAGNOSTIC_CAPTURE_DIR", str(diagnostic_dir))
+    child_stdout = (
+        'fatal: permission denied operation="open" '
+        'path="/tmp/synthetic private file" errno=EACCES private-token'
+    )
+    child_stderr = "synthetic child stderr credential"
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(
+        client_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout=child_stdout, stderr=child_stderr
+        ),
+    )
+
+    with pytest.raises(BackendProcessFailure) as caught:
+        CodexCliBackend(model="synthetic-model").complete(
+            "synthetic system", "synthetic user", 0.0
+        )
+
+    failure = caught.value.backend_failure
+    artifact_path = diagnostic_dir / "child-process-output.json"
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert stat.S_IMODE(diagnostic_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(artifact_path.stat().st_mode) == 0o600
+    assert artifact["stdout_excerpt"] == child_stdout
+    assert artifact["stderr_excerpt"] == child_stderr
+    assert failure["private_capture_status"] == "written"
+    assert failure["private_capture_sha256"] == hashlib.sha256(
+        artifact_path.read_bytes()
+    ).hexdigest()
+    assert failure["private_capture_errno"] is None
+    assert "private-token" not in str(failure)
+    assert "synthetic child stderr credential" not in str(failure)

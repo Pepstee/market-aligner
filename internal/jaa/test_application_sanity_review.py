@@ -313,24 +313,27 @@ def test_missing_timeout_and_mock_provider_fail_closed(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("stderr", "expected_category", "expected_operation", "expected_errno"),
+    ("stderr", "expected_category", "expected_operation", "expected_path_class", "expected_errno"),
     (
         (
             'sandbox_runtime_denied: {"operation":"open","errno":"EPERM","api_key":"synthetic-secret-value","path":"/tmp/synthetic profile/resume.pdf"}',
             "sandbox_runtime_denied",
             "open",
+            "tmp",
             "EPERM",
         ),
         (
             'Permission denied: operation="open" errno=EACCES path="/tmp/synthetic private/profile.json"',
             "permission_denied",
             "open",
+            "tmp",
             "EACCES",
         ),
         (
             'sandbox_runtime_denied: operation=connect errno=EACCES path="https://example.invalid/apply?token=synthetic-query-token&api_key=synthetic-query-key"',
             "sandbox_runtime_denied",
             "connect",
+            "url",
             "EACCES",
         ),
     ),
@@ -339,10 +342,12 @@ def test_backend_failure_records_redacted_process_diagnostics(
     stderr: str,
     expected_category: str,
     expected_operation: str,
+    expected_path_class: str,
     expected_errno: str,
     tmp_path,
     monkeypatch,
 ) -> None:
+    import hashlib
     from types import SimpleNamespace
 
     monkeypatch.setattr(
@@ -350,12 +355,13 @@ def test_backend_failure_records_redacted_process_diagnostics(
         "resolve_binary",
         staticmethod(lambda: "/synthetic/codex"),
     )
+    stdout = "synthetic-only stdout"
     monkeypatch.setattr(
         llm_client_module.subprocess,
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=73,
-            stdout="synthetic-only stdout",
+            stdout=stdout,
             stderr=stderr,
         ),
     )
@@ -370,6 +376,12 @@ def test_backend_failure_records_redacted_process_diagnostics(
     assert failure is not None
     assert failure["error_category"] == expected_category
     assert failure["exit_code"] == 73
+    assert failure["operation"] == expected_operation
+    assert failure["path_class"] == expected_path_class
+    assert failure["errno"] == expected_errno
+    assert failure["diagnostic_sha256"] == hashlib.sha256(
+        f"{stdout}\n{stderr}".encode("utf-8")
+    ).hexdigest()
     diagnosis = failure["stderr_diagnosis"]
     assert isinstance(diagnosis, str)
     assert f"operation={expected_operation}" in diagnosis
@@ -377,6 +389,8 @@ def test_backend_failure_records_redacted_process_diagnostics(
     assert "path=[PATH]" in diagnosis
     assert "synthetic" not in diagnosis
     assert "synthetic-only stdout" not in str(captured.value.document())
+    assert "synthetic-secret-value" not in str(captured.value.document())
+    assert "synthetic private/profile.json" not in str(captured.value.document())
     assert captured.value.document()["backend_failure"] == failure
 
 

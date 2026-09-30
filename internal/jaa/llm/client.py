@@ -34,7 +34,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 # --------------------------------------------------------------------------- #
 # Paths — everything this module writes lives under llm/data/ (per protocol).
@@ -63,11 +63,12 @@ class LLMError(RuntimeError):
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_MAX_BACKEND_DIAGNOSTIC_BYTES = 16 * 1024
 _OPERATION_FIELD_RE = re.compile(
     r'''(?i)["']?operation["']?\s*[:=]\s*["']?([a-z][a-z0-9_-]{0,31})'''
 )
 _PATH_FIELD_RE = re.compile(
-    r'''(?i)["']?path["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+)'''
+    r'''(?i)["']?path["']?\s*[:=]\s*(?P<path>"[^"]*"|'[^']*'|[^\s,;}]+)'''
 )
 _ERRNO_FIELD_RE = re.compile(
     r'''(?i)["']?errno["']?\s*[:=]\s*["']?([a-z][a-z0-9]*|[0-9]{1,3})(?![a-z0-9_])'''
@@ -94,39 +95,327 @@ _SAFE_BACKEND_OPERATIONS = frozenset(
     }
 )
 _KNOWN_ERRNO_NAMES = frozenset(errno.errorcode.values())
+_SAFE_BACKEND_PATH_CLASSES = frozenset(
+    {"absolute", "dev", "etc", "home", "proc", "relative", "run", "srv", "tmp", "url", "var", "windows"}
+)
+_SAFE_BACKEND_CATEGORIES = frozenset(
+    {
+        "authentication_error",
+        "backend_error",
+        "filesystem_read_only",
+        "permission_denied",
+        "process_exit",
+        "sandbox_runtime_denied",
+        "timeout",
+    }
+)
+_SAFE_PRIVATE_CAPTURE_STATUSES = frozenset(
+    {"configuration_invalid", "not_requested", "write_failed", "written"}
+)
+
+
+def _bounded_diagnostic_bytes(value: bytes, limit: int) -> bytes:
+    if len(value) <= limit:
+        return value
+    marker = b"\n[diagnostic truncated]\n"
+    available = limit - len(marker)
+    prefix_size = available // 2
+    suffix_size = available - prefix_size
+    return value[:prefix_size] + marker + value[-suffix_size:]
+
+
+def _capture_backend_output(
+    stdout: str | None, stderr: str | None
+) -> tuple[str, str]:
+    stdout_bytes = (stdout or "").encode("utf-8", errors="replace")
+    stderr_bytes = (stderr or "").encode("utf-8", errors="replace")
+    diagnostic_hash = hashlib.sha256(stdout_bytes + b"\n" + stderr_bytes).hexdigest()
+    stream_budget = (_MAX_BACKEND_DIAGNOSTIC_BYTES - 1) // 2
+    bounded_stdout = _bounded_diagnostic_bytes(stdout_bytes, stream_budget)
+    bounded_stderr = _bounded_diagnostic_bytes(stderr_bytes, stream_budget)
+    bounded = bounded_stdout + b"\n" + bounded_stderr
+    return bounded.decode("utf-8", errors="replace"), diagnostic_hash
+
+
+def _write_private_backend_capture(
+    directory_value: str | None, stdout: str | None, stderr: str | None
+) -> dict[str, object]:
+    if not directory_value:
+        return {
+            "private_capture_status": "not_requested",
+            "private_capture_sha256": None,
+            "private_capture_errno": None,
+        }
+    try:
+        directory = Path(directory_value)
+        if not directory.is_absolute() or directory.is_symlink():
+            raise ValueError
+        resolved = directory.resolve(strict=True)
+        temporary_root = Path("/tmp").resolve(strict=True)
+        project_root = _MODULE_DIR.parents[2].resolve(strict=True)
+        if (
+            not resolved.is_relative_to(temporary_root)
+            or resolved.is_relative_to(project_root)
+        ):
+            raise ValueError
+        status = resolved.lstat()
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.getuid()
+            or stat.S_IMODE(status.st_mode) != 0o700
+        ):
+            raise ValueError
+        stdout_bytes = (stdout or "").encode("utf-8", errors="replace")
+        stderr_bytes = (stderr or "").encode("utf-8", errors="replace")
+        stream_budget = (_MAX_BACKEND_DIAGNOSTIC_BYTES - 1) // 2
+        artifact = {
+            "schema_version": "jaa.private-backend-process-capture.v1",
+            "stdout_bytes": len(stdout_bytes),
+            "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+            "stdout_excerpt": _bounded_diagnostic_bytes(
+                stdout_bytes, stream_budget
+            ).decode("utf-8", errors="replace"),
+            "stderr_bytes": len(stderr_bytes),
+            "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+            "stderr_excerpt": _bounded_diagnostic_bytes(
+                stderr_bytes, stream_budget
+            ).decode("utf-8", errors="replace"),
+        }
+        payload = json.dumps(
+            artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        target = resolved / "child-process-output.json"
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return {
+            "private_capture_status": "written",
+            "private_capture_sha256": hashlib.sha256(payload).hexdigest(),
+            "private_capture_errno": None,
+        }
+    except OSError as error:
+        return {
+            "private_capture_status": "write_failed",
+            "private_capture_sha256": None,
+            "private_capture_errno": errno.errorcode.get(error.errno),
+        }
+    except (RuntimeError, ValueError):
+        return {
+            "private_capture_status": "configuration_invalid",
+            "private_capture_sha256": None,
+            "private_capture_errno": None,
+        }
+
+
+def _without_incidental_path_alias_warning(value: str) -> str:
+    retained_lines = []
+    for line in value.splitlines():
+        lowered = line.lower()
+        if "path aliases" in lowered and any(
+            marker in lowered
+            for marker in (
+                "read-only file system",
+                "read-only filesystem",
+                "erofs",
+            )
+        ):
+            line = re.sub(
+                r"(?i)read-only\s+(?:file\s+system|filesystem)|\bEROFS\b",
+                "",
+                line,
+            )
+        retained_lines.append(line)
+    return "\n".join(retained_lines)
+
+
+def _backend_path_class(value: str) -> str:
+    path = value.strip().strip("\"'")
+    if re.match(r"(?i)^[a-z][a-z0-9+.-]*://", path) or path.lower().startswith("file:"):
+        return "url"
+    if re.match(r"^[A-Za-z]:[\\/]", path):
+        return "windows"
+    if path.startswith("/"):
+        if path.startswith("//"):
+            return "absolute"
+        root = path.split("/", 2)[1].lower()
+        return root if root in {"dev", "etc", "home", "proc", "run", "srv", "tmp", "var"} else "absolute"
+    return "relative"
+
+
+def _normalise_backend_errno(value: object) -> str | None:
+    if isinstance(value, str):
+        upper = value.upper()
+        if upper in _KNOWN_ERRNO_NAMES:
+            return upper
+        if value.isascii() and value.isdigit() and len(value) <= 3:
+            return errno.errorcode.get(int(value))
+    elif isinstance(value, int) and not isinstance(value, bool):
+        return errno.errorcode.get(value)
+    return None
+
+
+def _backend_diagnostic_fields(value: str | None) -> dict[str, str | None]:
+    if not value:
+        return {
+            "error_category": "process_exit",
+            "operation": None,
+            "path_class": None,
+            "errno": None,
+        }
+    source = _bounded_diagnostic_bytes(
+        value.encode("utf-8", errors="replace"), _MAX_BACKEND_DIAGNOSTIC_BYTES
+    ).decode("utf-8", errors="replace")
+    source = _ANSI_ESCAPE_RE.sub("", source)
+    source = _without_incidental_path_alias_warning(source)
+    operation_match = _OPERATION_FIELD_RE.search(source)
+    operation = operation_match.group(1).lower() if operation_match else None
+    if operation not in _SAFE_BACKEND_OPERATIONS:
+        operation = None
+    errno_matches = list(_ERRNO_FIELD_RE.finditer(source))
+    errno_values = [match.group(1) for match in errno_matches]
+    errno_name = next(
+        (
+            _normalise_backend_errno(value)
+            for value in errno_values
+            if not (value.isascii() and value.isdigit())
+            and _normalise_backend_errno(value)
+        ),
+        None,
+    )
+    if errno_name is None:
+        errno_name = next(
+            (_normalise_backend_errno(value) for value in errno_values if _normalise_backend_errno(value)),
+            None,
+        )
+    if errno_name is None:
+        errno_match = _ERRNO_TOKEN_RE.search(source)
+        if errno_match and errno_match.group(0) in _KNOWN_ERRNO_NAMES:
+            errno_name = errno_match.group(0)
+    category = _backend_process_error_category(source)
+    if errno_name is None and category == "filesystem_read_only":
+        errno_name = "EROFS"
+    path_match = _PATH_FIELD_RE.search(source)
+    path_class = _backend_path_class(path_match.group("path")) if path_match else None
+    return {
+        "error_category": category,
+        "operation": operation,
+        "path_class": path_class,
+        "errno": errno_name,
+    }
 
 
 def redact_backend_diagnostic(value: str | None) -> str | None:
     if not value:
         return None
-    source = _ANSI_ESCAPE_RE.sub("", value)
-    fields = [_backend_process_error_category(source)]
-    operation_match = _OPERATION_FIELD_RE.search(source)
-    if operation_match:
-        operation = operation_match.group(1).lower()
-        if operation in _SAFE_BACKEND_OPERATIONS:
-            fields.append(f"operation={operation}")
-    errno_match = _ERRNO_FIELD_RE.search(source)
-    errno_name = errno_match.group(1).upper() if errno_match else None
-    if errno_name and errno_name.isdigit():
-        errno_name = errno.errorcode.get(int(errno_name))
-    elif errno_name and errno_name not in _KNOWN_ERRNO_NAMES:
-        errno_name = None
-    if errno_name is None:
-        errno_match = _ERRNO_TOKEN_RE.search(source)
-        if errno_match and errno_match.group(0) in _KNOWN_ERRNO_NAMES:
-            errno_name = errno_match.group(0)
-    if errno_name:
-        fields.append(f"errno={errno_name}")
-    if _PATH_FIELD_RE.search(source):
+    details = _backend_diagnostic_fields(value)
+    fields = [str(details["error_category"])]
+    if details["operation"]:
+        fields.append(f"operation={details['operation']}")
+    if details["errno"]:
+        fields.append(f"errno={details['errno']}")
+    if details["path_class"]:
         fields.append("path=[PATH]")
     if fields == ["process_exit"]:
         fields.append("unstructured stderr omitted")
     return " ".join(fields)
 
 
+def sanitize_backend_failure_record(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    raw_diagnosis = value.get("stderr_diagnosis")
+    diagnosis = raw_diagnosis if isinstance(raw_diagnosis, str) else None
+    details = _backend_diagnostic_fields(diagnosis)
+    raw_category = value.get("error_category")
+    category = (
+        raw_category
+        if isinstance(raw_category, str) and raw_category in _SAFE_BACKEND_CATEGORIES
+        else details["error_category"]
+    )
+    if category not in _SAFE_BACKEND_CATEGORIES:
+        category = "backend_error"
+    raw_exit_code = value.get("exit_code")
+    exit_code = (
+        raw_exit_code
+        if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool)
+        else None
+    )
+    raw_operation = value.get("operation")
+    operation = (
+        raw_operation
+        if isinstance(raw_operation, str) and raw_operation in _SAFE_BACKEND_OPERATIONS
+        else details["operation"]
+    )
+    raw_path_class = value.get("path_class")
+    path_class = (
+        raw_path_class
+        if isinstance(raw_path_class, str) and raw_path_class in _SAFE_BACKEND_PATH_CLASSES
+        else None
+    )
+    errno_name = _normalise_backend_errno(value.get("errno")) or details["errno"]
+    raw_hash = value.get("diagnostic_sha256")
+    diagnostic_hash = (
+        raw_hash
+        if isinstance(raw_hash, str) and re.fullmatch(r"[0-9a-f]{64}", raw_hash)
+        else None
+    )
+    raw_capture_status = value.get("private_capture_status")
+    capture_status = (
+        raw_capture_status
+        if isinstance(raw_capture_status, str)
+        and raw_capture_status in _SAFE_PRIVATE_CAPTURE_STATUSES
+        else "not_requested"
+    )
+    raw_capture_hash = value.get("private_capture_sha256")
+    capture_hash = (
+        raw_capture_hash
+        if isinstance(raw_capture_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", raw_capture_hash)
+        else None
+    )
+    capture_errno = _normalise_backend_errno(value.get("private_capture_errno"))
+    return {
+        "error_category": category,
+        "exit_code": exit_code,
+        "operation": operation,
+        "path_class": path_class,
+        "errno": errno_name,
+        "diagnostic_sha256": diagnostic_hash,
+        "stderr_diagnosis": redact_backend_diagnostic(diagnosis),
+        "private_capture_status": capture_status,
+        "private_capture_sha256": capture_hash,
+        "private_capture_errno": capture_errno,
+    }
+
+
+def _backend_failure_record(
+    exit_code: int,
+    stdout: str | None,
+    stderr: str | None,
+    private_capture_metadata: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    diagnostic, diagnostic_hash = _capture_backend_output(stdout, stderr)
+    details = _backend_diagnostic_fields(diagnostic)
+    return sanitize_backend_failure_record(
+        {
+            **details,
+            "exit_code": exit_code,
+            "diagnostic_sha256": diagnostic_hash,
+            "stderr_diagnosis": redact_backend_diagnostic(diagnostic),
+            **dict(private_capture_metadata or {}),
+        }
+    )
+
+
 def _backend_process_error_category(stderr: str | None) -> str:
-    lowered = (stderr or "").lower()
+    lowered = _without_incidental_path_alias_warning(stderr or "").lower()
     if "sandbox_runtime_denied" in lowered or re.search(
         r"sandbox.{0,40}(?:denied|blocked)", lowered
     ):
@@ -141,6 +430,11 @@ def _backend_process_error_category(stderr: str | None) -> str:
         for marker in ("not logged in", "unauthorized", "authentication failed")
     ):
         return "authentication_error"
+    if any(
+        marker in lowered
+        for marker in ("read-only file system", "read-only filesystem", "erofs")
+    ):
+        return "filesystem_read_only"
     return "process_exit"
 
 
@@ -151,14 +445,14 @@ class BackendProcessFailure(RuntimeError):
         *,
         exit_code: int,
         stderr: str | None,
+        stdout: str | None = None,
+        private_capture_metadata: Mapping[str, object] | None = None,
     ) -> None:
-        category = _backend_process_error_category(stderr)
-        diagnosis = redact_backend_diagnostic(stderr)
-        self.backend_failure = {
-            "error_category": category,
-            "exit_code": exit_code,
-            "stderr_diagnosis": diagnosis,
-        }
+        self.backend_failure = _backend_failure_record(
+            exit_code, stdout, stderr, private_capture_metadata
+        )
+        category = self.backend_failure["error_category"]
+        diagnosis = self.backend_failure["stderr_diagnosis"]
         detail = diagnosis or "stderr empty"
         super().__init__(f"{backend} exited {exit_code} ({category}): {detail}")
 
@@ -511,7 +805,7 @@ class CodexCliBackend(Backend):
     """Shell out to the locally-installed `codex` CLI (OpenAI Codex, headless).
 
     Pure TRANSPORT, mirror of ClaudeCliBackend: invokes
-        codex exec --ephemeral --skip-git-repo-check -s read-only \
+        codex exec --json --ephemeral --skip-git-repo-check -s read-only \
               --output-last-message <tmpfile> [-m <model>] -
     with the prompt on STDIN and reads the agent's final message from the
     tmpfile (avoids parsing the JSONL event stream). Sandbox is read-only —
@@ -557,7 +851,7 @@ class CodexCliBackend(Backend):
         with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as tf:
             out_path = Path(tf.name)
         try:
-            cmd = [codex, "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+            cmd = [codex, "exec", "--json", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
                    "--output-last-message", str(out_path)]
             if self.model:
                 cmd += ["-m", self.model]
@@ -574,25 +868,37 @@ class CodexCliBackend(Backend):
             except OSError as exc:
                 raise LLMError(f"failed to launch codex CLI ({codex}): {exc}") from exc
 
-            blob = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+            blob, _ = _capture_backend_output(proc.stdout, proc.stderr)
             low = blob.lower()
             if ("login" in low and ("not logged in" in low or "codex login" in low
                                     or "please log in" in low or "need to log in" in low)):
-                diagnosis = redact_backend_diagnostic(proc.stderr or "")
+                private_capture_metadata = _write_private_backend_capture(
+                    os.environ.get("JAA_LLM_DIAGNOSTIC_CAPTURE_DIR"),
+                    proc.stdout,
+                    proc.stderr,
+                )
                 raise LLMError(
                     "codex CLI not logged in — run `codex login` on this machine "
                     "(uses your ChatGPT account).",
-                    backend_failure={
-                        "error_category": "authentication_error",
-                        "exit_code": proc.returncode,
-                        "stderr_diagnosis": diagnosis,
-                    },
+                    backend_failure=_backend_failure_record(
+                        proc.returncode,
+                        proc.stdout,
+                        proc.stderr,
+                        private_capture_metadata,
+                    ),
                 )
             if proc.returncode != 0:
+                private_capture_metadata = _write_private_backend_capture(
+                    os.environ.get("JAA_LLM_DIAGNOSTIC_CAPTURE_DIR"),
+                    proc.stdout,
+                    proc.stderr,
+                )
                 raise BackendProcessFailure(
                     "codex CLI",
                     exit_code=proc.returncode,
                     stderr=proc.stderr,
+                    stdout=proc.stdout,
+                    private_capture_metadata=private_capture_metadata,
                 )
 
             text = ""
@@ -602,9 +908,10 @@ class CodexCliBackend(Backend):
                 # Some codex builds print the final message to stdout instead.
                 text = (proc.stdout or "").strip()
             if not text:
+                diagnosis = redact_backend_diagnostic(proc.stderr) or "stderr empty"
                 raise RuntimeError(
                     "codex CLI returned an empty result "
-                    f"(stderr: {(proc.stderr or '').strip()[:200] or 'none'})"
+                    f"({diagnosis})"
                 )
             return LLMResponse(
                 text=text,
