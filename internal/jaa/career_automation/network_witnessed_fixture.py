@@ -20,9 +20,10 @@ import stat
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from enum import Enum
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from playwright._impl._driver import compute_driver_executable
@@ -32,6 +33,12 @@ from .provider_observation_capture import exact_committed_source_identity
 
 from .application_artifacts import publish_application_artifacts
 from .application_compiler import CandidateContact, ProductionApplicationCompiler
+from .application_sanity_review import (
+    SanityReviewPackage,
+    SanityReviewReceipt,
+    package_from_application,
+    verify_sanity_review_receipt,
+)
 from cv_generation.service import validate_application_cv
 from .application_strategy import ApplicationStrategyStore
 from .ats_fixture import (
@@ -212,6 +219,34 @@ HEX_64 = re.compile(r"[0-9a-f]{64}")
 
 class NetworkWitnessedFixtureError(RuntimeError):
     """The bounded synthetic integration failed closed."""
+
+
+class SanityReviewMode(Enum):
+    LIVE = "live"
+    OFFLINE = "offline"
+
+
+def _resolve_sanity_review_receipt(
+    package: SanityReviewPackage,
+    *,
+    mode: SanityReviewMode,
+    live_reviewer: Callable[[SanityReviewPackage], SanityReviewReceipt] | None,
+    offline_reviewer: Callable[[SanityReviewPackage], SanityReviewReceipt] | None,
+) -> SanityReviewReceipt:
+    if mode is SanityReviewMode.LIVE:
+        if live_reviewer is None:
+            raise RuntimeError("live sanity reviewer is required")
+        receipt = live_reviewer(package)
+    elif mode is SanityReviewMode.OFFLINE:
+        if offline_reviewer is None:
+            raise RuntimeError("offline fixture reviewer is required")
+        receipt = offline_reviewer(package)
+    else:
+        raise ValueError("sanity review mode is unsupported")
+    if receipt is None:
+        raise RuntimeError("sanity reviewer returned no receipt")
+    verify_sanity_review_receipt(receipt, package)
+    return receipt
 
 
 class _ChromiumNetworkAudit:
@@ -1224,6 +1259,9 @@ def _browser_inputs(
     fixture: LocalATSFixture,
     release_inputs: tuple[object, ...],
     repository: Path,
+    *,
+    review_mode: SanityReviewMode,
+    live_reviewer: Callable[[SanityReviewPackage], SanityReviewReceipt] | None = None,
 ) -> tuple[
     CareerDatabase,
     BrowserWorkflow,
@@ -1371,11 +1409,27 @@ def _browser_inputs(
             company_name=source.company_name,
         ),
     )
-    sanity_review_receipt = fixture_pass_receipt(
+    reviewed_package = package_from_application(
         source=source,
         artifacts=artifacts,
         questions=questions,
-        state_root=artifact_root,
+    )
+
+    def offline_reviewer(
+        _reviewed_package: SanityReviewPackage,
+    ) -> SanityReviewReceipt:
+        return fixture_pass_receipt(
+            source=source,
+            artifacts=artifacts,
+            questions=questions,
+            state_root=artifact_root,
+        )
+
+    sanity_review_receipt = _resolve_sanity_review_receipt(
+        reviewed_package,
+        mode=review_mode,
+        live_reviewer=live_reviewer,
+        offline_reviewer=offline_reviewer,
     )
     archive_receipt, archive_root = fixture_release_archive_receipt(
         source=source,
@@ -1684,7 +1738,12 @@ def _execute_worker(
             values,
             execution_authority,
             issued,
-        ) = _browser_inputs(fixture, release_inputs, repository)
+        ) = _browser_inputs(
+            fixture,
+            release_inputs,
+            repository,
+            review_mode=SanityReviewMode.OFFLINE,
+        )
         workflow_sha256 = normalized_workflow_sha256(workflow.to_dict())
         if workflow_sha256 != FROZEN_SHADOW_CONTRACT.workflow_sha256:
             raise NetworkWitnessedFixtureError("normalized workflow differs")

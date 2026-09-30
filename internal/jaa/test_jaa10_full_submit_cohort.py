@@ -6,6 +6,7 @@ import hashlib
 import inspect
 
 import pytest
+import career_automation.network_witnessed_fixture as fixture_module
 from datetime import datetime, timedelta, timezone
 
 from career_automation.ats_fixture import FixtureReceipt
@@ -242,11 +243,12 @@ def test_production_cohort_has_no_test_module_imports() -> None:
     assert tuple(MUTATION_TEST_NODES) == REQUIRED_MUTATION_CONTROLS
 
 
-@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort", "cohort_fit", "network_fit"])
+@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort", "cohort_fit", "network_fit", "network_live_review"])
 def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, release_builder):
     """Run the canonical cohort browser builder with an actual synthetic release."""
     from playwright.sync_api import sync_playwright
     from career_automation import shadow_full_submit_cohort as cohort
+    from career_automation import network_witnessed_fixture as network
     from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
     from career_automation.browser_executor import LocalBrowserExecutor
     from career_automation.browser_workflows import BrowserWorkflowStore
@@ -256,12 +258,11 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
         rows = _issued_release_inputs(tmp_path)
         database, _, contact, questions, source, artifacts, artifact_root, publication, _, gate, _, issued = rows
         inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
-    elif release_builder in ("cohort_fit", "network_fit"):
+    elif release_builder in ("cohort_fit", "network_fit", "network_live_review"):
         from types import SimpleNamespace
         from test_jaa06_independent_acceptance import _CapturedResearch
         from career_automation.jaa04_corpus_authority import RawRequirementAnchor
-        from career_automation import network_witnessed_fixture as network
-        builder = network if release_builder == "network_fit" else cohort
+        builder = network if release_builder in ("network_fit", "network_live_review") else cohort
         body = (b"<p>Example product service platform provides documented public "
                 b"value to customers through reliable engineering technology.</p>")
         digest = hashlib.sha256(body).hexdigest()
@@ -282,8 +283,8 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
             synthetic_research.setattr(builder, "_FrozenCorpusResearch", lambda cache, authority: _CapturedResearch(cache))
             synthetic_research.setattr(builder, "RAW_RESPONSE_SHA256", digest)
             inputs = (network._issued_release_inputs(tmp_path, cohort.ROOT, frozen)
-                      if release_builder == "network_fit" else cohort._release_inputs(tmp_path, frozen))
-        source = inputs[4] if release_builder == "network_fit" else inputs[3]
+                      if release_builder in ("network_fit", "network_live_review") else cohort._release_inputs(tmp_path, frozen))
+        source = inputs[4] if release_builder in ("network_fit", "network_live_review") else inputs[3]
     else:
         # Substitute only frozen-corpus ingestion with a real synthetic fit database.
         # Compilation, PDFs, publication, release issuance and browser execution are real.
@@ -313,15 +314,47 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
         source = inputs[3]
     vacancy = FixtureVacancy("synthetic-cohort", source.job_key, source.role_title,
                              source.company_name, source.answers[0].question)
+    review_receipts = []
+    network_review_options = {
+        "review_mode": network.SanityReviewMode.OFFLINE,
+    }
+    if release_builder == "network_live_review":
+        from llm.client import LLMClient
+        from career_automation.application_sanity_review import review_application_package
+        from career_automation.testing_sanity_review import FixturePassBackend
+
+        def live_reviewer(review_package):
+            receipt = review_application_package(
+                review_package,
+                client=LLMClient(
+                    backend=FixturePassBackend(),
+                    model="scripted-fixture-v1",
+                    temperature=0,
+                    max_retries=1,
+                    cache_enabled=False,
+                    cache_dir=tmp_path / "review-cache",
+                    usage_log=tmp_path / "review-usage.jsonl",
+                ),
+            )
+            review_receipts.append(receipt)
+            return receipt
+
+        network_review_options = {
+            "review_mode": network.SanityReviewMode.LIVE,
+            "live_reviewer": live_reviewer,
+        }
     with LocalATSFixture(vacancy, nonce=lambda: cohort.NONCE, form_token=cohort.FORM_TOKEN) as fixture:
-        if release_builder == "network_fit":
+        if release_builder in ("network_fit", "network_live_review"):
             database, workflow, approvals, values, authority, issued = network._browser_inputs(
-                fixture, inputs, cohort.ROOT
+                fixture, inputs, cohort.ROOT, **network_review_options
             )
         else:
             database, workflow, approvals, values, authority, issued = cohort._browser_inputs(
                 fixture, tmp_path, inputs
             )
+        if release_builder == "network_live_review":
+            assert len(review_receipts) == 1
+            assert authority.sanity_review_receipt is review_receipts[0]
         store = BrowserWorkflowStore(database.path)
         run_id = store.create_run(workflow)
         assert store.claim_run("cohort_worker", run_id=run_id) is not None
@@ -346,3 +379,164 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
         assert store.submit_dispatch(run_id)["state"] == "receipt_recorded"
         assert authority.sanity_review_receipt is not None
         assert authority.archive_receipt is not None
+
+
+def _fixture_review(package, tmp_path):
+    from llm.client import LLMClient
+    from career_automation.application_sanity_review import review_application_package
+    from career_automation.testing_sanity_review import FixturePassBackend
+
+    return review_application_package(
+        package,
+        client=LLMClient(
+            backend=FixturePassBackend(),
+            model="scripted-fixture-v1",
+            temperature=0,
+            max_retries=1,
+            cache_enabled=False,
+            cache_dir=tmp_path / "review-cache",
+            usage_log=tmp_path / "review-usage.jsonl",
+        ),
+    )
+
+
+def test_live_review_resolver_invokes_once_and_returns_bound_receipt(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    calls = []
+    receipts = []
+    offline_calls = []
+
+    def live_reviewer(package):
+        calls.append(package)
+        receipt = _fixture_review(package, tmp_path)
+        receipts.append(receipt)
+        return receipt
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    result = fixture_module._resolve_sanity_review_receipt(
+        reviewed_package,
+        mode=fixture_module.SanityReviewMode.LIVE,
+        live_reviewer=live_reviewer,
+        offline_reviewer=offline_reviewer,
+    )
+
+    assert calls == [reviewed_package]
+    assert calls[0] is reviewed_package
+    assert result is receipts[0]
+    assert offline_calls == []
+
+
+def test_live_review_failure_never_falls_back_to_offline(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    failure = RuntimeError("synthetic reviewer failure")
+    live_calls = []
+    offline_calls = []
+
+    def live_reviewer(package):
+        live_calls.append(package)
+        raise failure
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        fixture_module._resolve_sanity_review_receipt(
+            reviewed_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=live_reviewer,
+            offline_reviewer=offline_reviewer,
+        )
+
+    assert raised.value is failure
+    assert live_calls == [reviewed_package]
+    assert offline_calls == []
+
+
+def test_live_review_missing_or_empty_result_fails_closed(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    offline_calls = []
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    with pytest.raises(RuntimeError, match="live sanity reviewer is required"):
+        fixture_module._resolve_sanity_review_receipt(
+            reviewed_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=None,
+            offline_reviewer=offline_reviewer,
+        )
+
+    with pytest.raises(RuntimeError, match="returned no receipt"):
+        fixture_module._resolve_sanity_review_receipt(
+            reviewed_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=lambda _package: None,
+            offline_reviewer=offline_reviewer,
+        )
+
+    assert offline_calls == []
+
+
+def test_live_review_rejects_receipt_bound_to_another_package(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    other_package = build_package(letter="A different synthetic application.")
+    receipt = _fixture_review(reviewed_package, tmp_path)
+    offline_calls = []
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    with pytest.raises(ValueError, match="differs from its sanity-review receipt"):
+        fixture_module._resolve_sanity_review_receipt(
+            other_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=lambda _package: receipt,
+            offline_reviewer=offline_reviewer,
+        )
+
+    assert offline_calls == []
+
+
+def test_offline_mode_selects_only_its_explicit_reviewer(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    live_calls = []
+    offline_calls = []
+    receipts = []
+
+    def live_reviewer(package):
+        live_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        receipt = _fixture_review(package, tmp_path)
+        receipts.append(receipt)
+        return receipt
+
+    result = fixture_module._resolve_sanity_review_receipt(
+        reviewed_package,
+        mode=fixture_module.SanityReviewMode.OFFLINE,
+        live_reviewer=live_reviewer,
+        offline_reviewer=offline_reviewer,
+    )
+
+    assert result is receipts[0]
+    assert live_calls == []
+    assert offline_calls == [reviewed_package]
