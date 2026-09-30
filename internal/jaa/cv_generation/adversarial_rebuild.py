@@ -1417,10 +1417,7 @@ def _verify_application_recruiter_base(
         role_title=source.role_title,
         company_name=source.company_name,
     )
-    expected_fields = canonical_form_fields(
-        questions,
-        cover_note=artifacts.editable.answers_text.strip(),
-    )
+    expected_fields = canonical_form_fields(source, questions)
     if (
         package.cv_pdf_bytes != artifacts.cv_pdf.pdf_bytes
         or package.cover_letter_pdf_bytes != artifacts.cover_letter_pdf.pdf_bytes

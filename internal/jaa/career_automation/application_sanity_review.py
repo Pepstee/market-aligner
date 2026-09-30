@@ -26,6 +26,11 @@ from llm.client import (
 
 from .evidence_matching import canonical_json, content_hash
 from .external_document_assurance import IntendedVacancy
+from .form_answers import (
+    embedded_source_form_answers,
+    source_form_answer_bindings,
+    source_form_answers,
+)
 
 
 PROMPT_SCHEMA_VERSION = "jaa.application-sanity-prompt.v1"
@@ -293,6 +298,7 @@ class SanityReviewPackage:
     approved_evidence_ids: tuple[str, ...]
     application_source_identity: str
     vacancy_review_material: VacancyReviewMaterial | None = None
+    form_answer_bindings: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.intended_vacancy) is not IntendedVacancy:
@@ -317,6 +323,23 @@ class SanityReviewPackage:
             question_ids.append(question_id)
         if question_ids != sorted(set(question_ids)):
             raise ValueError("sanity review form answers require ascending unique question IDs")
+        binding_rows = tuple(self.form_answer_bindings)
+        if binding_rows:
+            if any(not isinstance(row, tuple) or len(row) != 2 for row in binding_rows):
+                raise ValueError("sanity review field binding is invalid")
+            field_ids = tuple(row[0] for row in binding_rows)
+            if (
+                field_ids != tuple(sorted(set(field_ids)))
+                or set(field_ids) != set(question_ids)
+                or any(
+                    not isinstance(field_id, str)
+                    or not field_id
+                    or not isinstance(question_id, str)
+                    or not question_id
+                    for field_id, question_id in binding_rows
+                )
+            ):
+                raise ValueError("sanity review field bindings differ from form fields")
         if not re.fullmatch(r"[0-9a-f]{64}", self.application_source_identity):
             raise ValueError("sanity review requires an application-source identity")
         if not self.vacancy_requirements:
@@ -337,17 +360,28 @@ class SanityReviewPackage:
 
 
 def canonical_form_fields(
+    source: object,
     questions: Mapping[str, tuple[str, str]] | None,
     *,
-    cover_note: str,
+    field_answer_bindings: Sequence[tuple[str, str]] | None = None,
 ) -> tuple[tuple[str, str, str], ...]:
-    """Create the exact stable question/answer package, including cover note."""
-    rows = [
-        (str(key), str(value[0]), str(value[1]))
-        for key, value in (questions or {}).items()
-    ]
-    rows.append(("cover_note", "Cover note", cover_note))
-    return tuple(sorted(rows))
+    """Preserve source answers unless actual employer fields are explicitly bound."""
+    if field_answer_bindings is None:
+        answer_rows = (
+            source_form_answers(source, questions)
+            if questions is not None
+            else embedded_source_form_answers(source)
+        )
+        return tuple(
+            (question_id, question, answer)
+            for question_id, question, answer in answer_rows
+        )
+    return tuple(
+        (field_id, question, answer)
+        for field_id, _question_id, question, answer in source_form_answer_bindings(
+            source, questions, field_answer_bindings
+        )
+    )
 
 
 def approved_evidence_projection(source: object) -> tuple[str, ...]:
@@ -380,16 +414,30 @@ def package_from_application(
     source: object,
     artifacts: object,
     questions: Mapping[str, tuple[str, str]] | None,
+    field_answer_bindings: Sequence[tuple[str, str]] | None = None,
     vacancy_requirements: Sequence[str] | None = None,
     vacancy_review_material: VacancyReviewMaterial | None = None,
 ) -> SanityReviewPackage:
     """Build review data from the exact immutable application objects."""
+    form_fields = canonical_form_fields(
+        source,
+        questions,
+        field_answer_bindings=field_answer_bindings,
+    )
+    answer_bindings = (
+        tuple((field_id, field_id) for field_id, _question, _answer in form_fields)
+        if field_answer_bindings is None
+        else tuple(
+            (field_id, question_id)
+            for field_id, question_id, _question, _answer
+            in source_form_answer_bindings(source, questions, field_answer_bindings)
+        )
+    )
     return SanityReviewPackage(
         cv_pdf_bytes=artifacts.cv_pdf.pdf_bytes,
         cover_letter_pdf_bytes=artifacts.cover_letter_pdf.pdf_bytes,
-        form_fields=canonical_form_fields(
-            questions, cover_note=artifacts.editable.answers_text.strip()
-        ),
+        form_fields=form_fields,
+        form_answer_bindings=answer_bindings,
         intended_vacancy=IntendedVacancy(
             job_key=source.job_key,
             vacancy_sha256=source.vacancy_sha256,
@@ -436,8 +484,16 @@ def _package_document(
     SanityReviewPackage.__post_init__(package)
     cv_text = _independent_pdf_text(package.cv_pdf_bytes)
     letter_text = _independent_pdf_text(package.cover_letter_pdf_bytes)
+    bound_question_ids = dict(package.form_answer_bindings)
     form_document = [
-        {"field_id": row[0], "question": row[1], "answer": row[2]}
+        {
+            "field_id": row[0],
+            "question_id": bound_question_ids[row[0]],
+            "question": row[1],
+            "answer": row[2],
+        }
+        if row[0] in bound_question_ids
+        else {"field_id": row[0], "question": row[1], "answer": row[2]}
         for row in package.form_fields
     ]
     evidence_document = list(package.approved_evidence_ids)

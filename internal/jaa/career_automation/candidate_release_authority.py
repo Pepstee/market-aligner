@@ -161,6 +161,7 @@ class CandidateReleaseExecutionAuthority(ReleaseExecutionAuthority):
             source=self.source,
             artifacts=self.artifacts,
             questions=self.questions,
+            field_answer_bindings=self.answer_field_bindings,
             vacancy_requirements=self.vacancy_requirements,
             vacancy_review_material=self.vacancy_review_material,
         )

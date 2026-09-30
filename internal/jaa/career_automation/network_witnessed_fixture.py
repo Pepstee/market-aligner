@@ -52,6 +52,7 @@ from .browser_executor import (
     MaterializedValue,
     ReleaseExecutionAuthority,
 )
+from .form_answers import source_form_answer_for_question, source_form_answers
 from .browser_workflows import (
     ActionKind,
     ApprovedValue,
@@ -1337,6 +1338,18 @@ def _issued_release_inputs(
     )
 
 
+def _fixture_answer_for_question(
+    source: Any,
+    questions: Mapping[str, tuple[str, str]] | None,
+    form_answers: Sequence[tuple[str, str, str]],
+    question: str,
+) -> tuple[str, str, str]:
+    resolved = source_form_answers(source, questions)
+    if tuple(form_answers) != resolved:
+        raise ValueError("rendered form answers differ from the complete source inventory")
+    return source_form_answer_for_question(source, questions, question)
+
+
 def _browser_inputs(
     fixture: LocalATSFixture,
     release_inputs: tuple[object, ...],
@@ -1366,6 +1379,14 @@ def _browser_inputs(
         _route,
         issued,
     ) = release_inputs
+    selected_answer = _fixture_answer_for_question(
+        source,
+        questions,
+        artifacts.editable.form_answers,
+        fixture.state.vacancy.question,
+    )
+    form_answer_bindings = (("cover_note", selected_answer[0]),)
+    cover_note = selected_answer[2]
     definitions = (
         ("full_name", ActionKind.FILL, "Full name", contact.full_name),
         ("email", ActionKind.FILL, "Email address", contact.email),
@@ -1381,7 +1402,7 @@ def _browser_inputs(
             "cover_note",
             ActionKind.FILL,
             fixture.state.vacancy.question,
-            artifacts.editable.answers_text.strip(),
+            cover_note,
         ),
         (
             "cv",
@@ -1495,6 +1516,7 @@ def _browser_inputs(
         source=source,
         artifacts=artifacts,
         questions=questions,
+        field_answer_bindings=form_answer_bindings,
     )
 
     def offline_reviewer(
@@ -1504,6 +1526,7 @@ def _browser_inputs(
             source=source,
             artifacts=artifacts,
             questions=questions,
+            field_answer_bindings=form_answer_bindings,
             state_root=artifact_root,
         )
 
@@ -1517,6 +1540,7 @@ def _browser_inputs(
         source=source,
         artifacts=artifacts,
         questions=questions,
+        form_answer_bindings=form_answer_bindings,
         document_assurance_receipts=document_assurance_receipts,
         sanity_review_receipt=sanity_review_receipt,
         artifact_root=artifact_root,
@@ -1549,6 +1573,7 @@ def _browser_inputs(
         receipt_url=fixture.receipt_url,
         application_id=fixture.state.vacancy.application_id,
         job_key=source.job_key,
+        form_answer_bindings=form_answer_bindings,
     )
     return database, workflow, tuple(approvals), values, authority, issued
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Sequence
 
 from llm.client import Backend, LLMClient, LLMResponse
 
@@ -42,6 +43,7 @@ def fixture_pass_receipt(
     artifacts,
     questions,
     state_root: Path,
+    field_answer_bindings: Sequence[tuple[str, str]] | None = None,
     vacancy_requirements=None,
     vacancy_review_material=None,
 ) -> SanityReviewReceipt:
@@ -59,6 +61,7 @@ def fixture_pass_receipt(
             source=source,
             artifacts=artifacts,
             questions=questions,
+            field_answer_bindings=field_answer_bindings,
             vacancy_requirements=vacancy_requirements,
             vacancy_review_material=vacancy_review_material,
         ),

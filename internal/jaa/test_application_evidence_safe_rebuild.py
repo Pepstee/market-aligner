@@ -200,10 +200,7 @@ def _base(tmp_path: Path):
         listing_text_sha256=hashlib.sha256(listing.encode()).hexdigest(),
         cv_pdf_bytes=artifacts.cv_pdf.pdf_bytes,
         cover_letter_pdf_bytes=artifacts.cover_letter_pdf.pdf_bytes,
-        form_fields=canonical_form_fields(
-            questions,
-            cover_note=artifacts.editable.answers_text.strip(),
-        ),
+        form_fields=canonical_form_fields(source, questions),
         intended_vacancy=IntendedVacancy(
             job_key=source.job_key,
             vacancy_sha256=source.vacancy_sha256,

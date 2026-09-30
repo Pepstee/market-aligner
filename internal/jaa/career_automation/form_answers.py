@@ -15,6 +15,7 @@ from .evidence_matching import canonical_json
 
 
 FORM_ANSWERS_SCHEMA_VERSION = "jaa.form-answers.v1"
+FORM_ANSWER_BINDINGS_SCHEMA_VERSION = "jaa.form-answer-field-bindings.v1"
 MAX_FORM_ANSWERS = 200
 MAX_FORM_VALUE_BYTES = 8_000
 
@@ -142,6 +143,81 @@ def source_form_answers(
     return canonical_form_answers(tuple(rows), allow_empty=False)
 
 
+def source_form_answer_for_question(
+    source: object,
+    questions: Mapping[str, tuple[str, str]] | None,
+    question: str,
+) -> tuple[str, str, str]:
+    """Select exactly one resolved source answer by its exact question text."""
+
+    matches = tuple(
+        row for row in source_form_answers(source, questions) if row[1] == question
+    )
+    if len(matches) != 1:
+        raise ValueError("field question does not identify exactly one source answer")
+    return matches[0]
+
+
+def source_form_answer_bindings(
+    source: object,
+    questions: Mapping[str, tuple[str, str]] | None,
+    bindings: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Bind actual field IDs to exact question IDs from the canonical inventory."""
+
+    answer_rows = source_form_answers(source, questions)
+    answers_by_id = {question_id: (question, answer) for question_id, question, answer in answer_rows}
+    checked_bindings: list[tuple[str, str, str, str]] = []
+    seen_field_ids: set[str] = set()
+    for row in bindings:
+        if not isinstance(row, tuple) or len(row) != 2:
+            raise ValueError("form answer field binding is malformed")
+        field_id = _canonical_text(row[0], "form answer field ID")
+        question_id = _canonical_text(row[1], "form answer question ID")
+        if field_id in seen_field_ids:
+            raise ValueError("form answer field IDs must be unique")
+        seen_field_ids.add(field_id)
+        answer = answers_by_id.get(question_id)
+        if answer is None:
+            raise ValueError("form answer field binding names an unknown question ID")
+        question, answer_text = answer
+        checked_bindings.append((field_id, question_id, question, answer_text))
+    return tuple(sorted(checked_bindings, key=lambda value: value[0]))
+
+
+def form_answer_bindings_document(
+    source: object,
+    questions: Mapping[str, tuple[str, str]] | None,
+    bindings: Sequence[tuple[str, str]],
+) -> dict[str, object]:
+    rows = source_form_answer_bindings(source, questions, bindings)
+    return {
+        "schema_version": FORM_ANSWER_BINDINGS_SCHEMA_VERSION,
+        "bindings": [
+            {
+                "answer": answer,
+                "answer_sha256": form_answers_sha256(
+                    ((question_id, question, answer),)
+                ),
+                "field_id": field_id,
+                "question": question,
+                "question_id": question_id,
+            }
+            for field_id, question_id, question, answer in rows
+        ],
+    }
+
+
+def form_answer_bindings_bytes(
+    source: object,
+    questions: Mapping[str, tuple[str, str]] | None,
+    bindings: Sequence[tuple[str, str]],
+) -> bytes:
+    return canonical_json(
+        form_answer_bindings_document(source, questions, bindings)
+    ).encode("utf-8")
+
+
 def embedded_source_form_answers(source: object) -> tuple[tuple[str, str, str], ...]:
     """Render already inventory-bound structured answers from a source manifest."""
 
@@ -178,12 +254,17 @@ def render_form_answers_text(rows: Sequence[tuple[str, str, str]]) -> str:
 
 
 __all__ = [
+    "FORM_ANSWER_BINDINGS_SCHEMA_VERSION",
     "FORM_ANSWERS_SCHEMA_VERSION",
     "canonical_form_answers",
     "embedded_source_form_answers",
+    "form_answer_bindings_bytes",
+    "form_answer_bindings_document",
     "form_answers_bytes",
     "form_answers_document",
     "form_answers_sha256",
     "render_form_answers_text",
+    "source_form_answer_bindings",
+    "source_form_answer_for_question",
     "source_form_answers",
 ]

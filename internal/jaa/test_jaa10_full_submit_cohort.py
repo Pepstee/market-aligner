@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from dataclasses import replace
 
 import pytest
 import career_automation.network_witnessed_fixture as fixture_module
@@ -42,6 +43,49 @@ from career_automation.shadow_mutation_runtime import (
 REVISION = "1" * 40
 TREE = "2" * 40
 SOURCE_CONTENT = "sha256:" + "3" * 64
+
+
+def test_fixture_answer_mapping_uses_exact_question_identity_and_fact():
+    from types import SimpleNamespace
+
+    from career_automation.application_compiler import StructuredAnswer
+
+    question = "Describe the delivery outcome."
+    other_question = "Which design tradeoff did you make?"
+    source = SimpleNamespace(
+        answers=(
+            StructuredAnswer("question-one", question, ("fact-one",)),
+            StructuredAnswer("question-two", other_question, ("fact-two",)),
+        ),
+        facts=(
+            SimpleNamespace(sentence_id="fact-one", text="Approved delivery fact."),
+            SimpleNamespace(sentence_id="fact-two", text="Approved tradeoff fact."),
+        ),
+        style_slots=(),
+    )
+    questions = {
+        "requirement-one": ("question-one", question),
+        "requirement-two": ("question-two", other_question),
+    }
+    form_answers = (
+        ("question-one", question, "Approved delivery fact."),
+        ("question-two", other_question, "Approved tradeoff fact."),
+    )
+
+    assert fixture_module._fixture_answer_for_question(
+        source, questions, form_answers, question
+    ) == ("question-one", question, "Approved delivery fact.")
+    with pytest.raises(ValueError, match="does not identify exactly one"):
+        fixture_module._fixture_answer_for_question(
+            source, questions, form_answers, question + " "
+        )
+    with pytest.raises(ValueError, match="rendered form answers differ"):
+        fixture_module._fixture_answer_for_question(
+            source,
+            questions,
+            (("question-one", "Altered question.", "Approved delivery fact."),),
+            question,
+        )
 
 
 def _state() -> dict[str, object]:
@@ -402,6 +446,12 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
     from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
     from career_automation.browser_executor import LocalBrowserExecutor
     from career_automation.browser_workflows import BrowserWorkflowStore
+    from career_automation.application_archive import selected_archive_object_bytes
+    from career_automation.application_sanity_review import (
+        package_from_application,
+        verify_sanity_review_receipt,
+    )
+    from career_automation.form_answers import form_answer_bindings_bytes
     from test_jaa08_independent_acceptance import _issued_release_inputs
 
     if release_builder == "acceptance_fixture":
@@ -469,6 +519,7 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
     vacancy = FixtureVacancy("synthetic-cohort", source.job_key, source.role_title,
                              source.company_name, source.answers[0].question)
     review_receipts = []
+    reviewed_packages = []
     network_review_options = {
         "review_mode": network.SanityReviewMode.OFFLINE,
     }
@@ -478,6 +529,7 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
         from career_automation.testing_sanity_review import FixturePassBackend
 
         def live_reviewer(review_package):
+            reviewed_packages.append(review_package)
             receipt = review_application_package(
                 review_package,
                 client=LLMClient(
@@ -506,6 +558,67 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
             database, workflow, approvals, values, authority, issued = cohort._browser_inputs(
                 fixture, tmp_path, inputs
             )
+        selected_answer = fixture_module._fixture_answer_for_question(
+            authority.source,
+            authority.questions,
+            authority.artifacts.editable.form_answers,
+            fixture.state.vacancy.question,
+        )
+        expected_answer_binding = (("cover_note", selected_answer[0]),)
+        reviewed_package = authority.sanity_review_package()
+        preview_package = package_from_application(
+            source=authority.source,
+            artifacts=authority.artifacts,
+            questions=authority.questions,
+        )
+        assert preview_package.form_fields == tuple(
+            (question_id, question, answer)
+            for question_id, question, answer
+            in authority.artifacts.editable.form_answers
+        )
+        assert preview_package.form_answer_bindings == tuple(
+            (question_id, question_id)
+            for question_id, _question, _answer
+            in authority.artifacts.editable.form_answers
+        )
+        assert authority.answer_field_bindings == expected_answer_binding
+        assert reviewed_package.form_answer_bindings == expected_answer_binding
+        assert reviewed_package.form_fields == (
+            ("cover_note", selected_answer[1], selected_answer[2]),
+        )
+        verify_sanity_review_receipt(authority.sanity_review_receipt, reviewed_package)
+        if release_builder == "network_live_review":
+            assert reviewed_packages == [reviewed_package]
+        with pytest.raises(ValueError):
+            verify_sanity_review_receipt(
+                authority.sanity_review_receipt,
+                replace(
+                    reviewed_package,
+                    form_answer_bindings=(("cover_note", "wrong-question-id"),),
+                ),
+            )
+        with pytest.raises(ValueError, match="field IDs must be unique"):
+            replace(
+                authority,
+                form_answer_bindings=(
+                    expected_answer_binding[0],
+                    expected_answer_binding[0],
+                ),
+            )
+        cover_note_materializations = tuple(
+            item.value
+            for item in values.values()
+            if item.reference.reference_id == "EV_COVER_NOTE"
+        )
+        assert cover_note_materializations == (selected_answer[2],)
+        assert selected_archive_object_bytes(
+            authority.archive_receipt,
+            "form.approved_field_mapping",
+            root=authority.archive_root,
+            repository_root=authority.repository_root,
+        ) == form_answer_bindings_bytes(
+            authority.source, authority.questions, expected_answer_binding
+        )
         if release_builder == "network_live_review":
             assert len(review_receipts) == 1
             assert authority.sanity_review_receipt is review_receipts[0]
@@ -529,6 +642,9 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
             finally:
                 browser.close()
         assert fixture.receipt is not None
+        assert fixture.receipt.payload_sha256 == executor._expected_fixture_payload_sha256(
+            authority
+        )
         assert store.run_snapshot(run_id)["status"] == "completed"
         assert store.submit_dispatch(run_id)["state"] == "receipt_recorded"
         assert authority.sanity_review_receipt is not None

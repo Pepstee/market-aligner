@@ -1592,7 +1592,6 @@ class ProductionApplicationCompiler:
         if not cv_facts or not letter_candidate or not letter_employer:
             raise ValueError("strategy does not contain complete document authority")
 
-        cv_slot = self._slot("cv", "summary-lead", "Relevant evidence")
         letter_open = self._slot(
             "cover_letter",
             "salutation",
@@ -1603,7 +1602,7 @@ class ProductionApplicationCompiler:
             "signoff",
             "Kind regards",
         )
-        slots: list[StyleSlot] = [cv_slot, letter_open, letter_close]
+        slots: list[StyleSlot] = [letter_open, letter_close]
         education = tuple(
             row.sentence_id
             for row in cv_facts
@@ -1631,7 +1630,6 @@ class ProductionApplicationCompiler:
                 DocumentSection(
                     "Professional Summary",
                     (summary_id,),
-                    (cv_slot.slot_id,),
                 )
             ]
             if capabilities:
@@ -1646,7 +1644,6 @@ class ProductionApplicationCompiler:
                 DocumentSection(
                     "Professional Summary",
                     (cv_facts[0].sentence_id,),
-                    (cv_slot.slot_id,),
                 )
             ]
             if education:
@@ -1662,18 +1659,11 @@ class ProductionApplicationCompiler:
             fact = answer_facts.get(requirement_id)
             if fact is None:
                 raise ValueError("portal question lacks structured-answer authority")
-            slot = self._slot(
-                "answer",
-                f"answer:{question_id}",
-                "A relevant example follows.",
-            )
-            slots.append(slot)
             answers.append(
                 StructuredAnswer(
                     question_id,
                     question_text,
                     (fact.sentence_id,),
-                    (slot.slot_id,),
                 )
             )
         return compile_application_source(

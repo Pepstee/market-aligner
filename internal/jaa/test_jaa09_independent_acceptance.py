@@ -243,6 +243,8 @@ def _released_browser_inputs(
     tmp_path: Path,
     release_inputs=None,
 ):
+    from career_automation.form_answers import source_form_answer_for_question
+
     (
         database,
         _strategy,
@@ -257,6 +259,12 @@ def _released_browser_inputs(
         _route,
         issued,
     ) = release_inputs or _issued_release_inputs(tmp_path)
+    selected_answer = source_form_answer_for_question(
+        source,
+        questions,
+        fixture.state.vacancy.question,
+    )
+    form_answer_bindings = (("cover_note", selected_answer[0]),)
     base_workflow, approvals, values = _local_browser_inputs(
         fixture,
         tmp_path,
@@ -277,11 +285,7 @@ def _released_browser_inputs(
     bind("evidence:EV_PHONE", contact.phone, None)
     bind("evidence:EV_CITY", contact.city, None)
     bind("evidence:EV_WORK_AUTHORISATION", "authorised", None)
-    bind(
-        "evidence:EV_COVER_NOTE",
-        artifacts.editable.answers_text.strip(),
-        None,
-    )
+    bind("evidence:EV_COVER_NOTE", selected_answer[2], None)
     bind(
         "evidence:EV_CV",
         artifact_directory / "cv.pdf",
@@ -330,12 +334,14 @@ def _released_browser_inputs(
         source=source,
         artifacts=artifacts,
         questions=questions,
+        field_answer_bindings=form_answer_bindings,
         state_root=tmp_path,
     )
     archive_receipt, archive_root = fixture_release_archive_receipt(
         source=source,
         artifacts=artifacts,
         questions=questions,
+        form_answer_bindings=form_answer_bindings,
         document_assurance_receipts=document_assurance_receipts,
         sanity_review_receipt=sanity_review_receipt,
         artifact_root=artifact_root,
@@ -368,6 +374,7 @@ def _released_browser_inputs(
         receipt_url=fixture.receipt_url,
         application_id=fixture.state.vacancy.application_id,
         job_key=source.job_key,
+        form_answer_bindings=form_answer_bindings,
     )
     assert authority.consumed_at == _fixture_now(database)
     return (

@@ -67,6 +67,7 @@ from .evidence_matching import (
     evidence_projection_hash,
     matching_input_hash,
 )
+from .form_answers import source_form_answer_for_question
 from .external_document_assurance import (
     IntendedVacancy,
     assert_application_artifacts,
@@ -755,6 +756,11 @@ def _browser_inputs(
         gate,
         issued,
     ) = release_inputs
+    selected_answer = source_form_answer_for_question(
+        source, questions, fixture.state.vacancy.question
+    )
+    form_answer_bindings = (("cover_note", selected_answer[0]),)
+    cover_note = selected_answer[2]
     definitions = (
         ("full_name", ActionKind.FILL, "Full name", "Alex Example"),
         ("email", ActionKind.FILL, "Email address", "alex@example.test"),
@@ -770,7 +776,7 @@ def _browser_inputs(
             "cover_note",
             ActionKind.FILL,
             fixture.state.vacancy.question,
-            "Delivered a synthetic migration example.",
+            cover_note,
         ),
         ("cv", ActionKind.UPLOAD, "CV (PDF)", work_root / "cv.pdf"),
         (
@@ -839,7 +845,7 @@ def _browser_inputs(
     bind("evidence:EV_PHONE", contact.phone, None)
     bind("evidence:EV_CITY", contact.city, None)
     bind("evidence:EV_WORK_AUTHORISATION", "authorised", None)
-    bind("evidence:EV_COVER_NOTE", artifacts.editable.answers_text.strip(), None)
+    bind("evidence:EV_COVER_NOTE", cover_note, None)
     bind("evidence:EV_CV", artifact_directory / "cv.pdf", artifacts.cv_pdf.pdf_sha256)
     bind(
         "evidence:EV_COVER_LETTER",
@@ -878,12 +884,14 @@ def _browser_inputs(
         source=source,
         artifacts=artifacts,
         questions=questions,
+        field_answer_bindings=form_answer_bindings,
         state_root=work_root,
     )
     archive_receipt, archive_root = fixture_release_archive_receipt(
         source=source,
         artifacts=artifacts,
         questions=questions,
+        form_answer_bindings=form_answer_bindings,
         document_assurance_receipts=document_assurance_receipts,
         sanity_review_receipt=sanity_review_receipt,
         artifact_root=artifact_root,
@@ -916,6 +924,7 @@ def _browser_inputs(
         receipt_url=fixture.receipt_url,
         application_id=fixture.state.vacancy.application_id,
         job_key=source.job_key,
+        form_answer_bindings=form_answer_bindings,
     )
     return database, workflow, tuple(approvals), values, authority, issued
 

@@ -44,6 +44,7 @@ from .external_document_assurance import (
     verify_receipt_for_pdf,
 )
 from .evidence_matching import canonical_json
+from .form_answers import form_answer_bindings_bytes, source_form_answer_bindings
 from form_filling.service import approved_form_mapping_bytes
 from .provider_observation_authority import verify_provider_observation_authority
 from .ats_fixture import FixtureReceipt
@@ -328,6 +329,9 @@ class ReleaseExecutionAuthority:
     receipt_url: str
     application_id: str
     job_key: str
+    form_answer_bindings: tuple[tuple[str, str], ...] = field(
+        default=(), kw_only=True
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.gate, ReleaseGateStore):
@@ -337,6 +341,9 @@ class ReleaseExecutionAuthority:
             or len(self.release_token.split(".")) != 3
         ):
             raise ValueError("release authority token format is invalid")
+        answer_bindings = self.answer_field_bindings
+        if answer_bindings:
+            source_form_answer_bindings(self.source, self.questions, answer_bindings)
         if self.ats_provider == "jaa_loopback":
             if not _loopback_url(self.application_url) or not _loopback_url(
                 self.receipt_url
@@ -436,7 +443,47 @@ class ReleaseExecutionAuthority:
             source=self.source,
             artifacts=self.artifacts,
             questions=self.questions,
+            field_answer_bindings=self.answer_field_bindings,
         )
+
+    @property
+    def answer_field_bindings(self) -> tuple[tuple[str, str], ...]:
+        if (
+            not isinstance(self.form_answer_bindings, tuple)
+            or any(
+                not isinstance(row, tuple) or len(row) != 2
+                for row in self.form_answer_bindings
+            )
+            or any(
+                not isinstance(field_id, str)
+                or not isinstance(question_id, str)
+                for field_id, question_id in self.form_answer_bindings
+            )
+        ):
+            raise ValueError("release form answer bindings are malformed")
+        explicit_fields = tuple(row[0] for row in self.form_answer_bindings)
+        if len(set(explicit_fields)) != len(explicit_fields):
+            raise ValueError("release form answer field IDs must be unique")
+        bindings = {field_id: question_id for field_id, question_id in self.form_answer_bindings}
+        for field_id, authority_name in self.field_authority_names:
+            if authority_name.startswith("answer."):
+                question_id = authority_name[len("answer."):]
+                previous = bindings.setdefault(field_id, question_id)
+                if previous != question_id:
+                    raise ValueError("form field has conflicting answer bindings")
+        return tuple(sorted(bindings.items()))
+
+    def answer_for_field(self, field_id: str) -> str:
+        matches = tuple(
+            row
+            for row in source_form_answer_bindings(
+                self.source, self.questions, self.answer_field_bindings
+            )
+            if row[0] == field_id
+        )
+        if len(matches) != 1:
+            raise ValueError("actual form field has no unique bound source answer")
+        return matches[0][3]
 
     def verify_employer_facing_receipts(
         self, *, verified_at: datetime | None = None
@@ -511,6 +558,20 @@ class ReleaseExecutionAuthority:
                 else self.archive_receipt.vacancy.source_url
             ),
         )
+        if self.ats_provider == "greenhouse":
+            approved_form_mapping = approved_form_mapping_bytes(
+                source=self.source,
+                artifacts=self.artifacts,
+                questions=self.questions,
+                field_authority_names=self.field_authority_names,
+                consent_states=self.consent_states,
+            )
+        elif self.ats_provider == "jaa_loopback":
+            approved_form_mapping = form_answer_bindings_bytes(
+                self.source, self.questions, self.answer_field_bindings
+            )
+        else:
+            approved_form_mapping = None
         expected_selected = release_authority_selected_sha256(
             cv_pdf_bytes=self.artifacts.cv_pdf.pdf_bytes,
             cover_letter_pdf_bytes=self.artifacts.cover_letter_pdf.pdf_bytes,
@@ -522,16 +583,7 @@ class ReleaseExecutionAuthority:
             semantic_assurance_document=self.sanity_review_receipt.document(),
             attached_roles=self.attached_roles,
             upload_field_names=self.upload_field_names or None,
-            approved_form_mapping=(
-                approved_form_mapping_bytes(
-                    source=self.source,
-                    artifacts=self.artifacts,
-                    field_authority_names=self.field_authority_names,
-                    consent_states=self.consent_states,
-                )
-                if self.ats_provider == "greenhouse"
-                else None
-            ),
+            approved_form_mapping=approved_form_mapping,
             provider_success_semantics=(
                 _json_bytes(self.success_evidence.document())
                 if self.success_evidence is not None
@@ -802,7 +854,6 @@ class LocalBrowserExecutor:
             "EV_PHONE": authority.contact.phone,
             "EV_CITY": authority.contact.city,
             "EV_WORK_AUTHORISATION": "authorised",
-            "EV_COVER_NOTE": (authority.artifacts.editable.answers_text.strip()),
         }
         reference_id = action.value_reference.reference_id
         if reference_id == "EV_CV":
@@ -817,7 +868,15 @@ class LocalBrowserExecutor:
                     "upload materialization differs from JAA-08 authority"
                 )
             return
-        expected = expected_text.get(reference_id)
+        if reference_id == "EV_COVER_NOTE":
+            try:
+                expected = authority.answer_for_field(action.step_id)
+            except ValueError as exc:
+                raise ApprovalRequiredError(
+                    "cover-note field lacks an exact question-bound answer"
+                ) from exc
+        else:
+            expected = expected_text.get(reference_id)
         if expected is None or materialized.value != expected:
             raise ApprovalRequiredError(
                 "field materialization differs from JAA-08 authority"
@@ -904,7 +963,7 @@ class LocalBrowserExecutor:
                 "city": authority.contact.city,
                 "work_authorisation": "authorised",
                 "cover_note": (
-                    authority.artifacts.editable.answers_text.strip()
+                    authority.answer_for_field("cover_note")
                     .replace("\r\n", "\n")
                     .replace("\r", "\n")
                     .replace("\n", "\r\n")

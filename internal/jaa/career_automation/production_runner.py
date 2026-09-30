@@ -844,6 +844,7 @@ class GreenhouseProductionRunner:
             page,
             source=prepared.source,
             artifacts=prepared.artifacts,
+            questions=prepared.questions,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
             ats_application_authority=prepared.ats_application_authority,

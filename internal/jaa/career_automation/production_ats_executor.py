@@ -703,6 +703,7 @@ class CertifiedGreenhouseSubmitExecutor:
         expected_bytes = approved_form_mapping_bytes(
             source=authority.source,
             artifacts=authority.artifacts,
+            questions=authority.questions,
             field_authority_names=authority.field_authority_names,
             consent_states=authority.consent_states,
         )

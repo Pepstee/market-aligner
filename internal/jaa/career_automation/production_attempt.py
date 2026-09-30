@@ -752,6 +752,7 @@ class GreenhouseAttemptRecorder:
         *,
         source: ApplicationSource,
         artifacts: ApplicationArtifacts,
+        questions: Mapping[str, tuple[str, str]] | None,
         document_assurance_receipts: tuple[
             ExternalDocumentAssuranceReceipt,
             ExternalDocumentAssuranceReceipt,
@@ -903,6 +904,7 @@ class GreenhouseAttemptRecorder:
                 approved_form_mapping_bytes(
                     source=source,
                     artifacts=artifacts,
+                    questions=questions,
                     field_authority_names=field_authority_names,
                     consent_states=consent_states,
                 ),
