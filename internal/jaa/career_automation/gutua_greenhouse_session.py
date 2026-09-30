@@ -1300,6 +1300,15 @@ class GutuaGreenhouseSession:
                     approved=False,
                     rejection_codes=(exc.code,),
                 )
+            elif exc.backend_failure is not None:
+                recorder.add_revision(
+                    role="review.sanity_result",
+                    value=_json_bytes(exc.document()),
+                    media_type="application/json",
+                    prior_sha256=None,
+                    approved=False,
+                    rejection_codes=(exc.code,),
+                )
             raise
         # Passive, no-interaction ATS diagnostic: captured after the sanity
         # review passes but before any release gate issue or page mutation,

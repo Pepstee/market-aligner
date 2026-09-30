@@ -1237,6 +1237,55 @@ def test_synthetic_review_seam_stops_before_gate_and_fill(tmp_path, monkeypatch)
     assert resumed.attempt._events() == original
 
 
+def test_synthetic_review_backend_failure_is_archived_safely(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from career_automation.application_sanity_review import ApplicationSanityReviewError
+
+    fixture = _synthetic_seam_fixture(
+        tmp_path, monkeypatch, html=_SYNTHETIC_SEAM_HTML
+    )
+    fixture.recorder.begin_review_only()
+    fixture.session._browser = SimpleNamespace(
+        browser_type=SimpleNamespace(name="synthetic"), version="1"
+    )
+    page = SimpleNamespace(
+        content=lambda: fixture.html,
+        locator=lambda selector: SimpleNamespace(
+            inner_text=lambda: "Graduate Engineer at Example"
+        ),
+        evaluate=lambda script: "synthetic",
+    )
+    failure = ApplicationSanityReviewError(
+        "review.backend_failure",
+        "synthetic denial",
+        backend_failure={
+            "error_category": "sandbox_runtime_denied",
+            "exit_code": 73,
+            "stderr_diagnosis": "sandbox_runtime_denied operation=open errno=EACCES path=[PATH]",
+        },
+    )
+
+    def fail_review(*args, **kwargs):
+        fixture.order.append("sanity")
+        raise failure
+
+    monkeypatch.setattr(session_module.LLMClient, "from_config", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(session_module, "review_application_package", fail_review)
+    with pytest.raises(ApplicationSanityReviewError):
+        fixture.session.prepare_review(
+            fixture.item, fixture.recorder, page, fixture.sink
+        )
+
+    objects = fixture.recorder.attempt._objects(fixture.recorder.attempt._events())
+    archived = [row for row in objects if row.role == "review.sanity_result"]
+    assert len(archived) == 1
+    assert archived[0].disposition == "rejected"
+    assert json.loads(fixture.recorder.attempt.read_artifact(archived[0])) == failure.document()
+    assert any(row.role == "review.semantic_intent" for row in objects)
+    assert not any(row.role == "assurance.semantic.receipt" for row in objects)
+    assert fixture.order == ["sanity"]
+
+
 def test_synthetic_seam_passive_forensics_after_sanity_before_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
