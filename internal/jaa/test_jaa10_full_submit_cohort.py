@@ -243,6 +243,156 @@ def test_production_cohort_has_no_test_module_imports() -> None:
     assert tuple(MUTATION_TEST_NODES) == REQUIRED_MUTATION_CONTROLS
 
 
+def _network_fit_inputs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from career_automation import shadow_full_submit_cohort as cohort
+    from career_automation.jaa04_corpus_authority import RawRequirementAnchor
+    from test_jaa06_independent_acceptance import (
+        SYNTHETIC_PRODUCT_SOURCE,
+        _CapturedResearch,
+    )
+
+    body = SYNTHETIC_PRODUCT_SOURCE
+    digest = hashlib.sha256(body).hexdigest()
+    anchors = tuple(
+        RawRequirementAnchor(text, body.index(text.encode()), len(text), digest)
+        for text in ("product service", "reliable engineering", "technology")
+    )
+    frozen = SimpleNamespace(
+        synthetic_fixture_id=fixture_module.SYNTHETIC_FIXTURE_ID,
+        candidate_profile_id=fixture_module.SYNTHETIC_PROFILE_ID,
+        job_key=fixture_module.GRAPHCORE_JOB_KEY,
+        title="Synthetic Engineer",
+        company="Example",
+        vacancy_url="https://jobs.example.test/synthetic",
+        opportunity_score_bp=9000,
+        queue_payload={},
+        raw_response_bytes=body,
+        raw_response_sha256=digest,
+        inventory_sha256=digest,
+        inventory_files_sha256=digest,
+        dossier_sha256=digest,
+        queue_body_content_sha256=digest,
+        admitted_queue_payload_sha256=digest,
+        tracked_seed_payload_sha256=digest,
+        requirement_anchors=anchors,
+        dossier={"sources": [{"captured_at": datetime.now(timezone.utc).isoformat()}]},
+    )
+    with monkeypatch.context() as synthetic_research:
+        synthetic_research.setattr(
+            fixture_module,
+            "_FrozenCorpusResearch",
+            lambda cache, authority: _CapturedResearch(cache),
+        )
+        synthetic_research.setattr(fixture_module, "RAW_RESPONSE_SHA256", digest)
+        return fixture_module._issued_release_inputs(tmp_path, cohort.ROOT, frozen)
+
+
+def test_network_fit_documents_synthetic_facts_without_wrappers_or_duplicate_research(
+    tmp_path, monkeypatch
+):
+    from career_automation.application_compiler import (
+        verify_application_source,
+    )
+    from career_automation.rendering import render_editable_text
+
+    inputs = _network_fit_inputs(tmp_path, monkeypatch)
+    database, source = inputs[0], inputs[4]
+    verify_application_source(source)
+    rendered = render_editable_text(source)
+    candidate_facts = {
+        row.text for row in source.facts if row.fact_kind == "candidate"
+    }
+    assert candidate_facts == {
+        claim_statement
+        for _evidence_statement, claim_statement, _claim_type
+        in fixture_module.SYNTHETIC_CANDIDATE_FACTS
+    }
+    assert all(fixture_module.DISCLOSURE not in row.text for row in source.facts)
+    assert all("Fixture claim" not in row.text for row in source.facts)
+    assert "not a real person" not in rendered.cv_text
+    assert "not a real person" not in rendered.cover_letter_text
+    employer_facts = [row for row in source.facts if row.fact_kind == "employer"]
+    assert len(employer_facts) == 1
+    assert rendered.cover_letter_text.count(employer_facts[0].text) == 1
+    assert employer_facts[0].text == (
+        "Example: Example's product service platform provides reliable engineering "
+        "and technology for customer workflows."
+    )
+    with database.connection() as connection:
+        provenance = connection.execute(
+            """SELECT evidence.source_identity,decision.reason
+               FROM candidate_evidence evidence
+               JOIN candidate_verification_decisions decision
+                 ON decision.target_kind='evidence'
+                AND decision.target_id=evidence.evidence_id
+                AND decision.target_version=evidence.version
+               WHERE evidence.source_identity LIKE 'fixture:candidate-evidence:%'
+               ORDER BY evidence.evidence_id"""
+        ).fetchall()
+    assert len(provenance) == len(fixture_module.SYNTHETIC_CANDIDATE_FACTS)
+    assert all(row[0].startswith("fixture:candidate-evidence:") for row in provenance)
+    assert all(row[1] == fixture_module.DISCLOSURE for row in provenance)
+
+
+def test_network_fit_rejects_mismatched_synthetic_profile_anchors(tmp_path):
+    from types import SimpleNamespace
+
+    from career_automation.jaa04_corpus_authority import RawRequirementAnchor
+
+    digest = hashlib.sha256(b"synthetic vacancy").hexdigest()
+    authority = SimpleNamespace(
+        synthetic_fixture_id=fixture_module.SYNTHETIC_FIXTURE_ID,
+        candidate_profile_id=fixture_module.SYNTHETIC_PROFILE_ID,
+        job_key=fixture_module.GRAPHCORE_JOB_KEY,
+        raw_response_sha256=digest,
+        requirement_anchors=tuple(
+            RawRequirementAnchor(text, 0, len(text), digest)
+            for text in (
+                "product service",
+                "unrelated requirement",
+                "technology",
+            )
+        ),
+    )
+    with pytest.raises(
+        fixture_module.NetworkWitnessedFixtureError,
+        match="declared vacancy anchor identity",
+    ):
+        fixture_module._fit_database(
+            tmp_path,
+            authority,
+            candidate_profile_id=fixture_module.SYNTHETIC_PROFILE_ID,
+        )
+    assert not (tmp_path / "workflow.sqlite3").exists()
+
+
+def test_distinct_employer_facts_from_one_source_are_retained_by_hash():
+    from career_automation.application_compiler import (
+        _employer_fact_is_new,
+        content_hash,
+    )
+
+    source_ids = ["fixture:official-product"]
+    fact_hashes = tuple(
+        content_hash({
+            "classification": "fact",
+            "id": claim_id,
+            "source_ids": source_ids,
+            "text": text,
+        })
+        for claim_id, text in (
+            ("product-service", "Example offers a service platform."),
+            ("product-technology", "Example serves users with technology."),
+        )
+    )
+    seen_hashes: set[str] = set()
+    assert _employer_fact_is_new(fact_hashes[0], seen_hashes)
+    assert _employer_fact_is_new(fact_hashes[1], seen_hashes)
+    assert not _employer_fact_is_new(fact_hashes[0], seen_hashes)
+
+
 @pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort", "cohort_fit", "network_fit", "network_live_review"])
 def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, release_builder):
     """Run the canonical cohort browser builder with an actual synthetic release."""
@@ -260,15 +410,19 @@ def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, 
         inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
     elif release_builder in ("cohort_fit", "network_fit", "network_live_review"):
         from types import SimpleNamespace
-        from test_jaa06_independent_acceptance import _CapturedResearch
+        from test_jaa06_independent_acceptance import (
+            SYNTHETIC_PRODUCT_SOURCE,
+            _CapturedResearch,
+        )
         from career_automation.jaa04_corpus_authority import RawRequirementAnchor
         builder = network if release_builder in ("network_fit", "network_live_review") else cohort
-        body = (b"<p>Example product service platform provides documented public "
-                b"value to customers through reliable engineering technology.</p>")
+        body = SYNTHETIC_PRODUCT_SOURCE
         digest = hashlib.sha256(body).hexdigest()
         anchors = tuple(RawRequirementAnchor(text, body.index(text.encode()), len(text), digest)
                         for text in ("product service", "reliable engineering", "technology"))
         frozen = SimpleNamespace(
+            synthetic_fixture_id=network.SYNTHETIC_FIXTURE_ID,
+            candidate_profile_id=network.SYNTHETIC_PROFILE_ID,
             job_key=cohort.GRAPHCORE_JOB_KEY, title="Synthetic Engineer", company="Example",
             vacancy_url="https://jobs.example.test/synthetic", opportunity_score_bp=9000,
             queue_payload={}, raw_response_bytes=body, raw_response_sha256=digest,

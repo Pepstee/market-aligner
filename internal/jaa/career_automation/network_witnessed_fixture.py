@@ -172,6 +172,30 @@ MAX_ARTIFACT_BYTES = 64_000_000
 NONCE = "fixture-review-nonce-00000001"
 FORM_TOKEN = "fixture-form-token-00000000001"
 DISCLOSURE = "deterministic approved fixture candidate projection; not a real person"
+SYNTHETIC_FIXTURE_ID = "jaa10-graphcore-synthetic-profile-v1"
+SYNTHETIC_PROFILE_ID = "jaa10-graphcore-anchor-profile-v1"
+SYNTHETIC_PROFILE_ANCHORS = (
+    "product service",
+    "reliable engineering",
+    "technology",
+)
+SYNTHETIC_CANDIDATE_FACTS = (
+    (
+        "Designed a product service for customer workflows.",
+        "Designed a product service for customer workflows.",
+        "project",
+    ),
+    (
+        "Applied reliable engineering practices to software delivery.",
+        "Applied reliable engineering practices to software delivery.",
+        "capability",
+    ),
+    (
+        "Used technology to improve a customer-facing workflow.",
+        "Used technology to improve a customer-facing workflow.",
+        "capability",
+    ),
+)
 CERTIFIED_CORPUS_ENVIRONMENT_KEY = "JAA_CERTIFIED_CORPUS_ROOT"
 TRACKED_SEED_RELATIVE = Path("career_automation/fixtures/jaa04_admitted_queue.json")
 POLICY_DIGEST = hashlib.sha256(b"jaa10-network-witnessed-fixture").hexdigest()
@@ -927,10 +951,49 @@ def _fixture_now(database: CareerDatabase) -> datetime:
     return datetime(value.year, value.month, value.day, 12, tzinfo=timezone.utc)
 
 
+def _validate_synthetic_profile_binding(
+    authority: FrozenVacancyAuthority,
+    candidate_profile_id: str | None,
+) -> None:
+    anchors = tuple(authority.requirement_anchors)
+    synthetic_fixture = (
+        getattr(authority, "synthetic_fixture_id", None) == SYNTHETIC_FIXTURE_ID
+    )
+    if (
+        candidate_profile_id != SYNTHETIC_PROFILE_ID
+        or authority.job_key != GRAPHCORE_JOB_KEY
+        or tuple(anchor.text for anchor in anchors) != SYNTHETIC_PROFILE_ANCHORS
+        or not synthetic_fixture
+        or any(
+            anchor.source_content_sha256 != authority.raw_response_sha256
+            for anchor in anchors
+        )
+    ):
+        raise NetworkWitnessedFixtureError(
+            "synthetic candidate profile does not match its declared vacancy anchor identity"
+        )
+
+
 def _fit_database(
     output_root: Path,
     authority: FrozenVacancyAuthority,
+    *,
+    candidate_profile_id: str | None = None,
 ) -> tuple[CareerDatabase, object, tuple[Requirement, ...]]:
+    synthetic_fixture = (
+        getattr(authority, "synthetic_fixture_id", None) == SYNTHETIC_FIXTURE_ID
+    )
+    if synthetic_fixture:
+        _validate_synthetic_profile_binding(authority, candidate_profile_id)
+    elif not (
+        isinstance(authority, FrozenVacancyAuthority)
+        and authority.corpus_identity == CORPUS_IDENTITY
+        and authority.job_key == GRAPHCORE_JOB_KEY
+        and candidate_profile_id is None
+    ):
+        raise NetworkWitnessedFixtureError(
+            "candidate profile lacks an exact synthetic or frozen-corpus authority"
+        )
     database = CareerDatabase(output_root / "workflow.sqlite3")
     # This is a replay of a content-addressed frozen corpus.  Bind every
     # downstream temporal decision to the verified source capture date so the
@@ -1027,16 +1090,31 @@ def _fit_database(
         )
         for index, anchor in enumerate(authority.requirement_anchors, 1)
     )
+    candidate_facts = (
+        SYNTHETIC_CANDIDATE_FACTS
+        if synthetic_fixture
+        else tuple(
+            (
+                f"Approved synthetic fixture support for {requirement.text}; {DISCLOSURE}.",
+                f"Fixture claim for {requirement.text}; {DISCLOSURE}.",
+                ("capability", "project", "education")[(index - 1) % 3],
+            )
+            for index, requirement in enumerate(requirements, 1)
+        )
+    )
+    if len(candidate_facts) != len(requirements):
+        raise NetworkWitnessedFixtureError(
+            "candidate profile facts do not match the frozen vacancy requirements"
+        )
     valid_until = today.replace(year=today.year + 1).isoformat()
     graph = CandidateGraph(database.path)
-    for index, requirement in enumerate(requirements, 1):
+    for index, (requirement, (evidence_statement, claim_statement, claim_type)) in enumerate(
+        zip(requirements, candidate_facts, strict=True), 1
+    ):
         evidence_id = f"fixture-evidence-{index}"
         graph.add_evidence(
             evidence_id,
-            statement=(
-                f"Approved synthetic fixture support for {requirement.text}; "
-                f"{DISCLOSURE}."
-            ),
+            statement=evidence_statement,
             source_identity=f"fixture:candidate-evidence:{index}",
             state="evidence",
             evidence_kind="portfolio_artifact",
@@ -1055,8 +1133,8 @@ def _fit_database(
         )
         graph.add_claim(
             requirement.criterion,
-            statement=(f"Fixture claim for {requirement.text}; {DISCLOSURE}."),
-            claim_type=("capability", "project", "education")[(index - 1) % 3],
+            statement=claim_statement,
+            claim_type=claim_type,
             state="evidence",
             source_identity=f"fixture:candidate-claim:{index}",
             valid_until=valid_until,
@@ -1108,7 +1186,11 @@ def _issued_release_inputs(
     repository: Path,
     authority: FrozenVacancyAuthority,
 ) -> tuple[object, ...]:
-    database, run, requirements = _fit_database(output_root, authority)
+    database, run, requirements = _fit_database(
+        output_root,
+        authority,
+        candidate_profile_id=getattr(authority, "candidate_profile_id", None),
+    )
     as_of = _fixture_date(database)
     strategy = ApplicationStrategyStore(database.path).compile_and_record(
         fit_run_id=run.run_id,

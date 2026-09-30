@@ -799,6 +799,13 @@ class FactualSentence:
         }
 
 
+def _employer_fact_is_new(fact_sha256: str, seen_hashes: set[str]) -> bool:
+    if fact_sha256 in seen_hashes:
+        return False
+    seen_hashes.add(fact_sha256)
+    return True
+
+
 @dataclass(frozen=True)
 class StyleSlot:
     """Non-factual connective prose which a critic may propose replacing."""
@@ -1499,6 +1506,7 @@ class ProductionApplicationCompiler:
             job_key = str(parent["job_key"])
             candidate_cache: dict[tuple[str, int, str, int], tuple[str, str]] = {}
             employer_cache: dict[str, tuple[str, str]] = {}
+            employer_fact_hashes: set[str] = set()
             facts: list[FactualSentence] = []
             claim_type_by_sentence: dict[str, str] = {}
             for element in strategy.elements:
@@ -1539,6 +1547,11 @@ class ProductionApplicationCompiler:
                     facts.append(sentence)
                     claim_type_by_sentence[sentence.sentence_id] = claim_type
                 elif element.kind == "employer_hook":
+                    if not _employer_fact_is_new(
+                        element.employer_fact_sha256,
+                        employer_fact_hashes,
+                    ):
+                        continue
                     if element.employer_research_claim_id not in employer_cache:
                         employer_cache[element.employer_research_claim_id] = (
                             self._employer_statement(
