@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from career_automation.application_sanity_review import (
 )
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.rendering import _build_text_pdf
+from llm import client as llm_client_module
 from llm.client import Backend, LLMClient, LLMResponse, MockBackend
 from llm.client import ClaudeCliBackend, CodexCliBackend
 from llm.openai_responses import OpenAIResponsesBackend
@@ -31,6 +33,7 @@ from scripts.run_application_sanity_live_smoke import (
     _publish_external_trace,
     _require_external_private_directory,
     _review_case,
+    main as run_live_smoke,
 )
 
 
@@ -310,6 +313,138 @@ def test_missing_timeout_and_mock_provider_fail_closed(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("stderr", "expected_category", "expected_operation", "expected_errno"),
+    (
+        (
+            'sandbox_runtime_denied: {"operation":"open","errno":"EPERM","api_key":"synthetic-secret-value","path":"/tmp/synthetic profile/resume.pdf"}',
+            "sandbox_runtime_denied",
+            "open",
+            "EPERM",
+        ),
+        (
+            'Permission denied: operation="open" errno=EACCES path="/tmp/synthetic private/profile.json"',
+            "permission_denied",
+            "open",
+            "EACCES",
+        ),
+        (
+            'sandbox_runtime_denied: operation=connect errno=EACCES path="https://example.invalid/apply?token=synthetic-query-token&api_key=synthetic-query-key"',
+            "sandbox_runtime_denied",
+            "connect",
+            "EACCES",
+        ),
+    ),
+)
+def test_backend_failure_records_redacted_process_diagnostics(
+    stderr: str,
+    expected_category: str,
+    expected_operation: str,
+    expected_errno: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        CodexCliBackend,
+        "resolve_binary",
+        staticmethod(lambda: "/synthetic/codex"),
+    )
+    monkeypatch.setattr(
+        llm_client_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=73,
+            stdout="synthetic-only stdout",
+            stderr=stderr,
+        ),
+    )
+
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package(
+            package(), client=client(CodexCliBackend(), tmp_path)
+        )
+
+    failure = captured.value.backend_failure
+    assert captured.value.code == "review.backend_failure"
+    assert failure is not None
+    assert failure["error_category"] == expected_category
+    assert failure["exit_code"] == 73
+    diagnosis = failure["stderr_diagnosis"]
+    assert isinstance(diagnosis, str)
+    assert f"operation={expected_operation}" in diagnosis
+    assert f"errno={expected_errno}" in diagnosis
+    assert "path=[PATH]" in diagnosis
+    assert "synthetic" not in diagnosis
+    assert "synthetic-only stdout" not in str(captured.value.document())
+    assert captured.value.document()["backend_failure"] == failure
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    (
+        (
+            "\x1b[31mPermission denied\x1b[0m operation='open' errno='13' path='/tmp/synthetic private/profile.json' api_key='synthetic-control-secret'\x00",
+            "permission_denied operation=open errno=EACCES path=[PATH]",
+        ),
+        (
+            '{"operation":"connect","errno":13,"path":"https://example.invalid/apply?token=synthetic-json-token&api_key=synthetic-json-key"}',
+            "process_exit operation=connect errno=EACCES path=[PATH]",
+        ),
+        (
+            "synthetic-unknown-payload bearer=synthetic-unknown-token\x00",
+            "process_exit unstructured stderr omitted",
+        ),
+        (
+            "synthetic-error errno=999",
+            "process_exit unstructured stderr omitted",
+        ),
+    ),
+)
+def test_redact_backend_diagnostic_handles_controls_and_unknown_payloads(
+    stderr: str, expected: str
+) -> None:
+    diagnosis = llm_client_module.redact_backend_diagnostic(stderr)
+
+    assert diagnosis == expected
+    assert not any(ord(character) < 32 or ord(character) == 127 for character in diagnosis)
+    assert "synthetic" not in diagnosis
+
+
+def test_redact_backend_diagnostic_does_not_truncate_huge_numeric_errno() -> None:
+    huge_numeric_errno = "130" + "0" * 5997
+
+    diagnosis = llm_client_module.redact_backend_diagnostic(
+        f"operation=connect errno={huge_numeric_errno} errno=ETIMEDOUT"
+    )
+
+    assert diagnosis == "process_exit operation=connect errno=ETIMEDOUT"
+
+
+def test_redact_backend_diagnostic_ignores_unicode_decimal_errno() -> None:
+    diagnosis = llm_client_module.redact_backend_diagnostic(
+        "operation=mkdir errno=٤٢"
+    )
+
+    assert diagnosis == "process_exit operation=mkdir"
+
+
+def test_redact_backend_diagnostic_suppresses_malformed_and_duplicate_payloads() -> None:
+    malformed = llm_client_module.redact_backend_diagnostic(
+        '{"msg":"C:\\\\synthetic\\\\q\\\\u12 unclosed bearer=synthetic-token'
+    )
+    duplicate = llm_client_module.redact_backend_diagnostic(
+        "operation=read errno=EPERM errno=ENOENT code=13 marker=synthetic-duplicate"
+    )
+
+    assert malformed == "process_exit unstructured stderr omitted"
+    assert duplicate is not None
+    assert duplicate.startswith("permission_denied operation=read errno=")
+    assert duplicate.split()[-1] in {"errno=EPERM", "errno=ENOENT"}
+    assert "synthetic" not in duplicate
+
+
+@pytest.mark.parametrize(
     "override",
     (
         {"cache_enabled": True},
@@ -535,6 +670,56 @@ def test_live_smoke_rejects_unknown_backend_instead_of_falling_back_to_mock() ->
         _build_backend("typo_backend", "", 17)
 
 
+def test_live_smoke_can_run_exactly_one_synthetic_case(tmp_path, monkeypatch) -> None:
+    calls = []
+
+    def fake_review_case(**kwargs):
+        calls.append(kwargs)
+        return {
+            "case_id": kwargs["case_id"],
+            "expected_verdict": kwargs["expected"],
+            "matched_expectation": True,
+        }
+
+    output = tmp_path / "smoke.json"
+    monkeypatch.setattr(
+        "scripts.run_application_sanity_live_smoke._review_case",
+        fake_review_case,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_application_sanity_live_smoke", "--case", "clean_llm_skill", "--output", str(output)],
+    )
+
+    assert run_live_smoke() == 0
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    assert len(calls) == 1
+    assert calls[0]["case_id"] == "clean_llm_skill"
+    assert evidence["case_count"] == 1
+    assert [case["case_id"] for case in evidence["cases"]] == ["clean_llm_skill"]
+
+
+def test_live_smoke_single_case_rejects_incident_pdf(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_application_sanity_live_smoke",
+            "--case",
+            "clean_llm_skill",
+            "--incident-pdf",
+            "synthetic-incident.pdf",
+            "--output",
+            str(tmp_path / "smoke.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as captured:
+        run_live_smoke()
+    assert captured.value.code == 2
+
+
 @pytest.mark.parametrize(
     ("error_code", "expected_verdict"),
     (
@@ -553,7 +738,20 @@ def test_live_smoke_infrastructure_failure_cannot_satisfy_block_canary(
     backend = ScriptedBackend(PASS)
 
     def fake_review(*_args, **_kwargs):
-        raise ApplicationSanityReviewError(error_code, "synthetic failure")
+        backend_failure = (
+            {
+                "error_category": "sandbox_runtime_denied",
+                "exit_code": 73,
+                "stderr_diagnosis": "synthetic denial: operation=open path=[PATH]",
+            }
+            if error_code == "review.backend_failure"
+            else None
+        )
+        raise ApplicationSanityReviewError(
+            error_code,
+            "synthetic failure",
+            backend_failure=backend_failure,
+        )
 
     monkeypatch.setattr(
         "scripts.run_application_sanity_live_smoke._build_backend",
@@ -575,6 +773,9 @@ def test_live_smoke_infrastructure_failure_cannot_satisfy_block_canary(
     assert record["verdict"] == "error"
     assert record["matched_expectation"] is False
     assert record["review_error_code"] == error_code
+    if error_code == "review.backend_failure":
+        assert record["backend_failure"]["exit_code"] == 73
+        assert "operation=open" in record["backend_failure"]["stderr_diagnosis"]
 
 
 def test_live_smoke_retains_public_transport_evidence_for_provider_pass(

@@ -23,6 +23,7 @@ JSON fallback; `jsonschema` is optional (light manual validation if absent).
 from __future__ import annotations
 
 import hashlib
+import errno
 import re
 import json
 import os
@@ -48,6 +49,118 @@ _CONFIG_PATH = _REPO_ROOT / "skeleton" / "config.yaml"
 
 class LLMError(RuntimeError):
     """Any client-level failure (backend exhausted retries, bad structured output)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend_failure: dict[str, object] | None = None,
+    ) -> None:
+        self.backend_failure = (
+            dict(backend_failure) if backend_failure is not None else None
+        )
+        super().__init__(message)
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_OPERATION_FIELD_RE = re.compile(
+    r'''(?i)["']?operation["']?\s*[:=]\s*["']?([a-z][a-z0-9_-]{0,31})'''
+)
+_PATH_FIELD_RE = re.compile(
+    r'''(?i)["']?path["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+)'''
+)
+_ERRNO_FIELD_RE = re.compile(
+    r'''(?i)["']?errno["']?\s*[:=]\s*["']?([a-z][a-z0-9]*|[0-9]{1,3})(?![a-z0-9_])'''
+)
+_ERRNO_TOKEN_RE = re.compile(r"\bE[A-Z0-9]+\b")
+_SAFE_BACKEND_OPERATIONS = frozenset(
+    {
+        "bind",
+        "chdir",
+        "connect",
+        "exec",
+        "execve",
+        "listen",
+        "mkdir",
+        "open",
+        "openat",
+        "read",
+        "rename",
+        "socket",
+        "spawn",
+        "stat",
+        "unlink",
+        "write",
+    }
+)
+_KNOWN_ERRNO_NAMES = frozenset(errno.errorcode.values())
+
+
+def redact_backend_diagnostic(value: str | None) -> str | None:
+    if not value:
+        return None
+    source = _ANSI_ESCAPE_RE.sub("", value)
+    fields = [_backend_process_error_category(source)]
+    operation_match = _OPERATION_FIELD_RE.search(source)
+    if operation_match:
+        operation = operation_match.group(1).lower()
+        if operation in _SAFE_BACKEND_OPERATIONS:
+            fields.append(f"operation={operation}")
+    errno_match = _ERRNO_FIELD_RE.search(source)
+    errno_name = errno_match.group(1).upper() if errno_match else None
+    if errno_name and errno_name.isdigit():
+        errno_name = errno.errorcode.get(int(errno_name))
+    elif errno_name and errno_name not in _KNOWN_ERRNO_NAMES:
+        errno_name = None
+    if errno_name is None:
+        errno_match = _ERRNO_TOKEN_RE.search(source)
+        if errno_match and errno_match.group(0) in _KNOWN_ERRNO_NAMES:
+            errno_name = errno_match.group(0)
+    if errno_name:
+        fields.append(f"errno={errno_name}")
+    if _PATH_FIELD_RE.search(source):
+        fields.append("path=[PATH]")
+    if fields == ["process_exit"]:
+        fields.append("unstructured stderr omitted")
+    return " ".join(fields)
+
+
+def _backend_process_error_category(stderr: str | None) -> str:
+    lowered = (stderr or "").lower()
+    if "sandbox_runtime_denied" in lowered or re.search(
+        r"sandbox.{0,40}(?:denied|blocked)", lowered
+    ):
+        return "sandbox_runtime_denied"
+    if any(
+        marker in lowered
+        for marker in ("permission denied", "operation not permitted", "eperm", "eacces")
+    ):
+        return "permission_denied"
+    if any(
+        marker in lowered
+        for marker in ("not logged in", "unauthorized", "authentication failed")
+    ):
+        return "authentication_error"
+    return "process_exit"
+
+
+class BackendProcessFailure(RuntimeError):
+    def __init__(
+        self,
+        backend: str,
+        *,
+        exit_code: int,
+        stderr: str | None,
+    ) -> None:
+        category = _backend_process_error_category(stderr)
+        diagnosis = redact_backend_diagnostic(stderr)
+        self.backend_failure = {
+            "error_category": category,
+            "exit_code": exit_code,
+            "stderr_diagnosis": diagnosis,
+        }
+        detail = diagnosis or "stderr empty"
+        super().__init__(f"{backend} exited {exit_code} ({category}): {detail}")
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -398,7 +511,7 @@ class CodexCliBackend(Backend):
     """Shell out to the locally-installed `codex` CLI (OpenAI Codex, headless).
 
     Pure TRANSPORT, mirror of ClaudeCliBackend: invokes
-        codex exec --skip-git-repo-check -s read-only \
+        codex exec --ephemeral --skip-git-repo-check -s read-only \
               --output-last-message <tmpfile> [-m <model>] -
     with the prompt on STDIN and reads the agent's final message from the
     tmpfile (avoids parsing the JSONL event stream). Sandbox is read-only —
@@ -444,7 +557,7 @@ class CodexCliBackend(Backend):
         with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as tf:
             out_path = Path(tf.name)
         try:
-            cmd = [codex, "exec", "--skip-git-repo-check", "-s", "read-only",
+            cmd = [codex, "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
                    "--output-last-message", str(out_path)]
             if self.model:
                 cmd += ["-m", self.model]
@@ -465,14 +578,21 @@ class CodexCliBackend(Backend):
             low = blob.lower()
             if ("login" in low and ("not logged in" in low or "codex login" in low
                                     or "please log in" in low or "need to log in" in low)):
+                diagnosis = redact_backend_diagnostic(proc.stderr or "")
                 raise LLMError(
                     "codex CLI not logged in — run `codex login` on this machine "
-                    "(uses your ChatGPT account)."
+                    "(uses your ChatGPT account).",
+                    backend_failure={
+                        "error_category": "authentication_error",
+                        "exit_code": proc.returncode,
+                        "stderr_diagnosis": diagnosis,
+                    },
                 )
             if proc.returncode != 0:
-                raise RuntimeError(
-                    f"codex CLI exited {proc.returncode}: "
-                    f"{(proc.stderr or proc.stdout or '').strip()[:300]}"
+                raise BackendProcessFailure(
+                    "codex CLI",
+                    exit_code=proc.returncode,
+                    stderr=proc.stderr,
                 )
 
             text = ""
@@ -832,7 +952,10 @@ class LLMClient:
                 last = exc
                 if attempt < self.max_retries:
                     time.sleep(self._backoff_base * (2 ** (attempt - 1)))
-        raise LLMError(f"backend failed after {self.max_retries} attempts: {last}")
+        raise LLMError(
+            f"backend failed after {self.max_retries} attempts: {last}",
+            backend_failure=getattr(last, "backend_failure", None),
+        )
 
     def _complete_structured(
         self,

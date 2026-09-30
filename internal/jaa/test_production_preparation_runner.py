@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +46,7 @@ def _deployment(tmp_path: Path) -> runner._ProductionPreparationDeployment:
     binary.chmod(0o700)
     return runner._ProductionPreparationDeployment(
         repository_root=tmp_path / "repository",
+        data_home=tmp_path / "data-home",
         admission_database=tmp_path / "admissions.sqlite3",
         outbox_root=tmp_path / "outbox",
         candidate_authority_path=tmp_path / "candidate.json",
@@ -54,6 +56,7 @@ def _deployment(tmp_path: Path) -> runner._ProductionPreparationDeployment:
         output_root=tmp_path / "preparations",
         recruiter_archive_root=tmp_path / "recruiter",
         codex_binary=binary,
+        poppler_bin=tmp_path,
         model="gpt-test",
         timeout_seconds=30,
     )
@@ -139,8 +142,8 @@ def _real_preflight_deployment(
     outbox.mkdir(mode=0o700)
     poppler = tmp_path / "poppler"
     poppler.mkdir(mode=0o700)
-    poppler_libraries = tmp_path / "poppler-libraries"
-    poppler_libraries.mkdir(mode=0o700)
+    poppler_libraries = tmp_path / "lib" / "x86_64-linux-gnu"
+    poppler_libraries.mkdir(mode=0o700, parents=True)
     codex = tmp_path / "codex"
     codex.write_bytes(b"exact codex")
     codex.chmod(0o755)
@@ -180,6 +183,7 @@ def _real_preflight_deployment(
 
     deployment = runner._ProductionPreparationDeployment(
         repository_root=repository,
+        data_home=data_home,
         admission_database=database,
         outbox_root=outbox,
         candidate_authority_path=paths["candidate"],
@@ -189,6 +193,7 @@ def _real_preflight_deployment(
         output_root=paths["output"],
         recruiter_archive_root=paths["recruiter"],
         codex_binary=codex,
+        poppler_bin=poppler,
         model="gpt-test",
         timeout_seconds=30,
     )
@@ -318,6 +323,48 @@ def test_registry_chain_predecessors_remain_in_the_resource_lease(
             resources.verify()
     finally:
         resources.close()
+
+
+def test_installed_deployment_resolves_host_paths_bound_to_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    values = {
+        "data_home": tmp_path / "private-state",
+        "repository_root": Path(__file__).resolve().parents[2],
+        "outbox_root": tmp_path / "private-outbox",
+        "candidate_authority_path": tmp_path / "authority" / "candidate.json",
+        "contact_authority_path": tmp_path / "authority" / "contact.json",
+        "contact_public_key_path": tmp_path / "authority" / "operator.pem",
+        "contact_registry_path": tmp_path / "authority" / "registry.json",
+        "codex_binary": tmp_path / "codex" / "bin" / "codex.js",
+        "poppler_bin": tmp_path / "poppler" / "usr" / "bin",
+    }
+    raw = runner.production_preparation_configuration_bytes(**values)
+    monkeypatch.setattr(runner, "_read_root_owned_configuration", lambda _path: raw)
+    monkeypatch.setattr(
+        runner,
+        "installed_production_handoff_deployment",
+        lambda: SimpleNamespace(
+            data_home=values["data_home"],
+            repository_root=values["repository_root"],
+            output_root=values["outbox_root"],
+            candidate_authority_path=values["candidate_authority_path"],
+            candidate_authority_sha256=runner.PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+        ),
+    )
+
+    deployment = runner.installed_production_preparation_deployment()
+
+    assert deployment.data_home == values["data_home"]
+    assert deployment.repository_root == values["repository_root"]
+    assert deployment.outbox_root == values["outbox_root"]
+    assert deployment.candidate_authority_path == values["candidate_authority_path"]
+    assert deployment.admission_database == (
+        values["data_home"] / "state/jaa-production-admissions/admissions.sqlite3"
+    )
+    assert deployment.poppler_library_directory == (
+        values["poppler_bin"].parent / "lib/x86_64-linux-gnu"
+    )
 
 
 def test_source_record_binds_exact_sealed_producer_context(tmp_path: Path) -> None:
@@ -474,10 +521,10 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
         path.write_bytes(name.encode())
         hashes[name] = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
     monkeypatch.setattr(runner, "PRODUCTION_POPPLER_SHA256", hashes)
-    monkeypatch.setattr(runner, "PRODUCTION_POPPLER_LIBRARY_DIRECTORY", tmp_path)
+    deployment.poppler_library_directory.mkdir(mode=0o700, parents=True)
     library_hashes = {}
     for name in runner.PRODUCTION_POPPLER_LIBRARY_SHA256:
-        path = tmp_path / name
+        path = deployment.poppler_library_directory / name
         path.write_bytes(name.encode())
         library_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     monkeypatch.setattr(
@@ -685,7 +732,6 @@ def test_poppler_substitution_rejects_before_provider_availability(
 ) -> None:
     deployment = _deployment(tmp_path)
     calls = {"adapter": 0, "recruiter": 0}
-    monkeypatch.setattr(runner, "PRODUCTION_POPPLER_BIN", tmp_path)
     monkeypatch.setattr(runner, "PRODUCTION_POPPLER_SHA256", {"pdfinfo": "0" * 64})
     (tmp_path / "pdfinfo").write_bytes(b"substituted")
     monkeypatch.setattr(

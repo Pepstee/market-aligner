@@ -34,6 +34,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from llm.client import (  # noqa: E402
     ClaudeCliBackend,
+    CodexCliBackend,
     LLMClient,
     LLMError,
     MockBackend,
@@ -285,3 +286,25 @@ def test_creative_portfolio_assessment_preserves_advisory_fields(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="portfolio mode"):
         caps.assess_portfolio([], client=client, mode="unknown")
+
+
+def test_codex_cli_backend_uses_ephemeral_session(monkeypatch):
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        output_path.write_text("synthetic sanity result", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex"))
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    response = CodexCliBackend(model="gpt-6-luna").complete("synthetic system", "synthetic user", 0.0)
+
+    assert response.text == "synthetic sanity result"
+    assert commands[0][:3] == ["/test/codex", "exec", "--ephemeral"]

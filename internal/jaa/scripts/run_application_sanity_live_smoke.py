@@ -180,6 +180,7 @@ def _review_case(
     receipt_sha256 = None
     transport_evidence = None
     error_code = None
+    backend_failure = None
     try:
         receipt = review_application_package(package, client=client)
         verdict = receipt.verdict
@@ -196,6 +197,11 @@ def _review_case(
         # condition are infrastructure errors, not successful semantic review.
         verdict = "block" if error.code == "review.material_finding" else "error"
         error_code = error.code
+        backend_failure = (
+            dict(error.backend_failure)
+            if error.backend_failure is not None
+            else None
+        )
         result = error.result or {}
         codes = [str(row["code"]) for row in result.get("findings", [])]
         transport_evidence = (
@@ -212,6 +218,7 @@ def _review_case(
         "matched_expectation": verdict == expected,
         "finding_codes": codes,
         "review_error_code": error_code,
+        "backend_failure": backend_failure,
         "provider": backend.name,
         "model": model_identity,
         "elapsed_ms": elapsed_ms,
@@ -233,9 +240,16 @@ def main() -> int:
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
     parser.add_argument("--transport-archive-dir", type=Path)
     parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument(
+        "--case",
+        choices=tuple(case_id for case_id, _, _ in CASES),
+        help="run exactly one synthetic review case instead of the full suite",
+    )
     parser.add_argument("--incident-pdf", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.case is not None and args.incident_pdf is not None:
+        parser.error("--case cannot be combined with --incident-pdf")
     if args.backend == "openai_responses":
         if args.transport_archive_dir is None:
             parser.error("OpenAI Responses smoke requires --transport-archive-dir")
@@ -248,9 +262,14 @@ def main() -> int:
     else:
         archive_root = None
     records = []
+    selected_cases = (
+        CASES
+        if args.case is None
+        else tuple(case for case in CASES if case[0] == args.case)
+    )
     with tempfile.TemporaryDirectory(prefix="jaa-sanity-smoke-") as directory:
         root = Path(directory)
-        for case_id, expected, text in CASES:
+        for case_id, expected, text in selected_cases:
             records.append(_review_case(
                 case_id=case_id,
                 expected=expected,

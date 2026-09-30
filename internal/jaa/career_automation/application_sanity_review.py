@@ -16,7 +16,13 @@ from typing import Mapping, Sequence
 
 from pypdf import PdfReader
 
-from llm.client import LLMClient, LLMError, MockBackend, validate_json
+from llm.client import (
+    LLMClient,
+    LLMError,
+    MockBackend,
+    redact_backend_diagnostic,
+    validate_json,
+)
 
 from .evidence_matching import canonical_json, content_hash
 from .external_document_assurance import IntendedVacancy
@@ -167,13 +173,23 @@ class ApplicationSanityReviewError(ValueError):
         *,
         result: Mapping[str, object] | None = None,
         transport_evidence: Mapping[str, str] | None = None,
+        backend_failure: Mapping[str, object] | None = None,
     ) -> None:
         self.code = code
         self.result = dict(result) if result is not None else None
         self.transport_evidence = (
             dict(transport_evidence) if transport_evidence is not None else None
         )
+        self.backend_failure = (
+            dict(backend_failure) if backend_failure is not None else None
+        )
         super().__init__(f"application sanity review blocked ({code}): {message}")
+
+    def document(self) -> dict[str, object]:
+        value: dict[str, object] = {"code": self.code, "result": self.result}
+        if self.backend_failure is not None:
+            value["backend_failure"] = dict(self.backend_failure)
+        return value
 
 
 def _project_visible_listing_text(value: bytes) -> bytes:
@@ -625,7 +641,46 @@ def review_application_package(
             json_attempts=1,
         )
     except (LLMError, TimeoutError) as exc:
-        raise ApplicationSanityReviewError("review.backend_failure", str(exc)) from exc
+        raw_failure = getattr(exc, "backend_failure", None)
+        if isinstance(raw_failure, Mapping):
+            raw_category = raw_failure.get("error_category")
+            category = (
+                re.sub(r"[^a-zA-Z0-9_.-]", "_", raw_category)[:80]
+                if isinstance(raw_category, str)
+                else "backend_error"
+            )
+            raw_exit_code = raw_failure.get("exit_code")
+            exit_code = (
+                raw_exit_code
+                if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool)
+                else None
+            )
+            raw_diagnosis = raw_failure.get("stderr_diagnosis")
+            diagnosis = (
+                redact_backend_diagnostic(raw_diagnosis)
+                if isinstance(raw_diagnosis, str)
+                else None
+            )
+        else:
+            category = "timeout" if isinstance(exc, TimeoutError) else "backend_error"
+            exit_code = None
+            diagnosis = None
+        backend_failure = {
+            "error_category": category or "backend_error",
+            "exit_code": exit_code,
+            "stderr_diagnosis": diagnosis,
+        }
+        message = f"backend execution failed ({backend_failure['error_category']}"
+        if exit_code is not None:
+            message += f", exit {exit_code}"
+        if diagnosis:
+            message += f": {diagnosis}"
+        message += ")"
+        raise ApplicationSanityReviewError(
+            "review.backend_failure",
+            message,
+            backend_failure=backend_failure,
+        ) from exc
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise ApplicationSanityReviewError("review.invalid_result", str(exc)) from exc
     if result["verdict"] != "pass" or result["findings"]:

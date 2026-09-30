@@ -284,11 +284,11 @@ def install(value: bytes | None = None) -> dict[str, object]:
     }
 
 
-def install_preparation() -> dict[str, object]:
+def install_preparation(**host_paths: str | Path) -> dict[str, object]:
     """Install the distinct fixed preparation lifecycle authority."""
     if os.geteuid() != 0:
         raise PermissionError("installation requires root")
-    value = production_preparation_configuration_bytes()
+    value = production_preparation_configuration_bytes(**host_paths)
     outcome = _create_or_exact_at(
         PRODUCTION_PREPARATION_CONFIG_PATH,
         value,
@@ -337,23 +337,101 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--candidate-authority-sha256", help="SHA-256 of the candidate authority"
     )
+    parser.add_argument(
+        "--preparation-data-home", help="host-private preparation data root"
+    )
+    parser.add_argument(
+        "--preparation-repository-root", help="canonical deployed repository root"
+    )
+    parser.add_argument(
+        "--preparation-outbox-root", help="host-private handoff outbox root"
+    )
+    parser.add_argument(
+        "--preparation-candidate-authority-path",
+        help="path to the existing hash-pinned candidate authority",
+    )
+    parser.add_argument(
+        "--preparation-contact-authority-path",
+        help="path to the existing hash-pinned signed contact authority",
+    )
+    parser.add_argument(
+        "--preparation-contact-public-key-path",
+        help="path to the existing hash-pinned operator public key",
+    )
+    parser.add_argument(
+        "--preparation-contact-registry-path",
+        help="path to the existing hash-pinned signed contact registry",
+    )
+    parser.add_argument(
+        "--preparation-codex-binary", help="path to the existing hash-pinned Codex binary"
+    )
+    parser.add_argument(
+        "--preparation-poppler-bin",
+        help="path to the existing hash-pinned Poppler bin directory",
+    )
     args = parser.parse_args(argv)
-    host_values = (
+    handoff_host_values = (
         args.data_home,
         args.repository_root,
         args.output_root,
         args.candidate_authority_path,
         args.candidate_authority_sha256,
     )
-    custom_host = any(value is not None for value in host_values)
-    if custom_host and not all(value is not None for value in host_values):
+    custom_handoff = any(value is not None for value in handoff_host_values)
+    if custom_handoff and not all(value is not None for value in handoff_host_values):
         parser.error(
             "host deployment requires --data-home, --repository-root, --output-root, "
             "--candidate-authority-path and --candidate-authority-sha256 together"
         )
-    if custom_host and (args.print_preparation_config or args.install_preparation):
-        parser.error("host deployment options apply only to the production handoff")
-    value = (
+    preparation_host_values = {
+        "data_home": args.preparation_data_home,
+        "repository_root": args.preparation_repository_root,
+        "outbox_root": args.preparation_outbox_root,
+        "candidate_authority_path": args.preparation_candidate_authority_path,
+        "contact_authority_path": args.preparation_contact_authority_path,
+        "contact_public_key_path": args.preparation_contact_public_key_path,
+        "contact_registry_path": args.preparation_contact_registry_path,
+        "codex_binary": args.preparation_codex_binary,
+        "poppler_bin": args.preparation_poppler_bin,
+    }
+    custom_preparation = any(
+        value is not None for value in preparation_host_values.values()
+    )
+    if custom_preparation and not all(
+        value is not None for value in preparation_host_values.values()
+    ):
+        parser.error(
+            "host preparation requires all nine --preparation-* path options"
+        )
+    if custom_handoff and custom_preparation:
+        parser.error("handoff and preparation host options cannot be combined")
+    preparation_action = args.print_preparation_config or args.install_preparation
+    if custom_preparation and not preparation_action:
+        parser.error("--preparation-* options require a preparation action")
+    if custom_handoff and preparation_action:
+        parser.error("handoff host options cannot be used for preparation")
+    if preparation_action:
+        if args.print_preparation_config:
+            preparation_value = production_preparation_configuration_bytes(
+                **(preparation_host_values if custom_preparation else {})
+            )
+            sys.stdout.buffer.write(preparation_value)
+            sys.stdout.buffer.flush()
+            return 0
+        try:
+            result = install_preparation(
+                **(preparation_host_values if custom_preparation else {})
+            )
+        except (OSError, ValueError) as exc:
+            print(
+                f"market-handoff preparation configuration installation refused: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    handoff_value = (
         production_handoff_deployment_configuration_bytes(
             data_home=args.data_home,
             repository_root=args.repository_root,
@@ -361,22 +439,15 @@ def main(argv: list[str] | None = None) -> int:
             candidate_authority_path=args.candidate_authority_path,
             candidate_authority_sha256=args.candidate_authority_sha256,
         )
-        if custom_host
+        if custom_handoff
         else production_handoff_deployment_configuration_bytes()
     )
     if args.print_config:
-        sys.stdout.buffer.write(value)
-        sys.stdout.buffer.flush()
-        return 0
-    if args.print_preparation_config:
-        sys.stdout.buffer.write(production_preparation_configuration_bytes())
+        sys.stdout.buffer.write(handoff_value)
         sys.stdout.buffer.flush()
         return 0
     try:
-        if args.install_preparation:
-            result = install_preparation()
-        else:
-            result = install(value)
+        result = install(handoff_value)
     except (OSError, ValueError) as exc:
         print(
             f"market-handoff configuration installation refused: {exc}", file=sys.stderr
