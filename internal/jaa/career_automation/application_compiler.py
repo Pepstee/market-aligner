@@ -69,6 +69,9 @@ CV_SECTION_ORDER = (
     "Education",
     "Experience",
     "Skills",
+    "Highlights",
+    "Results",
+    "Outcomes",
 )
 LETTER_SECTION_ORDER = (
     "Opening",

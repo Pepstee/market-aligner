@@ -11,7 +11,9 @@ import pytest
 from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import (
     _approved_statements,
+    _build_candidate_application_source,
     _projection_evidence_sha256,
+    _profile_cv_section_for_evidence,
     build_market_application_decision_authority,
     build_candidate_application_deployment_binding,
     build_candidate_application_package,
@@ -479,6 +481,295 @@ def _synthetic_evidence_binding(tmp_path: Path) -> tuple[Path, dict[str, object]
         (canonical_json(projection) + "\n").encode("utf-8")
     ).hexdigest()
     return path, projection
+
+
+def _synthetic_composition_inputs(
+    tmp_path: Path,
+    *,
+    employment_index: int | None = None,
+    additional_kind: str | None = None,
+    matched_requirements: int = 2,
+    duplicate_last_statement: bool = False,
+) -> dict[str, object]:
+    statements = [
+        "Built a service dashboard that organised support requests by priority and showed unresolved work to operators.",
+        "Implemented validation for incoming records, catching invalid dates early and reducing repeated manual corrections during review.",
+        "Designed a searchable project catalogue with consistent metadata, making related examples easier to find and compare.",
+        "Created a batch processing workflow that grouped large data sets and produced a concise, reproducible completion summary.",
+        "Added accessible status indicators to a reporting page so users could distinguish queued, active, and completed tasks.",
+        "Refined a deployment checklist with verified prerequisites, clear rollback steps, and a repeatable validation sequence.",
+        "Developed a lightweight API adapter that normalised responses and preserved useful error details for downstream callers.",
+        "Measured import performance before and after indexing, recording test conditions and explaining the observed improvement.",
+    ]
+    if duplicate_last_statement:
+        statements[-1] = statements[0]
+    evidence_rows: list[dict[str, str]] = []
+    for index, text in enumerate(statements):
+        kind = "portfolio_artifact"
+        if index == employment_index:
+            kind = "employment_record"
+            text = (
+                "Worked as a software engineer maintaining an internal records service, "
+                "coordinating releases, and documenting dependable support practices."
+            )
+        elif index == 7 and additional_kind is not None:
+            kind = additional_kind
+            text = {
+                "verified_claim": (
+                    "Maintained a consistent release process with documented "
+                    "acceptance checks and clear rollback decisions."
+                ),
+                "work_artifact": (
+                    "Created a reusable project checklist with verified "
+                    "prerequisites and clear completion steps."
+                ),
+                "test_result": (
+                    "Recorded repeatable test results across representative "
+                    "data batches and summarised the failures for review."
+                ),
+                "external_outcome": (
+                    "Delivered a service update that reduced duplicate requests "
+                    "and improved turnaround for partner teams."
+                ),
+                "credential": (
+                    "Completed a course in software design, automated testing, "
+                    "and data handling, with a practical assessment."
+                ),
+            }[additional_kind]
+        evidence_rows.append(
+            {
+                "id": f"SYNTHETIC-PORTFOLIO-{index + 1:02d}",
+                "kind": kind,
+                "proof_class": kind,
+                "statement": text,
+            }
+        )
+    evidence_document = {
+        "schema_version": "synthetic-evidence-test.v1",
+        "statements": evidence_rows,
+    }
+    evidence_bytes = (canonical_json(evidence_document) + "\n").encode("utf-8")
+    evidence_path = tmp_path / "synthetic-composition-evidence.json"
+    evidence_path.write_bytes(evidence_bytes)
+    statement_projection = [
+        {
+            "id": row["id"],
+            "statement_sha256": hashlib.sha256(
+                row["statement"].encode("utf-8")
+            ).hexdigest(),
+            "kind": row["kind"],
+            "proof_class": row["proof_class"],
+        }
+        for row in evidence_rows
+    ]
+    candidate_projection: dict[str, object] = {
+        "schema_version": "jaa.candidate-authority-projection.v1",
+        "source_hashes": {
+            "approved_evidence": hashlib.sha256(evidence_bytes).hexdigest(),
+        },
+        "schema_sha256": hashlib.sha256(b"synthetic-schema").hexdigest(),
+        "policy_sha256": hashlib.sha256(b"synthetic-policy").hexdigest(),
+        "availability": {"status": "synthetic"},
+        "approved_evidence": statement_projection,
+        "claim_suppressors": {
+            "source_sha256": hashlib.sha256(b"synthetic-suppressors").hexdigest(),
+            "mode": "suppress_only",
+            "items": [],
+        },
+    }
+    candidate_projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(candidate_projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    vacancy_description = b"Synthetic platform-engineering vacancy description."
+    vacancy_description_sha256 = hashlib.sha256(vacancy_description).hexdigest()
+    vacancy_sha256 = hashlib.sha256(b"synthetic vacancy payload").hexdigest()
+    source_url = "https://boards.greenhouse.io/example/jobs/synthetic-001"
+    job_key = "synthetic-job-001"
+    requirements = (
+        "Build reliable services for operational workflows.",
+        "Maintain clear validation and reporting processes.",
+    )
+    evidence_matrix = [
+        {
+            "requirement_id": f"SYNTHETIC-REQUIREMENT-{index + 1:02d}",
+            "requirement_text": text,
+            "requirement_text_sha256": hashlib.sha256(
+                text.encode("utf-8")
+            ).hexdigest(),
+            "status": "matched" if index < matched_requirements else "no_match",
+            "evidence_ids": [evidence_rows[index]["id"]]
+            if index < matched_requirements
+            else [],
+            "classification": "essential",
+        }
+        for index, text in enumerate(requirements)
+    ]
+    decision_receipt = {
+        "decision": "eligible",
+        "job_key": job_key,
+        "role_title": "Platform Engineer",
+        "company_name": "Example Systems",
+        "vacancy_sha256": vacancy_sha256,
+        "vacancy_description_sha256": vacancy_description_sha256,
+        "source_url": source_url,
+        "observed_at": "2026-10-01T07:45:00+00:00",
+        "candidate_projection_sha256": candidate_projection["projection_sha256"],
+        "evidence_matrix": evidence_matrix,
+    }
+    return {
+        "decision_receipt": decision_receipt,
+        "candidate_projection": candidate_projection,
+        "job_key": job_key,
+        "vacancy_sha256": vacancy_sha256,
+        "source_url": source_url,
+        "role_title": "Platform Engineer",
+        "company_name": "Example Systems",
+        "contact": CandidateContact(
+            full_name="Synthetic Candidate",
+            email="candidate@example.test",
+            phone="+44 7700 900123",
+            city="London",
+            record_id="synthetic-contact",
+            record_version=1,
+            provenance_sha256="a" * 64,
+        ),
+        "approved_evidence_path": evidence_path,
+    }
+
+
+@pytest.mark.parametrize(
+    ("employment_index", "expected_headings"),
+    (
+        (None, ("Professional Summary", "Projects")),
+        (7, ("Professional Summary", "Projects", "Experience")),
+    ),
+)
+def test_generation_composes_verified_nonlegacy_profile_by_evidence_kind(
+    tmp_path: Path,
+    employment_index: int | None,
+    expected_headings: tuple[str, ...],
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        employment_index=employment_index,
+    )
+
+    built = _build_candidate_application_source(**arguments)
+    source = built.source
+    cv_rows = [
+        row
+        for section in source.cv_sections
+        for sentence_id in section.sentence_ids
+        for row in source.facts
+        if row.sentence_id == sentence_id
+    ]
+
+    assert tuple(section.heading for section in source.cv_sections) == expected_headings
+    assert len(cv_rows) == 8
+    assert len(" ".join(row.text for row in cv_rows).split()) >= 110
+    assert len({row.authority.candidate_evidence_id for row in cv_rows}) == 8
+    assert all("SYNTHETIC-PORTFOLIO-" not in row.text for row in cv_rows)
+    profile_bound = [
+        row
+        for row in cv_rows
+        if hasattr(row.authority, "candidate_profile_hash")
+    ]
+    assert profile_bound
+    assert all(
+        row.authority.candidate_profile_hash
+        == arguments["candidate_projection"]["projection_sha256"]
+        for row in profile_bound
+    )
+
+
+def test_generic_section_uses_verified_kind_not_legacy_id_spelling() -> None:
+    assert (
+        _profile_cv_section_for_evidence(
+            "E-001",
+            "portfolio_artifact",
+            legacy_profile=False,
+        )
+        == "Projects"
+    )
+    assert (
+        _profile_cv_section_for_evidence(
+            "E-001",
+            "credential",
+            legacy_profile=True,
+        )
+        == "Education"
+    )
+
+
+@pytest.mark.parametrize(
+    ("additional_kind", "expected_heading"),
+    (
+        ("verified_claim", "Highlights"),
+        ("work_artifact", "Projects"),
+        ("test_result", "Results"),
+        ("external_outcome", "Outcomes"),
+        ("credential", "Education"),
+    ),
+)
+def test_generic_factory_accepts_each_supported_evidence_kind(
+    tmp_path: Path,
+    additional_kind: str,
+    expected_heading: str,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        additional_kind=additional_kind,
+    )
+
+    source = _build_candidate_application_source(**arguments).source
+    sentence_id = next(
+        row.sentence_id
+        for row in source.facts
+        if row.authority.candidate_evidence_id == "SYNTHETIC-PORTFOLIO-08"
+    )
+    section_heading = next(
+        section.heading
+        for section in source.cv_sections
+        if sentence_id in section.sentence_ids
+    )
+
+    assert section_heading == expected_heading
+
+
+def test_generic_cover_letter_fills_two_bound_facts_without_legacy_ids(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=1,
+    )
+
+    source = _build_candidate_application_source(**arguments).source
+    letter_facts = [
+        row
+        for section in source.letter_sections
+        for sentence_id in section.sentence_ids
+        for row in source.facts
+        if row.sentence_id == sentence_id and row.fact_kind == "candidate"
+    ]
+    employer_facts = [row for row in source.facts if row.fact_kind == "employer"]
+
+    assert len(letter_facts) == 2
+    assert len({row.authority.candidate_evidence_id for row in letter_facts}) == 2
+    assert employer_facts
+    assert all(source.company_name in row.text for row in employer_facts)
+
+
+def test_generic_profile_composition_still_rejects_duplicate_cv_facts(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        duplicate_last_statement=True,
+    )
+
+    with pytest.raises(ValueError, match="candidate CV repeats factual content"):
+        _build_candidate_application_source(**arguments)
 
 
 def test_generation_evidence_digest_is_resolved_from_verified_projection(
