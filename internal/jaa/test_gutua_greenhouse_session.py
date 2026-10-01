@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import career_automation.gutua_greenhouse_session as session_module
 import career_automation.candidate_contact_authority as contact_module
+import career_automation.production_runner as runner_module
 from career_automation.gutua_greenhouse_session import GutuaGreenhouseSession
 from career_automation.gutua_greenhouse_session import (
     APPROVED_CANDIDATE_SOURCE_HASHES,
@@ -772,6 +773,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
         assessment={"eligible": True, "fit_score": decision["fit"]},
     )
     session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = None
     session.archive_root = archive_root
     session.repository_root = Path.cwd().resolve()
     session.candidate_projection = authority["candidate_projection"]
@@ -998,6 +1000,7 @@ def _synthetic_seam_fixture(
         assessment={"eligible": True, "fit_score": 0.8},
     )
     session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = tmp_path / "synthetic-approved-evidence.json"
     session.archive_root = archive_root
     session.repository_root = Path.cwd().resolve()
     session.candidate_projection = {"projection_sha256": "1" * 64}
@@ -1862,6 +1865,138 @@ def test_concrete_preparation_uses_only_owned_candidate_generator() -> None:
         entrypoint = inspect.getsource(method)
         assert f"self._prepare_application(item, recorder, page, sink, review_only={selection})" in entrypoint
         assert "sink.generate_candidate_application(" not in entrypoint
+
+
+def test_session_initializes_and_forwards_approved_evidence_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "archive"
+    repository = tmp_path / "repository"
+    archive.mkdir()
+    repository.mkdir()
+    evidence_path = tmp_path / "approved-evidence.json"
+    observed_market_path = {}
+
+    def initialize_market(session, _arguments, _receipt):
+        observed_market_path["value"] = session.approved_evidence_path
+
+    monkeypatch.setattr(
+        GutuaGreenhouseSession, "_initialize_market_execution", initialize_market
+    )
+    market_session = GutuaGreenhouseSession(
+        SimpleNamespace(
+            archive_root=archive,
+            repository_root=repository,
+            market_execution_receipt=tmp_path / "market-receipt.json",
+            approved_evidence_path=evidence_path,
+        )
+    )
+    assert market_session.approved_evidence_path == evidence_path
+    assert observed_market_path["value"] == evidence_path
+
+    normal_session = object.__new__(GutuaGreenhouseSession)
+
+    class StopAfterInitialization(Exception):
+        pass
+
+    def stop_before_discovery(_name):
+        assert normal_session.approved_evidence_path == evidence_path
+        raise StopAfterInitialization
+
+    monkeypatch.setattr(session_module, "_required_file", stop_before_discovery)
+    with pytest.raises(StopAfterInitialization):
+        normal_session.__init__(SimpleNamespace(approved_evidence_path=evidence_path))
+
+
+def test_prepare_application_forwards_explicit_approved_evidence_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vacancy_body = b"Synthetic local vacancy: build and test a demonstration service."
+    vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:synthetic-local:0002",
+        vacancy_sha256=hashlib.sha256(vacancy_body).hexdigest(),
+        source_url="http://127.0.0.1:1/synthetic/application",
+        role_title="Synthetic Software Engineer",
+        company_name="Example Systems",
+    )
+    evidence_path = tmp_path / "accepted-synthetic-evidence.json"
+    evidence_path.write_text('{"synthetic":true}\n')
+    session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = evidence_path
+    session.archive_root = tmp_path
+    session.repository_root = Path(__file__).resolve().parents[2]
+    session.market_context_by_key = {}
+    session.complete_vacancy_by_key = {vacancy.job_key: vacancy_body}
+    session.decision_by_key = {vacancy.job_key: {"receipt": {"synthetic": True}}}
+    session.candidate_projection = {"synthetic": True}
+    monkeypatch.setattr(
+        session_module,
+        "verify_vacancy_body_equivalence",
+        lambda *_args, **_kwargs: {"equivalent": True},
+    )
+    monkeypatch.setattr(
+        session_module,
+        "build_vacancy_review_material",
+        lambda **_kwargs: SimpleNamespace(document=lambda: {"synthetic": True}),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_required_file",
+        lambda _name: tmp_path / "contact-authority.json",
+    )
+    monkeypatch.setattr(
+        session_module,
+        "load_candidate_contact_authority",
+        lambda *_args, **_kwargs: SimpleNamespace(contact="synthetic-contact"),
+    )
+
+    class Attempt:
+        def add_artifact(self, *_args, **_kwargs):
+            pass
+
+    class Recorder:
+        attempt = Attempt()
+
+        def add_revision(self, *_args, **_kwargs):
+            pass
+
+    class Page:
+        def content(self):
+            return "<html><body>Synthetic local vacancy</body></html>"
+
+        def locator(self, _selector):
+            return SimpleNamespace(inner_text=lambda: "Synthetic local vacancy")
+
+    captured = {}
+
+    class Sink:
+        def generate_candidate_application(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    item = SimpleNamespace(vacancy=SimpleNamespace(vacancy=vacancy))
+    with pytest.raises(
+        TypeError, match="owned candidate generator returned an invalid package"
+    ):
+        session._prepare_application(item, Recorder(), Page(), Sink(), review_only=True)
+    assert captured["approved_evidence_path"] == evidence_path
+
+
+def test_production_runner_cli_accepts_optional_approved_evidence_path(
+    tmp_path: Path,
+) -> None:
+    common = ["--repository-root", str(tmp_path), "--archive-root", str(tmp_path)]
+    explicit = runner_module._build_parser().parse_args(
+        [
+            *common,
+            "--review-only",
+            "--approved-evidence-path",
+            str(tmp_path / "evidence.json"),
+        ]
+    )
+    legacy = runner_module._build_parser().parse_args([*common, "--review-only"])
+    assert explicit.approved_evidence_path == tmp_path / "evidence.json"
+    assert legacy.approved_evidence_path is None
 
 
 def test_original_visible_listing_is_archived_before_contact_authority(tmp_path, monkeypatch):

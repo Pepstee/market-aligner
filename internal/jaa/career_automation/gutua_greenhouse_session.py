@@ -399,6 +399,9 @@ def _required_file(environment_name: str) -> Path:
 
 class GutuaGreenhouseSession:
     def __init__(self, arguments) -> None:
+        self.approved_evidence_path = getattr(
+            arguments, "approved_evidence_path", None
+        )
         market_receipt = getattr(arguments, "market_execution_receipt", None)
         if market_receipt is not None:
             self.archive_root = Path(arguments.archive_root).resolve(strict=True)
@@ -1423,6 +1426,7 @@ class GutuaGreenhouseSession:
         product = sink.generate_candidate_application(
             decision_receipt=decision,
             candidate_projection=self.candidate_projection,
+            approved_evidence_path=self.approved_evidence_path,
             job_key=vacancy.job_key,
             vacancy_sha256=vacancy.vacancy_sha256,
             source_url=vacancy.source_url,

@@ -979,10 +979,15 @@ def _load_factory(reference: str):
     return factory
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, required=True)
     parser.add_argument("--archive-root", type=Path, required=True)
+    parser.add_argument(
+        "--approved-evidence-path",
+        type=Path,
+        help="explicit approved evidence file for owned application generation",
+    )
     parser.add_argument(
         "--market-execution-receipt",
         type=Path,
@@ -1012,6 +1017,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "retry only archived human-verification blocks that contain no click intent"
         ),
     )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
     arguments = parser.parse_args(argv)
     if arguments.review_only and arguments.max_terminal_attempts not in (None, 1):
         parser.error("--review-only permits at most one terminal outcome")
