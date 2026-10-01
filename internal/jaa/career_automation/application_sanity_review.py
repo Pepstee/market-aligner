@@ -693,7 +693,8 @@ def _combined_result_schema(criteria_count: int) -> dict[str, object]:
                                 "properties": {
                                     "code": {
                                         "type": "string",
-                                        "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                                        "maxLength": 64,
+                                        "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*(?![\\s\\S])",
                                     },
                                     "summary": {"type": "string", "maxLength": 4096},
                                     "evidence": {"type": "string", "maxLength": 16384},

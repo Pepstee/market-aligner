@@ -1508,36 +1508,6 @@ def _build_candidate_application_source(
             )
         )
 
-    opening_document = _employer_document(
-        f"vacancy-role-identity:{job_key}",
-        f"The {role_title} position is at {company_name}.",
-        source_identity=source_identity,
-    )
-    opening_fact_sha256 = content_hash(opening_document)
-    opening_text = str(opening_document["text"])
-    opening_employer = FactualSentence(
-        content_hash(
-            {
-                "contract": "jaa07.vacancy-role-factual-sentence.v1",
-                "employer_fact_sha256": opening_fact_sha256,
-                "text": opening_text,
-                "vacancy_sha256": vacancy_sha256,
-                "vacancy_source_identity": source_identity,
-            }
-        ),
-        opening_text,
-        opening_text,
-        "employer",
-        "cover_letter",
-        VacancyFactAuthority(
-            vacancy_source_identity=source_identity,
-            vacancy_sha256=vacancy_sha256,
-            employer_research_claim_id=str(opening_document["id"]),
-            employer_fact_sha256=opening_fact_sha256,
-        ),
-        canonical_json(opening_document),
-    )
-
     def profile_fact(
         evidence_id: str,
         document_kind: str,
@@ -1711,6 +1681,26 @@ def _build_candidate_application_source(
     letter_candidate_texts = {
         row.text.casefold().strip() for row in letter_candidate
     }
+    letter_opening_text = "Dear Hiring Manager,"
+    letter_close_text = (
+        "I would welcome the opportunity to discuss this work in more detail and "
+        "how I could contribute to the team."
+    )
+
+    def letter_has_content_floor() -> bool:
+        factual_text = " ".join(
+            (
+                letter_opening_text,
+                *(row.text for row in (*letter_candidate, *letter_employer)),
+                letter_close_text,
+            )
+        )
+        return (
+            len(letter_candidate) >= MINIMUM_LETTER_CANDIDATE_FACTS
+            and len(letter_evidence_ids) >= MINIMUM_LETTER_CANDIDATE_FACTS
+            and len(factual_text.split()) >= MINIMUM_LETTER_WORDS
+        )
+
     letter_profile_evidence_ids = tuple(str(row["id"]) for row in projection_rows)
     legacy_letter_priority = (
         PROFILE_LETTER_EVIDENCE_PRIORITY if legacy_profile else ()
@@ -1719,7 +1709,7 @@ def _build_candidate_application_source(
         *legacy_letter_priority,
         *letter_profile_evidence_ids,
     ):
-        if len(letter_evidence_ids) >= MINIMUM_LETTER_CANDIDATE_FACTS:
+        if letter_has_content_floor():
             break
         if evidence_id in letter_evidence_ids or evidence_id not in projection_by_id:
             continue
@@ -1732,26 +1722,74 @@ def _build_candidate_application_source(
         letter_evidence_ids.add(evidence_id)
         letter_candidate_texts.add(projected_fact.text.casefold().strip())
 
-    letter_open = _slot("cover_letter", "salutation", "Dear Hiring Manager,")
-    letter_intent = _slot(
-        "cover_letter",
-        "opening-intent",
+    def strategy_sibling_key(fact: FactualSentence) -> tuple[object, ...] | None:
+        authority = fact.authority
+        if not isinstance(authority, FactAuthority):
+            return None
+        return (
+            authority.requirement_id,
+            authority.candidate_claim_id,
+            authority.candidate_claim_version,
+            authority.candidate_evidence_id,
+            authority.candidate_evidence_version,
+            authority.employer_research_claim_id,
+            authority.employer_fact_sha256,
+        )
+
+    candidates_by_sibling: dict[tuple[object, ...], list[FactualSentence]] = {}
+    for fact in letter_candidate:
+        sibling = strategy_sibling_key(fact)
+        if sibling is not None:
+            candidates_by_sibling.setdefault(sibling, []).append(fact)
+    employers_by_sibling: dict[tuple[object, ...], list[FactualSentence]] = {}
+    unbound_employer_facts: list[FactualSentence] = []
+    for fact in letter_employer:
+        sibling = strategy_sibling_key(fact)
+        if sibling is None:
+            unbound_employer_facts.append(fact)
+        else:
+            employers_by_sibling.setdefault(sibling, []).append(fact)
+            if sibling not in candidates_by_sibling:
+                raise ValueError(
+                    "cover letter employer fact lacks an exact candidate sibling"
+                )
+    sibling_order = tuple(employers_by_sibling)
+    paired_groups = tuple(
         (
-            "I am applying for this position. "
-            "I want to build and operate dependable software systems, and this "
-            "opportunity is closely aligned with that direction."
-        ),
+            *candidates_by_sibling[sibling],
+            *employers_by_sibling[sibling],
+        )
+        for sibling in sibling_order
     )
-    letter_evidence_lead = _slot(
-        "cover_letter",
-        "evidence-lead",
-        "My strongest relevant work comes from systems I have built and evaluated.",
-    )
+    paired_candidate_ids = {
+        fact.sentence_id
+        for sibling in sibling_order
+        for fact in candidates_by_sibling[sibling]
+    }
+    if paired_groups:
+        opening_facts = paired_groups[0]
+        evidence_match_facts = [
+            fact for group in paired_groups[1:] for fact in group
+        ]
+        evidence_match_facts.extend(
+            fact
+            for fact in letter_candidate
+            if fact.sentence_id not in paired_candidate_ids
+        )
+    else:
+        opening_facts = (letter_candidate[0],)
+        evidence_match_facts = [
+            fact
+            for fact in letter_candidate
+            if fact.sentence_id != opening_facts[0].sentence_id
+        ]
+    evidence_match_facts.extend(unbound_employer_facts)
+
+    letter_open = _slot("cover_letter", "salutation", letter_opening_text)
     letter_close = _slot(
         "cover_letter",
         "close",
-        "I would welcome the opportunity to discuss this work in more detail and "
-        "how I could contribute to the team.",
+        letter_close_text,
     )
     cv_sections = tuple(
         DocumentSection(
@@ -1768,7 +1806,6 @@ def _build_candidate_application_source(
             for row in cv_sections_by_heading[section.heading]
         ),
         *letter_candidate,
-        opening_employer,
         *letter_employer,
     ]
     source = compile_application_source(
@@ -1782,25 +1819,18 @@ def _build_candidate_application_source(
         facts=facts,
         style_slots=(
             letter_open,
-            letter_intent,
-            letter_evidence_lead,
             letter_close,
         ),
         cv_sections=cv_sections,
         letter_sections=(
             DocumentSection(
                 "Opening",
-                (opening_employer.sentence_id,),
-                (letter_open.slot_id, letter_intent.slot_id),
+                tuple(row.sentence_id for row in opening_facts),
+                (letter_open.slot_id,),
             ),
             DocumentSection(
                 "Evidence Match",
-                tuple(row.sentence_id for row in letter_candidate),
-                (letter_evidence_lead.slot_id,),
-            ),
-            DocumentSection(
-                "Company Fit",
-                tuple(row.sentence_id for row in letter_employer),
+                tuple(row.sentence_id for row in evidence_match_facts),
             ),
             DocumentSection(
                 "Close",

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from career_automation.application_compiler import CandidateContact
+from career_automation.application_compiler import CandidateContact, FactAuthority
 from career_automation.rendering import _letter_paragraphs, render_pdf_artifacts
 from career_automation.candidate_application_factory import (
     _approved_statements,
@@ -358,14 +358,41 @@ def test_builds_plain_vacancy_bound_documents_from_approved_atoms() -> None:
         for section in package.source.letter_sections
         if section.heading == "Opening"
     )
-    assert len(opening.sentence_ids) == 1
-    opening_fact = next(
+    opening_facts = [
         fact
-        for fact in employer_facts
-        if fact.sentence_id == opening.sentence_ids[0]
+        for fact in package.source.facts
+        if fact.sentence_id in opening.sentence_ids
+    ]
+    opening_candidate = next(fact for fact in opening_facts if fact.fact_kind == "candidate")
+    opening_employer = next(fact for fact in opening_facts if fact.fact_kind == "employer")
+    assert isinstance(opening_candidate.authority, FactAuthority)
+    assert isinstance(opening_employer.authority, FactAuthority)
+    assert (
+        opening_candidate.authority.requirement_id,
+        opening_candidate.authority.candidate_claim_id,
+        opening_candidate.authority.candidate_claim_version,
+        opening_candidate.authority.candidate_evidence_id,
+        opening_candidate.authority.candidate_evidence_version,
+        opening_candidate.authority.employer_research_claim_id,
+        opening_candidate.authority.employer_fact_sha256,
+    ) == (
+        opening_employer.authority.requirement_id,
+        opening_employer.authority.candidate_claim_id,
+        opening_employer.authority.candidate_claim_version,
+        opening_employer.authority.candidate_evidence_id,
+        opening_employer.authority.candidate_evidence_version,
+        opening_employer.authority.employer_research_claim_id,
+        opening_employer.authority.employer_fact_sha256,
     )
-    assert package.source.role_title in opening_fact.text
-    assert package.source.company_name in opening_fact.text
+    assert len(" ".join(package.artifacts.editable.cover_letter_text.split()).split()) >= 90
+    assert "The " + package.source.role_title + " position is at " + package.source.company_name + "." not in package.artifacts.editable.cover_letter_text
+    assert "I am applying for this position" not in package.artifacts.editable.cover_letter_text
+    assert (
+        package.artifacts.editable.cover_letter_text.count(
+            "I would welcome the opportunity"
+        )
+        == 1
+    )
     assert any(
         phrase in package.artifacts.editable.cover_letter_text
         for phrase in (
@@ -821,10 +848,23 @@ def test_generic_cover_letter_fills_two_bound_facts_without_legacy_ids(
     ]
     employer_facts = [row for row in source.facts if row.fact_kind == "employer"]
 
-    assert len(letter_facts) == 2
-    assert len({row.authority.candidate_evidence_id for row in letter_facts}) == 2
+    assert len(letter_facts) >= 2
+    assert len({row.authority.candidate_evidence_id for row in letter_facts}) == len(
+        letter_facts
+    )
     assert employer_facts
     assert all(source.company_name in row.text for row in employer_facts)
+    letter_slots = {
+        slot.slot_id: slot.text
+        for slot in source.style_slots
+        if slot.document_kind == "cover_letter"
+    }
+    factual_text = " ".join(
+        row.text
+        for row in source.facts
+        if row.document_kind == "cover_letter"
+    )
+    assert len(" ".join((*letter_slots.values(), factual_text)).split()) >= 90
 
 
 def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
@@ -835,30 +875,95 @@ def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
         matched_requirements=1,
     )
 
-    source = _build_candidate_application_source(**arguments).source
+    package = build_candidate_application_package(**arguments)
+    source = package.source
     paragraphs = _letter_paragraphs(source)
-    opening = paragraphs[0].casefold()
-    assert opening.count(source.role_title.casefold()) == 1
-    assert opening.count(source.company_name.casefold()) == 1
+    assert tuple(section.heading for section in source.letter_sections) == (
+        "Opening",
+        "Evidence Match",
+        "Close",
+    )
+    opening_section = source.letter_sections[0]
+    opening_facts = [
+        fact for fact in source.facts if fact.sentence_id in opening_section.sentence_ids
+    ]
+    assert [fact.fact_kind for fact in opening_facts] == ["candidate", "employer"]
+    candidate_fact, employer_fact = opening_facts
+    assert isinstance(candidate_fact.authority, FactAuthority)
+    assert isinstance(employer_fact.authority, FactAuthority)
+    sibling_fields = (
+        "requirement_id",
+        "candidate_claim_id",
+        "candidate_claim_version",
+        "candidate_evidence_id",
+        "candidate_evidence_version",
+        "employer_research_claim_id",
+        "employer_fact_sha256",
+    )
+    assert tuple(getattr(candidate_fact.authority, key) for key in sibling_fields) == tuple(
+        getattr(employer_fact.authority, key) for key in sibling_fields
+    )
+    letter_fact_text = " ".join(
+        fact.text for fact in source.facts if fact.document_kind == "cover_letter"
+    )
+    letter_slot_text = " ".join(
+        slot.text for slot in source.style_slots if slot.document_kind == "cover_letter"
+    )
+    assert len(f"{letter_fact_text} {letter_slot_text}".split()) >= 90
     assert paragraphs[-1] == f"Kind regards,\n{source.contact.full_name}"
-    company_fit = next(
-        section for section in source.letter_sections if section.heading == "Company Fit"
-    )
-    assert company_fit.sentence_ids
-    assert not company_fit.style_slot_ids
-    assert all(
-        next(fact for fact in source.facts if fact.sentence_id == sentence_id).fact_kind
-        == "employer"
-        for sentence_id in company_fit.sentence_ids
-    )
-
-    artifacts = render_pdf_artifacts(source)
     for text in (
-        artifacts.editable.cover_letter_text,
-        artifacts.cover_letter_pdf.extracted_text,
+        package.artifacts.editable.cover_letter_text,
+        package.artifacts.cover_letter_pdf.extracted_text,
     ):
+        flattened = " ".join(text.split())
+        candidate_text = " ".join(candidate_fact.text.split())
+        employer_text = " ".join(employer_fact.text.split())
+        assert flattened.index(candidate_text) < flattened.index(employer_text)
+        assert flattened.count(candidate_text) == 1
+        assert flattened.count(employer_text) == 1
         assert text.casefold().count("kind regards") == 1
         assert "requirement below" not in text.casefold()
+        assert "i am applying for this position" not in text.casefold()
+        assert text.casefold().count("i would welcome the opportunity") == 1
+
+
+def test_generic_zero_match_keeps_vacancy_fact_in_a_candidate_factual_section(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=0,
+    )
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    opening = source.letter_sections[0]
+    evidence_match = source.letter_sections[1]
+    facts = {row.sentence_id: row for row in source.facts}
+    opening_facts = [facts[sentence_id] for sentence_id in opening.sentence_ids]
+    evidence_facts = [facts[sentence_id] for sentence_id in evidence_match.sentence_ids]
+    assert tuple(section.heading for section in source.letter_sections) == (
+        "Opening",
+        "Evidence Match",
+        "Close",
+    )
+    assert [row.fact_kind for row in opening_facts] == ["candidate"]
+    assert any(row.fact_kind == "candidate" for row in evidence_facts)
+    employer_facts = [row for row in evidence_facts if row.fact_kind == "employer"]
+    assert employer_facts
+    evidence_paragraph = " ".join(_letter_paragraphs(source)[1].split())
+    assert any(
+        evidence_paragraph.index(" ".join(row.text.split()))
+        < evidence_paragraph.index(" ".join(employer_facts[0].text.split()))
+        for row in evidence_facts
+        if row.fact_kind == "candidate"
+    )
+    for text in (
+        package.artifacts.editable.cover_letter_text,
+        package.artifacts.cover_letter_pdf.extracted_text,
+    ):
+        flattened = " ".join(text.split())
+        for fact in (*opening_facts, *evidence_facts):
+            assert flattened.count(" ".join(fact.text.split())) == 1
 
 
 def test_generic_profile_composition_still_rejects_duplicate_cv_facts(

@@ -291,6 +291,76 @@ def test_combined_review_blocks_if_any_component_finds_a_problem(
     assert captured.value.document()["code"] == "review.combined_finding"
 
 
+def test_combined_criterion_finding_code_schema_accepts_only_bounded_dotted_codes() -> None:
+    schema = review_module._combined_result_schema(2)
+
+    def result_with_code(code: str) -> dict[str, object]:
+        result = _combined_result(blocked_criterion="resume-cover-letter")
+        result["criteria_reviews"][0]["findings"][0]["code"] = code
+        return result
+
+    for code in (
+        "a",
+        "cover_letter.generic_opening",
+        "cover_letter.repeats_listing",
+        "a" * 64,
+    ):
+        llm_client_module.validate_json(result_with_code(code), schema)
+
+    for code in (
+        "",
+        ".leading",
+        "trailing.",
+        "double..dot",
+        "Upper.case",
+        "a-b",
+        "a b",
+        "1digit",
+        "_start",
+        "a\n",
+        "a.\n",
+        "a" * 65,
+    ):
+        with pytest.raises(llm_client_module.LLMError):
+            llm_client_module.validate_json(result_with_code(code), schema)
+
+
+def test_combined_review_preserves_dotted_block_findings_without_receipt(tmp_path) -> None:
+    result = _combined_result(blocked_criterion="resume-cover-letter")
+    findings = [
+        {
+            "code": "cover_letter.generic_opening",
+            "summary": "Synthetic opening issue.",
+            "evidence": "A generic synthetic opening appears in the exact text.",
+            "remediation": "Use only bound synthetic facts.",
+        },
+        {
+            "code": "cover_letter.repeats_listing",
+            "summary": "Synthetic repeated-listing issue.",
+            "evidence": "Bound synthetic vacancy text is repeated.",
+            "remediation": "Remove the duplicate synthetic material.",
+        },
+    ]
+    result["criteria_reviews"][0]["findings"] = findings
+    backend = ScriptedBackend(result, model="gpt-6-luna")
+
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package_with_criteria(
+            package(),
+            client=client(backend, tmp_path),
+            criteria_prompt="Apply both synthetic read-only review criteria.",
+            criteria=(
+                {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+                {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+            ),
+        )
+
+    assert backend.calls == 1
+    assert captured.value.document()["code"] == "review.combined_finding"
+    assert captured.value.result == result
+    assert captured.value.result["criteria_reviews"][0]["findings"] == findings
+
+
 def test_applicant_projection_requires_every_postfill_value_and_keeps_scope_narrow() -> None:
     fields = (("email", "Email address", "planned@example.invalid"),)
     bindings = (("email", "contact-email"),)

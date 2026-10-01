@@ -1070,6 +1070,12 @@ def _validate_sections(
             or len(headings) < 2
         ):
             raise ValueError("cv sections are not canonical")
+    elif document_kind == "cover_letter":
+        without_company_fit = tuple(
+            heading for heading in expected_headings if heading != "Company Fit"
+        )
+        if headings not in (expected_headings, without_company_fit):
+            raise ValueError(f"{document_kind} sections are not canonical")
     elif headings != expected_headings:
         raise ValueError(f"{document_kind} sections are not canonical")
     covered: set[str] = set()
