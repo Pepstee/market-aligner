@@ -1,11 +1,11 @@
 {
-  "community_count": 30069,
-  "edge_count": 73057,
-  "node_count": 56499,
+  "community_count": 30062,
+  "edge_count": 73099,
+  "node_count": 56507,
   "outputs": {
-    ".graphify_labels.json": "05370ce11dc94fc569d7f3ad0f66945cb55380aabb8f50d2332dc3e9430ecd5e",
-    "GRAPH_REPORT.md": "c3d1989141c7d89a9a210c97c520090c7166093bc273872ac4ee8fc48556ab8d",
-    "graph.json": "940750cb923752cff9fb26f796282d684ba102705e39ae7967866c859c8309e7"
+    ".graphify_labels.json": "1ad87092e9d059613cd0d7290c6f64a9eba235ec0cd06f0c1a2368a86d171053",
+    "GRAPH_REPORT.md": "c5fe4fa18c0dc3a9498ad2f7d797346096c1d3774ed5d84ce084019ab0408750",
+    "graph.json": "7bf993a52314ab64e6957b3104b7b5cf213a8c577b06dba9ed0d960f76dfe6b4"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "6dc2b576bbdd29db190d7a96dd696f1b3bb5f305",
+  "source_base_commit": "146528b89db3e5f7a4c1359a55453da739fd64ea",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -82,7 +82,7 @@
     "internal/jaa/career_automation/browser_executor.py": "9205268e371a4bff9618c023c88b86a226eaa8c7fecaf9aef8b8c9427d9e52e2",
     "internal/jaa/career_automation/browser_workflows.py": "d76a20c4c8b6cc5465f4cdc9b39c535ab367f4f587fa854579e46865401ba122",
     "internal/jaa/career_automation/canary_forensic_evidence.py": "368050e5f6971525fc5adfaa6ca7309287dc68b6cdb33091230d3e9b3ed2cfb4",
-    "internal/jaa/career_automation/candidate_application_factory.py": "1c9123eb7b3303f4da791f5ad8a8a7aee35832c2c03673c070b82deabd3972d9",
+    "internal/jaa/career_automation/candidate_application_factory.py": "fd477737b83713b6338ab331dffd0dab164d991a2a0a802ed8de6399c1987352",
     "internal/jaa/career_automation/candidate_authority.py": "3e392bf91817e1be696cec7e5434c24cd277c92501504898da7beab3c5e4dd35",
     "internal/jaa/career_automation/candidate_contact_authority.py": "25cb102d1124ad286cf298c1bc9b8fe401b2f1173a44a855c4edb26633381b0f",
     "internal/jaa/career_automation/candidate_generation_worker.py": "82fe4385d9b14390e20ec7ae066cd6951af4cb99dcad30f6ffd06ecce3b510ed",
@@ -504,7 +504,7 @@
     "internal/jaa/test_assurance_manifest_truth.py": "7c332645e440d38b38b42e0ad9b914a8bc737db7b72473d09b146ad818cdc969",
     "internal/jaa/test_ats_application_authority.py": "f1c5dddae68334d7ed5af23ad885966e79be99d2d88ddbaa702d756d4d117d70",
     "internal/jaa/test_authority_provisioning.py": "2bc92afd73dc8eaf92d02507d2ddca29a1370f9a0e4745f1003b2c1087d52f47",
-    "internal/jaa/test_candidate_application_factory.py": "9cc9c17259bca7ffc469d74baf695185a3ced58e31732bf30f15901a530bc15f",
+    "internal/jaa/test_candidate_application_factory.py": "17cf160a9385ab8ae895b8504704d4dc738fa46d15bcca42cd57a4f00fd4f97a",
     "internal/jaa/test_candidate_authority.py": "ca4a1791b5e918ba04c765e3ac533a2c8f1364d3df29ffd3b708c02c45b6fb4d",
     "internal/jaa/test_candidate_contact_authority.py": "cdb84f6b6c7af8ccff2b7443d91684cc0071fb6e973cb99dbe761454a6318cc8",
     "internal/jaa/test_candidate_contact_enrollment.py": "86d7afacc8f6fcec19c539840cb3c2740d5bbb6e279320407714d411bf3a2e2e",

@@ -830,7 +830,26 @@ def _load_approved_statements(
     result = {str(row["id"]): dict(row) for row in rows if isinstance(row, Mapping)}
     if len(result) != len(rows):
         raise ValueError("application factory candidate evidence is ambiguous")
+    for row in result.values():
+        _evidence_document_targets(row)
     return result, source_context
+
+
+_DOCUMENT_TARGETS = frozenset({"cv", "cover_letter"})
+
+
+def _evidence_document_targets(evidence: Mapping[str, object]) -> frozenset[str]:
+    if "document_targets" not in evidence:
+        return _DOCUMENT_TARGETS
+    raw = evidence["document_targets"]
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(not isinstance(value, str) or value not in _DOCUMENT_TARGETS for value in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        raise ValueError("candidate evidence document targets are malformed")
+    return frozenset(raw)
 
 
 def _sha256(value: bytes) -> str:
@@ -1477,6 +1496,10 @@ def _build_candidate_application_source(
         if element.kind in {"cv_emphasis", "cover_letter_argument"}:
             document_kind = "cv" if element.kind == "cv_emphasis" else "cover_letter"
             evidence = statements[element.candidate_evidence_id]
+            if document_kind not in _evidence_document_targets(evidence):
+                raise ValueError(
+                    "strategy evidence contradicts its candidate document scope"
+                )
             sentence = _sentence(
                 element,
                 text=str(evidence["statement"]),
@@ -1549,6 +1572,8 @@ def _build_candidate_application_source(
             != projected.get("statement_sha256")
         ):
             raise ValueError("profile evidence differs from candidate authority")
+        if document_kind not in _evidence_document_targets(evidence):
+            return None
         verified_evidence_kinds[evidence_id] = str(evidence["proof_class"])
         try:
             outward_text = _outward_profile_text(
@@ -1723,6 +1748,24 @@ def _build_candidate_application_source(
     legacy_letter_priority = (
         PROFILE_LETTER_EVIDENCE_PRIORITY if legacy_profile else ()
     )
+    for evidence_id in letter_profile_evidence_ids:
+        if (
+            evidence_id in letter_evidence_ids
+            or evidence_id not in projection_by_id
+            or evidence_id not in statements
+            or _evidence_document_targets(statements[evidence_id])
+            != {"cover_letter"}
+        ):
+            continue
+        projected_fact = profile_fact(evidence_id, "cover_letter")
+        if projected_fact is None:
+            continue
+        if projected_fact.text.casefold().strip() in letter_candidate_texts:
+            continue
+        letter_candidate.append(projected_fact)
+        letter_evidence_ids.add(evidence_id)
+        letter_candidate_texts.add(projected_fact.text.casefold().strip())
+
     for evidence_id in (
         *legacy_letter_priority,
         *letter_profile_evidence_ids,
@@ -1784,7 +1827,29 @@ def _build_candidate_application_source(
         for sibling in sibling_order
         for fact in candidates_by_sibling[sibling]
     }
-    if paired_groups:
+    letter_only_facts = [
+        fact
+        for fact in letter_candidate
+        if fact.sentence_id not in paired_candidate_ids
+        and _evidence_document_targets(
+            statements[fact.authority.candidate_evidence_id]
+        )
+        == {"cover_letter"}
+    ]
+    letter_only_ids = {fact.sentence_id for fact in letter_only_facts}
+    if letter_only_facts:
+        opening_facts = (letter_only_facts[0],)
+        evidence_match_facts = [
+            fact for group in paired_groups for fact in group
+        ]
+        evidence_match_facts.extend(
+            fact
+            for fact in letter_candidate
+            if fact.sentence_id not in paired_candidate_ids
+            and fact.sentence_id not in letter_only_ids
+        )
+        evidence_match_facts.extend(letter_only_facts[1:])
+    elif paired_groups:
         opening_facts = paired_groups[0]
         evidence_match_facts = [
             fact for group in paired_groups[1:] for fact in group

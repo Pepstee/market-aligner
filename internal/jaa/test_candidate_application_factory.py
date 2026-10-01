@@ -15,8 +15,10 @@ from career_automation.application_compiler import verify_application_source
 from career_automation.rendering import _letter_paragraphs, render_pdf_artifacts
 from career_automation.candidate_application_factory import (
     _approved_statements,
+    _evidence_document_targets,
     _fact_binding,
     _build_candidate_application_source,
+    _load_approved_statements,
     _projection_evidence_sha256,
     _profile_cv_section_for_evidence,
     _select_profile_capability_fact,
@@ -675,6 +677,53 @@ def _synthetic_composition_inputs(
     }
 
 
+def _update_synthetic_document_targets(
+    arguments: dict[str, object],
+    targets_by_id: dict[str, list[str]],
+    additional_rows: tuple[dict[str, object], ...] = (),
+) -> None:
+    evidence_path = arguments["approved_evidence_path"]
+    evidence_document = json.loads(evidence_path.read_bytes())
+    for row in evidence_document["statements"]:
+        if row["id"] in targets_by_id:
+            row["document_targets"] = targets_by_id[row["id"]]
+    projection_rows = []
+    for row in additional_rows:
+        evidence_row = {
+            "id": row["id"],
+            "kind": "portfolio_artifact",
+            "proof_class": "portfolio_artifact",
+            "statement": row["statement"],
+            "document_targets": row["document_targets"],
+        }
+        evidence_document["statements"].append(evidence_row)
+        projection_rows.append(
+            {
+                "id": evidence_row["id"],
+                "statement_sha256": hashlib.sha256(
+                    evidence_row["statement"].encode("utf-8")
+                ).hexdigest(),
+                "kind": evidence_row["kind"],
+                "proof_class": evidence_row["proof_class"],
+            }
+        )
+    evidence_bytes = (canonical_json(evidence_document) + "\n").encode("utf-8")
+    evidence_path.write_bytes(evidence_bytes)
+    projection = json.loads(json.dumps(arguments["candidate_projection"]))
+    projection["source_hashes"]["approved_evidence"] = hashlib.sha256(
+        evidence_bytes
+    ).hexdigest()
+    projection["approved_evidence"].extend(projection_rows)
+    projection.pop("projection_sha256")
+    projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    decision = dict(arguments["decision_receipt"])
+    decision["candidate_projection_sha256"] = projection["projection_sha256"]
+    arguments["candidate_projection"] = projection
+    arguments["decision_receipt"] = decision
+
+
 @pytest.mark.parametrize(
     ("employment_index", "expected_headings"),
     (
@@ -857,6 +906,294 @@ def test_generic_first_person_rewrite_uses_verified_evidence_source_context(
         == rewrite.document()
     )
     assert "source_bytes" not in binding_json
+
+
+def test_document_targets_omission_defaults_to_both_documents(tmp_path: Path) -> None:
+    path, _projection = _synthetic_evidence_binding(tmp_path)
+    evidence = hashlib.sha256(path.read_bytes()).hexdigest()
+    statements, _source_context = _load_approved_statements(
+        path,
+        expected_evidence_sha256=evidence,
+    )
+    assert _evidence_document_targets(statements["SYNTHETIC-EVIDENCE-1"]) == {
+        "cv",
+        "cover_letter",
+    }
+
+
+@pytest.mark.parametrize(
+    "targets",
+    (None, [], ["cv", "cv"], ["resume"], [1], [["cv"]], "cv"),
+)
+def test_document_targets_reject_malformed_metadata_at_load(
+    tmp_path: Path,
+    targets: object,
+) -> None:
+    path, _projection = _synthetic_evidence_binding(tmp_path)
+    evidence_document = json.loads(path.read_bytes())
+    evidence_document["statements"][0]["document_targets"] = targets
+    evidence_bytes = (canonical_json(evidence_document) + "\n").encode("utf-8")
+    path.write_bytes(evidence_bytes)
+    with pytest.raises(ValueError, match="document targets are malformed"):
+        _load_approved_statements(
+            path,
+            expected_evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("document_kind", "contradictory_target"),
+    (("cv", ["cover_letter"]), ("cover_letter", ["cv"])),
+)
+def test_strategy_evidence_scope_conflicts_fail_closed(
+    tmp_path: Path,
+    document_kind: str,
+    contradictory_target: list[str],
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, matched_requirements=1)
+    baseline = _build_candidate_application_source(**arguments).source
+    fact = next(
+        row
+        for row in baseline.facts
+        if row.document_kind == document_kind
+        and isinstance(row.authority, FactAuthority)
+    )
+    evidence_id = fact.authority.candidate_evidence_id
+    _update_synthetic_document_targets(
+        arguments,
+        {evidence_id: contradictory_target},
+    )
+    with pytest.raises(
+        ValueError,
+        match="strategy evidence contradicts its candidate document scope",
+    ):
+        _build_candidate_application_source(**arguments)
+
+
+def test_letter_only_evidence_stays_out_of_cv_and_keeps_strategy_pairs(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, matched_requirements=1)
+    context_rows = (
+        {
+            "id": "SYNTHETIC-LETTER-CONTEXT-01",
+            "statement": (
+                "Designed a searchable delivery guide that connects verified "
+                "prerequisites with clear handoff steps for project teams."
+            ),
+            "document_targets": ["cover_letter"],
+        },
+        {
+            "id": "SYNTHETIC-LETTER-CONTEXT-02",
+            "statement": (
+                "Built a release checklist that records repeatable validation "
+                "steps and explains recovery choices for maintainers."
+            ),
+            "document_targets": ["cover_letter"],
+        },
+        {
+            "id": "SYNTHETIC-CV-CONTEXT-01",
+            "statement": (
+                "Created a service monitoring panel that groups status "
+                "signals and highlights unresolved operational work."
+            ),
+            "document_targets": ["cv"],
+        },
+    )
+    _update_synthetic_document_targets(arguments, {}, context_rows)
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    facts = {row.sentence_id: row for row in source.facts}
+    cv_ids = {
+        sentence_id
+        for section in source.cv_sections
+        for sentence_id in section.sentence_ids
+    }
+    letter_ids = {
+        sentence_id
+        for section in source.letter_sections
+        for sentence_id in section.sentence_ids
+    }
+    evidence_by_id = {
+        row["id"]: row
+        for row in json.loads(
+            arguments["approved_evidence_path"].read_bytes()
+        )["statements"]
+    }
+    letter_context = facts[
+        next(
+            sentence_id
+            for sentence_id in letter_ids
+            if facts[sentence_id].authority.candidate_evidence_id
+            == "SYNTHETIC-LETTER-CONTEXT-01"
+        )
+    ]
+    cv_context = facts[
+        next(
+            sentence_id
+            for sentence_id in cv_ids
+            if facts[sentence_id].authority.candidate_evidence_id
+            == "SYNTHETIC-CV-CONTEXT-01"
+        )
+    ]
+    letter_context_ids = {
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.document_kind == "cover_letter"
+    }
+    assert letter_context.authority.candidate_evidence_id not in {
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.sentence_id in cv_ids
+    }
+    assert "SYNTHETIC-LETTER-CONTEXT-02" in letter_context_ids
+    assert "SYNTHETIC-CV-CONTEXT-01" not in letter_context_ids
+    assert letter_context.text == evidence_by_id[
+        "SYNTHETIC-LETTER-CONTEXT-01"
+    ]["statement"]
+    assert cv_context.text == evidence_by_id["SYNTHETIC-CV-CONTEXT-01"]["statement"]
+    assert source.letter_sections[0].sentence_ids == (letter_context.sentence_id,)
+    evidence_match = source.letter_sections[1]
+    evidence_match_ids = set(evidence_match.sentence_ids)
+    for employer_fact in (
+        row
+        for row in source.facts
+        if row.document_kind == "cover_letter" and row.fact_kind == "employer"
+    ):
+        assert isinstance(employer_fact.authority, FactAuthority)
+        sibling = next(
+            row
+            for row in source.facts
+            if row.document_kind == "cover_letter"
+            and row.fact_kind == "candidate"
+            and isinstance(row.authority, FactAuthority)
+            and row.authority.requirement_id == employer_fact.authority.requirement_id
+            and row.authority.candidate_claim_id
+            == employer_fact.authority.candidate_claim_id
+            and row.authority.candidate_claim_version
+            == employer_fact.authority.candidate_claim_version
+            and row.authority.candidate_evidence_id
+            == employer_fact.authority.candidate_evidence_id
+            and row.authority.candidate_evidence_version
+            == employer_fact.authority.candidate_evidence_version
+            and row.authority.employer_research_claim_id
+            == employer_fact.authority.employer_research_claim_id
+            and row.authority.employer_fact_sha256
+            == employer_fact.authority.employer_fact_sha256
+        )
+        assert sibling.sentence_id in evidence_match_ids
+        assert employer_fact.sentence_id in evidence_match_ids
+    normalized_cv = " ".join(package.artifacts.editable.cv_text.split())
+    context_statements = (
+        evidence_by_id["SYNTHETIC-LETTER-CONTEXT-01"]["statement"],
+        evidence_by_id["SYNTHETIC-LETTER-CONTEXT-02"]["statement"],
+    )
+    assert all(
+        " ".join(statement.split()) not in normalized_cv
+        for statement in context_statements
+    )
+    for text in (
+        package.artifacts.editable.cover_letter_text,
+        package.artifacts.cover_letter_pdf.extracted_text,
+    ):
+        normalized_text = " ".join(text.split())
+        assert all(
+            normalized_text.count(" ".join(statement.split())) == 1
+            for statement in context_statements
+        )
+
+
+def test_explicit_both_document_targets_preserve_rendered_output_order(
+    tmp_path: Path,
+) -> None:
+    baseline_dir = tmp_path / "baseline"
+    explicit_dir = tmp_path / "explicit"
+    baseline_dir.mkdir()
+    explicit_dir.mkdir()
+    baseline_arguments = _synthetic_composition_inputs(baseline_dir)
+    explicit_arguments = _synthetic_composition_inputs(explicit_dir)
+    ids = {
+        row["id"]
+        for row in json.loads(
+            explicit_arguments["approved_evidence_path"].read_bytes()
+        )["statements"]
+    }
+    _update_synthetic_document_targets(
+        explicit_arguments,
+        {evidence_id: ["cv", "cover_letter"] for evidence_id in ids},
+    )
+    baseline = build_candidate_application_package(**baseline_arguments)
+    explicit = build_candidate_application_package(**explicit_arguments)
+    assert explicit.artifacts.editable.cv_text == baseline.artifacts.editable.cv_text
+    assert explicit.artifacts.editable.cover_letter_text == baseline.artifacts.editable.cover_letter_text
+    assert explicit.artifacts.cv_pdf.extracted_text == baseline.artifacts.cv_pdf.extracted_text
+    assert explicit.artifacts.cover_letter_pdf.extracted_text == baseline.artifacts.cover_letter_pdf.extracted_text
+
+
+def test_all_letter_only_profile_facts_use_one_opening_anchor(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=0,
+    )
+    context_rows = tuple(
+        {
+            "id": f"SYNTHETIC-LETTER-ONLY-{index:02d}",
+            "statement": statement,
+            "document_targets": ["cover_letter"],
+        }
+        for index, statement in enumerate(
+            (
+                "Designed a searchable delivery guide that connects verified prerequisites with clear handoff steps, helping project teams find implementation notes quickly.",
+                "Built a release checklist that records repeatable validation steps and explains recovery choices, so maintainers can complete handoffs consistently.",
+                "Created an onboarding map linking service ownership, operational checks, and escalation routes, giving contributors a concise reference during planned changes.",
+            ),
+            start=1,
+        )
+    )
+    _update_synthetic_document_targets(arguments, {}, context_rows)
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    facts = {row.sentence_id: row for row in source.facts}
+    candidate_ids = {
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.document_kind == "cover_letter" and row.fact_kind == "candidate"
+    }
+    expected_ids = {row["id"] for row in context_rows}
+    assert candidate_ids == expected_ids
+    assert source.letter_sections[0].sentence_ids == (
+        next(
+            row.sentence_id
+            for row in source.facts
+            if row.authority.candidate_evidence_id == "SYNTHETIC-LETTER-ONLY-01"
+        ),
+    )
+    evidence_match_ids = set(source.letter_sections[1].sentence_ids)
+    assert all(
+        next(
+            row.sentence_id
+            for row in source.facts
+            if row.authority.candidate_evidence_id == evidence_id
+        )
+        in evidence_match_ids
+        for evidence_id in expected_ids - {"SYNTHETIC-LETTER-ONLY-01"}
+    )
+    assert len(candidate_ids) == len(source.letter_sections[0].sentence_ids) + sum(
+        facts[sentence_id].fact_kind == "candidate"
+        for sentence_id in source.letter_sections[1].sentence_ids
+    )
+    for fact in (
+        row
+        for row in source.facts
+        if row.document_kind == "cover_letter" and row.fact_kind == "candidate"
+    ):
+        assert fact.authority.candidate_evidence_id not in {
+            row.authority.candidate_evidence_id
+            for row in source.facts
+            if row.document_kind == "cv"
+        }
 
 
 @pytest.mark.parametrize(
