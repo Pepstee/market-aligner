@@ -4,8 +4,8 @@
   "node_count": 56488,
   "outputs": {
     ".graphify_labels.json": "8b460b4bf83939d4baab1795c54c1fcd68762da79c973f513d4d8039b3d6f796",
-    "GRAPH_REPORT.md": "afb7aa379cb5f092798f1f6354e69f5213eb576bcd06bfbc4ac067a551d43062",
-    "graph.json": "75e7a4a6f8a72b3f9c13ec233b2ddfc33a6797bd7c6daeb11b039f66869f39ef"
+    "GRAPH_REPORT.md": "e20442f4d88a229d70229b10db1151f419a3b8e6e8f79c430f544b2f2f14b0d1",
+    "graph.json": "41c91aa46db306c371bf18f4e3d701466937eb20aaa9e6df5b10112c25f96df9"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "956569bba04d796fad55fae78a88cadebba6e80e",
+  "source_base_commit": "baf8b0fa009f5063ee624a313cbcd2731f8f03e2",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -71,7 +71,7 @@
     "internal/jaa/career_automation/application_preview.py": "f1d85977ab8adf914ca365ba44082ee8d33f12917d8a7e3c8198dee856499309",
     "internal/jaa/career_automation/application_quality.py": "737e2c206800c9b0a1e87302c843c5ee2baaabb90ca86830e8ad4a925a805ecc",
     "internal/jaa/career_automation/application_quality_contracts.py": "dfeb4d210ea2d5e9e6090fd2a02d55c346efe4c564b6a0f2a7883e516ba0826c",
-    "internal/jaa/career_automation/application_sanity_review.py": "628440cdc467f203dd1072bce06d485fe758ac36da050b5cdb9e2e29b1437440",
+    "internal/jaa/career_automation/application_sanity_review.py": "1eebe1bc557f455fcaa00085ddae5bb31008148947d3ef321fca6690c9713c32",
     "internal/jaa/career_automation/application_strategy.py": "58ff3d1ed0e0ca6838335c398ff7771ec6c4acacee0ad856975732a2da691c7a",
     "internal/jaa/career_automation/ashby_live_adapter.py": "e55c5f5056a30a6ba0be05452e4eb2c453a6a460a4b826974d1e575d97d0dccc",
     "internal/jaa/career_automation/ats_application_authority.py": "f28df747584d6f1a5af7c08ad29914619d2b3d828ad6bb3404d0a4845b3d5c8d",
@@ -499,7 +499,7 @@
     "internal/jaa/test_application_evidence_safe_rebuild.py": "91c6872edc5432b7d890c4b8811a3f8111d2aa40b3c85cba2cbb14e2f4753cda",
     "internal/jaa/test_application_preview.py": "49476fe8be2c98b7560595ab64e66c066f751b20777cd616f1bdebfc8e505985",
     "internal/jaa/test_application_quality.py": "bba8b7e16159777cb5ba3b450365084a27f2ef682d36bd9cb5aa10eac73a96c5",
-    "internal/jaa/test_application_sanity_review.py": "02dc1ada3384817b7956e3b126f8ef76ea4b643dc27805811d948c7e8fbf4082",
+    "internal/jaa/test_application_sanity_review.py": "aee6b745def1268249f54c3652247b00acc3e9755d903b885474c390c682b4b3",
     "internal/jaa/test_archive_observation_bundle.py": "7a4edc71c2437d7704ed90a0ae16962d646f046655c5b2679a239e4a00e1eb98",
     "internal/jaa/test_assurance_manifest_truth.py": "7c332645e440d38b38b42e0ad9b914a8bc737db7b72473d09b146ad818cdc969",
     "internal/jaa/test_ats_application_authority.py": "f1c5dddae68334d7ed5af23ad885966e79be99d2d88ddbaa702d756d4d117d70",

@@ -1108,7 +1108,7 @@ def review_application_package_with_criteria(
         + criteria_prompt.strip()
         + "\n\nThe exact criterion IDs, in their required output order, are "
         + canonical_json(criterion_ids)
-        + ". Return one criteria_reviews row for each ID in that order. Use each ID exactly; do not append a version, hash, label, or alias."
+        + ". Return one JSON object containing one sanity_review and one criteria_reviews row for each ID in that order. Use each ID exactly; do not append a version, hash, label, or alias."
     )
     result_schema = _combined_result_schema(criterion_ids)
     prompt_sha256 = hashlib.sha256(combined_prompt.encode("utf-8")).hexdigest()

@@ -260,6 +260,7 @@ def test_combined_review_issues_one_content_bound_receipt_for_all_criteria(
     assert review_module.canonical_json(
         [row["criterion_id"] for row in criteria]
     ) in backend.last_system
+    assert "Return one JSON object containing one sanity_review" in backend.last_system
     restored = SanityReviewReceipt.from_document(receipt.document())
     assert restored.receipt_sha256 == receipt.receipt_sha256
 
