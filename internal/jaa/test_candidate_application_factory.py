@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import json
 import hashlib
+import pickle
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from career_automation import application_compiler as application_compiler_module
 from career_automation.application_compiler import CandidateContact, FactAuthority
+from career_automation.application_compiler import verify_application_source
 from career_automation.rendering import _letter_paragraphs, render_pdf_artifacts
 from career_automation.candidate_application_factory import (
     _approved_statements,
+    _fact_binding,
     _build_candidate_application_source,
     _projection_evidence_sha256,
     _profile_cv_section_for_evidence,
@@ -520,6 +524,7 @@ def _synthetic_composition_inputs(
     additional_kind: str | None = None,
     matched_requirements: int = 2,
     duplicate_last_statement: bool = False,
+    first_person_index: int | None = None,
 ) -> dict[str, object]:
     statements = [
         "Built a service dashboard that organised support requests by priority and showed unresolved work to operators.",
@@ -533,6 +538,9 @@ def _synthetic_composition_inputs(
     ]
     if duplicate_last_statement:
         statements[-1] = statements[0]
+    if first_person_index is not None:
+        statement = statements[first_person_index]
+        statements[first_person_index] = f"I {statement[0].lower()}{statement[1:]}"
     evidence_rows: list[dict[str, str]] = []
     for index, text in enumerate(statements):
         kind = "portfolio_artifact"
@@ -752,6 +760,103 @@ def test_generic_package_relocates_verified_capability_fact_verbatim(
         for row in source.facts
         if row.document_kind == "cv" and row.fact_kind == "candidate"
     }) == 8
+
+
+def test_generic_first_person_rewrite_uses_verified_evidence_source_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, first_person_index=2)
+
+    def reject_global_authority_lookup(_evidence_id: str) -> tuple[str, str]:
+        raise AssertionError("generic rewrite attempted protected global lookup")
+
+    monkeypatch.setattr(
+        application_compiler_module,
+        "_protected_approved_statement",
+        reject_global_authority_lookup,
+    )
+    package = build_candidate_application_package(**arguments)
+    fact = next(
+        row
+        for row in package.source.facts
+        if row.authority.candidate_evidence_id == "SYNTHETIC-PORTFOLIO-03"
+    )
+    rewrite = fact.authority.rewrite_authority
+    projected = next(
+        row
+        for row in arguments["candidate_projection"]["approved_evidence"]
+        if row["id"] == "SYNTHETIC-PORTFOLIO-03"
+    )
+
+    assert fact.approved_source_text.startswith("I designed ")
+    assert fact.text == (
+        fact.approved_source_text[2].upper() + fact.approved_source_text[3:]
+    )
+    assert rewrite is not None
+    assert rewrite.approved_evidence_source_sha256 == arguments[
+        "candidate_projection"
+    ]["source_hashes"]["approved_evidence"]
+    assert rewrite.approved_source_text_sha256 == projected["statement_sha256"]
+    assert rewrite.outward_text_sha256 == hashlib.sha256(
+        fact.text.encode()
+    ).hexdigest()
+    verify_application_source(package.source)
+    restored_package = pickle.loads(pickle.dumps(package))
+    verify_application_source(restored_package.source)
+
+    source_context = rewrite.source_context
+    assert source_context is not None
+    replay_receipt = replace(rewrite, source_context=None)
+    application_compiler_module.verify_authenticated_outward_rewrite(
+        replay_receipt,
+        candidate_evidence_id=fact.authority.candidate_evidence_id,
+        candidate_evidence_version=fact.authority.candidate_evidence_version,
+        approved_source_text=fact.approved_source_text,
+        outward_text=fact.text,
+        document_kind=fact.document_kind,
+        approved_evidence_source=source_context,
+        candidate_profile_hash=fact.authority.candidate_profile_hash,
+    )
+    with pytest.raises(ValueError, match="context is missing"):
+        application_compiler_module.verify_authenticated_outward_rewrite(
+            replay_receipt,
+            candidate_evidence_id=fact.authority.candidate_evidence_id,
+            candidate_evidence_version=fact.authority.candidate_evidence_version,
+            approved_source_text=fact.approved_source_text,
+            outward_text=fact.text,
+            document_kind=fact.document_kind,
+            candidate_profile_hash=fact.authority.candidate_profile_hash,
+        )
+
+    damaged_context = object.__new__(type(source_context))
+    object.__setattr__(damaged_context, "source_bytes", b"tampered")
+    object.__setattr__(damaged_context, "source_sha256", source_context.source_sha256)
+    object.__setattr__(
+        damaged_context,
+        "candidate_profile_hash",
+        source_context.candidate_profile_hash,
+    )
+    with pytest.raises(ValueError, match="context hash differs"):
+        damaged_context.statement(fact.authority.candidate_evidence_id)
+
+    approved_statements = _approved_statements(
+        Path(arguments["approved_evidence_path"]),
+        expected_evidence_sha256=str(
+            arguments["candidate_projection"]["source_hashes"]["approved_evidence"]
+        ),
+    )
+    materialized_binding = _fact_binding(
+        fact,
+        approved_statements=approved_statements,
+    )
+    binding_json = canonical_json(materialized_binding)
+    binding_document = json.loads(binding_json)
+    assert (
+        binding_document["authority"]["rewrite_authority"]
+        == rewrite.document()
+    )
+    assert "source_bytes" not in binding_json
 
 
 @pytest.mark.parametrize(

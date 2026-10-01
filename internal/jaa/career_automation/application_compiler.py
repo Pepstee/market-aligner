@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -375,6 +375,39 @@ def _rewrite_policy_sha256(
 
 
 @dataclass(frozen=True)
+class ApprovedEvidenceSourceContext:
+    source_bytes: bytes = field(repr=False)
+    source_sha256: str
+    candidate_profile_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        _digest(self.source_sha256, "approved evidence source hash")
+        if self.candidate_profile_hash is not None:
+            _digest(self.candidate_profile_hash, "candidate profile hash")
+        if not isinstance(self.source_bytes, bytes) or hashlib.sha256(
+            self.source_bytes
+        ).hexdigest() != self.source_sha256:
+            raise ValueError("approved evidence source context hash differs")
+
+    def for_profile(self, candidate_profile_hash: str) -> ApprovedEvidenceSourceContext:
+        self.__post_init__()
+        _digest(candidate_profile_hash, "candidate profile hash")
+        if (
+            self.candidate_profile_hash is not None
+            and self.candidate_profile_hash != candidate_profile_hash
+        ):
+            raise ValueError("approved evidence source context profile differs")
+        return replace(self, candidate_profile_hash=candidate_profile_hash)
+
+    def statement(self, evidence_id: str) -> tuple[str, str]:
+        self.__post_init__()
+        return (
+            _approved_statement_from_bytes(self.source_bytes, evidence_id),
+            self.source_sha256,
+        )
+
+
+@dataclass(frozen=True)
 class AuthenticatedOutwardRewrite:
     """Replay-stable receipt for one exact protected-evidence outward span."""
 
@@ -388,6 +421,11 @@ class AuthenticatedOutwardRewrite:
     issuer_identity: str
     resolution_receipt_sha256: str
     schema_version: str = OUTWARD_REWRITE_SCHEMA_VERSION
+    source_context: ApprovedEvidenceSourceContext | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.schema_version != OUTWARD_REWRITE_SCHEMA_VERSION:
@@ -406,6 +444,19 @@ class AuthenticatedOutwardRewrite:
             raise ValueError("candidate evidence version must be positive")
         if self.document_kind not in {"cv", "cover_letter"}:
             raise ValueError("outward rewrite document kind is unsupported")
+        source_context = getattr(self, "source_context", None)
+        if source_context is not None:
+            source_context.__post_init__()
+            if (
+                source_context.source_sha256
+                != self.approved_evidence_source_sha256
+            ):
+                raise ValueError("outward rewrite source context differs")
+            if (
+                self.rewrite_policy_sha256 == GENERIC_OUTWARD_REWRITE_POLICY_SHA256
+                and source_context.candidate_profile_hash is None
+            ):
+                raise ValueError("generic outward rewrite context lacks profile binding")
 
     def document(self, *, include_receipt: bool = True) -> dict[str, object]:
         value: dict[str, object] = {
@@ -427,14 +478,23 @@ class AuthenticatedOutwardRewrite:
 def _protected_approved_statement(evidence_id: str) -> tuple[str, str]:
     """Resolve one statement from the policy-pinned external authority."""
     from .candidate_authority import (
-        APPROVED_CANDIDATE_SOURCE_HASHES,
         APPROVED_EVIDENCE_PATH,
     )
 
-    expected_sha256 = APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+    expected_sha256 = _pinned_approved_evidence_sha256()
     value = APPROVED_EVIDENCE_PATH.read_bytes()
     if hashlib.sha256(value).hexdigest() != expected_sha256:
         raise ValueError("protected candidate evidence differs from pinned authority")
+    return _approved_statement_from_bytes(value, evidence_id), expected_sha256
+
+
+def _pinned_approved_evidence_sha256() -> str:
+    from .candidate_authority import APPROVED_CANDIDATE_SOURCE_HASHES
+
+    return APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+
+
+def _approved_statement_from_bytes(value: bytes, evidence_id: str) -> str:
     try:
         document = json.loads(value)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -447,7 +507,7 @@ def _protected_approved_statement(evidence_id: str) -> tuple[str, str]:
     ]
     if len(matches) != 1 or not isinstance(matches[0].get("statement"), str):
         raise ValueError("rewrite evidence is absent or ambiguous")
-    return str(matches[0]["statement"]), expected_sha256
+    return str(matches[0]["statement"])
 
 
 def resolve_authenticated_outward_rewrite(
@@ -457,11 +517,39 @@ def resolve_authenticated_outward_rewrite(
     outward_text: str,
     document_kind: str,
     candidate_evidence_version: int = 1,
+    approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
+    candidate_profile_hash: str | None = None,
 ) -> AuthenticatedOutwardRewrite:
     """Mint a receipt only for a current, policy-derived exact source span."""
-    resolved_source, source_sha256 = _protected_approved_statement(
-        candidate_evidence_id
-    )
+    exact_policy = _rewrite_policy_sha256(
+        candidate_evidence_id,
+        document_kind=document_kind,
+    ) == EXACT_OUTWARD_REWRITE_POLICY_SHA256
+    source_context: ApprovedEvidenceSourceContext | None = None
+    if approved_evidence_source is None:
+        resolved_source, source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
+    elif exact_policy:
+        approved_evidence_source.__post_init__()
+        if (
+            approved_evidence_source.source_sha256
+            != _pinned_approved_evidence_sha256()
+        ):
+            raise ValueError("exact outward rewrite requires pinned evidence source")
+        context_source, context_sha256 = approved_evidence_source.statement(
+            candidate_evidence_id
+        )
+        resolved_source, source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
+        if context_sha256 != source_sha256 or context_source != resolved_source:
+            raise ValueError("exact outward rewrite context differs from pinned source")
+    else:
+        if candidate_profile_hash is None:
+            raise ValueError("generic outward rewrite requires a candidate profile binding")
+        source_context = approved_evidence_source.for_profile(candidate_profile_hash)
+        resolved_source, source_sha256 = source_context.statement(candidate_evidence_id)
     expected = approved_candidate_outward_text(
         candidate_evidence_id,
         approved_source_text,
@@ -486,6 +574,7 @@ def resolve_authenticated_outward_rewrite(
         ),
         issuer_identity=OUTWARD_REWRITE_ISSUER_ID,
         resolution_receipt_sha256="0" * 64,
+        source_context=source_context,
     )
     return replace(
         provisional,
@@ -503,6 +592,8 @@ def verify_authenticated_outward_rewrite(
     approved_source_text: str,
     outward_text: str,
     document_kind: str,
+    approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
+    candidate_profile_hash: str | None = None,
 ) -> None:
     authority.__post_init__()
     expected_policy = _rewrite_policy_sha256(
@@ -523,9 +614,51 @@ def verify_authenticated_outward_rewrite(
         != content_hash(authority.document(include_receipt=False))
     ):
         raise ValueError("outward rewrite resolution is not authentic")
-    current_source, current_source_sha256 = _protected_approved_statement(
-        candidate_evidence_id
-    )
+    attached_context = getattr(authority, "source_context", None)
+    if (
+        approved_evidence_source is not None
+        and attached_context is not None
+        and approved_evidence_source != attached_context
+    ):
+        raise ValueError("outward rewrite evidence context differs")
+    source_context = approved_evidence_source or attached_context
+    exact_policy = expected_policy == EXACT_OUTWARD_REWRITE_POLICY_SHA256
+    if source_context is not None:
+        source_context.__post_init__()
+        if source_context.source_sha256 != authority.approved_evidence_source_sha256:
+            raise ValueError("outward rewrite source context differs")
+    if exact_policy:
+        if source_context is not None and (
+            source_context.source_sha256 != _pinned_approved_evidence_sha256()
+        ):
+            raise ValueError("exact outward rewrite context differs from pinned source")
+        if source_context is not None:
+            context_source, _ = source_context.statement(candidate_evidence_id)
+        else:
+            context_source = None
+        current_source, current_source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
+        if context_source is not None and context_source != current_source:
+            raise ValueError("exact outward rewrite context differs from pinned source")
+    elif source_context is not None:
+        if (
+            candidate_profile_hash is None
+            or source_context.candidate_profile_hash != candidate_profile_hash
+        ):
+            raise ValueError("generic outward rewrite profile binding differs")
+        current_source, current_source_sha256 = source_context.statement(
+            candidate_evidence_id
+        )
+    else:
+        if (
+            authority.approved_evidence_source_sha256
+            != _pinned_approved_evidence_sha256()
+        ):
+            raise ValueError("generic outward rewrite evidence context is missing")
+        current_source, current_source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
     if (
         authority.approved_evidence_source_sha256 != current_source_sha256
         or current_source != approved_source_text
@@ -746,6 +879,16 @@ class FactualSentence:
                 approved_source_text=source,
                 outward_text=text,
                 document_kind=self.document_kind,
+                approved_evidence_source=getattr(
+                    self.authority.rewrite_authority,
+                    "source_context",
+                    None,
+                ),
+                candidate_profile_hash=(
+                    self.authority.candidate_profile_hash
+                    if isinstance(self.authority, ProfileFactAuthority)
+                    else None
+                ),
             )
         elif isinstance(self.authority, (FactAuthority, ProfileFactAuthority)) and (
             outward_text_sha256 is not None or rewrite_policy_sha256 is not None
@@ -1341,6 +1484,17 @@ def compile_application_source(
 
 
 def verify_application_source(source: ApplicationSource) -> None:
+    for fact in source.facts:
+        rewrite = getattr(fact.authority, "rewrite_authority", None)
+        if rewrite is None:
+            continue
+        if getattr(rewrite, "source_context", None) is not None:
+            fact.__post_init__()
+        elif (
+            rewrite.approved_evidence_source_sha256
+            != _pinned_approved_evidence_sha256()
+        ):
+            fact.__post_init__()
     _validate_related_section_bindings(
         source.letter_sections,
         {row.sentence_id: row for row in source.facts},

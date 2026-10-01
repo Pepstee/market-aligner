@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from datetime import date, datetime
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
 
 from .application_compiler import (
     ApplicationSource,
+    ApprovedEvidenceSourceContext,
     CandidateContact,
     DocumentSection,
     EXACT_OUTWARD_PROFILE_REWRITES as OUTWARD_PROFILE_REWRITES,
@@ -801,6 +802,18 @@ def _approved_statements(
     *,
     expected_evidence_sha256: str | None = None,
 ) -> dict[str, dict[str, object]]:
+    statements, _source_context = _load_approved_statements(
+        path,
+        expected_evidence_sha256=expected_evidence_sha256,
+    )
+    return statements
+
+
+def _load_approved_statements(
+    path: Path,
+    *,
+    expected_evidence_sha256: str | None = None,
+) -> tuple[dict[str, dict[str, object]], ApprovedEvidenceSourceContext]:
     value = path.read_bytes()
     expected = (
         APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
@@ -809,6 +822,7 @@ def _approved_statements(
     )
     if _sha256(value) != expected:
         raise ValueError("application factory candidate evidence hash differs")
+    source_context = ApprovedEvidenceSourceContext(value, expected)
     document = json.loads(value)
     rows = document.get("statements")
     if not isinstance(rows, list):
@@ -816,7 +830,7 @@ def _approved_statements(
     result = {str(row["id"]): dict(row) for row in rows if isinstance(row, Mapping)}
     if len(result) != len(rows):
         raise ValueError("application factory candidate evidence is ambiguous")
-    return result
+    return result, source_context
 
 
 def _sha256(value: bytes) -> str:
@@ -944,6 +958,7 @@ def _profile_sentence(
     candidate_profile_hash: str,
     statement_sha256: str,
     document_kind: str,
+    approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
 ) -> FactualSentence:
     evidence_id = str(evidence["id"])
     approved_source_text = str(evidence["statement"])
@@ -956,6 +971,8 @@ def _profile_sentence(
             approved_source_text=approved_source_text,
             outward_text=text,
             document_kind=document_kind,
+            approved_evidence_source=approved_evidence_source,
+            candidate_profile_hash=candidate_profile_hash,
         )
         if rewritten
         else None
@@ -1264,7 +1281,7 @@ def _build_candidate_application_source(
         all_requirements.append(f"{row['requirement_id']}: {row['requirement_text']}")
         if row.get("status") == "matched":
             matched_rows.append(row)
-    statements = _approved_statements(
+    statements, approved_evidence_source = _load_approved_statements(
         approved_evidence_path,
         expected_evidence_sha256=expected_evidence_sha256,
     )
@@ -1551,6 +1568,7 @@ def _build_candidate_application_source(
             candidate_profile_hash=str(candidate_projection["projection_sha256"]),
             statement_sha256=str(projected["statement_sha256"]),
             document_kind=document_kind,
+            approved_evidence_source=approved_evidence_source,
         )
 
     strategy_cv_by_evidence: dict[str, list[FactualSentence]] = {}
@@ -2005,7 +2023,12 @@ def _fact_binding(
     *,
     approved_statements: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
-    authority = asdict(fact.authority)
+    authority = {}
+    for authority_field in fields(fact.authority):
+        value = getattr(fact.authority, authority_field.name)
+        if authority_field.name == "rewrite_authority" and value is not None:
+            value = value.document()
+        authority[authority_field.name] = value
     evidence_ids: tuple[str, ...]
     approved_evidence_statement_sha256: str | None = None
     if fact.fact_kind == "candidate":

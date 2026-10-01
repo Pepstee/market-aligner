@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 
 from career_automation import rendering as rendering_module
+from career_automation import application_compiler as application_compiler_module
 from career_automation.application_compiler import (
+    ApprovedEvidenceSourceContext,
     CandidateContact,
     FactualSentence,
     ModelReceipt,
@@ -179,6 +181,36 @@ def test_outward_rewrite_receipt_is_deterministic_and_rejects_wrong_text(
             approved_source_text=source,
             outward_text=f"{outward} Added claim.",
             document_kind="cv",
+        )
+
+
+def test_exact_rewrite_rejects_unpinned_context_before_protected_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statement = "I led a fictional records exercise with a repeatable review."
+    source_bytes = canonical_json(
+        {"statements": [{"id": "E-011", "statement": statement}]}
+    ).encode("utf-8")
+    context = ApprovedEvidenceSourceContext(
+        source_bytes,
+        hashlib.sha256(source_bytes).hexdigest(),
+    )
+
+    def reject_protected_lookup(_evidence_id: str) -> tuple[str, str]:
+        raise AssertionError("mismatched exact context reached protected lookup")
+
+    monkeypatch.setattr(
+        application_compiler_module,
+        "_protected_approved_statement",
+        reject_protected_lookup,
+    )
+    with pytest.raises(ValueError, match="pinned evidence source"):
+        application_compiler_module.resolve_authenticated_outward_rewrite(
+            candidate_evidence_id="E-011",
+            approved_source_text=statement,
+            outward_text="Synthetic exact-policy test wording.",
+            document_kind="cv",
+            approved_evidence_source=context,
         )
 
 
