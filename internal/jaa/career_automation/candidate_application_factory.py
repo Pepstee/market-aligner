@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, Sequence
 
 from .application_compiler import (
     ApplicationSource,
@@ -55,6 +55,7 @@ from .rendering import (
 from cv_generation.constraints import (
     CVConstraintReceipt,
     CandidateSourcePolicyReceipt,
+    capability_line_eligible,
     validate_candidate_source_policy,
     validate_generated_cv,
 )
@@ -98,6 +99,9 @@ PROFILE_CV_SECTION_ORDER = (
     "Highlights",
     "Results",
     "Outcomes",
+)
+_CAPABILITY_EVIDENCE_PROOF_CLASSES = frozenset(
+    {"portfolio_artifact", "work_artifact", "test_result", "employment_record"}
 )
 _PROFILE_CV_LEGACY_SECTION_BY_EVIDENCE_ID = {
     evidence_id: heading
@@ -1038,6 +1042,27 @@ def _profile_cv_section_for_fact(
     )
 
 
+def _select_profile_capability_fact(
+    sections: Mapping[str, Sequence[FactualSentence]],
+    evidence_kinds: Mapping[str, str],
+) -> FactualSentence | None:
+    for heading in PROFILE_CV_SECTION_ORDER:
+        if heading in {"Professional Summary", "Core Capabilities"}:
+            continue
+        for fact in sections.get(heading, ()):
+            evidence_id = getattr(fact.authority, "candidate_evidence_id", None)
+            if (
+                fact.fact_kind != "candidate"
+                or not isinstance(evidence_id, str)
+                or evidence_kinds.get(evidence_id)
+                not in _CAPABILITY_EVIDENCE_PROOF_CLASSES
+                or not capability_line_eligible(fact.text)
+            ):
+                continue
+            return fact
+    return None
+
+
 def _assert_package_quality(
     source: ApplicationSource,
     *,
@@ -1070,6 +1095,13 @@ def _assert_package_quality(
         raise ValueError("candidate CV is too sparse for employer submission")
     if len(cv_texts) != len(set(cv_texts)):
         raise ValueError("candidate CV repeats factual content")
+    overview_section_names = {"Professional Summary", "Core Capabilities"}
+    overview_sentence_ids = {
+        sentence_id
+        for section in source.cv_sections
+        if section.heading in overview_section_names
+        for sentence_id in section.sentence_ids
+    }
     expected_headings = {
         _profile_cv_section_for_fact(
             row,
@@ -1077,6 +1109,7 @@ def _assert_package_quality(
             legacy_profile=legacy_profile,
         )
         for row in cv_rows
+        if row.sentence_id not in overview_sentence_ids
     }
     actual_heading_order = tuple(section.heading for section in source.cv_sections)
     summary_section = next(
@@ -1089,6 +1122,38 @@ def _assert_package_quality(
     )
     if summary_section is not None:
         expected_headings.add("Professional Summary")
+    capability_sections = [
+        section
+        for section in source.cv_sections
+        if section.heading == "Core Capabilities"
+    ]
+    if len(capability_sections) > 1:
+        raise ValueError("candidate CV has ambiguous capability sections")
+    if capability_sections:
+        capability_section = capability_sections[0]
+        if not capability_section.sentence_ids:
+            raise ValueError("candidate CV capability section is empty")
+        expected_headings.add("Core Capabilities")
+        if not legacy_profile:
+            if len(capability_section.sentence_ids) != 1:
+                raise ValueError("candidate CV capability section is not a single relocation")
+            capability_sentence_id = capability_section.sentence_ids[0]
+            capability_fact = facts.get(capability_sentence_id)
+            evidence_id = (
+                getattr(capability_fact.authority, "candidate_evidence_id", None)
+                if capability_fact is not None
+                else None
+            )
+            if (
+                capability_fact is None
+                or capability_fact.fact_kind != "candidate"
+                or sum(row.sentence_id == capability_sentence_id for row in cv_rows) != 1
+                or not isinstance(evidence_id, str)
+                or evidence_kinds.get(evidence_id)
+                not in _CAPABILITY_EVIDENCE_PROOF_CLASSES
+                or not capability_line_eligible(capability_fact.text)
+            ):
+                raise ValueError("candidate CV capability section lacks verified evidence")
     expected_heading_order = tuple(
         heading
         for heading in PROFILE_CV_SECTION_ORDER
@@ -1106,6 +1171,7 @@ def _assert_package_quality(
             != section.heading
             for section in source.cv_sections
             if section.heading != "Professional Summary"
+            and not (section.heading == "Core Capabilities" and not legacy_profile)
             for sentence_id in section.sentence_ids
         )
         or (
@@ -1604,6 +1670,39 @@ def _build_candidate_application_source(
             cv_sections_by_heading.setdefault("Professional Summary", []).append(
                 summary_fact
             )
+
+    if not legacy_profile and not cv_sections_by_heading.get("Core Capabilities"):
+        capability_fact = _select_profile_capability_fact(
+            cv_sections_by_heading,
+            verified_evidence_kinds,
+        )
+        if capability_fact is not None:
+            capability_sentence_id = capability_fact.sentence_id
+            occurrences = sum(
+                row.sentence_id == capability_sentence_id
+                for rows in cv_sections_by_heading.values()
+                for row in rows
+            )
+            if occurrences != 1:
+                raise ValueError("candidate CV capability fact is ambiguous")
+            relocated_sections: dict[str, list[FactualSentence]] = {}
+            for heading, rows in cv_sections_by_heading.items():
+                if heading in {"Professional Summary", "Core Capabilities"}:
+                    relocated_sections[heading] = list(rows)
+                    continue
+                remaining = [
+                    row for row in rows if row.sentence_id != capability_sentence_id
+                ]
+                if remaining:
+                    relocated_sections[heading] = remaining
+            if any(
+                rows
+                for heading, rows in relocated_sections.items()
+                if heading not in {"Professional Summary", "Core Capabilities"}
+            ):
+                cv_sections_by_heading.clear()
+                cv_sections_by_heading.update(relocated_sections)
+                cv_sections_by_heading["Core Capabilities"] = [capability_fact]
 
     letter_candidate = list(strategy_letter)
     letter_evidence_ids = {

@@ -483,6 +483,24 @@ def _section_text(
     return "\n".join(sections.get(heading, ()))
 
 
+def _capability_line_has_valid_tool_usage(text: str) -> bool:
+    tool_count = len(_TOOL_TOKEN.findall(text))
+    bridged = re.search(r"\b(?:using|with|through|across|via)\b", text, re.I)
+    inventory_shape = len(re.findall(r"[,|;/]", text)) >= 2 or ":" in text
+    return not (
+        (tool_count >= 2 and not _CAPABILITY_LANGUAGE.search(text))
+        or (tool_count >= 3 and inventory_shape and not bridged)
+    )
+
+
+def capability_line_eligible(text: str) -> bool:
+    return (
+        not _FORMAT_INVENTORY.search(text)
+        and bool(_CAPABILITY_LANGUAGE.search(text))
+        and _capability_line_has_valid_tool_usage(text)
+    )
+
+
 def validate_generated_cv(
     *,
     source_id: str,
@@ -552,12 +570,7 @@ def validate_generated_cv(
                 "formats, interchange syntax and storage engines cannot be listed as skills"
             )
         for line in sections.get(heading, ()):
-            tool_count = len(_TOOL_TOKEN.findall(line))
-            bridged = re.search(r"\b(?:using|with|through|across|via)\b", line, re.I)
-            inventory_shape = len(re.findall(r"[,|;/]", line)) >= 2 or ":" in line
-            if tool_count >= 2 and not _CAPABILITY_LANGUAGE.search(line) or (
-                tool_count >= 3 and inventory_shape and not bridged
-            ):
+            if not _capability_line_has_valid_tool_usage(line):
                 raise CVConstraintError(
                     "tools and platforms must support a capability, not replace one"
                 )

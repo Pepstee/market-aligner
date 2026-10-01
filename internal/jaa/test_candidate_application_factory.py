@@ -14,6 +14,7 @@ from career_automation.candidate_application_factory import (
     _build_candidate_application_source,
     _projection_evidence_sha256,
     _profile_cv_section_for_evidence,
+    _select_profile_capability_fact,
     build_market_application_decision_authority,
     build_candidate_application_deployment_binding,
     build_candidate_application_package,
@@ -27,6 +28,7 @@ from career_automation.production_attempt import _approved_fact_authorities
 from career_automation.release_gate import cv_constraint_release_binding
 from career_automation import market_aligner_preparation
 from career_automation.handoff_admission import HandoffAdmissionError
+from cv_generation.constraints import capability_line_eligible
 from cv_generation.editorial_composition import (
     ApprovedCVClaim,
     CandidateEditorialAuthority,
@@ -493,7 +495,7 @@ def _synthetic_composition_inputs(
 ) -> dict[str, object]:
     statements = [
         "Built a service dashboard that organised support requests by priority and showed unresolved work to operators.",
-        "Implemented validation for incoming records, catching invalid dates early and reducing repeated manual corrections during review.",
+        "Implemented integration testing for incoming records, catching invalid dates early and reducing repeated manual corrections during review.",
         "Designed a searchable project catalogue with consistent metadata, making related examples easier to find and compare.",
         "Created a batch processing workflow that grouped large data sets and produced a concise, reproducible completion summary.",
         "Added accessible status indicators to a reporting page so users could distinguish queued, active, and completed tasks.",
@@ -640,8 +642,8 @@ def _synthetic_composition_inputs(
 @pytest.mark.parametrize(
     ("employment_index", "expected_headings"),
     (
-        (None, ("Professional Summary", "Projects")),
-        (7, ("Professional Summary", "Projects", "Experience")),
+        (None, ("Professional Summary", "Core Capabilities", "Projects")),
+        (7, ("Professional Summary", "Core Capabilities", "Projects", "Experience")),
     ),
 )
 def test_generation_composes_verified_nonlegacy_profile_by_evidence_kind(
@@ -680,6 +682,70 @@ def test_generation_composes_verified_nonlegacy_profile_by_evidence_kind(
         == arguments["candidate_projection"]["projection_sha256"]
         for row in profile_bound
     )
+
+
+def test_generic_package_relocates_verified_capability_fact_verbatim(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path)
+    evidence_document = json.loads(
+        (tmp_path / "synthetic-composition-evidence.json").read_text()
+    )
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    capability_section = next(
+        section
+        for section in source.cv_sections
+        if section.heading == "Core Capabilities"
+    )
+    assert len(capability_section.sentence_ids) == 1
+    capability_fact = next(
+        row
+        for row in source.facts
+        if row.sentence_id == capability_section.sentence_ids[0]
+    )
+    evidence = next(
+        row
+        for row in evidence_document["statements"]
+        if row["id"] == capability_fact.authority.candidate_evidence_id
+    )
+    assert capability_line_eligible(evidence["statement"])
+    assert capability_fact.text == evidence["statement"]
+    assert capability_fact.approved_source_text == evidence["statement"]
+    cv_sentence_ids = [
+        sentence_id
+        for section in source.cv_sections
+        for sentence_id in section.sentence_ids
+    ]
+    assert len(cv_sentence_ids) == 8
+    assert len(set(cv_sentence_ids)) == len(cv_sentence_ids)
+    assert len({
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.document_kind == "cv" and row.fact_kind == "candidate"
+    }) == 8
+
+
+@pytest.mark.parametrize(
+    "evidence_kind",
+    ("credential", "verified_claim", "external_outcome", "unsupported"),
+)
+def test_capability_selector_excludes_unapproved_evidence_kinds(
+    tmp_path: Path,
+    evidence_kind: str,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, additional_kind="credential")
+    source = _build_candidate_application_source(**arguments).source
+    credential_fact = next(
+        row
+        for row in source.facts
+        if row.authority.candidate_evidence_id == "SYNTHETIC-PORTFOLIO-08"
+    )
+    assert capability_line_eligible(credential_fact.text)
+    assert _select_profile_capability_fact(
+        {"Education": (credential_fact,)},
+        {"SYNTHETIC-PORTFOLIO-08": evidence_kind},
+    ) is None
 
 
 def test_generic_section_uses_verified_kind_not_legacy_id_spelling() -> None:
