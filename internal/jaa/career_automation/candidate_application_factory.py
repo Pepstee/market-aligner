@@ -1747,15 +1747,6 @@ def _build_candidate_application_source(
         "evidence-lead",
         "My strongest relevant work comes from systems I have built and evaluated.",
     )
-    letter_company_lead = _slot(
-        "cover_letter",
-        "company-lead",
-        (
-            "The closest direct overlap with the role is the requirement below."
-            if selected_rows
-            else "The role description gives clear context for my application."
-        ),
-    )
     letter_close = _slot(
         "cover_letter",
         "close",
@@ -1793,7 +1784,6 @@ def _build_candidate_application_source(
             letter_open,
             letter_intent,
             letter_evidence_lead,
-            letter_company_lead,
             letter_close,
         ),
         cv_sections=cv_sections,
@@ -1811,7 +1801,6 @@ def _build_candidate_application_source(
             DocumentSection(
                 "Company Fit",
                 tuple(row.sentence_id for row in letter_employer),
-                (letter_company_lead.slot_id,),
             ),
             DocumentSection(
                 "Close",

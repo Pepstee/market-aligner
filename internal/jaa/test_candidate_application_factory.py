@@ -841,6 +841,16 @@ def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
     assert opening.count(source.role_title.casefold()) == 1
     assert opening.count(source.company_name.casefold()) == 1
     assert paragraphs[-1] == f"Kind regards,\n{source.contact.full_name}"
+    company_fit = next(
+        section for section in source.letter_sections if section.heading == "Company Fit"
+    )
+    assert company_fit.sentence_ids
+    assert not company_fit.style_slot_ids
+    assert all(
+        next(fact for fact in source.facts if fact.sentence_id == sentence_id).fact_kind
+        == "employer"
+        for sentence_id in company_fit.sentence_ids
+    )
 
     artifacts = render_pdf_artifacts(source)
     for text in (
@@ -848,6 +858,7 @@ def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
         artifacts.cover_letter_pdf.extracted_text,
     ):
         assert text.casefold().count("kind regards") == 1
+        assert "requirement below" not in text.casefold()
 
 
 def test_generic_profile_composition_still_rejects_duplicate_cv_facts(
