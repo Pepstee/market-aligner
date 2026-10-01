@@ -192,6 +192,26 @@ def _plain_excerpt(excerpt: str) -> str:
     return re.sub(r"\s+", " ", plain).strip()
 
 
+def _has_company_possessive_prefix(text: str, company: str) -> bool:
+    if not isinstance(company, str) or not company or company != company.strip():
+        return False
+    return re.match(rf"(?i:{re.escape(company)})['’]s(?=\b)", text) is not None
+
+
+def _company_bound_excerpt_text(text: str, excerpt: str, company: Any) -> bool:
+    return (
+        isinstance(company, str)
+        and text == _plain_excerpt(excerpt)
+        and _has_company_possessive_prefix(text, company)
+    )
+
+
+def _employer_claim_text(company: str, summary: str) -> str:
+    if _has_company_possessive_prefix(summary, company):
+        return summary
+    return f"{company}: {summary}"
+
+
 def _kind_relevant(
     kind: IntelligenceKind, excerpt: str, entry: Mapping[str, Any]
 ) -> bool:
@@ -2150,10 +2170,13 @@ def validate_dossier(
             raise ValueError(f"kind-irrelevant {kind.value} evidence")
         if authority_contract:
             prefix, separator, assertion = str(claim["text"]).partition(":")
-            if (
-                not prefix.strip()
-                or not separator
-                or assertion.strip() != _plain_excerpt(excerpt)
+            labelled_excerpt = (
+                bool(prefix.strip())
+                and bool(separator)
+                and assertion.strip() == _plain_excerpt(excerpt)
+            )
+            if not labelled_excerpt and not _company_bound_excerpt_text(
+                str(claim["text"]), excerpt, dossier.get("employer_name")
             ):
                 raise ValueError(
                     "authority claim must exactly reflect its cited excerpt"
@@ -2402,10 +2425,13 @@ def _validate_portable_dossier(
             raise ValueError("supported claim requires an exact excerpt")
         text = str(claim.get("text", ""))
         prefix, separator, assertion = text.partition(":")
-        if (
-            not prefix.strip()
-            or not separator
-            or assertion.strip() != _plain_excerpt(excerpt)
+        labelled_excerpt = (
+            bool(prefix.strip())
+            and bool(separator)
+            and assertion.strip() == _plain_excerpt(excerpt)
+        )
+        if not labelled_excerpt and not _company_bound_excerpt_text(
+            text, excerpt, dossier.get("employer_name")
         ):
             raise ValueError(
                 "supported assertion must exactly reflect its cited excerpt"
@@ -2734,7 +2760,7 @@ def build_reconnaissance_dossier(
             "id": claim_id,
             "kind": kind.value,
             "classification": classification,
-            "text": f"{company}: {summary}",
+            "text": _employer_claim_text(company, summary),
             "citation_excerpt": excerpt,
             "source_plan_id": entry["id"],
         }
@@ -2776,6 +2802,7 @@ def build_reconnaissance_dossier(
     dossier = {
         "schema_version": "jaa04.dossier.v2",
         "job_key": task.job_key,
+        "employer_name": company,
         "raw_cache_root": str(cache.root),
         "sources": [vars(item) for item in citations],
         "source_plan": [plan_by_kind[kind] for _, kind, _, _, _ in specifications],
@@ -2815,6 +2842,9 @@ def _build_portable_dossier(
     *,
     as_of: date | None = None,
 ) -> dict[str, Any]:
+    company = str(task.company).strip()
+    if not company:
+        raise ValueError("research task requires company")
     plan = [dict(row) for row in source_plan]
     claims: list[dict[str, Any]] = []
     for entry in plan:
@@ -2858,7 +2888,7 @@ def _build_portable_dossier(
         claim.update(
             {
                 "classification": "fact",
-                "text": f"{task.company}: {plain}",
+                "text": _employer_claim_text(company, plain),
                 "source_ids": [source.id],
                 "citation_excerpt": excerpt,
                 "source_captured_at": source.captured_at,
@@ -2879,6 +2909,7 @@ def _build_portable_dossier(
     dossier = {
         "schema_version": schema_version,
         "job_key": task.job_key,
+        "employer_name": company,
         "raw_cache_root": str(cache.root),
         "sources": [vars(item) for item in citations],
         "source_plan": plan,
@@ -3038,6 +3069,39 @@ class Opportunity1Coordinator:
         return {"job_key": job_key, **decision}
 
 
+def _frozen_employer_claim_key(
+    dossier: Mapping[str, Any], claim: Mapping[str, Any]
+) -> tuple[str, str]:
+    text = str(claim.get("text", "")).strip()
+    excerpt = str(claim.get("citation_excerpt", ""))
+    if _company_bound_excerpt_text(text, excerpt, dossier.get("employer_name")):
+        employer = str(dossier["employer_name"]).strip()
+        intelligence = text
+    else:
+        employer, delimiter, intelligence = text.partition(":")
+        employer = employer.strip()
+        if not delimiter or not employer or not intelligence.strip():
+            raise ValueError(
+                "frozen supported claim requires an employer-prefixed text"
+            )
+    if len(text.split()) < 8:
+        raise ValueError("frozen claims must contain substantive employer intelligence")
+    normalized = intelligence.strip().casefold().replace(
+        employer.casefold(), "<employer>"
+    )
+    return employer.casefold(), normalized
+
+
+def _has_cross_employer_boilerplate(
+    normalized_claim_employers: Mapping[str, Mapping[str, set[str]]]
+) -> bool:
+    return any(
+        len(employers) > 1
+        for claims_by_text in normalized_claim_employers.values()
+        for employers in claims_by_text.values()
+    )
+
+
 def load_frozen_dossiers(
     path: str | Path,
     cache: RawResponseCache,
@@ -3191,21 +3255,10 @@ def load_frozen_dossiers(
             ):
                 raise ValueError("frozen claims require freshness classification")
             if strict_corpus and supported:
-                text = str(claim.get("text", "")).strip()
-                employer, delimiter, intelligence = text.partition(":")
-                employer = employer.strip()
-                if not delimiter or not employer or not intelligence.strip():
-                    raise ValueError(
-                        "frozen supported claim requires an employer-prefixed text"
-                    )
-                if len(text.split()) < 8:
-                    raise ValueError(
-                        "frozen claims must contain substantive employer intelligence"
-                    )
-                normalized = text.casefold().replace(employer.casefold(), "<employer>")
+                employer, normalized = _frozen_employer_claim_key(dossier, claim)
                 normalized_claim_employers[str(claim["kind"])].setdefault(
                     normalized, set()
-                ).add(employer.casefold())
+                ).add(employer)
     if (
         strict_corpus
         and not all(
@@ -3220,11 +3273,7 @@ def load_frozen_dossiers(
     # Repeated byte-bound intelligence for the same employer is valid across
     # distinct vacancies, but never counts as independent corroboration.
     # Employer-substituted boilerplate spanning employers remains a blocker.
-    if strict_corpus and any(
-        len(employers) > 1
-        for kind in required_kinds
-        for employers in normalized_claim_employers[kind].values()
-    ):
+    if strict_corpus and _has_cross_employer_boilerplate(normalized_claim_employers):
         raise ValueError(
             "employer-normalized boilerplate cannot become certified intelligence"
         )

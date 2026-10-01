@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,9 @@ from career_automation.employer_research import (
     Citation,
     PortableAuthorityRetriever,
     RawResponseCache,
+    build_reconnaissance_dossier,
+    _frozen_employer_claim_key,
+    _has_cross_employer_boilerplate,
     validate_dossier,
 )
 from career_automation.models import IntelligenceKind
@@ -57,6 +61,111 @@ def _portable(cache: RawResponseCache, body: bytes, supported: dict[str, tuple[s
                        "observed_at": None, "temporal_semantics": "retrieval_snapshot", "score_delta_bp": 0})
     return {"schema_version": "jaa04.dossier.v3", "job_key": "portable-contract",
             "sources": [vars(citation)], "source_plan": plan, "claims": claims, "edges": []}
+
+
+def _build_portable_company_dossier(tmp_path: Path, summary: str) -> tuple[
+    RawResponseCache, dict[str, object], str
+]:
+    cache = RawResponseCache(tmp_path / "raw")
+    excerpt = f"<p>{summary}</p>"
+    body = excerpt.encode()
+    citation = _citation(cache, body)
+    plan = []
+    for kind in KINDS:
+        key = kind.value
+        common = {
+            "id": f"plan:{key}",
+            "kind": key,
+            "permitted_purposes": [key],
+            "freshness_days": FRESHNESS_DAYS[kind],
+        }
+        if kind is IntelligenceKind.COMPANY:
+            plan.append({
+                **common,
+                "outcome": "supported",
+                "source_id": citation.id,
+                "source_type": "official_company",
+                "source_content_sha256": citation.content_sha256,
+                "excerpt_sha256": hashlib.sha256(body).hexdigest(),
+                "excerpt_byte_start": 0,
+                "excerpt_byte_length": len(body),
+            })
+        else:
+            outcome = "abstained" if kind is IntelligenceKind.HIRING else "unknown"
+            reason = f"No purpose-specific public authority was available for {key} in this capture."
+            plan.append({**common, "outcome": outcome, "reason": reason})
+    task = type("Task", (), {"job_key": "portable-build", "company": "Acme"})()
+    dossier = build_reconnaissance_dossier(
+        task, citation, cache, source_plan=plan, as_of=date(2026, 7, 1)
+    )
+    return cache, dossier, excerpt
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    (
+        (
+            "Acme's company operates a public business serving customers worldwide.",
+            "Acme's company operates a public business serving customers worldwide.",
+        ),
+        (
+            "Acme Holdings' company operates a public business serving customers worldwide.",
+            "Acme: Acme Holdings' company operates a public business serving customers worldwide.",
+        ),
+        (
+            "Acmeish's company operates a public business serving customers worldwide.",
+            "Acme: Acmeish's company operates a public business serving customers worldwide.",
+        ),
+    ),
+)
+def test_portable_builder_preserves_exact_company_possessive_and_source_bytes(
+    tmp_path: Path, summary: str, expected: str
+) -> None:
+    cache, dossier, excerpt = _build_portable_company_dossier(tmp_path, summary)
+    claim = next(row for row in dossier["claims"] if row["kind"] == "company")
+    plan = next(row for row in dossier["source_plan"] if row["kind"] == "company")
+    source = dossier["sources"][0]
+    source_body = cache.resolve(source["raw_response_ref"], source["content_sha256"])
+    excerpt_bytes = excerpt.encode()
+
+    assert dossier["employer_name"] == "Acme"
+    assert claim["text"] == expected
+    assert claim["citation_excerpt"] == excerpt
+    assert source_body[plan["excerpt_byte_start"] : plan["excerpt_byte_start"] + plan["excerpt_byte_length"]] == excerpt_bytes
+    assert plan["excerpt_sha256"] == hashlib.sha256(excerpt_bytes).hexdigest()
+    validate_dossier(dossier, cache, as_of=date(2026, 7, 1))
+
+
+def test_portable_builder_rejects_possessive_text_bound_to_another_employer(
+    tmp_path: Path,
+) -> None:
+    cache, dossier, _excerpt = _build_portable_company_dossier(
+        tmp_path, "Acme's company operates a public business serving customers worldwide."
+    )
+    dossier["employer_name"] = "Acme Holdings"
+    with pytest.raises(ValueError, match="exactly reflect"):
+        validate_dossier(dossier, cache, as_of=date(2026, 7, 1))
+
+
+def test_mixed_legacy_and_possessive_dossiers_still_reject_employer_boilerplate() -> None:
+    legacy_summary = "Example's company operates a public business that serves customers worldwide."
+    current_summary = "Acme's company operates a public business that serves customers worldwide."
+    rows = (
+        (
+            {},
+            {"text": f"Example: {legacy_summary}", "citation_excerpt": f"<p>{legacy_summary}</p>"},
+        ),
+        (
+            {"employer_name": "Acme"},
+            {"text": current_summary, "citation_excerpt": f"<p>{current_summary}</p>"},
+        ),
+    )
+    normalized: dict[str, dict[str, set[str]]] = {"company": {}}
+    for dossier, claim in rows:
+        employer, key = _frozen_employer_claim_key(dossier, claim)
+        normalized["company"].setdefault(key, set()).add(employer)
+
+    assert _has_cross_employer_boilerplate(normalized)
 
 
 def test_one_authentic_capture_can_support_two_kinds_only_with_disjoint_exact_excerpts(tmp_path: Path) -> None:

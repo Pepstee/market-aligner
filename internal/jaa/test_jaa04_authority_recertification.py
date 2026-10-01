@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 from datetime import date
 from pathlib import Path
 
@@ -14,7 +15,9 @@ import pytest
 from career_automation.employer_research import (
     FRESHNESS_DAYS,
     SOURCE_KIND_POLICY,
+    Citation,
     RawResponseCache,
+    build_reconnaissance_dossier,
     validate_dossier,
 )
 from career_automation.models import IntelligenceKind
@@ -43,6 +46,8 @@ def _authority_dossier(
     published: str = "2026-07-01T00:00:00+00:00",
     same_article: bool = False,
     same_visible_content: bool = False,
+    company_summary: str | None = None,
+    builder_valid_sources: bool = False,
 ) -> tuple[dict[str, object], RawResponseCache]:
     cache = RawResponseCache(tmp_path / "raw")
     sources: list[dict[str, object]] = []
@@ -55,7 +60,18 @@ def _authority_dossier(
             if same_article
             else f"https://{host}/article"
         )
-        visible = _paragraph(IntelligenceKind.COMPANY) if same_visible_content else _paragraph(kind)
+        visible = (
+            company_summary
+            if kind is IntelligenceKind.COMPANY and company_summary is not None
+            else _paragraph(IntelligenceKind.COMPANY)
+            if same_visible_content
+            else _paragraph(kind)
+        )
+        if builder_valid_sources and len(visible.encode()) < 80:
+            visible += (
+                " Additional public information describes the employer's operations "
+                "and customer services across several regions."
+            )
         excerpt = f"<p>{visible}</p>"
         metadata = f'<meta property="article:published_time" content="{published}">'
         body = f"<!-- {article} -->{metadata}{excerpt}".encode()
@@ -120,6 +136,56 @@ def _authority_dossier(
 def test_valid_authority_dossier_positive_control(tmp_path: Path) -> None:
     dossier, cache = _authority_dossier(tmp_path)
     validate_dossier(dossier, cache, as_of=date(2026, 7, 20))
+
+
+def test_legacy_builder_preserves_exact_company_possessive_summary_and_identity(
+    tmp_path: Path,
+) -> None:
+    summary = (
+        "Example's company operates a public business and serves customers across "
+        "several regional markets with reliable services."
+    )
+    dossier, cache = _authority_dossier(
+        tmp_path, company_summary=summary, builder_valid_sources=True
+    )
+    citations = tuple(Citation(**source) for source in dossier["sources"])
+    built = build_reconnaissance_dossier(
+        SimpleNamespace(
+            job_key="independent-authority",
+            company="Example",
+            title="Synthetic engineer",
+        ),
+        citations,
+        cache,
+        source_plan=dossier["source_plan"],
+        as_of=date(2026, 7, 20),
+    )
+    company_claim = next(
+        claim for claim in built["claims"] if claim["kind"] == "company"
+    )
+    company_plan = next(
+        entry for entry in built["source_plan"] if entry["kind"] == "company"
+    )
+    company_source = next(
+        source for source in built["sources"] if source["id"] == company_claim["source_ids"][0]
+    )
+    raw_excerpt = company_claim["citation_excerpt"].encode()
+    raw_source = cache.resolve(
+        company_source["raw_response_ref"], company_source["content_sha256"]
+    )
+
+    assert built["employer_name"] == "Example"
+    assert company_claim["text"] == summary
+    assert raw_source[
+        company_plan["excerpt_byte_start"] : company_plan["excerpt_byte_start"]
+        + company_plan["excerpt_byte_length"]
+    ] == raw_excerpt
+    assert company_plan["excerpt_sha256"] == hashlib.sha256(raw_excerpt).hexdigest()
+    validate_dossier(built, cache, as_of=date(2026, 7, 20))
+
+    built["employer_name"] = "Example Group"
+    with pytest.raises(ValueError, match="exactly reflect"):
+        validate_dossier(built, cache, as_of=date(2026, 7, 20))
 
 
 def test_runtime_authority_evidence_is_external_and_required() -> None:
