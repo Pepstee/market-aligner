@@ -1,11 +1,11 @@
 {
-  "community_count": 30051,
-  "edge_count": 72528,
-  "node_count": 56372,
+  "community_count": 30077,
+  "edge_count": 72599,
+  "node_count": 56387,
   "outputs": {
-    ".graphify_labels.json": "270fc7a2b4a5d2cc21362cedd33ebadc35580df01b6c13f454a5eb9133cab4de",
-    "GRAPH_REPORT.md": "9eca8441214e3bd4b9d69517c6fc5a61b01bb8523287bd252c08e1d812cbd06c",
-    "graph.json": "df738311ce8297c5a2570a5ae3041251f75c1eee434857ab5501407c988fd7a1"
+    ".graphify_labels.json": "5844e14bfca8b5c53741e3f03c602911d4d53261776dc875a6b34e9a9c1b42fa",
+    "GRAPH_REPORT.md": "9cb201f7f9da2d6b0539f7e9f83d026a7b0506755d75d9d4b3730f157fb2b306",
+    "graph.json": "66c86af587f02c5d3098b4fd82b94adcd0ff04881ca879aa14f79a8d7ffff3d1"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "09f5351021b04a454c237f626853c45047063bd4",
+  "source_base_commit": "cca4f76dd85a81c452fad6bf6440cc2264009103",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -67,7 +67,7 @@
     "internal/jaa/career_automation/adversarial_recruiter_runtime.py": "38f1ac03445e3468cdfabfa94c75b3f6e09ee64dc4e95a894160584d6c65d317",
     "internal/jaa/career_automation/application_archive.py": "48e50ca7a002025c99ed3f90b56bd76644dabaa5030b7e6d44c7187a94d46656",
     "internal/jaa/career_automation/application_artifacts.py": "8c4fb656b882396af857c58ea6eeb5f8c7706169b67624ee2715d78fdac44c2d",
-    "internal/jaa/career_automation/application_compiler.py": "1bd5adba268ab224793bce1f2a6877a6b1e1cc490c8b9b96f7b0a4b2fe0e1880",
+    "internal/jaa/career_automation/application_compiler.py": "57571f095959fbaf9dec630be5f69934c190f78baec54c0f4f89d40f793e76c2",
     "internal/jaa/career_automation/application_preview.py": "f1d85977ab8adf914ca365ba44082ee8d33f12917d8a7e3c8198dee856499309",
     "internal/jaa/career_automation/application_quality.py": "290ffa0d41c9bf78eb66066e99ec758a35f7bc1721655b060ac5378ca306a360",
     "internal/jaa/career_automation/application_quality_contracts.py": "bb76d13b10ad74aaac82653b45825dd086312e16fb7a2c22437966f62479fd1a",
@@ -581,7 +581,7 @@
     "internal/jaa/test_jaa06_negative_controls.py": "e2ff4e91293183b2d268a458516b2d9e6c1667f599a18f0e2da99ad49d26c371",
     "internal/jaa/test_jaa07_independent_acceptance.py": "96e607edcd49f7ed91655e52606620521176c736fdd950c4d27b029d4b6a105c",
     "internal/jaa/test_jaa07_negative_controls.py": "5971abea7332440bdf5976aa69cac33bc5eab5821619174b88cc3a1065bed33c",
-    "internal/jaa/test_jaa08_independent_acceptance.py": "188bc3a202a197a8bbc5761f282b74941ec86dff27a7dd91415537322d7b8576",
+    "internal/jaa/test_jaa08_independent_acceptance.py": "f73dac00058b3ec307ae1d7748fa612b40af49c9066f0a41c89cf37d6789fdb1",
     "internal/jaa/test_jaa08_negative_controls.py": "a842370703f4f218f10539f80ba8663d4922ba90e8185459ab679fad26a8d41d",
     "internal/jaa/test_jaa09_independent_acceptance.py": "725ecf94283bef741973f8e0025eeebbeadf1a09dfa31e94385e483629d6a5cf",
     "internal/jaa/test_jaa09_negative_controls.py": "c87dd64d44985557dc83450f6a52cec96dac209e70a5388186ef212ccd9c81d9",

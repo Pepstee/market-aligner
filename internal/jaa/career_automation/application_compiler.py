@@ -895,6 +895,7 @@ class DocumentSection:
     heading: str
     sentence_ids: tuple[str, ...]
     style_slot_ids: tuple[str, ...] = ()
+    related_sentence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _safe_plain_text(self.heading, "section heading")
@@ -902,6 +903,23 @@ class DocumentSection:
             raise ValueError("document sections require content")
         if len(set(self.sentence_ids)) != len(self.sentence_ids):
             raise ValueError("section sentence identities must be unique")
+        if (
+            len(set(self.related_sentence_ids)) != len(self.related_sentence_ids)
+            or set(self.related_sentence_ids).intersection(self.sentence_ids)
+        ):
+            raise ValueError("related sentence identities must be unique metadata")
+        if self.related_sentence_ids and not self.style_slot_ids:
+            raise ValueError("related facts require a bound connective slot")
+
+    def document(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "heading": self.heading,
+            "sentence_ids": self.sentence_ids,
+            "style_slot_ids": self.style_slot_ids,
+        }
+        if self.related_sentence_ids:
+            result["related_sentence_ids"] = self.related_sentence_ids
+        return result
 
 
 @dataclass(frozen=True)
@@ -960,8 +978,8 @@ class ApplicationSource:
             "contact": self.contact.document(),
             "facts": [row.document() for row in self.facts],
             "style_slots": [row.document() for row in self.style_slots],
-            "cv_sections": [vars(row) for row in self.cv_sections],
-            "letter_sections": [vars(row) for row in self.letter_sections],
+            "cv_sections": [row.document() for row in self.cv_sections],
+            "letter_sections": [row.document() for row in self.letter_sections],
             "answers": [vars(row) for row in self.answers],
             "certifies_slice": False,
             "dependency_gate": "JAA-06",
@@ -1065,7 +1083,114 @@ def _validate_sections(
             slot = slots.get(slot_id)
             if slot is None or slot.document_kind != document_kind:
                 raise ValueError(f"{document_kind} section cites an invalid style slot")
+    if document_kind == "cover_letter":
+        _validate_related_section_bindings(sections, facts, slots)
     return covered
+
+
+def _strategy_sibling_key(fact: FactualSentence) -> tuple[object, ...] | None:
+    authority = fact.authority
+    if not isinstance(authority, FactAuthority):
+        return None
+    return (
+        authority.requirement_id,
+        authority.candidate_claim_id,
+        authority.candidate_claim_version,
+        authority.candidate_evidence_id,
+        authority.candidate_evidence_version,
+        authority.employer_research_claim_id,
+        authority.employer_fact_sha256,
+    )
+
+
+def _validate_related_section_bindings(
+    sections: tuple[DocumentSection, ...],
+    facts: Mapping[str, FactualSentence],
+    slots: Mapping[str, StyleSlot],
+) -> None:
+    bound_candidate_ids: set[str] = set()
+    for section in sections:
+        if not section.related_sentence_ids:
+            continue
+        if (
+            section.heading != "Company Fit"
+            or not section.style_slot_ids
+            or not section.sentence_ids
+        ):
+            raise ValueError("related facts are only valid in a connected company-fit section")
+        related_facts = [facts.get(sentence_id) for sentence_id in section.related_sentence_ids]
+        employer_facts = [facts.get(sentence_id) for sentence_id in section.sentence_ids]
+        section_slots = [slots.get(slot_id) for slot_id in section.style_slot_ids]
+        if (
+            any(
+                fact is None
+                or fact.fact_kind != "candidate"
+                or fact.document_kind != "cover_letter"
+                or _strategy_sibling_key(fact) is None
+                for fact in related_facts
+            )
+            or any(
+                fact is None
+                or fact.fact_kind != "employer"
+                or fact.document_kind != "cover_letter"
+                or _strategy_sibling_key(fact) is None
+                for fact in employer_facts
+            )
+            or any(
+                slot is None or slot.document_kind != "cover_letter"
+                for slot in section_slots
+            )
+        ):
+            raise ValueError("company-fit relation must bind candidate and employer strategy facts")
+        candidate_keys = {_strategy_sibling_key(fact) for fact in related_facts if fact}
+        employer_keys = {_strategy_sibling_key(fact) for fact in employer_facts if fact}
+        if not candidate_keys or not employer_keys or not employer_keys.issubset(candidate_keys):
+            raise ValueError("company-fit facts lack an exact strategy sibling binding")
+        if not candidate_keys.issubset(employer_keys):
+            raise ValueError("company-fit metadata contains an unrelated candidate fact")
+        for fact in related_facts:
+            assert fact is not None
+            if fact.sentence_id in bound_candidate_ids:
+                raise ValueError("candidate fact is bound more than once")
+            bound_candidate_ids.add(fact.sentence_id)
+            locations = [
+                row
+                for row in sections
+                if fact.sentence_id in row.sentence_ids
+            ]
+            if len(locations) != 1 or locations[0].heading != "Evidence Match":
+                raise ValueError("related candidate facts must appear once in Evidence Match")
+        private_ids = {
+            value
+            for fact in (*related_facts, *employer_facts)
+            if fact is not None
+            for value in (
+                fact.sentence_id,
+                fact.authority.strategy_element_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.requirement_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.candidate_claim_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.candidate_evidence_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.employer_research_claim_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+            )
+            if value
+        }
+        if any(
+            private_id in slot.text
+            for slot in section_slots
+            if slot is not None
+            for private_id in private_ids
+        ):
+            raise ValueError("company-fit connective cannot expose strategy identifiers")
 
 
 def compile_application_source(
@@ -1207,6 +1332,11 @@ def compile_application_source(
 
 
 def verify_application_source(source: ApplicationSource) -> None:
+    _validate_related_section_bindings(
+        source.letter_sections,
+        {row.sentence_id: row for row in source.facts},
+        {row.slot_id: row for row in source.style_slots},
+    )
     body = source.document(include_identity=False)
     expected_hash = hashlib.sha256(canonical_json(body).encode()).hexdigest()
     expected_id = content_hash(
@@ -1592,6 +1722,28 @@ class ProductionApplicationCompiler:
         if not cv_facts or not letter_candidate or not letter_employer:
             raise ValueError("strategy does not contain complete document authority")
 
+        employer_sibling_keys = {
+            _strategy_sibling_key(row) for row in letter_employer
+        }
+        related_candidate_ids = tuple(
+            row.sentence_id
+            for row in letter_candidate
+            if _strategy_sibling_key(row) in employer_sibling_keys
+        )
+        has_complete_sibling_binding = bool(related_candidate_ids) and all(
+            _strategy_sibling_key(employer) is not None
+            and _strategy_sibling_key(employer)
+            in {_strategy_sibling_key(candidate) for candidate in letter_candidate}
+            for employer in letter_employer
+        )
+        company_fit_slot = None
+        if has_complete_sibling_binding:
+            company_fit_slot = self._slot(
+                "cover_letter",
+                "strategy_sibling_company_fit_connective",
+                "I would welcome the opportunity to bring this experience to the work described here:",
+            )
+
         letter_open = self._slot(
             "cover_letter",
             "salutation",
@@ -1603,6 +1755,8 @@ class ProductionApplicationCompiler:
             "Kind regards",
         )
         slots: list[StyleSlot] = [letter_open, letter_close]
+        if company_fit_slot is not None:
+            slots.append(company_fit_slot)
         education = tuple(
             row.sentence_id
             for row in cv_facts
@@ -1690,6 +1844,8 @@ class ProductionApplicationCompiler:
                 DocumentSection(
                     "Company Fit",
                     tuple(row.sentence_id for row in letter_employer),
+                    (company_fit_slot.slot_id,) if company_fit_slot else (),
+                    related_candidate_ids if company_fit_slot else (),
                 ),
                 DocumentSection(
                     "Close",

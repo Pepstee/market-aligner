@@ -13,7 +13,9 @@ import pytest
 from career_automation.application_artifacts import publish_application_artifacts
 from career_automation.application_compiler import (
     CandidateContact,
+    FactAuthority,
     ProductionApplicationCompiler,
+    verify_application_source,
 )
 from career_automation.application_strategy import ApplicationStrategyStore
 from career_automation.candidate_graph import CandidateGraph
@@ -220,6 +222,107 @@ def _compilation_inputs(tmp_path: Path):
         artifact_root,
         receipt,
     )
+
+
+def test_company_fit_renders_only_exact_strategy_siblings_once(tmp_path: Path) -> None:
+    _, _, _, _, source, artifacts, _, _ = _compilation_inputs(tmp_path)
+    company_fit = next(
+        section for section in source.letter_sections if section.heading == "Company Fit"
+    )
+    assert company_fit.related_sentence_ids
+    related_facts = [
+        next(row for row in source.facts if row.sentence_id == sentence_id)
+        for sentence_id in company_fit.related_sentence_ids
+    ]
+    employer_facts = [
+        next(row for row in source.facts if row.sentence_id == sentence_id)
+        for sentence_id in company_fit.sentence_ids
+    ]
+    for employer in employer_facts:
+        assert isinstance(employer.authority, FactAuthority)
+        assert any(
+            isinstance(candidate.authority, FactAuthority)
+            and (
+                candidate.authority.requirement_id,
+                candidate.authority.candidate_claim_id,
+                candidate.authority.candidate_claim_version,
+                candidate.authority.candidate_evidence_id,
+                candidate.authority.candidate_evidence_version,
+                candidate.authority.employer_research_claim_id,
+                candidate.authority.employer_fact_sha256,
+            )
+            == (
+                employer.authority.requirement_id,
+                employer.authority.candidate_claim_id,
+                employer.authority.candidate_claim_version,
+                employer.authority.candidate_evidence_id,
+                employer.authority.candidate_evidence_version,
+                employer.authority.employer_research_claim_id,
+                employer.authority.employer_fact_sha256,
+            )
+            for candidate in related_facts
+        )
+
+    rendered = " ".join(artifacts.cover_letter_pdf.extracted_text.split())
+    for fact in (*related_facts, *employer_facts):
+        assert rendered.count(" ".join(fact.text.split())) == 1
+    connective = next(
+        row for row in source.style_slots if row.slot_id == company_fit.style_slot_ids[0]
+    )
+    assert " ".join(connective.text.split()) in rendered
+    for fact in (*related_facts, *employer_facts):
+        assert isinstance(fact.authority, FactAuthority)
+        for identifier in (
+            fact.sentence_id,
+            fact.authority.strategy_element_id,
+            fact.authority.requirement_id,
+            fact.authority.candidate_claim_id,
+            fact.authority.candidate_evidence_id,
+            fact.authority.employer_research_claim_id,
+        ):
+            if len(identifier) >= 12:
+                assert identifier not in rendered
+
+
+def test_company_fit_rejects_requirement_only_sibling_match(tmp_path: Path) -> None:
+    _, _, _, _, source, _, _, _ = _compilation_inputs(tmp_path)
+    company_fit = next(
+        section for section in source.letter_sections if section.heading == "Company Fit"
+    )
+    evidence_match = next(
+        section for section in source.letter_sections if section.heading == "Evidence Match"
+    )
+    original = next(
+        row for row in source.facts if row.sentence_id == company_fit.related_sentence_ids[0]
+    )
+    assert isinstance(original.authority, FactAuthority)
+    mismatched_fact = replace(
+        original,
+        sentence_id=hashlib.sha256(b"mismatched-company-hook-sibling").hexdigest(),
+        authority=replace(
+            original.authority,
+            employer_research_claim_id="different-employer-claim",
+        ),
+    )
+    sections = tuple(
+        replace(row, sentence_ids=(*row.sentence_ids, mismatched_fact.sentence_id))
+        if row.heading == "Evidence Match"
+        else replace(
+            row,
+            related_sentence_ids=(mismatched_fact.sentence_id,),
+        )
+        if row.heading == "Company Fit"
+        else row
+        for row in source.letter_sections
+    )
+    assert mismatched_fact.sentence_id not in evidence_match.sentence_ids
+    mismatched_source = replace(
+        source,
+        facts=(*source.facts, mismatched_fact),
+        letter_sections=sections,
+    )
+    with pytest.raises(ValueError, match="exact strategy sibling binding"):
+        verify_application_source(mismatched_source)
 
 
 def _cv_constraint_arguments(source, artifacts) -> dict[str, object]:
