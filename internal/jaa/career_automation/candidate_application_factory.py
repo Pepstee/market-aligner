@@ -1737,7 +1737,7 @@ def _build_candidate_application_source(
         "cover_letter",
         "opening-intent",
         (
-            f"I am applying for the {role_title} position at {company_name}. "
+            "I am applying for this position. "
             "I want to build and operate dependable software systems, and this "
             "opportunity is closely aligned with that direction."
         ),
@@ -1761,12 +1761,6 @@ def _build_candidate_application_source(
         "close",
         "I would welcome the opportunity to discuss this work in more detail and "
         "how I could contribute to the team.",
-    )
-    letter_signoff = _slot("cover_letter", "signoff", "Kind regards")
-    letter_signature = _slot(
-        "cover_letter",
-        "signature",
-        contact.full_name,
     )
     cv_sections = tuple(
         DocumentSection(
@@ -1801,8 +1795,6 @@ def _build_candidate_application_source(
             letter_evidence_lead,
             letter_company_lead,
             letter_close,
-            letter_signoff,
-            letter_signature,
         ),
         cv_sections=cv_sections,
         letter_sections=(
@@ -1824,11 +1816,7 @@ def _build_candidate_application_source(
             DocumentSection(
                 "Close",
                 (),
-                (
-                    letter_close.slot_id,
-                    letter_signoff.slot_id,
-                    letter_signature.slot_id,
-                ),
+                (letter_close.slot_id,),
             ),
         ),
         answers=(),

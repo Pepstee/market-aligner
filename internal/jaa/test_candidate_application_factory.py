@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from career_automation.application_compiler import CandidateContact
+from career_automation.rendering import _letter_paragraphs, render_pdf_artifacts
 from career_automation.candidate_application_factory import (
     _approved_statements,
     _build_candidate_application_source,
@@ -824,6 +825,29 @@ def test_generic_cover_letter_fills_two_bound_facts_without_legacy_ids(
     assert len({row.authority.candidate_evidence_id for row in letter_facts}) == 2
     assert employer_facts
     assert all(source.company_name in row.text for row in employer_facts)
+
+
+def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=1,
+    )
+
+    source = _build_candidate_application_source(**arguments).source
+    paragraphs = _letter_paragraphs(source)
+    opening = paragraphs[0].casefold()
+    assert opening.count(source.role_title.casefold()) == 1
+    assert opening.count(source.company_name.casefold()) == 1
+    assert paragraphs[-1] == f"Kind regards,\n{source.contact.full_name}"
+
+    artifacts = render_pdf_artifacts(source)
+    for text in (
+        artifacts.editable.cover_letter_text,
+        artifacts.cover_letter_pdf.extracted_text,
+    ):
+        assert text.casefold().count("kind regards") == 1
 
 
 def test_generic_profile_composition_still_rejects_duplicate_cv_facts(

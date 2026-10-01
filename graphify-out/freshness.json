@@ -1,11 +1,11 @@
 {
-  "community_count": 30060,
-  "edge_count": 72830,
-  "node_count": 56450,
+  "community_count": 30067,
+  "edge_count": 72839,
+  "node_count": 56451,
   "outputs": {
-    ".graphify_labels.json": "24652edd2fa4d21a958cf0e1d5a02519aac48d56bf4a51c1e27f85173a4e6c6b",
-    "GRAPH_REPORT.md": "b53bc4be26eaf9b2e770936e9545cb388f9276e13fd3a3f7ddde9dfc8bdf7c2d",
-    "graph.json": "a8a86f6b712e21e17bd3d69cb8f58fbe7c9d448083232fd9b0c8d661db548453"
+    ".graphify_labels.json": "b9be7b60c0077ca21208aad9e2572eeaf086647babfed36e62949f72812d03f1",
+    "GRAPH_REPORT.md": "3633802cf6d0474da1d9514320285dd2504e74addd31fff5731fe8c2b3784f3d",
+    "graph.json": "9d6d07bd1c98e4ea5ce175e4644958b608393c7b4f062e69181fa1c79922b1b5"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "9b1f8c7994f8cd43df3736ab163997b19e9d9f65",
+  "source_base_commit": "6ac1f9807548e2aa10ae3ffd1b4bccba482fb17f",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -82,7 +82,7 @@
     "internal/jaa/career_automation/browser_executor.py": "9205268e371a4bff9618c023c88b86a226eaa8c7fecaf9aef8b8c9427d9e52e2",
     "internal/jaa/career_automation/browser_workflows.py": "d76a20c4c8b6cc5465f4cdc9b39c535ab367f4f587fa854579e46865401ba122",
     "internal/jaa/career_automation/canary_forensic_evidence.py": "368050e5f6971525fc5adfaa6ca7309287dc68b6cdb33091230d3e9b3ed2cfb4",
-    "internal/jaa/career_automation/candidate_application_factory.py": "7c055c1f3679b455c6643159ad3523f9197effc8b7067252f508a84d3d1fd40c",
+    "internal/jaa/career_automation/candidate_application_factory.py": "78b86e9b508053950e8aca1071d7098727e04cd2d3ddc3e9baec03f182692988",
     "internal/jaa/career_automation/candidate_authority.py": "3e392bf91817e1be696cec7e5434c24cd277c92501504898da7beab3c5e4dd35",
     "internal/jaa/career_automation/candidate_contact_authority.py": "25cb102d1124ad286cf298c1bc9b8fe401b2f1173a44a855c4edb26633381b0f",
     "internal/jaa/career_automation/candidate_generation_worker.py": "82fe4385d9b14390e20ec7ae066cd6951af4cb99dcad30f6ffd06ecce3b510ed",
@@ -504,7 +504,7 @@
     "internal/jaa/test_assurance_manifest_truth.py": "7c332645e440d38b38b42e0ad9b914a8bc737db7b72473d09b146ad818cdc969",
     "internal/jaa/test_ats_application_authority.py": "f1c5dddae68334d7ed5af23ad885966e79be99d2d88ddbaa702d756d4d117d70",
     "internal/jaa/test_authority_provisioning.py": "2bc92afd73dc8eaf92d02507d2ddca29a1370f9a0e4745f1003b2c1087d52f47",
-    "internal/jaa/test_candidate_application_factory.py": "01c3cfdbeb5d943f3d601a00cfebf6e03005b3d7c263ca9494acda40594c2392",
+    "internal/jaa/test_candidate_application_factory.py": "df5f38718f8b74cd5b3605035bfc7ea418ee2922e9aa9816a0e0c2b03f1e2d53",
     "internal/jaa/test_candidate_authority.py": "ca4a1791b5e918ba04c765e3ac533a2c8f1364d3df29ffd3b708c02c45b6fb4d",
     "internal/jaa/test_candidate_contact_authority.py": "cdb84f6b6c7af8ccff2b7443d91684cc0071fb6e973cb99dbe761454a6318cc8",
     "internal/jaa/test_candidate_contact_enrollment.py": "86d7afacc8f6fcec19c539840cb3c2740d5bbb6e279320407714d411bf3a2e2e",
@@ -669,6 +669,7 @@
     "internal/jaa/test_jaa_certification_profile.py": "dfa5052d4f45a05b87f159b83f0a685feef2a331668abb0dc1ad55d0ef916ca8",
     "internal/jaa/test_jaa_module_boundaries.py": "4797e8e8c7b61becbb58108990c50528b693255cc8aa15a5bf9b244fd4735931",
     "internal/jaa/test_live_vacancy_discovery.py": "e3c2e7081239ac20f663882bf0f65de65950eebfb5ef49132eff352a5685ffa4",
+    "internal/jaa/test_ma_native_browser_diagnostic.py": "cc031d4156ca2e2fcab9ad1dbccd7a9c54838a462458ffd0f7eb9a592a82be38",
     "internal/jaa/test_nongreenhouse_fit_projection.py": "13d601e30c8b4d232c63f319cb39c2b16200d51d4270a8bcaa5c7bfb458fb26c",
     "internal/jaa/test_nongreenhouse_provider_alias.py": "98b57c26cb4251c8c35b4e6e5004fdf3ff616bad419450de669f8de298bd1aea",
     "internal/jaa/test_portable_acceptance_runtime_config.py": "8b433dab1f5bdda3edc10a4ba756acf9e3b2a252d48b75eb33cf17c38c0d6a5b",
