@@ -23,9 +23,15 @@ from .application_quality import (
     build_deterministic_preflight_quality_review,
     review_application_package_with_pinned_skills,
 )
-from .application_quality_contracts import QualityReviewDisposition
+from .application_quality_contracts import (
+    ApplicationPreflightQualityReview,
+    QualityReviewDisposition,
+)
 from .application_sanity_review import (
     ApplicationSanityReviewError,
+    LocalSyntheticReviewContext,
+    SanityReviewReceipt,
+    build_local_synthetic_review_context,
     build_vacancy_review_material,
     package_from_application,
     review_application_package,
@@ -100,6 +106,33 @@ class GreenhouseFormPlan:
     field_authority_names: tuple[tuple[str, str], ...]
     consent_states: tuple[tuple[str, bool | str], ...]
     inventory_sha256: str
+
+
+@dataclass(frozen=True)
+class PreparedLocalSyntheticDiagnostic:
+    sanity_review_receipt: SanityReviewReceipt
+    quality_review: ApplicationPreflightQualityReview
+    diagnostic_context: LocalSyntheticReviewContext
+    application_source_identity: str
+    artifact_set_sha256: str
+    native_fill_completed: bool = True
+    production_admission: bool = False
+    submission_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.sanity_review_receipt) is not SanityReviewReceipt
+            or self.sanity_review_receipt.schema_version
+            != "jaa.application-sanity-local-diagnostic-receipt.v1"
+            or type(self.diagnostic_context) is not LocalSyntheticReviewContext
+            or self.native_fill_completed is not True
+            or self.production_admission is not False
+            or self.submission_authority is not False
+            or self.application_source_identity
+            != self.diagnostic_context.application_source_identity
+            or not HEX_64.fullmatch(self.artifact_set_sha256)
+        ):
+            raise ValueError("local synthetic preparation result is not diagnostic-only")
 CANDIDATE_SCHEMA_SHA256 = (
     "338bd48974f07266003aee510f42286ef29285e007515e73f41900069468367f"
 )
@@ -1357,7 +1390,7 @@ class GutuaGreenhouseSession:
         recorder,
         page,
         sink: GeneratedRevisionSink,
-    ) -> PreparedGreenhouseRelease:
+    ) -> PreparedGreenhouseRelease | PreparedLocalSyntheticDiagnostic:
         return self._prepare_application(item, recorder, page, sink, review_only=False)
 
     def prepare_review(
@@ -1367,7 +1400,7 @@ class GutuaGreenhouseSession:
 
     def _prepare_application(
         self, item: QueueItem, recorder, page, sink: GeneratedRevisionSink, *, review_only: bool,
-    ) -> PreparedGreenhouseRelease | PreparedGreenhouseReview:
+    ) -> PreparedGreenhouseRelease | PreparedGreenhouseReview | PreparedLocalSyntheticDiagnostic:
         vacancy = item.vacancy.vacancy
         market_context = getattr(self, "market_context_by_key", {}).get(
             vacancy.job_key
@@ -1527,10 +1560,35 @@ class GutuaGreenhouseSession:
                 form_field_authorities=form_plan.form_field_authorities,
                 form_inventory_sha256=inventory_sha256 if review_only else None,
             )
+            local_synthetic_context = None
+            local_fixture_sha256 = getattr(
+                self, "local_synthetic_review_fixture_sha256", None
+            )
+            if local_fixture_sha256 is not None:
+                if review_only:
+                    raise ValueError(
+                        "local synthetic diagnostic context is unavailable in review-only mode"
+                    )
+                local_synthetic_context = build_local_synthetic_review_context(
+                    fixture_sha256=local_fixture_sha256,
+                    package=sanity_package,
+                    source_url=vacancy.source_url,
+                    observed_page_url=page.url,
+                    repository_root=self.repository_root,
+                )
             if review_only:
                 sanity_receipt = recorder.review_once(
                     sanity_package,
                     lambda: review_application_package(sanity_package, client=client),
+                )
+            elif local_synthetic_context is not None:
+                sanity_receipt = review_application_package_with_pinned_skills(
+                    sanity_package,
+                    client=client,
+                    local_synthetic_context=local_synthetic_context,
+                    repository_root=self.repository_root,
+                    actual_source_url=vacancy.source_url,
+                    observed_page_url=page.url,
                 )
             else:
                 sanity_receipt = review_application_package_with_pinned_skills(
@@ -1634,44 +1692,47 @@ class GutuaGreenhouseSession:
                 forensic_root=forensic_root,
                 forensic_receipt=forensic_receipt,
             )
-        gate_root = self.archive_root / "production-runtime"
-        gate_root.mkdir(mode=0o700, exist_ok=True)
-        gate = CandidateAuthorityReleaseGate(
-            gate_root / "release-gate.sqlite3",
-            repository_root=self.repository_root,
-            vacancy_requirements=package.vacancy_requirements,
-            authority_files=CandidateAuthorityFiles(
-                archive_root=self.archive_root,
-                discovery_path=self.discovery_path,
-                candidate_authority_path=self.eligibility_path,
-                contact_authority_path=contact_path,
-                job_key=vacancy.job_key,
-                decision_receipt_sha256=str(decision_row["receipt_sha256"]),
-            ),
-            **(
-                {
-                    "market_decision_authority": (
-                        market_context.market_decision_authority
-                    ),
-                    "materialization_receipt": (
-                        market_context.materialization.receipt
-                    ),
-                }
-                if market_context is not None
-                else {}
-            ),
-        )
-        issued = gate.issue(
-            source=package.source,
-            artifacts=package.artifacts,
-            contact=contact_authority.contact,
-            questions=form_plan.questions,
-            artifact_root=artifact_root,
-            repository_root=self.repository_root,
-            jurisdiction="GB",
-            contract_type="employee",
-            application_url=vacancy.source_url,
-        )
+        gate = None
+        issued = None
+        if local_synthetic_context is None:
+            gate_root = self.archive_root / "production-runtime"
+            gate_root.mkdir(mode=0o700, exist_ok=True)
+            gate = CandidateAuthorityReleaseGate(
+                gate_root / "release-gate.sqlite3",
+                repository_root=self.repository_root,
+                vacancy_requirements=package.vacancy_requirements,
+                authority_files=CandidateAuthorityFiles(
+                    archive_root=self.archive_root,
+                    discovery_path=self.discovery_path,
+                    candidate_authority_path=self.eligibility_path,
+                    contact_authority_path=contact_path,
+                    job_key=vacancy.job_key,
+                    decision_receipt_sha256=str(decision_row["receipt_sha256"]),
+                ),
+                **(
+                    {
+                        "market_decision_authority": (
+                            market_context.market_decision_authority
+                        ),
+                        "materialization_receipt": (
+                            market_context.materialization.receipt
+                        ),
+                    }
+                    if market_context is not None
+                    else {}
+                ),
+            )
+            issued = gate.issue(
+                source=package.source,
+                artifacts=package.artifacts,
+                contact=contact_authority.contact,
+                questions=form_plan.questions,
+                artifact_root=artifact_root,
+                repository_root=self.repository_root,
+                jurisdiction="GB",
+                contract_type="employee",
+                application_url=vacancy.source_url,
+            )
         # Employer-visible page mutation is admitted only after every local,
         # provider, semantic, and one-use release authority has passed.
         observed_capture = collect_greenhouse_form_inventory(page)
@@ -1767,11 +1828,33 @@ class GutuaGreenhouseSession:
             reviewed_form_field_authorities=form_plan.form_field_authorities,
             reviewed_vacancy_requirements=tuple(package.vacancy_requirements),
         )
-        quality_review = build_deterministic_preflight_quality_review(quality_input)
+        if local_synthetic_context is None:
+            quality_review = build_deterministic_preflight_quality_review(quality_input)
+        else:
+            quality_review = build_deterministic_preflight_quality_review(
+                quality_input,
+                local_synthetic_context=local_synthetic_context,
+                sanity_package=sanity_package,
+                repository_root=self.repository_root,
+                actual_source_url=vacancy.source_url,
+                observed_page_url=page.url,
+            )
         if quality_review.disposition is not QualityReviewDisposition.ACCEPTED:
             raise ProductionATSBoundaryError(
                 "deterministic application quality review refused release: "
                 + ", ".join(issue.code for issue in quality_review.issues)
+            )
+        if local_synthetic_context is not None:
+            return PreparedLocalSyntheticDiagnostic(
+                sanity_review_receipt=sanity_receipt,
+                quality_review=quality_review,
+                diagnostic_context=local_synthetic_context,
+                application_source_identity=package.source.source_id,
+                artifact_set_sha256=publication.artifact_set_sha256,
+            )
+        if gate is None or issued is None:
+            raise ProductionATSBoundaryError(
+                "production release gate was not issued for a production preparation"
             )
         head = exact_clean_head(self.repository_root)
         return PreparedGreenhouseRelease(

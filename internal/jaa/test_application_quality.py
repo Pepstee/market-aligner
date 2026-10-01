@@ -28,6 +28,10 @@ from career_automation.application_quality import (
 )
 from career_automation.application_sanity_review import (
     COMBINED_RESULT_SCHEMA_VERSION,
+    LOCAL_SYNTHETIC_REVIEW_SCOPE,
+    LOCAL_SYNTHETIC_REVIEW_URL,
+    LOCAL_SYNTHETIC_JOB_KEY_PREFIX,
+    LocalSyntheticReviewContext,
     SanityReviewPackage,
     approved_evidence_projection,
 )
@@ -463,6 +467,32 @@ def test_missing_editorial_skill_reviews_are_detailed_release_blockers(
         "humanizer_review_missing",
     }
     assert review.editorial_skill_reviews_verified is False
+
+
+def test_local_diagnostic_quality_context_requires_combined_receipt(
+    tmp_path: Path,
+) -> None:
+    quality_input = _quality_input_with_ats(tmp_path, _quality_source())
+    fixture_sha256 = "a" * 64
+    context = LocalSyntheticReviewContext(
+        fixture_sha256=fixture_sha256,
+        job_key=LOCAL_SYNTHETIC_JOB_KEY_PREFIX + fixture_sha256[:16],
+        application_source_identity=quality_input.source.source_id,
+        source_url=LOCAL_SYNTHETIC_REVIEW_URL,
+        observed_page_url=LOCAL_SYNTHETIC_REVIEW_URL,
+        repository_root=(
+            "/srv/artvault/control/operator-glm/programme/canary/"
+            "market-aligner-linux-verification"
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="local diagnostic bindings require a combined review receipt",
+    ):
+        build_deterministic_preflight_quality_review(
+            quality_input,
+            local_synthetic_context=context,
+        )
 
 
 def test_editorial_skill_review_order_input_and_identity_are_fail_closed(

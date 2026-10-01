@@ -18,10 +18,10 @@ import pytest
 
 ACCEPTED_EVIDENCE = Path(
     "/srv/artvault/control/operator-glm/jobs/"
-    "ma-complete-fixture-20261001-20261001T203008Z/work/accepted-complete-synthetic-evidence.json"
+    "ma-second-example-20261001-20261001T210349Z/work/accepted-two-example-evidence.json"
 )
 ACCEPTED_EVIDENCE_SHA256 = (
-    "4322c694716f7e4dbd6b420107d1780ffe6f0ec8651276dda6e492b8c7d7282b"
+    "8449a3f8a2940dea3770769483e1f0012151339e5f15ca85bc2d0de91ac4b730"
 )
 _MAX_NATIVE_RESPONSE_CAPTURE_BYTES = 1_048_576
 _MAX_NATIVE_EXCEPTION_CHAIN_DEPTH = 6
@@ -533,6 +533,7 @@ def test_native_prepare_release_one_call_local_diagnostic(
     from career_automation import candidate_contact_authority as contact_module
     from career_automation import candidate_release_gate as gate_module
     from career_automation import gutua_greenhouse_session as session_module
+    from career_automation import application_sanity_review as sanity_module
     from career_automation.application_archive import VacancyArchiveIdentity
     from career_automation.application_sanity_review import ApplicationSanityReviewError
     from career_automation.candidate_contact_authority import load_candidate_contact_authority
@@ -616,6 +617,7 @@ def test_native_prepare_release_one_call_local_diagnostic(
 
     session = object.__new__(GutuaGreenhouseSession)
     session.approved_evidence_path = ACCEPTED_EVIDENCE
+    session.local_synthetic_review_fixture_sha256 = ACCEPTED_EVIDENCE_SHA256
     session.archive_root = archive_root
     session.repository_root = repository_root
     session.candidate_projection = projection
@@ -690,9 +692,23 @@ def test_native_prepare_release_one_call_local_diagnostic(
     review_receipts: list[object] = []
     real_review = session_module.review_application_package_with_pinned_skills
 
-    def capture_review(package, *, client):
-        receipt = real_review(package, client=client)
+    def capture_review(package, *, client, **review_kwargs):
+        receipt = real_review(package, client=client, **review_kwargs)
         document = receipt.document()
+        default_verification_rejected = False
+        try:
+            sanity_module.verify_sanity_review_receipt(receipt, package)
+        except ValueError as verification_error:
+            default_verification_rejected = (
+                receipt.schema_version
+                == sanity_module.LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION
+                and str(verification_error)
+                == "local diagnostic receipt is rejected by production verification"
+            )
+        result[
+            "default_production_verifier_rejected_actual_diagnostic_receipt"
+        ] = default_verification_rejected
+        result["captured_sanity_receipt_schema_version"] = receipt.schema_version
         receipt_bytes = _json_bytes(document)
         recorder.add_revision(
             role="review.sanity_result",
@@ -717,6 +733,11 @@ def test_native_prepare_release_one_call_local_diagnostic(
                 "applicant_visible_projection_sha256"
             )
             result["combined_review_stage"] = coverage.get("review_stage")
+            result["diagnostic_context_sha256"] = coverage.get(
+                "diagnostic_context_sha256"
+            )
+            result["production_admission"] = coverage.get("production_admission")
+            result["execution_scope"] = coverage.get("execution_scope")
             result["combined_review_criteria"] = [
                 row.get("criterion_id")
                 for row in coverage.get("criteria", [])
@@ -768,6 +789,7 @@ def test_native_prepare_release_one_call_local_diagnostic(
         fill_results.append(fill_result)
         result["native_fill_returned"] = True
         result["uploaded_document_roles"] = sorted(str(row) for row in fill_result[0])
+        result["native_fill_observation_count"] = len(fill_results)
         return fill_result
 
     monkeypatch.setattr(GutuaGreenhouseSession, "_fill_supported_form", capture_fill)
@@ -973,6 +995,14 @@ def test_native_prepare_release_one_call_local_diagnostic(
     )
     if error is None:
         result["status"] = "prepared_no_submit"
+        result["prepared_result_type"] = type(prepared).__name__
+        if isinstance(prepared, session_module.PreparedLocalSyntheticDiagnostic):
+            result["production_admission"] = prepared.production_admission
+            result["submission_authority"] = prepared.submission_authority
+            result["native_fill_declared_completed"] = prepared.native_fill_completed
+            result["diagnostic_context_sha256"] = (
+                prepared.diagnostic_context.context_sha256
+            )
     elif backend.refused_before_dispatch and result.get("native_fill_returned"):
         result["status"] = "stopped_after_fill_before_second_provider_dispatch"
     elif isinstance(error, ApplicationSanityReviewError) and error.result is not None:
@@ -992,6 +1022,13 @@ def test_native_prepare_release_one_call_local_diagnostic(
     if page is not None:
         assert "submission.result" in result["terminal_archive_roles"]
         assert result["attempt_finalized"] is True
+    if review_receipts:
+        assert (
+            result.get(
+                "default_production_verifier_rejected_actual_diagnostic_receipt"
+            )
+            is True
+        )
     if result["status"] == "native_diagnostic_failed":
         pytest.fail("native diagnostic failed; inspect private exception evidence")
     if result["status"] != "prepared_no_submit":
@@ -1001,7 +1038,13 @@ def test_native_prepare_release_one_call_local_diagnostic(
     assert backend.dispatched == 1
     assert backend.responses == 1
     assert len(review_receipts) == 1
+    assert isinstance(prepared, session_module.PreparedLocalSyntheticDiagnostic)
+    assert prepared.production_admission is False
+    assert prepared.submission_authority is False
     assert result.get("native_fill_returned") is True
+    assert result.get("native_fill_observation_count") == 1
+    assert "cv" in result.get("uploaded_document_roles", [])
+    assert result.get("native_fill_declared_completed") is True
     assert result["attempt_finalized"] is True
     assert "submission.result" in result["terminal_archive_roles"]
 

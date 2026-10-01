@@ -265,6 +265,140 @@ def test_combined_review_issues_one_content_bound_receipt_for_all_criteria(
     assert restored.receipt_sha256 == receipt.receipt_sha256
 
 
+def test_local_diagnostic_receipt_is_context_bound_and_rejected_by_default(
+    tmp_path,
+) -> None:
+    fixture_sha256 = "a" * 64
+    original = package()
+    candidate = replace(
+        original,
+        intended_vacancy=replace(
+            original.intended_vacancy,
+            job_key=review_module.LOCAL_SYNTHETIC_JOB_KEY_PREFIX
+            + fixture_sha256[:16],
+        ),
+    )
+    source_url = review_module.LOCAL_SYNTHETIC_REVIEW_URL
+    repository_root = Path(review_module._NAMED_TEST_ROOT)
+    context = review_module.build_local_synthetic_review_context(
+        fixture_sha256=fixture_sha256,
+        package=candidate,
+        source_url=source_url,
+        observed_page_url=source_url,
+        repository_root=repository_root,
+    )
+    criteria = (
+        {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+        {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+    )
+    backend = ScriptedBackend(_combined_result(), model="gpt-6-luna")
+    receipt = review_module._review_application_package_with_criteria(
+        candidate,
+        client=client(backend, tmp_path),
+        criteria_prompt="Apply both exact synthetic read-only criteria.",
+        criteria=criteria,
+        local_synthetic_context=context,
+        repository_root=repository_root,
+        actual_source_url=source_url,
+        observed_page_url=source_url,
+    )
+
+    assert backend.calls == 1
+    assert receipt.schema_version == (
+        review_module.LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION
+    )
+    assert receipt.review_coverage["diagnostic_context"] == context.document()
+    assert receipt.review_coverage["diagnostic_context_sha256"] == context.context_sha256
+    assert review_module.canonical_json(context.document()) in backend.last_system
+    with pytest.raises(
+        ValueError,
+        match="local diagnostic receipt is rejected by production verification",
+    ):
+        verify_sanity_review_receipt(receipt, candidate)
+
+    verify_sanity_review_receipt(
+        receipt,
+        candidate,
+        local_synthetic_context=context,
+        repository_root=repository_root,
+        actual_source_url=source_url,
+        observed_page_url=source_url,
+    )
+    mismatched_context = replace(
+        context,
+        application_source_identity="f" * 64,
+    )
+    with pytest.raises(ValueError, match="diagnostic context differs"):
+        verify_sanity_review_receipt(
+            receipt,
+            candidate,
+            local_synthetic_context=mismatched_context,
+            repository_root=repository_root,
+            actual_source_url=source_url,
+            observed_page_url=source_url,
+        )
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ("source_url", "observed_page_url", "repository_root", "package"),
+)
+def test_local_diagnostic_mismatch_refuses_before_provider_dispatch(
+    tmp_path, mismatch
+) -> None:
+    fixture_sha256 = "b" * 64
+    original = package()
+    candidate = replace(
+        original,
+        intended_vacancy=replace(
+            original.intended_vacancy,
+            job_key=review_module.LOCAL_SYNTHETIC_JOB_KEY_PREFIX
+            + fixture_sha256[:16],
+        ),
+    )
+    source_url = review_module.LOCAL_SYNTHETIC_REVIEW_URL
+    repository_root = Path(review_module._NAMED_TEST_ROOT)
+    context = review_module.build_local_synthetic_review_context(
+        fixture_sha256=fixture_sha256,
+        package=candidate,
+        source_url=source_url,
+        observed_page_url=source_url,
+        repository_root=repository_root,
+    )
+    review_package = candidate
+    review_root = repository_root
+    actual_source_url = source_url
+    observed_page_url = source_url
+    if mismatch == "source_url":
+        actual_source_url = "http://127.0.0.1:1/synthetic/other"
+    elif mismatch == "observed_page_url":
+        observed_page_url = "http://127.0.0.1:1/synthetic/other"
+    elif mismatch == "repository_root":
+        review_root = Path("/srv/artvault/projects/market-aligner")
+    else:
+        review_package = replace(
+            candidate,
+            application_source_identity="c" * 64,
+        )
+    backend = ScriptedBackend(_combined_result(), model="gpt-6-luna")
+
+    with pytest.raises(ValueError):
+        review_module._review_application_package_with_criteria(
+            review_package,
+            client=client(backend, tmp_path),
+            criteria_prompt="Apply both exact synthetic read-only criteria.",
+            criteria=(
+                {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+                {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+            ),
+            local_synthetic_context=context,
+            repository_root=review_root,
+            actual_source_url=actual_source_url,
+            observed_page_url=observed_page_url,
+        )
+    assert backend.calls == 0
+
+
 @pytest.mark.parametrize(
     ("sanity", "blocked_criterion"),
     (

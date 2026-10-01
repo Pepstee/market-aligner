@@ -30,11 +30,16 @@ from .application_quality_contracts import (
 )
 from .application_sanity_review import (
     COMBINED_RECEIPT_SCHEMA_VERSION,
+    LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION,
+    LocalSyntheticReviewContext,
     SanityReviewPackage,
     SanityReviewReceipt,
+    _review_application_package_with_criteria,
     approved_evidence_projection,
     form_field_projection_document,
     review_application_package_with_criteria,
+    verify_sanity_review_receipt,
+    verify_local_synthetic_review_context,
     vacancy_requirements_projection,
 )
 from .evidence_matching import canonical_json, content_hash
@@ -470,12 +475,35 @@ def review_application_package_with_pinned_skills(
     package: SanityReviewPackage,
     *,
     client: LLMClient,
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
+    repository_root: Path | None = None,
+    actual_source_url: str | None = None,
+    observed_page_url: str | None = None,
 ) -> SanityReviewReceipt:
     """Review one exact package against sanity and both pinned skills in one call."""
     if type(package) is not SanityReviewPackage:
         raise TypeError("combined review requires the exact sanity package")
     if type(client) is not LLMClient:
         raise TypeError("combined review requires the exact LLM client")
+    SanityReviewPackage.__post_init__(package)
+    diagnostic_bindings = (
+        repository_root,
+        actual_source_url,
+        observed_page_url,
+    )
+    if local_synthetic_context is None:
+        if any(value is not None for value in diagnostic_bindings):
+            raise ValueError("local diagnostic bindings require an exact context")
+    else:
+        if any(value is None for value in diagnostic_bindings):
+            raise ValueError("local diagnostic context requires complete runtime bindings")
+        verify_local_synthetic_review_context(
+            local_synthetic_context,
+            package,
+            repository_root=repository_root,
+            actual_source_url=actual_source_url,
+            observed_page_url=observed_page_url,
+        )
     criteria: list[dict[str, str]] = []
     prompt_sections = [
         "Apply every pinned skill criterion to the same exact package in this one read-only review. Do not edit or rewrite any content. The criterion decisions are independent coverage fields within one result and one receipt; do not omit a criterion because another passes. Use only the exact package and preserve factual atoms."
@@ -494,11 +522,22 @@ def review_application_package_with_pinned_skills(
             "Apply the complete pinned document below as a read-only review. Return pass only when no concrete skill-defined issue remains. Otherwise return detailed findings with exact evidence from the supplied package; do not invent candidate facts.\n\n"
             + skill_document.decode("utf-8", errors="strict")
         )
-    return review_application_package_with_criteria(
+    if local_synthetic_context is None:
+        return review_application_package_with_criteria(
+            package,
+            client=client,
+            criteria_prompt="\n\n".join(prompt_sections),
+            criteria=criteria,
+        )
+    return _review_application_package_with_criteria(
         package,
         client=client,
         criteria_prompt="\n\n".join(prompt_sections),
         criteria=criteria,
+        local_synthetic_context=local_synthetic_context,
+        repository_root=repository_root,
+        actual_source_url=actual_source_url,
+        observed_page_url=observed_page_url,
     )
 
 
@@ -746,14 +785,51 @@ def _form_value_text(value: object) -> str:
 
 def _verify_combined_review_projection(
     quality_input: ApplicationQualityInput,
+    *,
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
+    sanity_package: SanityReviewPackage | None = None,
+    repository_root: Path | None = None,
+    actual_source_url: str | None = None,
+    observed_page_url: str | None = None,
 ) -> None:
     receipt = quality_input.combined_review_receipt
     authority = quality_input.ats_application_authority
     if type(receipt) is not SanityReviewReceipt:
         raise ValueError("combined sanity and skill review receipt is missing")
-    if receipt.schema_version != COMBINED_RECEIPT_SCHEMA_VERSION:
+    if receipt.schema_version not in {
+        COMBINED_RECEIPT_SCHEMA_VERSION,
+        LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION,
+    }:
         raise ValueError("combined review receipt version is unsupported")
     SanityReviewReceipt.__post_init__(receipt)
+    if receipt.schema_version == LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION:
+        if (
+            local_synthetic_context is None
+            or sanity_package is None
+            or repository_root is None
+            or actual_source_url is None
+            or observed_page_url is None
+        ):
+            raise ValueError("local diagnostic review requires explicit context")
+        verify_sanity_review_receipt(
+            receipt,
+            sanity_package,
+            local_synthetic_context=local_synthetic_context,
+            repository_root=repository_root,
+            actual_source_url=actual_source_url,
+            observed_page_url=observed_page_url,
+        )
+    elif any(
+        value is not None
+        for value in (
+            local_synthetic_context,
+            sanity_package,
+            repository_root,
+            actual_source_url,
+            observed_page_url,
+        )
+    ):
+        raise ValueError("production combined review cannot use local diagnostic context")
     expected_criteria = [
         {
             "criterion_id": name,
@@ -827,10 +903,26 @@ def build_deterministic_preflight_quality_review(
     quality_input: ApplicationQualityInput,
     *,
     prior_cover_letter_shingles: Iterable[Iterable[str]] = (),
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
+    sanity_package: SanityReviewPackage | None = None,
+    repository_root: Path | None = None,
+    actual_source_url: str | None = None,
+    observed_page_url: str | None = None,
 ) -> ApplicationPreflightQualityReview:
     """Recompute quality from exact source/artifact evidence with no score inputs."""
     if not isinstance(quality_input, ApplicationQualityInput):
         raise TypeError("quality input must be ApplicationQualityInput")
+    if quality_input.combined_review_receipt is None and any(
+        value is not None
+        for value in (
+            local_synthetic_context,
+            sanity_package,
+            repository_root,
+            actual_source_url,
+            observed_page_url,
+        )
+    ):
+        raise ValueError("local diagnostic bindings require a combined review receipt")
     source = quality_input.source
     artifacts = quality_input.artifacts
     verify_application_source(source)
@@ -876,7 +968,14 @@ def build_deterministic_preflight_quality_review(
     expected_names = tuple(row[0] for row in _EDITORIAL_SKILL_POLICIES)
     combined_receipt = quality_input.combined_review_receipt
     if combined_receipt is not None:
-        _verify_combined_review_projection(quality_input)
+        _verify_combined_review_projection(
+            quality_input,
+            local_synthetic_context=local_synthetic_context,
+            sanity_package=sanity_package,
+            repository_root=repository_root,
+            actual_source_url=actual_source_url,
+            observed_page_url=observed_page_url,
+        )
         if editorial_reviews:
             raise ValueError("combined receipt cannot be duplicated as separate skill receipts")
         observed_names = expected_names

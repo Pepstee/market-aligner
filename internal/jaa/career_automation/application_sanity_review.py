@@ -11,7 +11,9 @@ import hashlib
 import io
 import json
 import re
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping, Sequence
 
 from pypdf import PdfReader
@@ -37,8 +39,24 @@ PROMPT_SCHEMA_VERSION = "jaa.application-sanity-prompt.v1"
 RESULT_SCHEMA_VERSION = "jaa.application-sanity-result.v1"
 RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v2"
 COMBINED_RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v3"
+LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION = (
+    "jaa.application-sanity-local-diagnostic-receipt.v1"
+)
 COMBINED_RESULT_SCHEMA_VERSION = "jaa.combined-application-review-result.v1"
 COMBINED_REVIEW_COVERAGE_SCHEMA_VERSION = "jaa.combined-application-review-coverage.v1"
+LOCAL_SYNTHETIC_DIAGNOSTIC_COVERAGE_SCHEMA_VERSION = (
+    "jaa.combined-application-local-diagnostic-coverage.v1"
+)
+LOCAL_SYNTHETIC_REVIEW_CONTEXT_SCHEMA_VERSION = (
+    "jaa.local-synthetic-review-context.v1"
+)
+LOCAL_SYNTHETIC_REVIEW_SCOPE = "synthetic_local_no_submit"
+LOCAL_SYNTHETIC_REVIEW_URL = "http://127.0.0.1:1/synthetic/application"
+LOCAL_SYNTHETIC_JOB_KEY_PREFIX = "greenhouse:synthetic-local:"
+_NAMED_TEST_ROOT = (
+    "/srv/artvault/control/operator-glm/programme/canary/"
+    "market-aligner-linux-verification"
+)
 REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v1"
 REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
 MAX_REVIEW_TEXT_BYTES = 500_000
@@ -397,6 +415,174 @@ class SanityReviewPackage:
                 != self.intended_vacancy.vacancy_sha256
             ):
                 raise ValueError("review listing differs from intended vacancy")
+
+
+@dataclass(frozen=True)
+class LocalSyntheticReviewContext:
+    fixture_sha256: str
+    job_key: str
+    application_source_identity: str
+    source_url: str
+    observed_page_url: str
+    repository_root: str
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not str
+            for value in (
+                self.fixture_sha256,
+                self.job_key,
+                self.application_source_identity,
+                self.source_url,
+                self.observed_page_url,
+                self.repository_root,
+            )
+        ):
+            raise TypeError("local synthetic review context fields must be exact strings")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.fixture_sha256):
+            raise ValueError("local synthetic fixture identity is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.application_source_identity):
+            raise ValueError("local synthetic application source identity is invalid")
+        if self.job_key != LOCAL_SYNTHETIC_JOB_KEY_PREFIX + self.fixture_sha256[:16]:
+            raise ValueError("local synthetic job identity differs from its fixture")
+        if (
+            self.source_url != LOCAL_SYNTHETIC_REVIEW_URL
+            or self.observed_page_url != LOCAL_SYNTHETIC_REVIEW_URL
+        ):
+            raise ValueError("local synthetic review requires the exact fixture URL")
+        if self.repository_root != _NAMED_TEST_ROOT:
+            raise ValueError("local synthetic review requires the exact named test root")
+
+    def document(self) -> dict[str, object]:
+        return {
+            "schema_version": LOCAL_SYNTHETIC_REVIEW_CONTEXT_SCHEMA_VERSION,
+            "execution_scope": LOCAL_SYNTHETIC_REVIEW_SCOPE,
+            "production_admission": False,
+            "fixture_sha256": self.fixture_sha256,
+            "job_key": self.job_key,
+            "application_source_identity": self.application_source_identity,
+            "source_url": self.source_url,
+            "observed_page_url": self.observed_page_url,
+            "repository_root": self.repository_root,
+        }
+
+    @property
+    def context_sha256(self) -> str:
+        return content_hash(self.document())
+
+
+def _actual_named_test_root(repository_root: Path) -> str:
+    root = Path(repository_root)
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise ValueError("diagnostic repository root must be an existing absolute directory")
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("diagnostic repository root could not be verified") from exc
+    try:
+        actual_root = str(Path(completed.stdout.removesuffix("\n")).resolve(strict=True))
+    except OSError as exc:
+        raise ValueError("diagnostic repository root could not be resolved") from exc
+    if actual_root != _NAMED_TEST_ROOT:
+        raise ValueError("diagnostic repository root is not the exact named test path")
+    return actual_root
+
+
+def build_local_synthetic_review_context(
+    *,
+    fixture_sha256: str,
+    package: SanityReviewPackage,
+    source_url: str,
+    observed_page_url: str,
+    repository_root: Path,
+) -> LocalSyntheticReviewContext:
+    if type(package) is not SanityReviewPackage:
+        raise TypeError("diagnostic review requires the exact sanity package")
+    SanityReviewPackage.__post_init__(package)
+    context = LocalSyntheticReviewContext(
+        fixture_sha256=fixture_sha256,
+        job_key=package.intended_vacancy.job_key,
+        application_source_identity=package.application_source_identity,
+        source_url=source_url,
+        observed_page_url=observed_page_url,
+        repository_root=_actual_named_test_root(repository_root),
+    )
+    verify_local_synthetic_review_context(
+        context,
+        package,
+        repository_root=repository_root,
+        actual_source_url=source_url,
+        observed_page_url=observed_page_url,
+    )
+    return context
+
+
+def verify_local_synthetic_review_context(
+    context: LocalSyntheticReviewContext,
+    package: SanityReviewPackage,
+    *,
+    repository_root: Path,
+    actual_source_url: str,
+    observed_page_url: str,
+) -> None:
+    if type(package) is not SanityReviewPackage:
+        raise TypeError("diagnostic review requires the exact sanity package")
+    SanityReviewPackage.__post_init__(package)
+    if type(context) is not LocalSyntheticReviewContext:
+        raise TypeError("diagnostic review requires the exact context type")
+    LocalSyntheticReviewContext.__post_init__(context)
+    if context.repository_root != _actual_named_test_root(repository_root):
+        raise ValueError("diagnostic repository root differs from the context")
+    if actual_source_url != context.source_url:
+        raise ValueError("diagnostic source URL differs from the context")
+    if observed_page_url != context.observed_page_url:
+        raise ValueError("diagnostic page URL differs from the context")
+    if (
+        package.intended_vacancy.job_key != context.job_key
+        or package.application_source_identity != context.application_source_identity
+    ):
+        raise ValueError("diagnostic context differs from the exact application package")
+
+
+def _local_synthetic_review_context_from_document(
+    value: object,
+) -> LocalSyntheticReviewContext:
+    fields = {
+        "schema_version",
+        "execution_scope",
+        "production_admission",
+        "fixture_sha256",
+        "job_key",
+        "application_source_identity",
+        "source_url",
+        "observed_page_url",
+        "repository_root",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("local synthetic review context document is malformed")
+    if (
+        value["schema_version"] != LOCAL_SYNTHETIC_REVIEW_CONTEXT_SCHEMA_VERSION
+        or value["execution_scope"] != LOCAL_SYNTHETIC_REVIEW_SCOPE
+        or value["production_admission"] is not False
+    ):
+        raise ValueError("local synthetic review context scope is invalid")
+    context = LocalSyntheticReviewContext(
+        fixture_sha256=value["fixture_sha256"],
+        job_key=value["job_key"],
+        application_source_identity=value["application_source_identity"],
+        source_url=value["source_url"],
+        observed_page_url=value["observed_page_url"],
+        repository_root=value["repository_root"],
+    )
+    if context.document() != value:
+        raise ValueError("local synthetic review context is not canonical")
+    return context
 
 
 def canonical_form_fields(
@@ -764,18 +950,54 @@ class SanityReviewReceipt:
             ):
                 raise ValueError("sanity receipt policy binding is stale")
             result_schema = RESULT_SCHEMA
-        elif self.schema_version == COMBINED_RECEIPT_SCHEMA_VERSION:
+        elif self.schema_version in {
+            COMBINED_RECEIPT_SCHEMA_VERSION,
+            LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION,
+        }:
             coverage = self.review_coverage
-            if coverage is None or set(coverage) != {
+            is_local_diagnostic = (
+                self.schema_version
+                == LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION
+            )
+            required_coverage_fields = {
                 "schema_version",
                 "criteria",
                 "applicant_visible_projection_sha256",
                 "review_stage",
                 "post_review_inventory",
-            }:
+            }
+            if is_local_diagnostic:
+                required_coverage_fields.update(
+                    {
+                        "execution_scope",
+                        "production_admission",
+                        "diagnostic_context",
+                        "diagnostic_context_sha256",
+                    }
+                )
+            if coverage is None or set(coverage) != required_coverage_fields:
                 raise ValueError("combined review coverage is missing or malformed")
-            if coverage.get("schema_version") != COMBINED_REVIEW_COVERAGE_SCHEMA_VERSION:
+            expected_coverage_schema = (
+                LOCAL_SYNTHETIC_DIAGNOSTIC_COVERAGE_SCHEMA_VERSION
+                if is_local_diagnostic
+                else COMBINED_REVIEW_COVERAGE_SCHEMA_VERSION
+            )
+            if coverage.get("schema_version") != expected_coverage_schema:
                 raise ValueError("combined review coverage version differs")
+            if is_local_diagnostic:
+                context = _local_synthetic_review_context_from_document(
+                    coverage.get("diagnostic_context")
+                )
+                if (
+                    coverage.get("execution_scope") != LOCAL_SYNTHETIC_REVIEW_SCOPE
+                    or coverage.get("production_admission") is not False
+                    or coverage.get("diagnostic_context_sha256")
+                    != context.context_sha256
+                    or context.job_key != self.intended_vacancy.job_key
+                    or context.application_source_identity
+                    != self.application_source_identity
+                ):
+                    raise ValueError("local diagnostic receipt context is unbound")
             criteria = coverage.get("criteria")
             if not isinstance(criteria, list) or not criteria:
                 raise ValueError("combined review criteria are missing")
@@ -1053,7 +1275,47 @@ def review_application_package_with_criteria(
     criteria_prompt: str,
     criteria: Sequence[Mapping[str, str]],
 ) -> SanityReviewReceipt:
+    return _review_application_package_with_criteria(
+        package,
+        client=client,
+        criteria_prompt=criteria_prompt,
+        criteria=criteria,
+    )
+
+
+def _review_application_package_with_criteria(
+    package: SanityReviewPackage,
+    *,
+    client: LLMClient,
+    criteria_prompt: str,
+    criteria: Sequence[Mapping[str, str]],
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
+    repository_root: Path | None = None,
+    actual_source_url: str | None = None,
+    observed_page_url: str | None = None,
+) -> SanityReviewReceipt:
     """Issue one receipt for sanity and every declared read-only review criterion."""
+    if type(package) is not SanityReviewPackage:
+        raise TypeError("combined review requires the exact sanity package")
+    SanityReviewPackage.__post_init__(package)
+    diagnostic_bindings = (
+        repository_root,
+        actual_source_url,
+        observed_page_url,
+    )
+    if local_synthetic_context is None:
+        if any(value is not None for value in diagnostic_bindings):
+            raise ValueError("local diagnostic bindings require an exact context")
+    else:
+        if any(value is None for value in diagnostic_bindings):
+            raise ValueError("local diagnostic context requires complete runtime bindings")
+        verify_local_synthetic_review_context(
+            local_synthetic_context,
+            package,
+            repository_root=repository_root,
+            actual_source_url=actual_source_url,
+            observed_page_url=observed_page_url,
+        )
     if isinstance(client.backend, MockBackend) or client.backend.name == "mock":
         raise ApplicationSanityReviewError(
             "review.mock_forbidden", "MockBackend cannot issue production authority"
@@ -1102,6 +1364,16 @@ def review_application_package_with_criteria(
         "review_stage": "pre_fill_semantic_intent",
         "post_review_inventory": "verified_locally_after_fill",
     }
+    if local_synthetic_context is not None:
+        coverage.update(
+            {
+                "schema_version": LOCAL_SYNTHETIC_DIAGNOSTIC_COVERAGE_SCHEMA_VERSION,
+                "execution_scope": LOCAL_SYNTHETIC_REVIEW_SCOPE,
+                "production_admission": False,
+                "diagnostic_context": local_synthetic_context.document(),
+                "diagnostic_context_sha256": local_synthetic_context.context_sha256,
+            }
+        )
     combined_prompt = (
         REVIEWER_PROMPT
         + "\n\n"
@@ -1110,6 +1382,12 @@ def review_application_package_with_criteria(
         + canonical_json(criterion_ids)
         + ". Return one JSON object containing one sanity_review and one criteria_reviews row for each ID in that order. Use each ID exactly; do not append a version, hash, label, or alias."
     )
+    if local_synthetic_context is not None:
+        combined_prompt += (
+            "\n\nVERIFIED LOCAL DIAGNOSTIC CONTEXT (not applicant-visible content):\n"
+            + canonical_json(local_synthetic_context.document())
+            + "\nThis is an authorized local synthetic, non-submitting fixture. Its fixture identifiers and non-deliverable contact values are test data, not real candidate claims or a real application. Review the exact supplied application and every pinned criterion normally; retain every concrete finding and never infer PASS from diagnostic scope. This context grants no production or submission authority."
+        )
     result_schema = _combined_result_schema(criterion_ids)
     prompt_sha256 = hashlib.sha256(combined_prompt.encode("utf-8")).hexdigest()
     schema_sha256 = hashlib.sha256(canonical_json(result_schema).encode("utf-8")).hexdigest()
@@ -1186,8 +1464,13 @@ def review_application_package_with_criteria(
             result=result,
         )
     model_result_sha256 = content_hash(result)
+    receipt_schema_version = (
+        LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION
+        if local_synthetic_context is not None
+        else COMBINED_RECEIPT_SCHEMA_VERSION
+    )
     preimage = {
-        "schema_version": COMBINED_RECEIPT_SCHEMA_VERSION,
+        "schema_version": receipt_schema_version,
         "package_hashes": hashes,
         "intended_vacancy": package.intended_vacancy.document(),
         "vacancy_intent_sha256": package.intended_vacancy.intent_sha256,
@@ -1227,15 +1510,28 @@ def review_application_package_with_criteria(
         model_result_sha256=model_result_sha256,
         verdict="pass",
         receipt_sha256=content_hash(preimage),
-        schema_version=COMBINED_RECEIPT_SCHEMA_VERSION,
+        schema_version=receipt_schema_version,
         review_coverage=coverage,
     )
-    verify_sanity_review_receipt(receipt, package)
+    verify_sanity_review_receipt(
+        receipt,
+        package,
+        local_synthetic_context=local_synthetic_context,
+        repository_root=repository_root,
+        actual_source_url=actual_source_url,
+        observed_page_url=observed_page_url,
+    )
     return receipt
 
 
 def verify_sanity_review_receipt(
-    receipt: SanityReviewReceipt, package: SanityReviewPackage
+    receipt: SanityReviewReceipt,
+    package: SanityReviewPackage,
+    *,
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
+    repository_root: Path | None = None,
+    actual_source_url: str | None = None,
+    observed_page_url: str | None = None,
 ) -> None:
     """Recompute every deterministic binding without making a second model call."""
     if type(receipt) is not SanityReviewReceipt:
@@ -1244,6 +1540,38 @@ def verify_sanity_review_receipt(
         raise TypeError("sanity verification requires the exact package type")
     SanityReviewPackage.__post_init__(package)
     SanityReviewReceipt.__post_init__(receipt)
+    diagnostic_bindings = (
+        repository_root,
+        actual_source_url,
+        observed_page_url,
+    )
+    if receipt.schema_version == LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION:
+        if local_synthetic_context is None or any(
+            value is None for value in diagnostic_bindings
+        ):
+            raise ValueError(
+                "local diagnostic receipt is rejected by production verification"
+            )
+        verify_local_synthetic_review_context(
+            local_synthetic_context,
+            package,
+            repository_root=repository_root,
+            actual_source_url=actual_source_url,
+            observed_page_url=observed_page_url,
+        )
+        coverage = receipt.review_coverage
+        if (
+            coverage is None
+            or coverage.get("diagnostic_context")
+            != local_synthetic_context.document()
+            or coverage.get("diagnostic_context_sha256")
+            != local_synthetic_context.context_sha256
+        ):
+            raise ValueError("local diagnostic receipt differs from its exact context")
+    elif local_synthetic_context is not None or any(
+        value is not None for value in diagnostic_bindings
+    ):
+        raise ValueError("production review receipt cannot use local diagnostic context")
     _, hashes = _package_document(package)
     if (
         dict(receipt.package_hashes) != hashes
@@ -1265,6 +1593,11 @@ __all__ = [
     "FINDING_CODES",
     "COMBINED_RECEIPT_SCHEMA_VERSION",
     "COMBINED_RESULT_SCHEMA_VERSION",
+    "LOCAL_SYNTHETIC_DIAGNOSTIC_RECEIPT_SCHEMA_VERSION",
+    "LOCAL_SYNTHETIC_REVIEW_CONTEXT_SCHEMA_VERSION",
+    "LOCAL_SYNTHETIC_REVIEW_SCOPE",
+    "LOCAL_SYNTHETIC_REVIEW_URL",
+    "LocalSyntheticReviewContext",
     "MAX_REVIEW_TEXT_BYTES",
     "POLICY_SHA256",
     "PROMPT_SHA256",
@@ -1277,6 +1610,7 @@ __all__ = [
     "VacancyReviewMaterial",
     "approved_evidence_projection",
     "build_vacancy_review_material",
+    "build_local_synthetic_review_context",
     "canonical_form_fields",
     "form_field_projection_document",
     "package_from_application",
@@ -1284,4 +1618,5 @@ __all__ = [
     "review_application_package_with_criteria",
     "vacancy_requirements_projection",
     "verify_sanity_review_receipt",
+    "verify_local_synthetic_review_context",
 ]
