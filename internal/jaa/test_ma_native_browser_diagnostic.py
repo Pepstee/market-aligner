@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+import stat
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -22,6 +23,10 @@ ACCEPTED_EVIDENCE = Path(
 ACCEPTED_EVIDENCE_SHA256 = (
     "5a409c813aea87d748445a40287972bcc2897e861464d08b0265632d1aa20a72"
 )
+_MAX_NATIVE_RESPONSE_CAPTURE_BYTES = 1_048_576
+_MAX_NATIVE_EXCEPTION_CHAIN_DEPTH = 6
+_MAX_NATIVE_EXCEPTION_MESSAGE_BYTES = 4096
+_MAX_NATIVE_EXCEPTION_CHAIN_BYTES = 32_768
 NAMED_TEST_ROOT = Path(
     "/srv/artvault/control/operator-glm/programme/canary/"
     "market-aligner-linux-verification"
@@ -64,6 +69,141 @@ def _private_write(path: Path, value: bytes) -> None:
 
 def _save_result(root: Path, result: dict[str, object]) -> None:
     _private_write(root / "safe-result.json", _json_bytes(result))
+
+
+def _response_structure(text: str) -> dict[str, object]:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        return {
+            "json_status": "invalid",
+            "json_root_type": None,
+            "json_root_member_count": None,
+            "json_error_line": error.lineno,
+            "json_error_column": error.colno,
+        }
+    if isinstance(value, dict):
+        root_type = "object"
+        member_count = len(value)
+    elif isinstance(value, list):
+        root_type = "array"
+        member_count = len(value)
+    elif value is None:
+        root_type = "null"
+        member_count = None
+    elif isinstance(value, bool):
+        root_type = "boolean"
+        member_count = None
+    elif isinstance(value, (int, float)):
+        root_type = "number"
+        member_count = None
+    else:
+        root_type = "string"
+        member_count = None
+    return {
+        "json_status": "valid",
+        "json_root_type": root_type,
+        "json_root_member_count": member_count,
+        "json_error_line": None,
+        "json_error_column": None,
+    }
+
+
+def _capture_provider_response(
+    response: object, destination: Path | None
+) -> dict[str, object]:
+    if destination is None:
+        return {"status": "not_requested"}
+    text = getattr(response, "text", None)
+    if not isinstance(text, str):
+        return {
+            "status": "response_text_unavailable",
+            "response_type": type(response).__name__,
+        }
+    payload = text.encode("utf-8")
+    summary: dict[str, object] = {
+        "response_bytes": len(payload),
+        "response_sha256": _sha(payload),
+    }
+    if len(payload) > _MAX_NATIVE_RESPONSE_CAPTURE_BYTES:
+        summary["status"] = "too_large"
+        return summary
+    try:
+        summary.update(_response_structure(text))
+    except Exception as error:
+        summary["json_status"] = "summary_failed"
+        summary["json_error_type"] = type(error).__name__
+    try:
+        _private_write(destination, payload)
+    except Exception as error:
+        summary["status"] = "write_failed"
+        summary["capture_error_type"] = type(error).__name__
+        return summary
+    summary["status"] = "written"
+    return summary
+
+
+def _capture_exception_chain(root: Path, error: BaseException) -> dict[str, object]:
+    records: list[dict[str, object]] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    chain_truncated = False
+    while current is not None and len(records) < _MAX_NATIVE_EXCEPTION_CHAIN_DEPTH:
+        if id(current) in seen:
+            chain_truncated = True
+            break
+        seen.add(id(current))
+        try:
+            message = str(current)
+        except Exception:
+            message = ""
+        prefix = message[:_MAX_NATIVE_EXCEPTION_MESSAGE_BYTES]
+        prefix_bytes = prefix.encode("utf-8", errors="replace")[
+            :_MAX_NATIVE_EXCEPTION_MESSAGE_BYTES
+        ]
+        records.append(
+            {
+                "type": type(current).__name__,
+                "message_prefix": prefix_bytes.decode("utf-8", errors="replace"),
+                "captured_message_bytes": len(prefix_bytes),
+                "captured_message_sha256": _sha(prefix_bytes),
+                "message_truncated": len(prefix) < len(message)
+                or len(prefix_bytes) < len(prefix.encode("utf-8", errors="replace")),
+            }
+        )
+        next_error = current.__cause__
+        if next_error is None and not current.__suppress_context__:
+            next_error = current.__context__
+        current = next_error
+    if current is not None:
+        chain_truncated = True
+    document = {
+        "schema_version": "ma.native-diagnostic-exception-chain.v1",
+        "chain_truncated": chain_truncated,
+        "causes": records,
+    }
+    backend_failure = getattr(error, "backend_failure", None)
+    if isinstance(backend_failure, dict):
+        document["backend_failure"] = backend_failure
+    payload = _json_bytes(document)
+    summary: dict[str, object] = {
+        "status": "too_large" if len(payload) > _MAX_NATIVE_EXCEPTION_CHAIN_BYTES else "pending",
+        "exception_chain_bytes": len(payload),
+        "exception_chain_sha256": _sha(payload),
+        "exception_chain_types": [row["type"] for row in records],
+        "exception_chain_truncated": chain_truncated
+        or any(row["message_truncated"] for row in records),
+    }
+    if len(payload) > _MAX_NATIVE_EXCEPTION_CHAIN_BYTES:
+        return summary
+    try:
+        _private_write(root / "exception-chain.json", payload)
+    except Exception as capture_error:
+        summary["status"] = "write_failed"
+        summary["capture_error_type"] = type(capture_error).__name__
+        return summary
+    summary["status"] = "written"
+    return summary
 
 
 def _capture_setup_failures(test_function):
@@ -295,8 +435,10 @@ def _synthetic_html() -> str:
 class _OneCallBackend:
     name = "codex_cli"
 
-    def __init__(self, backend) -> None:
+    def __init__(self, backend, *, response_capture_path: Path | None = None) -> None:
         self.backend = backend
+        self.response_capture_path = response_capture_path
+        self.response_capture: dict[str, object] = {"status": "not_received"}
         self.call_attempts = 0
         self.dispatched = 0
         self.responses = 0
@@ -325,6 +467,15 @@ class _OneCallBackend:
         self.responses += 1
         model = getattr(response, "model", None)
         self.response_model = model if isinstance(model, str) else None
+        try:
+            self.response_capture = _capture_provider_response(
+                response, self.response_capture_path
+            )
+        except Exception as capture_error:
+            self.response_capture = {
+                "status": "capture_failed",
+                "capture_error_type": type(capture_error).__name__,
+            }
         return response
 
 
@@ -494,7 +645,10 @@ def test_native_prepare_release_one_call_local_diagnostic(
         lambda **_kwargs: (observation, _ObservationReceipt()),
     )
 
-    backend = _OneCallBackend(CodexCliBackend(model="gpt-6-luna"))
+    backend = _OneCallBackend(
+        CodexCliBackend(model="gpt-6-luna"),
+        response_capture_path=tmp_path / "provider-response.txt",
+    )
     class _LLMClientFactory:
         @staticmethod
         def from_config(**kwargs):
@@ -726,6 +880,36 @@ def test_native_prepare_release_one_call_local_diagnostic(
         _private_write(tmp_path / "actual-exception.txt", error_bytes)
         result["exception_sha256"] = _sha(error_bytes)
         result["exception_type"] = type(error).__name__
+    if error is not None:
+        try:
+            exception_capture = _capture_exception_chain(tmp_path, error)
+            result.update(
+                exception_chain_capture_status=exception_capture["status"],
+                exception_chain_bytes=exception_capture["exception_chain_bytes"],
+                exception_chain_sha256=exception_capture["exception_chain_sha256"],
+                exception_chain_types=exception_capture["exception_chain_types"],
+                exception_chain_truncated=exception_capture[
+                    "exception_chain_truncated"
+                ],
+            )
+            if isinstance(error, ApplicationSanityReviewError):
+                result["review_error_code"] = error.code
+                backend_failure = error.backend_failure
+                if isinstance(backend_failure, dict):
+                    result["review_backend_failure_category"] = backend_failure.get(
+                        "error_category"
+                    )
+                    result["review_backend_failure_exit_code"] = backend_failure.get(
+                        "exit_code"
+                    )
+                    result["review_backend_diagnosis_present"] = bool(
+                        backend_failure.get("stderr_diagnosis")
+                    )
+        except Exception as capture_error:
+            result["exception_chain_capture_status"] = "capture_failed"
+            result["exception_chain_capture_error_type"] = type(
+                capture_error
+            ).__name__
 
     objects = recorder.attempt._objects(recorder.attempt._events())
     roles = sorted(row.role for row in objects)
@@ -736,6 +920,25 @@ def test_native_prepare_release_one_call_local_diagnostic(
         provider_backend_errors=backend.backend_errors,
         provider_refused_before_dispatch=backend.refused_before_dispatch,
         provider_response_model=backend.response_model,
+        provider_response_capture_status=backend.response_capture.get("status"),
+        provider_response_bytes=backend.response_capture.get("response_bytes"),
+        provider_response_sha256=backend.response_capture.get("response_sha256"),
+        provider_response_json_status=backend.response_capture.get("json_status"),
+        provider_response_json_root_type=backend.response_capture.get(
+            "json_root_type"
+        ),
+        provider_response_json_root_member_count=backend.response_capture.get(
+            "json_root_member_count"
+        ),
+        provider_response_json_error_line=backend.response_capture.get(
+            "json_error_line"
+        ),
+        provider_response_json_error_column=backend.response_capture.get(
+            "json_error_column"
+        ),
+        provider_response_capture_error_type=backend.response_capture.get(
+            "capture_error_type"
+        ),
         fixture_gets_fulfilled=served["fixture_get"],
         intercepted_requests_aborted=served["aborted_requests"],
         intercepted_post_attempts=served["post_attempts"],
@@ -778,3 +981,93 @@ def test_native_prepare_release_one_call_local_diagnostic(
     assert result.get("native_fill_returned") is True
     assert result["attempt_finalized"] is True
     assert "submission.result" in result["terminal_archive_roles"]
+
+
+def test_native_response_capture_preserves_exact_bytes_and_one_call_limit(
+    tmp_path: Path,
+) -> None:
+    from llm.client import LLMError, LLMResponse
+
+    tmp_path.chmod(0o700)
+    text = '{"verdict":"uncertain","detail":"synthetic diagnostic"}\n'
+    response = LLMResponse(text=text, model="synthetic-model")
+
+    class _FakeBackend:
+        calls = 0
+
+        def complete(self, system: str, user: str, temperature: float):
+            self.calls += 1
+            return response
+
+    fake = _FakeBackend()
+    response_path = tmp_path / "provider-response.txt"
+    backend = _OneCallBackend(fake, response_capture_path=response_path)
+    returned = backend.complete("synthetic system", "synthetic user", 0)
+
+    assert returned is response
+    assert response_path.read_bytes() == text.encode("utf-8")
+    assert stat.S_IMODE(response_path.stat().st_mode) == 0o600
+    assert backend.response_capture == {
+        "response_bytes": len(text.encode("utf-8")),
+        "response_sha256": _sha(text.encode("utf-8")),
+        "json_status": "valid",
+        "json_root_type": "object",
+        "json_root_member_count": 2,
+        "json_error_line": None,
+        "json_error_column": None,
+        "status": "written",
+    }
+    assert "synthetic diagnostic" not in json.dumps(backend.response_capture)
+
+    with pytest.raises(LLMError, match="second backend dispatch refused"):
+        backend.complete("synthetic system", "synthetic user", 0)
+    assert fake.calls == 1
+    assert backend.dispatched == 1
+    assert backend.responses == 1
+    assert backend.refused_before_dispatch == 1
+    assert response_path.read_bytes() == text.encode("utf-8")
+
+
+def test_native_response_capture_refuses_oversize_without_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm.client import LLMResponse
+
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(
+        __import__(__name__), "_MAX_NATIVE_RESPONSE_CAPTURE_BYTES", 8
+    )
+    response_path = tmp_path / "provider-response.txt"
+    response = LLMResponse(text="synthetic-too-large", model="synthetic-model")
+
+    summary = _capture_provider_response(response, response_path)
+
+    assert summary["status"] == "too_large"
+    assert summary["response_bytes"] == len(response.text.encode("utf-8"))
+    assert summary["response_sha256"] == _sha(response.text.encode("utf-8"))
+    assert not response_path.exists()
+
+
+def test_native_exception_chain_capture_is_bounded_and_private(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    try:
+        try:
+            raise ValueError("synthetic cause " + "x" * 6000)
+        except ValueError as cause:
+            raise RuntimeError("synthetic wrapper") from cause
+    except RuntimeError as error:
+        summary = _capture_exception_chain(tmp_path, error)
+
+    artifact = tmp_path / "exception-chain.json"
+    assert summary["status"] == "written"
+    assert stat.S_IMODE(artifact.stat().st_mode) == 0o600
+    assert artifact.stat().st_size <= _MAX_NATIVE_EXCEPTION_CHAIN_BYTES
+    document = json.loads(artifact.read_bytes())
+    assert [row["type"] for row in document["causes"]] == [
+        "RuntimeError",
+        "ValueError",
+    ]
+    assert document["causes"][1]["message_truncated"] is True
+    assert summary["exception_chain_truncated"] is True

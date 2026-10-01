@@ -1,11 +1,11 @@
 {
-  "community_count": 30087,
-  "edge_count": 72944,
-  "node_count": 56472,
+  "community_count": 30072,
+  "edge_count": 72977,
+  "node_count": 56480,
   "outputs": {
-    ".graphify_labels.json": "6061cac09421ec73cdf3532cd5e09801e1b38da7d524a9533d483431966997ff",
-    "GRAPH_REPORT.md": "7a224cb675d5ff8bc49904d3ad83a6a2a44116ee6e71b692b23e6cb15bf69a93",
-    "graph.json": "05903a45721514707be44bc5e3ed6a778313bdec339e0aefaebf43b1e9db3b89"
+    ".graphify_labels.json": "c784e5399a8ad4ac8c6c40998ab7a2e6e5a4c16befbf74a6c22ea528b483fd71",
+    "GRAPH_REPORT.md": "0f38189786fc7868b28ad63b6348515b180cd5253f60bacc0e8e56a540eaa31c",
+    "graph.json": "a280a31f89d8226cec6465644835a4e2739085af77bca0e82fb5b9eed5b85f96"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "5bfcee63e29950585a0051e922f99db018662d18",
+  "source_base_commit": "cb82b89333a27e1e8494f61917c9ec2d7ffdf006",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -669,7 +669,7 @@
     "internal/jaa/test_jaa_certification_profile.py": "dfa5052d4f45a05b87f159b83f0a685feef2a331668abb0dc1ad55d0ef916ca8",
     "internal/jaa/test_jaa_module_boundaries.py": "4797e8e8c7b61becbb58108990c50528b693255cc8aa15a5bf9b244fd4735931",
     "internal/jaa/test_live_vacancy_discovery.py": "e3c2e7081239ac20f663882bf0f65de65950eebfb5ef49132eff352a5685ffa4",
-    "internal/jaa/test_ma_native_browser_diagnostic.py": "11c5022bb32389fc6751d0de898276195ac0928f18d2ead1d158a8458cb8c0e6",
+    "internal/jaa/test_ma_native_browser_diagnostic.py": "223b3b8dbe2d43b82f3315c60eac5773e5d7f6127c7fcf8b234f415a15efc526",
     "internal/jaa/test_nongreenhouse_fit_projection.py": "13d601e30c8b4d232c63f319cb39c2b16200d51d4270a8bcaa5c7bfb458fb26c",
     "internal/jaa/test_nongreenhouse_provider_alias.py": "98b57c26cb4251c8c35b4e6e5004fdf3ff616bad419450de669f8de298bd1aea",
     "internal/jaa/test_portable_acceptance_runtime_config.py": "8b433dab1f5bdda3edc10a4ba756acf9e3b2a252d48b75eb33cf17c38c0d6a5b",
