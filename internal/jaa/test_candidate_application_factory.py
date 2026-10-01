@@ -10,6 +10,8 @@ import pytest
 
 from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import (
+    _approved_statements,
+    _projection_evidence_sha256,
     build_market_application_decision_authority,
     build_candidate_application_deployment_binding,
     build_candidate_application_package,
@@ -18,6 +20,7 @@ from career_automation.candidate_application_factory import (
 from career_automation.evidence_matching import canonical_json
 from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.candidate_authority import APPROVED_EVIDENCE_PATH
+from career_automation.candidate_authority import APPROVED_CANDIDATE_SOURCE_HASHES
 from career_automation.production_attempt import _approved_fact_authorities
 from career_automation.release_gate import cv_constraint_release_binding
 from career_automation import market_aligner_preparation
@@ -436,6 +439,114 @@ def test_rejects_candidate_evidence_byte_substitution(tmp_path: Path) -> None:
     changed.write_bytes(APPROVED_EVIDENCE_PATH.read_bytes() + b" ")
     with pytest.raises(ValueError, match="evidence hash differs"):
         build_candidate_application_package(**_inputs(), approved_evidence_path=changed)
+
+
+def _synthetic_evidence_binding(tmp_path: Path) -> tuple[Path, dict[str, object]]:
+    statement = {
+        "id": "SYNTHETIC-EVIDENCE-1",
+        "kind": "verified_claim",
+        "proof_class": "verified_claim",
+        "statement": "Synthetic demonstration evidence.",
+    }
+    evidence = {"schema_version": "synthetic-evidence-test.v1", "statements": [statement]}
+    evidence_bytes = (canonical_json(evidence) + "\n").encode("utf-8")
+    path = tmp_path / "synthetic-approved-evidence.json"
+    path.write_bytes(evidence_bytes)
+    digest = hashlib.sha256(evidence_bytes).hexdigest()
+    projection: dict[str, object] = {
+        "schema_version": "jaa.candidate-authority-projection.v1",
+        "source_hashes": {"approved_evidence": digest},
+        "schema_sha256": hashlib.sha256(b"synthetic-schema").hexdigest(),
+        "policy_sha256": hashlib.sha256(b"synthetic-policy").hexdigest(),
+        "availability": {"status": "synthetic"},
+        "approved_evidence": [
+            {
+                "id": statement["id"],
+                "statement_sha256": hashlib.sha256(
+                    statement["statement"].encode("utf-8")
+                ).hexdigest(),
+                "kind": statement["kind"],
+                "proof_class": statement["proof_class"],
+            }
+        ],
+        "claim_suppressors": {
+            "source_sha256": hashlib.sha256(b"synthetic-suppressors").hexdigest(),
+            "mode": "suppress_only",
+            "items": [],
+        },
+    }
+    projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    return path, projection
+
+
+def test_generation_evidence_digest_is_resolved_from_verified_projection(
+    tmp_path: Path,
+) -> None:
+    evidence_path, projection = _synthetic_evidence_binding(tmp_path)
+    claimed = projection["projection_sha256"]
+    decision = {"candidate_projection_sha256": claimed}
+
+    expected = _projection_evidence_sha256(projection, decision)
+
+    assert expected == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    assert _approved_statements(
+        evidence_path,
+        expected_evidence_sha256=expected,
+    )["SYNTHETIC-EVIDENCE-1"]["id"] == "SYNTHETIC-EVIDENCE-1"
+
+
+def test_generation_projection_rejects_stale_evidence_digest_swap(
+    tmp_path: Path,
+) -> None:
+    _evidence_path, projection = _synthetic_evidence_binding(tmp_path)
+    decision = {"candidate_projection_sha256": projection["projection_sha256"]}
+    source_hashes = dict(projection["source_hashes"])
+    source_hashes["approved_evidence"] = hashlib.sha256(b"substituted").hexdigest()
+    projection["source_hashes"] = source_hashes
+
+    with pytest.raises(ValueError, match="projection content differs"):
+        _projection_evidence_sha256(projection, decision)
+
+
+def test_generation_projection_requires_receipt_hash_and_valid_evidence_digest(
+    tmp_path: Path,
+) -> None:
+    _evidence_path, projection = _synthetic_evidence_binding(tmp_path)
+    with pytest.raises(ValueError, match="projection binding differs"):
+        _projection_evidence_sha256(projection, {"candidate_projection_sha256": "0" * 64})
+
+    source_hashes = dict(projection["source_hashes"])
+    source_hashes["approved_evidence"] = "A" * 64
+    projection["source_hashes"] = source_hashes
+    projection.pop("projection_sha256")
+    projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(ValueError, match="evidence digest is malformed"):
+        _projection_evidence_sha256(
+            projection,
+            {"candidate_projection_sha256": projection["projection_sha256"]},
+        )
+
+
+def test_approved_statements_legacy_call_keeps_pinned_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_path, _projection = _synthetic_evidence_binding(tmp_path)
+    evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    monkeypatch.setitem(
+        APPROVED_CANDIDATE_SOURCE_HASHES,
+        "approved_evidence",
+        evidence_sha256,
+    )
+
+    assert "SYNTHETIC-EVIDENCE-1" in _approved_statements(evidence_path)
+    evidence_path.write_bytes(evidence_path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="evidence hash differs"):
+        _approved_statements(evidence_path)
 
 
 def test_materializes_exact_authority_bound_source_without_pdf(

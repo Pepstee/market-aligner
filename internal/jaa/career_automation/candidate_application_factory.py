@@ -729,9 +729,56 @@ class GenerationRevisionWriter(Protocol):
     ) -> object: ...
 
 
-def _approved_statements(path: Path) -> dict[str, dict[str, object]]:
+def _projection_evidence_sha256(
+    candidate_projection: Mapping[str, object],
+    decision_receipt: Mapping[str, object],
+) -> str:
+    claimed = candidate_projection.get("projection_sha256")
+    if (
+        not isinstance(claimed, str)
+        or len(claimed) != 64
+        or any(character not in "0123456789abcdef" for character in claimed)
+        or decision_receipt.get("candidate_projection_sha256") != claimed
+    ):
+        raise ValueError("application factory candidate projection binding differs")
+    projection_body = {
+        key: value
+        for key, value in candidate_projection.items()
+        if key != "projection_sha256"
+    }
+    try:
+        computed = _sha256((canonical_json(projection_body) + "\n").encode("utf-8"))
+    except (TypeError, ValueError):
+        raise ValueError("application factory candidate projection is malformed") from None
+    if computed != claimed:
+        raise ValueError("application factory candidate projection content differs")
+    source_hashes = candidate_projection.get("source_hashes")
+    expected = (
+        source_hashes.get("approved_evidence")
+        if isinstance(source_hashes, Mapping)
+        else None
+    )
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise ValueError("application factory candidate evidence digest is malformed")
+    return expected
+
+
+def _approved_statements(
+    path: Path,
+    *,
+    expected_evidence_sha256: str | None = None,
+) -> dict[str, dict[str, object]]:
     value = path.read_bytes()
-    if _sha256(value) != APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]:
+    expected = (
+        APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+        if expected_evidence_sha256 is None
+        else expected_evidence_sha256
+    )
+    if _sha256(value) != expected:
         raise ValueError("application factory candidate evidence hash differs")
     document = json.loads(value)
     rows = document.get("statements")
@@ -1018,10 +1065,12 @@ def _build_candidate_application_source(
         or decision_receipt.get("company_name") != company_name
         or decision_receipt.get("vacancy_sha256") != vacancy_sha256
         or decision_receipt.get("source_url") != source_url
-        or decision_receipt.get("candidate_projection_sha256")
-        != candidate_projection.get("projection_sha256")
     ):
         raise ValueError("application factory decision authority differs")
+    expected_evidence_sha256 = _projection_evidence_sha256(
+        candidate_projection,
+        decision_receipt,
+    )
     matrix = decision_receipt.get("evidence_matrix")
     if not isinstance(matrix, list) or not matrix:
         raise ValueError("application factory requires an evidence matrix")
@@ -1040,7 +1089,10 @@ def _build_candidate_application_source(
         all_requirements.append(f"{row['requirement_id']}: {row['requirement_text']}")
         if row.get("status") == "matched":
             matched_rows.append(row)
-    statements = _approved_statements(approved_evidence_path)
+    statements = _approved_statements(
+        approved_evidence_path,
+        expected_evidence_sha256=expected_evidence_sha256,
+    )
     projection_rows = candidate_projection.get("approved_evidence")
     if not isinstance(projection_rows, list):
         raise ValueError("candidate projection evidence is malformed")
