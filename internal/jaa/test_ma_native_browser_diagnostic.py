@@ -646,7 +646,7 @@ def test_native_prepare_release_one_call_local_diagnostic(
     )
 
     backend = _OneCallBackend(
-        CodexCliBackend(model="gpt-6-luna"),
+        CodexCliBackend(model="gpt-6-luna", cli_timeout_seconds=300.0),
         response_capture_path=tmp_path / "provider-response.txt",
     )
     class _LLMClientFactory:

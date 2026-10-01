@@ -4710,9 +4710,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_ma_native_browser_diagnostic.py": {
-    "mtime": 1790866185.8618739,
-    "seen": 1790866966.2459009,
-    "ast_hash": "62714a9cd7dbd123d79cc7f8b3f6cad4",
+    "mtime": 1790871987.8057816,
+    "seen": 1790872066.6974485,
+    "ast_hash": "c54098cb2eec4381c3cddb79221afe7b",
     "semantic_hash": ""
   }
 }
