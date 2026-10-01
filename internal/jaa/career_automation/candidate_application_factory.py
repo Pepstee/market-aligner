@@ -1323,12 +1323,14 @@ def _build_candidate_application_source(
     matches: list[MatchResult] = []
     supports: list[CandidateSupport] = []
     selected_rows: list[Mapping[str, object]] = []
+    eligible_matched_rows: list[tuple[Mapping[str, object], tuple[str, ...]]] = []
+    matched_document_targets: dict[str, frozenset[str]] = {}
     source_identity = f"vacancy:{job_key}:{vacancy_sha256}"
     for row in matched_rows:
         evidence_ids = row.get("evidence_ids")
         if not isinstance(evidence_ids, list) or not evidence_ids:
             raise ValueError("matched requirement lacks approved evidence")
-        evidence_id = ""
+        eligible_evidence_ids: list[str] = []
         for candidate_id in sorted(str(value) for value in evidence_ids):
             candidate = statements.get(candidate_id)
             if candidate is None or candidate_id in OUTWARD_PROFILE_REWRITES:
@@ -1344,32 +1346,68 @@ def _build_candidate_application_source(
                     )
             except ExternalDocumentAssuranceError:
                 continue
-            evidence_id = candidate_id
-            break
-        if not evidence_id:
+            projected = projection_by_id.get(candidate_id)
+            if (
+                projected is None
+                or candidate.get("proof_class") != candidate.get("kind")
+                or (
+                    "kind" in projected
+                    and projected.get("kind") != candidate.get("kind")
+                )
+                or (
+                    "proof_class" in projected
+                    and projected.get("proof_class") != candidate.get("proof_class")
+                )
+                or _sha256(str(candidate["statement"]).encode())
+                != projected.get("statement_sha256")
+            ):
+                raise ValueError("matched evidence differs from candidate projection")
+            eligible_evidence_ids.append(candidate_id)
+        if not eligible_evidence_ids:
             continue
-        evidence = statements.get(evidence_id)
-        projected = projection_by_id.get(evidence_id)
-        if (
-            evidence is None
-            or projected is None
-            or evidence.get("proof_class") != evidence.get("kind")
-            or (
-                "kind" in projected
-                and projected.get("kind") != evidence.get("kind")
+        eligible_evidence_ids = list(dict.fromkeys(eligible_evidence_ids))
+        eligible_matched_rows.append((row, tuple(eligible_evidence_ids)))
+        for evidence_id in eligible_evidence_ids:
+            matched_document_targets[evidence_id] = _evidence_document_targets(
+                statements[evidence_id]
             )
-            or (
-                "proof_class" in projected
-                and projected.get("proof_class") != evidence.get("proof_class")
+    use_document_scoped_support = any(
+        targets != _DOCUMENT_TARGETS
+        for targets in matched_document_targets.values()
+    )
+    candidate_document_targets = (
+        {
+            evidence_id: tuple(sorted(targets))
+            for evidence_id, targets in matched_document_targets.items()
+        }
+        if use_document_scoped_support
+        else None
+    )
+    for row, eligible_evidence_ids in eligible_matched_rows:
+        selected_evidence_ids = (
+            eligible_evidence_ids
+            if use_document_scoped_support
+            else eligible_evidence_ids[:1]
+        )
+        for evidence_id in selected_evidence_ids:
+            verified_evidence_kinds[evidence_id] = str(
+                statements[evidence_id]["proof_class"]
             )
-            or _sha256(str(evidence["statement"]).encode())
-            != projected.get("statement_sha256")
-        ):
-            raise ValueError("matched evidence differs from candidate projection")
-        verified_evidence_kinds[evidence_id] = str(evidence["proof_class"])
         requirement_id = str(row["requirement_id"])
-        claim_id = f"approved-claim:{evidence_id}"
+        claim_id = (
+            f"approved-claim:{requirement_id}"
+            if use_document_scoped_support
+            else f"approved-claim:{selected_evidence_ids[0]}"
+        )
         requirement_text = str(row["requirement_text"])
+        accepted_proof_classes = tuple(
+            sorted(
+                {
+                    str(statements[evidence_id]["proof_class"])
+                    for evidence_id in selected_evidence_ids
+                }
+            )
+        )
         requirement = Requirement(
             requirement_id,
             claim_id,
@@ -1377,7 +1415,7 @@ def _build_candidate_application_source(
             row.get("classification") == "essential",
             "evidence",
             "build_evidence",
-            (str(evidence["proof_class"]),),
+            accepted_proof_classes,
             10_000,
             source_identity,
             (0, len(requirement_text)),
@@ -1387,21 +1425,21 @@ def _build_candidate_application_source(
             MatchResult(
                 requirement_id,
                 "matched",
-                (evidence_id,),
+                selected_evidence_ids,
                 10_000,
                 "Exact operator-approved evidence matched by candidate authority.",
                 str(candidate_projection["policy_sha256"]),
                 None,
             )
         )
-        supports.append(
+        supports.extend(
             CandidateSupport(
                 requirement_id,
                 claim_id,
                 1,
                 evidence_id,
                 1,
-                str(evidence["proof_class"]),
+                str(statements[evidence_id]["proof_class"]),
                 "approved",
                 "evidence",
                 "approved",
@@ -1409,6 +1447,7 @@ def _build_candidate_application_source(
                 "approved",
                 None,
             )
+            for evidence_id in selected_evidence_ids
         )
         selected_rows.append(row)
     selected_requirement_ids = {
@@ -1486,6 +1525,7 @@ def _build_candidate_application_source(
         candidate_support=supports,
         employer_facts=employer_facts,
         as_of=as_of,
+        candidate_document_targets=candidate_document_targets,
         permit_eligible_gap_application=True,
     )
     employer_by_id = {str(document["id"]): document for document in employer_documents}

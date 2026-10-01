@@ -965,7 +965,7 @@ def test_strategy_evidence_scope_conflicts_fail_closed(
     )
     with pytest.raises(
         ValueError,
-        match="strategy evidence contradicts its candidate document scope",
+        match="matched requirement lacks .*scoped candidate evidence",
     ):
         _build_candidate_application_source(**arguments)
 
@@ -1128,6 +1128,80 @@ def test_explicit_both_document_targets_preserve_rendered_output_order(
     assert explicit.artifacts.editable.cover_letter_text == baseline.artifacts.editable.cover_letter_text
     assert explicit.artifacts.cv_pdf.extracted_text == baseline.artifacts.cv_pdf.extracted_text
     assert explicit.artifacts.cover_letter_pdf.extracted_text == baseline.artifacts.cover_letter_pdf.extracted_text
+
+
+def test_matched_document_scopes_select_exact_strategy_supports(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, matched_requirements=1)
+    matched_rows = (
+        {
+            "id": "SYNTHETIC-MATCHED-CV-01",
+            "statement": (
+                "Built a monitoring dashboard that organizes service signals "
+                "and highlights unresolved operational work."
+            ),
+            "document_targets": ["cv"],
+        },
+        {
+            "id": "SYNTHETIC-MATCHED-LETTER-01",
+            "statement": (
+                "Designed a release guide that connects verified prerequisites "
+                "with clear handoff steps for project teams."
+            ),
+            "document_targets": ["cover_letter"],
+        },
+    )
+    _update_synthetic_document_targets(arguments, {}, matched_rows)
+    decision = arguments["decision_receipt"]
+    evidence_matrix = decision["evidence_matrix"]
+    evidence_matrix[0]["evidence_ids"] = [
+        "SYNTHETIC-MATCHED-CV-01",
+        "SYNTHETIC-MATCHED-LETTER-01",
+    ]
+
+    package = build_candidate_application_package(**arguments)
+    strategy_facts = [
+        fact
+        for fact in package.source.facts
+        if isinstance(fact.authority, FactAuthority)
+        and fact.authority.requirement_id == "SYNTHETIC-REQUIREMENT-01"
+    ]
+    cv_strategy = [fact for fact in strategy_facts if fact.document_kind == "cv"]
+    letter_strategy = [
+        fact
+        for fact in strategy_facts
+        if fact.document_kind == "cover_letter" and fact.fact_kind == "candidate"
+    ]
+    assert len(cv_strategy) == 1
+    assert cv_strategy[0].authority.candidate_evidence_id == "SYNTHETIC-MATCHED-CV-01"
+    assert len(letter_strategy) == 1
+    letter_fact = letter_strategy[0]
+    assert letter_fact.authority.candidate_evidence_id == "SYNTHETIC-MATCHED-LETTER-01"
+    employer_siblings = [
+        fact
+        for fact in strategy_facts
+        if fact.document_kind == "cover_letter" and fact.fact_kind == "employer"
+    ]
+    assert len(employer_siblings) == 1
+    employer_fact = employer_siblings[0]
+    assert (
+        employer_fact.authority.requirement_id,
+        employer_fact.authority.candidate_claim_id,
+        employer_fact.authority.candidate_claim_version,
+        employer_fact.authority.candidate_evidence_id,
+        employer_fact.authority.candidate_evidence_version,
+        employer_fact.authority.employer_research_claim_id,
+        employer_fact.authority.employer_fact_sha256,
+    ) == (
+        letter_fact.authority.requirement_id,
+        letter_fact.authority.candidate_claim_id,
+        letter_fact.authority.candidate_claim_version,
+        letter_fact.authority.candidate_evidence_id,
+        letter_fact.authority.candidate_evidence_version,
+        letter_fact.authority.employer_research_claim_id,
+        letter_fact.authority.employer_fact_sha256,
+    )
 
 
 def test_all_letter_only_profile_facts_use_one_opening_anchor(

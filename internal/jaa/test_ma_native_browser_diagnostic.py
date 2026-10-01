@@ -18,10 +18,10 @@ import pytest
 
 ACCEPTED_EVIDENCE = Path(
     "/srv/artvault/control/operator-glm/jobs/"
-    "ma-synthetic-project-facts-20261001T074832Z/work/accepted-synthetic-evidence.json"
+    "ma-complete-fixture-20261001-20261001T203008Z/work/accepted-complete-synthetic-evidence.json"
 )
 ACCEPTED_EVIDENCE_SHA256 = (
-    "5a409c813aea87d748445a40287972bcc2897e861464d08b0265632d1aa20a72"
+    "4322c694716f7e4dbd6b420107d1780ffe6f0ec8651276dda6e492b8c7d7282b"
 )
 _MAX_NATIVE_RESPONSE_CAPTURE_BYTES = 1_048_576
 _MAX_NATIVE_EXCEPTION_CHAIN_DEPTH = 6
@@ -31,14 +31,7 @@ NAMED_TEST_ROOT = Path(
     "/srv/artvault/control/operator-glm/programme/canary/"
     "market-aligner-linux-verification"
 )
-APPLICATION_URL = "https://job-boards.greenhouse.io/example/jobs/1234567"
-JOB_KEY = "greenhouse:example:1234567"
-ROLE_TITLE = "Synthetic Software Engineer"
-COMPANY_NAME = "Example Systems"
-REQUIREMENT = "Build and test a demonstration service."
-VACANCY_DESCRIPTION = (
-    "Build and test a demonstration service for a synthetic software role."
-)
+APPLICATION_URL = "http://127.0.0.1:1/synthetic/application"
 
 
 def _sha(value: bytes) -> str:
@@ -372,16 +365,25 @@ def _synthetic_decision(
     vacancy_sha256: str,
     projection: dict[str, object],
     evidence_document: dict[str, object],
+    vacancy: dict[str, str],
+    job_key: str,
 ):
     from career_automation.candidate_authority import fit_from_evidence_matrix
 
-    rows = evidence_document["statements"]
-    evidence_ids = [str(row["id"]) for row in rows[:2]]
+    evidence_ids = evidence_document.get("matched_evidence_ids")
+    if (
+        not isinstance(evidence_ids, list)
+        or not evidence_ids
+        or any(not isinstance(evidence_id, str) for evidence_id in evidence_ids)
+        or len(set(evidence_ids)) != len(evidence_ids)
+    ):
+        raise ValueError("synthetic evidence fixture matched IDs are malformed")
+    requirement = vacancy["requirement"]
     matrix = [
         {
             "requirement_id": "SYNTHETIC-REQ-1",
-            "requirement_text": REQUIREMENT,
-            "requirement_text_sha256": _sha(REQUIREMENT.encode("utf-8")),
+            "requirement_text": requirement,
+            "requirement_text_sha256": _sha(requirement.encode("utf-8")),
             "classification": "essential",
             "status": "matched",
             "evidence_ids": evidence_ids,
@@ -391,14 +393,14 @@ def _synthetic_decision(
     ]
     return {
         "schema_version": "jaa.candidate-vacancy-decision-receipt.v1",
-        "job_key": JOB_KEY,
-        "role_title": ROLE_TITLE,
-        "company_name": COMPANY_NAME,
+        "job_key": job_key,
+        "role_title": vacancy["role_title"],
+        "company_name": vacancy["company_name"],
         "source_url": APPLICATION_URL,
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "vacancy_sha256": vacancy_sha256,
         "discovery_body_sha256": vacancy_sha256,
-        "vacancy_description_sha256": _sha(VACANCY_DESCRIPTION.encode("utf-8")),
+        "vacancy_description_sha256": _sha(vacancy["description"].encode("utf-8")),
         "candidate_projection_sha256": projection["projection_sha256"],
         "decision": "eligible",
         "fit": fit_from_evidence_matrix(matrix),
@@ -409,14 +411,14 @@ def _synthetic_decision(
     }
 
 
-def _synthetic_html() -> str:
+def _synthetic_html(vacancy: dict[str, str]) -> str:
     return (
         "<!doctype html><html><head><title>"
-        f"{html.escape(ROLE_TITLE)} at {html.escape(COMPANY_NAME)}"
+        f"{html.escape(vacancy['role_title'])} at {html.escape(vacancy['company_name'])}"
         "</title></head><body><h1>"
-        f"{html.escape(ROLE_TITLE)} at {html.escape(COMPANY_NAME)}"
+        f"{html.escape(vacancy['role_title'])} at {html.escape(vacancy['company_name'])}"
         "</h1>"
-        f"<p>{html.escape(VACANCY_DESCRIPTION)}</p><form>"
+        f"<p>{html.escape(vacancy['description'])}</p><form>"
         '<label for="full_name">Full name</label>'
         '<input id="full_name" name="full_name" required>'
         '<label for="email">Email</label>'
@@ -509,6 +511,21 @@ def test_native_prepare_release_one_call_local_diagnostic(
     if evidence_sha256 != ACCEPTED_EVIDENCE_SHA256:
         pytest.fail("accepted synthetic evidence fixture digest differs")
     evidence_document = json.loads(evidence_bytes)
+    vacancy_data = evidence_document.get("synthetic_vacancy")
+    if (
+        not isinstance(vacancy_data, dict)
+        or any(
+            not isinstance(vacancy_data.get(key), str)
+            or not vacancy_data[key].strip()
+            for key in ("company_name", "description", "requirement", "role_title")
+        )
+    ):
+        pytest.fail("accepted synthetic vacancy fixture is malformed")
+    vacancy_data = {
+        key: vacancy_data[key]
+        for key in ("company_name", "description", "requirement", "role_title")
+    }
+    job_key = "greenhouse:synthetic-local:" + evidence_sha256[:16]
     projection = _synthetic_projection(evidence_document, evidence_bytes)
     result["approved_evidence_sha256"] = evidence_sha256
     result["candidate_projection_sha256"] = projection["projection_sha256"]
@@ -531,13 +548,15 @@ def test_native_prepare_release_one_call_local_diagnostic(
     )
     result["contact_authority_sha256"] = contact_authority.authority_sha256
 
-    html_text = _synthetic_html()
+    html_text = _synthetic_html(vacancy_data)
     vacancy_body = html_text.encode("utf-8")
     vacancy_sha256 = _sha(vacancy_body)
     decision = _synthetic_decision(
         vacancy_sha256=vacancy_sha256,
         projection=projection,
         evidence_document=evidence_document,
+        vacancy=vacancy_data,
+        job_key=job_key,
     )
     decision_bytes = _json_bytes(decision)
     decision_sha256 = _sha(decision_bytes)
@@ -546,7 +565,11 @@ def test_native_prepare_release_one_call_local_diagnostic(
         decision_receipt_sha256=decision_sha256,
     )
     vacancy = VacancyArchiveIdentity(
-        JOB_KEY, vacancy_sha256, ROLE_TITLE, COMPANY_NAME, APPLICATION_URL
+        job_key,
+        vacancy_sha256,
+        vacancy_data["role_title"],
+        vacancy_data["company_name"],
+        APPLICATION_URL,
     )
     live = LiveVacancy.create(
         vacancy=vacancy,
@@ -567,10 +590,10 @@ def test_native_prepare_release_one_call_local_diagnostic(
         vacancy=vacancy,
         complete_vacancy=vacancy_body,
         structured_vacancy={
-            "job_key": JOB_KEY,
+            "job_key": job_key,
             "source_url": APPLICATION_URL,
-            "role_title": ROLE_TITLE,
-            "company_name": COMPANY_NAME,
+            "role_title": vacancy_data["role_title"],
+            "company_name": vacancy_data["company_name"],
             "synthetic": True,
         },
         assessment={"synthetic": True},
@@ -597,13 +620,13 @@ def test_native_prepare_release_one_call_local_diagnostic(
     session.repository_root = repository_root
     session.candidate_projection = projection
     session.decision_by_key = {
-        JOB_KEY: {
-            "job_key": JOB_KEY,
+        job_key: {
+            "job_key": job_key,
             "receipt": decision,
             "receipt_sha256": decision_sha256,
         }
     }
-    session.complete_vacancy_by_key = {JOB_KEY: vacancy_body}
+    session.complete_vacancy_by_key = {job_key: vacancy_body}
     session.discovery_path = discovery_path
     session.eligibility_path = eligibility_path
 
@@ -612,9 +635,9 @@ def test_native_prepare_release_one_call_local_diagnostic(
         gate_module,
         "_verify_durable_candidate_authority",
         lambda *_args, **_kwargs: {
-            "job_key": JOB_KEY,
-            "role_title": ROLE_TITLE,
-            "company_name": COMPANY_NAME,
+            "job_key": job_key,
+            "role_title": vacancy_data["role_title"],
+            "company_name": vacancy_data["company_name"],
             "vacancy_sha256": vacancy_sha256,
             "source_url": APPLICATION_URL,
             "candidate_authority_sha256": eligibility_sha256,
