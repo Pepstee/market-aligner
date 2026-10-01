@@ -653,7 +653,7 @@ def form_field_projection_document(
     return rows
 
 
-def _combined_result_schema(criteria_count: int) -> dict[str, object]:
+def _combined_result_schema(criterion_ids: Sequence[str]) -> dict[str, object]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": COMBINED_RESULT_SCHEMA_VERSION,
@@ -665,17 +665,15 @@ def _combined_result_schema(criteria_count: int) -> dict[str, object]:
             "sanity_review": RESULT_SCHEMA,
             "criteria_reviews": {
                 "type": "array",
-                "minItems": criteria_count,
-                "maxItems": criteria_count,
+                "minItems": len(criterion_ids),
+                "maxItems": len(criterion_ids),
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["criterion_id", "decision", "findings"],
                     "properties": {
                         "criterion_id": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128,
+                            "enum": list(criterion_ids),
                         },
                         "decision": {"enum": ["pass", "block"]},
                         "findings": {
@@ -832,7 +830,7 @@ class SanityReviewReceipt:
             )
             if self.policy_sha256 != expected_policy_sha256:
                 raise ValueError("combined review policy identity is invalid")
-            result_schema = _combined_result_schema(len(criteria_ids))
+            result_schema = _combined_result_schema(criteria_ids)
         else:
             raise ValueError("sanity receipt schema version is unsupported")
         if (
@@ -1108,9 +1106,11 @@ def review_application_package_with_criteria(
         REVIEWER_PROMPT
         + "\n\n"
         + criteria_prompt.strip()
-        + "\n\nReturn one JSON object containing one sanity_review and one criteria_reviews row for each criterion, in the declared order."
+        + "\n\nThe exact criterion IDs, in their required output order, are "
+        + canonical_json(criterion_ids)
+        + ". Return one criteria_reviews row for each ID in that order. Use each ID exactly; do not append a version, hash, label, or alias."
     )
-    result_schema = _combined_result_schema(len(criteria_rows))
+    result_schema = _combined_result_schema(criterion_ids)
     prompt_sha256 = hashlib.sha256(combined_prompt.encode("utf-8")).hexdigest()
     schema_sha256 = hashlib.sha256(canonical_json(result_schema).encode("utf-8")).hexdigest()
     policy_sha256 = content_hash(

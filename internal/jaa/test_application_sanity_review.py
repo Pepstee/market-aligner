@@ -257,6 +257,9 @@ def test_combined_review_issues_one_content_bound_receipt_for_all_criteria(
         "applicant_visible_projection_sha256"
     ]
     assert "provider-managed-sentinel" not in backend.last_user
+    assert review_module.canonical_json(
+        [row["criterion_id"] for row in criteria]
+    ) in backend.last_system
     restored = SanityReviewReceipt.from_document(receipt.document())
     assert restored.receipt_sha256 == receipt.receipt_sha256
 
@@ -292,7 +295,9 @@ def test_combined_review_blocks_if_any_component_finds_a_problem(
 
 
 def test_combined_criterion_finding_code_schema_accepts_only_bounded_dotted_codes() -> None:
-    schema = review_module._combined_result_schema(2)
+    schema = review_module._combined_result_schema(
+        ("resume-cover-letter", "humanizer")
+    )
 
     def result_with_code(code: str) -> dict[str, object]:
         result = _combined_result(blocked_criterion="resume-cover-letter")
@@ -323,6 +328,40 @@ def test_combined_criterion_finding_code_schema_accepts_only_bounded_dotted_code
     ):
         with pytest.raises(llm_client_module.LLMError):
             llm_client_module.validate_json(result_with_code(code), schema)
+
+
+def test_combined_criterion_schema_rejects_decorated_undeclared_ids() -> None:
+    schema = review_module._combined_result_schema(
+        ("resume-cover-letter", "humanizer")
+    )
+    result = _combined_result()
+    result["criteria_reviews"][0]["criterion_id"] = (
+        "resume-cover-letter@2.8.2:sha256:" + "a" * 64
+    )
+
+    with pytest.raises(llm_client_module.LLMError):
+        llm_client_module.validate_json(result, schema)
+
+
+def test_combined_review_preserves_exact_id_order_check_and_block_result(tmp_path) -> None:
+    result = _combined_result()
+    result["criteria_reviews"].reverse()
+    backend = ScriptedBackend(result, model="gpt-6-luna")
+
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package_with_criteria(
+            package(),
+            client=client(backend, tmp_path),
+            criteria_prompt="Apply both synthetic read-only review criteria.",
+            criteria=(
+                {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+                {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+            ),
+        )
+
+    assert backend.calls == 1
+    assert captured.value.document()["code"] == "review.criteria_coverage_mismatch"
+    assert captured.value.result == result
 
 
 def test_combined_review_preserves_dotted_block_findings_without_receipt(tmp_path) -> None:
