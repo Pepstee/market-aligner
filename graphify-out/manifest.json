@@ -4708,5 +4708,11 @@
     "seen": 1790775868.5205023,
     "ast_hash": "db7d45cf621f52320933c2fac0bec5d1",
     "semantic_hash": ""
+  },
+  "internal/jaa/test_ma_native_browser_diagnostic.py": {
+    "mtime": 1790854654.8460805,
+    "seen": 1790854679.636142,
+    "ast_hash": "bed30b42c610ec5649aa310f05760b52",
+    "semantic_hash": ""
   }
 }

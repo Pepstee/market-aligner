@@ -1,11 +1,11 @@
 {
-  "community_count": 30063,
-  "edge_count": 72737,
-  "node_count": 56427,
+  "community_count": 30060,
+  "edge_count": 72830,
+  "node_count": 56450,
   "outputs": {
-    ".graphify_labels.json": "03c591be320af5089ed343af358253bed3e29e1d94bce637906ad63964ed3314",
-    "GRAPH_REPORT.md": "c177b90ca477307cfaecb9cb338cc380d791f8e876e3d28d265b05d2df5740ad",
-    "graph.json": "adf64b6c793b3faa9b913102e2cc631a34850c8a043e2c199d3551ed63c7e9bb"
+    ".graphify_labels.json": "24652edd2fa4d21a958cf0e1d5a02519aac48d56bf4a51c1e27f85173a4e6c6b",
+    "GRAPH_REPORT.md": "b53bc4be26eaf9b2e770936e9545cb388f9276e13fd3a3f7ddde9dfc8bdf7c2d",
+    "graph.json": "a8a86f6b712e21e17bd3d69cb8f58fbe7c9d448083232fd9b0c8d661db548453"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "368d0ab231df078aa37982c84d2780f0b3a095bd",
+  "source_base_commit": "9b1f8c7994f8cd43df3736ab163997b19e9d9f65",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
