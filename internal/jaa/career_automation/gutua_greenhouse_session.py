@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -29,6 +30,7 @@ from .application_sanity_review import (
     package_from_application,
     review_application_package,
 )
+from .form_answers import source_form_answers
 from .browser_executor import GreenhouseSuccessEvidence
 from .ats_application_authority import build_ats_application_authority
 from cv_generation.service import CandidateApplicationPackage
@@ -87,6 +89,17 @@ DISCOVERY_ENV = "JAA_GREENHOUSE_DISCOVERY"
 ELIGIBILITY_ENV = "JAA_GREENHOUSE_ELIGIBILITY"
 CONTACT_ENV = "JAA_CANDIDATE_CONTACT_AUTHORITY"
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class GreenhouseFormPlan:
+    questions: dict[str, tuple[str, str]] | None
+    answer_field_bindings: tuple[tuple[str, str], ...]
+    review_form_fields: tuple[tuple[str, str, str], ...]
+    form_field_authorities: tuple[tuple[str, str], ...]
+    field_authority_names: tuple[tuple[str, str], ...]
+    consent_states: tuple[tuple[str, bool | str], ...]
+    inventory_sha256: str
 CANDIDATE_SCHEMA_SHA256 = (
     "338bd48974f07266003aee510f42286ef29285e007515e73f41900069468367f"
 )
@@ -877,6 +890,7 @@ class GutuaGreenhouseSession:
         artifact_directory: Path,
         recorder: GreenhouseAttemptRecorder | None = None,
         inventory_bytes: bytes | None = None,
+        expected_form_plan: GreenhouseFormPlan | None = None,
     ) -> tuple[
         tuple[str, ...],
         tuple[tuple[str, str], ...],
@@ -884,19 +898,34 @@ class GutuaGreenhouseSession:
         tuple[tuple[str, bool | str], ...],
         dict[str, Path],
     ]:
-        inventory = json.loads(
+        effective_inventory_bytes = (
             inventory_bytes
             if inventory_bytes is not None
             else collect_greenhouse_form_inventory(page)
         )
+        inventory = json.loads(effective_inventory_bytes)
         fields = inventory["form_state"]["fields"]
         if not isinstance(fields, list):
             raise ProductionATSBoundaryError("Greenhouse form inventory is malformed")
+        form_plan = self._plan_supported_form(package, effective_inventory_bytes)
+        if expected_form_plan is not None and (
+            form_plan.questions != expected_form_plan.questions
+            or form_plan.answer_field_bindings != expected_form_plan.answer_field_bindings
+            or form_plan.review_form_fields != expected_form_plan.review_form_fields
+            or form_plan.form_field_authorities != expected_form_plan.form_field_authorities
+            or form_plan.field_authority_names != expected_form_plan.field_authority_names
+            or form_plan.consent_states != expected_form_plan.consent_states
+        ):
+            raise ProductionATSBoundaryError(
+                "Greenhouse form changed after its sanity-reviewed plan"
+            )
         identities: set[str] = set()
         field_authorities: list[tuple[str, str]] = []
         consents: list[tuple[str, bool | str]] = []
         uploads: dict[str, tuple[str, Path]] = {}
         approved = approved_authority_values(package.source, package.artifacts)
+        planned_authorities = dict(form_plan.form_field_authorities)
+        planned_consents = dict(form_plan.consent_states)
         select_inventories = {
             str(row["field_identity"]): row
             for row in inventory["select_inventories"]
@@ -996,15 +1025,11 @@ class GutuaGreenhouseSession:
                     "radio choice requires explicit answer authority"
                 )
             if field_type == "checkbox":
-                consent = any(
-                    marker in folded
-                    for marker in ("consent", "privacy", "terms and conditions")
-                )
-                if required and not consent:
+                if identity not in planned_consents:
                     raise ProductionATSBoundaryError(
-                        "required choice lacks explicit consent authority"
+                        "Greenhouse checkbox differs from the reviewed plan"
                     )
-                expected = bool(required and consent)
+                expected = planned_consents[identity]
                 locator.check() if expected else locator.uncheck()
                 if locator.is_checked() is not expected:
                     raise ProductionATSBoundaryError(
@@ -1035,7 +1060,7 @@ class GutuaGreenhouseSession:
                     )
                 consents.append((identity, expected))
                 continue
-            authority = self._field_authority(field)
+            authority = planned_authorities.get(identity)
             if authority is None:
                 if required:
                     raise ProductionATSBoundaryError(
@@ -1132,6 +1157,195 @@ class GutuaGreenhouseSession:
             tuple(field_authorities),
             tuple(consents),
             upload_paths,
+        )
+
+    def _plan_supported_form(
+        self,
+        package: CandidateApplicationPackage,
+        inventory_bytes: bytes,
+    ) -> GreenhouseFormPlan:
+        try:
+            inventory = json.loads(inventory_bytes)
+            fields = inventory["form_state"]["fields"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProductionATSBoundaryError(
+                "Greenhouse form inventory is malformed"
+            ) from exc
+        if not isinstance(fields, list):
+            raise ProductionATSBoundaryError("Greenhouse form inventory is malformed")
+
+        def display_question(field: Mapping[str, object]) -> str:
+            labels = field.get("labels", [])
+            if not isinstance(labels, list):
+                raise ProductionATSBoundaryError("Greenhouse field labels are malformed")
+            return " ".join(" ".join(str(value).split()) for value in labels).strip()
+
+        def question_key(value: str) -> str:
+            return re.sub(r"\s*\*\s*$", "", " ".join(value.split())).casefold()
+
+        answers = tuple(getattr(package.source, "answers", ()))
+        questions: dict[str, tuple[str, str]] | None = {} if answers else None
+        answer_by_field: dict[str, object] = {}
+        for answer in answers:
+            question = getattr(answer, "question", None)
+            question_id = getattr(answer, "question_id", None)
+            if not isinstance(question, str) or not isinstance(question_id, str):
+                raise ProductionATSBoundaryError(
+                    "application source answer identity is malformed"
+                )
+            matches = [
+                field
+                for field in fields
+                if isinstance(field, Mapping)
+                and question_key(display_question(field)) == question_key(question)
+            ]
+            if len(matches) != 1:
+                raise ProductionATSBoundaryError(
+                    "source answer does not identify one exact live Greenhouse question"
+                )
+            identity = self._field_identity(matches[0])
+            if identity in answer_by_field or question_id in questions:
+                raise ProductionATSBoundaryError(
+                    "Greenhouse source answer binding is ambiguous"
+                )
+            answer_by_field[identity] = answer
+            questions[question_id] = (question_id, question)
+
+        canonical_answers = (
+            {row[0]: (row[1], row[2]) for row in source_form_answers(package.source, questions)}
+            if questions is not None
+            else {}
+        )
+        approved = approved_authority_values(package.source, package.artifacts)
+        identities: set[str] = set()
+        upload_roles: set[str] = set()
+        planned_fields: list[tuple[str, str, str]] = []
+        field_authorities: list[tuple[str, str]] = []
+        field_authority_names: list[tuple[str, str]] = []
+        consent_states: list[tuple[str, bool | str]] = []
+        answer_field_bindings: list[tuple[str, str]] = []
+
+        for field in fields:
+            if not isinstance(field, Mapping):
+                raise ProductionATSBoundaryError("Greenhouse field is malformed")
+            field_type = str(field.get("type", "")).casefold()
+            if field_type in {"hidden", "submit", "button", "reset"}:
+                continue
+            identity = self._field_identity(field)
+            if identity in identities:
+                raise ProductionATSBoundaryError(
+                    "Greenhouse form contains an ambiguous field identity"
+                )
+            identities.add(identity)
+            labels = " ".join(str(value) for value in field.get("labels", []))
+            folded = f"{identity} {labels}".casefold()
+            required = field.get("required") is True
+            if is_greenhouse_auxiliary_field(
+                identity=identity,
+                field_type=field_type,
+                required=required,
+            ):
+                continue
+            if field_type == "file":
+                role = (
+                    "cover_letter"
+                    if "cover" in folded and "letter" in folded
+                    else "cv"
+                    if "resume" in folded or re.search(r"\bcv\b", folded)
+                    else ""
+                )
+                if not role and required:
+                    raise ProductionATSBoundaryError(
+                        "required upload field has no approved document role"
+                    )
+                if role and role in upload_roles:
+                    raise ProductionATSBoundaryError(
+                        "Greenhouse upload role is ambiguous"
+                    )
+                if role:
+                    upload_roles.add(role)
+                continue
+            if field_type == "radio":
+                raise ProductionATSBoundaryError(
+                    "radio choice requires explicit answer authority"
+                )
+            question = display_question(field) or identity
+            matched_answer = answer_by_field.get(identity)
+            if field_type == "checkbox":
+                consent = any(
+                    marker in folded
+                    for marker in ("consent", "privacy", "terms and conditions")
+                )
+                if required and not consent:
+                    raise ProductionATSBoundaryError(
+                        "required choice lacks explicit consent authority"
+                    )
+                expected: bool | str = bool(required and consent)
+                authority = "consent.required" if expected else "blank.optional"
+                consent_states.append((identity, expected))
+                planned_fields.append(
+                    (identity, question, "true" if expected else "false")
+                )
+                field_authorities.append((identity, authority))
+                continue
+
+            authority = self._field_authority(field)
+            if authority == "answers.full" or authority is None:
+                if matched_answer is not None:
+                    authority = f"answer.{matched_answer.question_id}"
+            if authority is None:
+                if required:
+                    raise ProductionATSBoundaryError(
+                        "required Greenhouse question lacks approved answer authority"
+                    )
+                authority = "blank.optional"
+            if authority not in approved:
+                if required:
+                    raise ProductionATSBoundaryError(
+                        "required contact field lacks explicit approved value"
+                    )
+                authority = "blank.optional"
+            if authority.startswith("answer."):
+                question_id = authority.removeprefix("answer.")
+                if (
+                    matched_answer is None
+                    or matched_answer.question_id != question_id
+                    or question_id not in canonical_answers
+                ):
+                    raise ProductionATSBoundaryError(
+                        "Greenhouse answer differs from its exact source question"
+                    )
+                question, source_answer = canonical_answers[question_id]
+                if source_answer != approved[authority]:
+                    raise ProductionATSBoundaryError(
+                        "Greenhouse answer differs from approved source content"
+                    )
+                question = matched_answer.question
+                answer_field_bindings.append((identity, question_id))
+            elif matched_answer is not None:
+                question_id = matched_answer.question_id
+                if canonical_answers.get(question_id) != (
+                    matched_answer.question,
+                    approved[authority],
+                ):
+                    raise ProductionATSBoundaryError(
+                        "stable authority conflicts with its authored source answer"
+                    )
+                question = matched_answer.question
+            planned_fields.append((identity, question, approved[authority]))
+            field_authorities.append((identity, authority))
+            field_authority_names.append((identity, authority))
+
+        if "cv" not in upload_roles:
+            raise ProductionATSBoundaryError("Greenhouse form lacks one CV upload")
+        return GreenhouseFormPlan(
+            questions=questions,
+            answer_field_bindings=tuple(sorted(answer_field_bindings)),
+            review_form_fields=tuple(sorted(planned_fields)),
+            form_field_authorities=tuple(sorted(field_authorities)),
+            field_authority_names=tuple(sorted(field_authority_names)),
+            consent_states=tuple(sorted(consent_states)),
+            inventory_sha256=hashlib.sha256(inventory_bytes).hexdigest(),
         )
 
     def prepare_release(
@@ -1275,14 +1489,40 @@ class GutuaGreenhouseSession:
             transport_archive_dir=self.archive_root / "provider-exchanges",
             usage_log=self.archive_root / "review-usage.jsonl",
         )
+        form_inventory = collect_greenhouse_form_inventory(page, passive=True)
+        form_plan = self._plan_supported_form(package, form_inventory)
+        existing_inventory = [
+            row
+            for row in recorder.attempt._objects(recorder.attempt._events())
+            if row.role == "review.form_inventory"
+        ]
+        inventory_sha256 = hashlib.sha256(form_inventory).hexdigest()
+        if existing_inventory:
+            if len(existing_inventory) != 1 or recorder.attempt.read_artifact(
+                existing_inventory[0]
+            ) != form_inventory:
+                raise ProductionATSBoundaryError(
+                    "resumed Greenhouse form inventory differs from its archive"
+                )
+        else:
+            recorder.attempt.add_artifact(
+                "review.form_inventory",
+                form_inventory,
+                media_type="application/json",
+                disposition="observed",
+            )
         try:
             sanity_package = package_from_application(
-                    source=package.source,
-                    artifacts=package.artifacts,
-                    questions=None,
-                    vacancy_requirements=package.vacancy_requirements,
-                    vacancy_review_material=vacancy_review_material,
-                )
+                source=package.source,
+                artifacts=package.artifacts,
+                questions=form_plan.questions,
+                field_answer_bindings=form_plan.answer_field_bindings,
+                vacancy_requirements=package.vacancy_requirements,
+                vacancy_review_material=vacancy_review_material,
+                planned_form_fields=form_plan.review_form_fields,
+                form_field_authorities=form_plan.form_field_authorities,
+                form_inventory_sha256=inventory_sha256,
+            )
             if review_only:
                 sanity_receipt = recorder.review_once(
                     sanity_package,
@@ -1378,6 +1618,12 @@ class GutuaGreenhouseSession:
                 generation_authority=generation_authority,
                 vacancy_review_material=vacancy_review_material,
                 vacancy_requirements=package.vacancy_requirements,
+                questions=form_plan.questions,
+                form_answer_bindings=form_plan.answer_field_bindings,
+                review_form_fields=form_plan.review_form_fields,
+                form_field_authorities=form_plan.form_field_authorities,
+                form_inventory_sha256=inventory_sha256,
+                form_inventory=form_inventory,
                 forensic_root=forensic_root,
                 forensic_receipt=forensic_receipt,
             )
@@ -1412,7 +1658,7 @@ class GutuaGreenhouseSession:
             source=package.source,
             artifacts=package.artifacts,
             contact=contact_authority.contact,
-            questions=None,
+            questions=form_plan.questions,
             artifact_root=artifact_root,
             repository_root=self.repository_root,
             jurisdiction="GB",
@@ -1422,6 +1668,18 @@ class GutuaGreenhouseSession:
         # Employer-visible page mutation is admitted only after every local,
         # provider, semantic, and one-use release authority has passed.
         observed_capture = collect_greenhouse_form_inventory(page)
+        observed_form_plan = self._plan_supported_form(package, observed_capture)
+        if (
+            observed_form_plan.questions != form_plan.questions
+            or observed_form_plan.answer_field_bindings != form_plan.answer_field_bindings
+            or observed_form_plan.review_form_fields != form_plan.review_form_fields
+            or observed_form_plan.form_field_authorities != form_plan.form_field_authorities
+            or observed_form_plan.field_authority_names != form_plan.field_authority_names
+            or observed_form_plan.consent_states != form_plan.consent_states
+        ):
+            raise ProductionATSBoundaryError(
+                "Greenhouse form changed after its sanity-reviewed plan"
+            )
         observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         observed_inventory = greenhouse_ats_inventory_from_capture(
             observed_capture,
@@ -1445,6 +1703,7 @@ class GutuaGreenhouseSession:
             artifact_directory=artifact_directory,
             recorder=recorder,
             inventory_bytes=observed_capture,
+            expected_form_plan=form_plan,
         )
         reviewed_capture = collect_greenhouse_form_inventory(page)
         reviewed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1511,7 +1770,7 @@ class GutuaGreenhouseSession:
             source=package.source,
             artifacts=package.artifacts,
             contact=contact_authority.contact,
-            questions=None,
+            questions=form_plan.questions,
             document_assurance_receipts=document_receipts,
             sanity_review_receipt=sanity_receipt,
             ats_application_authority=ats_authority,
@@ -1549,6 +1808,11 @@ class GutuaGreenhouseSession:
             consumed_at=issued.issued_at,
             vacancy_review_material=vacancy_review_material,
             vacancy_requirements=package.vacancy_requirements,
+            form_answer_bindings=form_plan.answer_field_bindings,
+            review_form_fields=form_plan.review_form_fields,
+            form_field_authorities=form_plan.form_field_authorities,
+            form_inventory_sha256=inventory_sha256,
+            form_inventory=form_inventory,
         )
 
     def close(self) -> None:

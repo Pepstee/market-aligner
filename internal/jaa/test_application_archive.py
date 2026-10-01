@@ -32,7 +32,7 @@ def _review_preparation(tmp_path, *, forensic_method="GET", begin=True):
     from form_filling.ats_forensics import ATSForensicRecorder, runtime_fingerprint
     from test_application_sanity_review import package, client, ScriptedBackend, PASS
 
-    reviewed = package(fields=(("cover_note", "Cover note", ""),))
+    reviewed = package(fields=())
     repository, root = _roots(tmp_path)
     vacancy = VacancyArchiveIdentity(
         reviewed.intended_vacancy.job_key, reviewed.intended_vacancy.vacancy_sha256,

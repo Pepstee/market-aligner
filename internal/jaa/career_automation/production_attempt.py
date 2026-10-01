@@ -683,9 +683,19 @@ class GreenhouseAttemptRecorder:
         if recovered is not None:
             return recovered
         package = package_from_application(
-            source=prepared.source, artifacts=prepared.artifacts, questions=None,
+            source=prepared.source,
+            artifacts=prepared.artifacts,
+            questions=prepared.questions,
+            field_answer_bindings=(
+                prepared.form_answer_bindings
+                if prepared.review_form_fields is not None
+                else None
+            ),
             vacancy_requirements=prepared.vacancy_requirements,
             vacancy_review_material=prepared.vacancy_review_material,
+            planned_form_fields=prepared.review_form_fields,
+            form_field_authorities=prepared.form_field_authorities,
+            form_inventory_sha256=prepared.form_inventory_sha256,
         )
         verify_sanity_review_receipt(prepared.sanity_review_receipt, package)
         forensic = verify_forensic_receipt(prepared.forensic_root, prepared.forensic_receipt)
@@ -705,6 +715,14 @@ class GreenhouseAttemptRecorder:
             "review.package": _json_bytes({
                 "application_source_identity": package.application_source_identity,
                 "form_fields": package.form_fields,
+                "form_answer_bindings": package.form_answer_bindings,
+                "form_field_authorities": package.form_field_authorities,
+                "form_inventory_sha256": package.form_inventory_sha256,
+                **(
+                    {"form_inventory": json.loads(prepared.form_inventory)}
+                    if prepared.form_inventory is not None
+                    else {}
+                ),
                 "vacancy_requirements": package.vacancy_requirements,
                 "approved_evidence_ids": package.approved_evidence_ids,
                 "artifact_set_sha256": prepared.artifacts.artifact_set_sha256,
@@ -714,6 +732,8 @@ class GreenhouseAttemptRecorder:
                 "outcome": "review_only",
             }),
         }
+        if prepared.form_inventory is not None:
+            payloads["review.form_inventory"] = prepared.form_inventory
         for event in forensic["events"]:
             if event["kind"] == "screenshot":
                 payload = event["payload"]

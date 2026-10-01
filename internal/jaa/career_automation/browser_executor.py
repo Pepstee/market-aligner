@@ -332,6 +332,13 @@ class ReleaseExecutionAuthority:
     form_answer_bindings: tuple[tuple[str, str], ...] = field(
         default=(), kw_only=True
     )
+    review_form_fields: tuple[tuple[str, str, str], ...] | None = field(
+        default=None, kw_only=True
+    )
+    review_form_field_authorities: tuple[tuple[str, str], ...] = field(
+        default=(), kw_only=True
+    )
+    form_inventory_sha256: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.gate, ReleaseGateStore):
@@ -444,6 +451,9 @@ class ReleaseExecutionAuthority:
             artifacts=self.artifacts,
             questions=self.questions,
             field_answer_bindings=self.answer_field_bindings,
+            planned_form_fields=self.review_form_fields,
+            form_field_authorities=self.review_form_field_authorities,
+            form_inventory_sha256=self.form_inventory_sha256,
         )
 
     @property

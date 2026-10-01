@@ -643,3 +643,20 @@ def test_retained_form_answers_preserve_source_ids_and_exact_inventory() -> None
         form_answers_bytes((rows[0], rows[0]))
     with pytest.raises(ValueError, match='NFC'):
         form_answers_bytes((('q1', 'Question', 'e\u0301'),))
+
+
+def test_embedded_form_answers_do_not_resolve_unused_source_facts() -> None:
+    from types import SimpleNamespace
+
+    from career_automation.form_answers import embedded_source_form_answers
+
+    source = SimpleNamespace(
+        facts=(SimpleNamespace(fact_kind="candidate", authority=SimpleNamespace(
+            candidate_claim_id="synthetic-claim",
+            candidate_claim_version=1,
+            candidate_evidence_id="synthetic-evidence",
+            candidate_evidence_version=1,
+        )),),
+    )
+
+    assert embedded_source_form_answers(source) == ()

@@ -164,6 +164,9 @@ class CandidateReleaseExecutionAuthority(ReleaseExecutionAuthority):
             field_answer_bindings=self.answer_field_bindings,
             vacancy_requirements=self.vacancy_requirements,
             vacancy_review_material=self.vacancy_review_material,
+            planned_form_fields=self.review_form_fields,
+            form_field_authorities=self.review_form_field_authorities,
+            form_inventory_sha256=self.form_inventory_sha256,
         )
 
     def verify_employer_facing_receipts(

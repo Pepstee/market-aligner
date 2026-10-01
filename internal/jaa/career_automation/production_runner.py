@@ -576,6 +576,11 @@ class PreparedGreenhouseRelease:
     vacancy_requirements: tuple[str, ...] = ()
     submit_button_name: str = "Submit Application"
     timeout_ms: int = 20_000
+    form_answer_bindings: tuple[tuple[str, str], ...] = ()
+    review_form_fields: tuple[tuple[str, str, str], ...] | None = None
+    form_field_authorities: tuple[tuple[str, str], ...] = ()
+    form_inventory_sha256: str | None = None
+    form_inventory: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -590,6 +595,12 @@ class PreparedGreenhouseReview:
     vacancy_requirements: tuple[str, ...]
     forensic_root: Path
     forensic_receipt: ATSForensicReceipt
+    questions: dict[str, tuple[str, str]] | None = None
+    form_answer_bindings: tuple[tuple[str, str], ...] = ()
+    review_form_fields: tuple[tuple[str, str, str], ...] | None = None
+    form_field_authorities: tuple[tuple[str, str], ...] = ()
+    form_inventory_sha256: str | None = None
+    form_inventory: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -889,6 +900,10 @@ class GreenhouseProductionRunner:
             job_key=prepared.source.job_key,
             vacancy_review_material=prepared.vacancy_review_material,
             vacancy_requirements=prepared.vacancy_requirements,
+            form_answer_bindings=prepared.form_answer_bindings,
+            review_form_fields=prepared.review_form_fields,
+            review_form_field_authorities=prepared.form_field_authorities,
+            form_inventory_sha256=prepared.form_inventory_sha256,
         )
         return self.executor.execute(
             page,

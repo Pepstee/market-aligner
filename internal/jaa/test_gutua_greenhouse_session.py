@@ -940,6 +940,7 @@ def _synthetic_seam_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     html: str,
+    answer_question: str | None = None,
 ):
     """Self-contained synthetic prepare_release seam; no private artifacts.
 
@@ -1051,6 +1052,47 @@ def _synthetic_seam_fixture(
         PublishedArtifactReceipt,
     )
 
+    source_facts = [
+        SimpleNamespace(
+            sentence_id="candidate-fact-1",
+            fact_kind="candidate",
+            text="built tested cloud services",
+            authority=SimpleNamespace(
+                candidate_claim_id="claim-1",
+                candidate_claim_version=1,
+                candidate_evidence_id="evidence-1",
+                candidate_evidence_version=1,
+            ),
+        )
+    ]
+    source_answers = ()
+    answers_text = ""
+    if answer_question is not None:
+        source_facts.append(
+            SimpleNamespace(
+                sentence_id="synthetic-answer-fact",
+                fact_kind="candidate",
+                text="Built a small synthetic internal demo.",
+                authority=SimpleNamespace(
+                    candidate_claim_id="claim-2",
+                    candidate_claim_version=1,
+                    candidate_evidence_id="evidence-2",
+                    candidate_evidence_version=1,
+                ),
+            )
+        )
+        source_answers = (
+            SimpleNamespace(
+                question_id="answer-1",
+                question=answer_question,
+                style_slot_ids=(),
+                sentence_ids=("synthetic-answer-fact",),
+            ),
+        )
+        answers_text = (
+            f"Question ID: answer-1\nQuestion: {answer_question}\n"
+            "Answer: Built a small synthetic internal demo.\n"
+        )
     package = CandidateApplicationPackage(
         source=SimpleNamespace(
             source_id=hashlib.sha256(b"synthetic-source").hexdigest(),
@@ -1058,17 +1100,14 @@ def _synthetic_seam_fixture(
             vacancy_sha256=vacancy.vacancy_sha256,
             role_title=vacancy.role_title,
             company_name=vacancy.company_name,
-            facts=(
-                SimpleNamespace(
-                    fact_kind="candidate",
-                    text="built tested cloud services",
-                    authority=SimpleNamespace(
-                        candidate_claim_id="claim-1",
-                        candidate_claim_version=1,
-                        candidate_evidence_id="evidence-1",
-                        candidate_evidence_version=1,
-                    ),
-                ),
+            facts=tuple(source_facts),
+            style_slots=(),
+            answers=source_answers,
+            contact=SimpleNamespace(
+                full_name="Alex Example",
+                email="alex@example.test",
+                phone="+44 7700 900123",
+                city="London",
             ),
             document=lambda: {"job_key": vacancy.job_key},
         ),
@@ -1076,7 +1115,7 @@ def _synthetic_seam_fixture(
             editable=SimpleNamespace(
                 cv_text="synthetic cv",
                 cover_letter_text="synthetic letter",
-                answers_text="synthetic answers",
+                answers_text=answers_text,
             ),
             cv_pdf=SimpleNamespace(pdf_bytes=b"synthetic cv pdf"),
             cover_letter_pdf=SimpleNamespace(pdf_bytes=b"synthetic letter pdf"),
@@ -1110,6 +1149,40 @@ def _synthetic_seam_fixture(
 
     order: list[str] = []
     observed: dict[str, object] = {}
+    inventory_fields = [
+        {"id": "full_name", "name": "full_name", "tag": "input", "type": "text", "labels": ["Full name"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "email", "name": "email", "tag": "input", "type": "email", "labels": ["Email"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "phone", "name": "phone", "tag": "input", "type": "tel", "labels": ["Phone"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "city", "name": "city", "tag": "input", "type": "text", "labels": ["City"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "resume", "name": "resume", "tag": "input", "type": "file", "labels": ["CV"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "cover_letter", "name": "cover_letter", "tag": "input", "type": "file", "labels": ["Cover letter"], "required": False, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "consent", "name": "consent", "tag": "input", "type": "checkbox", "labels": ["Privacy consent"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+    ]
+    if answer_question is not None:
+        inventory_fields.append(
+            {"id": "question_1", "name": "question_1", "tag": "textarea", "type": "textarea", "labels": [answer_question], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""}
+        )
+    inventory_document = {
+        "schema_version": "jaa.greenhouse-form-inventory.v1",
+        "url": application_url,
+        "title": "Graduate Engineer at Example",
+        "form_state": {
+            "schema_version": "jaa.greenhouse-form-state.v1",
+            "url": application_url,
+            "title": "Graduate Engineer at Example",
+            "provider": "greenhouse",
+            "fields": inventory_fields,
+        },
+        "select_inventories": [],
+    }
+
+    def inventory_capture(_page, *, passive=False):
+        order.append("inventory.passive" if passive else "inventory.active")
+        return (canonical_json(inventory_document) + "\n").encode()
+
+    monkeypatch.setattr(
+        session_module, "collect_greenhouse_form_inventory", inventory_capture
+    )
     original_capture = session_module.capture_or_recover_greenhouse_forensic_observation
 
     def tracked_publish(source, artifacts, **kwargs):
@@ -1123,6 +1196,7 @@ def _synthetic_seam_fixture(
 
     def tracked_review(package_under_review, client):
         order.append("sanity")
+        observed["sanity_package"] = package_under_review
         return SimpleNamespace(receipt_sha256="4" * 64, backend_identity="synthetic")
 
     def tracked_generate(**kwargs):
@@ -1168,6 +1242,8 @@ def _synthetic_seam_fixture(
         application_url=application_url,
         html=html,
         artifact_set_sha256=synthetic_artifact_set,
+        inventory_document=inventory_document,
+        inventory_bytes=lambda: (canonical_json(inventory_document) + "\n").encode(),
         order=order,
         observed=observed,
         sink=sink,
@@ -1179,11 +1255,18 @@ def test_synthetic_review_seam_stops_before_gate_and_fill(tmp_path, monkeypatch)
     from career_automation.production_runner import PreparedGreenhouseReview
     from form_filling.ats_forensics import ATSForensicRecorder
 
-    fixture = _synthetic_seam_fixture(tmp_path, monkeypatch, html=_SYNTHETIC_SEAM_HTML)
+    answer_question = "Describe your experience for this synthetic role"
+    fixture = _synthetic_seam_fixture(
+        tmp_path,
+        monkeypatch,
+        html=_SYNTHETIC_SEAM_HTML,
+        answer_question=answer_question,
+    )
     fixture.recorder.begin_review_only()
     receipts = []
 
     def review_once(recorder, package, review):
+        fixture.observed["review_once_package"] = package
         if not receipts:
             receipts.append(review())
         return receipts[0]
@@ -1220,7 +1303,22 @@ def test_synthetic_review_seam_stops_before_gate_and_fill(tmp_path, monkeypatch)
     monkeypatch.setattr(session_module, "load_provider_observation_authority", forbidden)
     prepared = fixture.session.prepare_review(fixture.item, fixture.recorder, page, fixture.sink)
     assert type(prepared) is PreparedGreenhouseReview
-    assert fixture.order == ["sanity", "forensics"]
+    assert fixture.order == ["inventory.passive", "sanity", "forensics"]
+    reviewed_package = fixture.observed["review_once_package"]
+    assert (
+        "question_1",
+        answer_question,
+        "Built a small synthetic internal demo.",
+    ) in reviewed_package.form_fields
+    assert reviewed_package.form_answer_bindings == (
+        ("question_1", "answer-1"),
+    )
+    assert dict(reviewed_package.form_field_authorities)["question_1"] == (
+        "answer.answer-1"
+    )
+    assert reviewed_package.form_inventory_sha256 == hashlib.sha256(
+        fixture.inventory_bytes()
+    ).hexdigest()
     assert not hasattr(prepared, "gate") and not hasattr(prepared, "release_token")
     with pytest.raises((AttributeError, TypeError)):
         prepared.release_token = "forbidden"
@@ -1233,7 +1331,12 @@ def test_synthetic_review_seam_stops_before_gate_and_fill(tmp_path, monkeypatch)
     resumed.begin_review_only()
     recovered = fixture.session.prepare_review(fixture.item, resumed, page, fixture.sink)
     assert type(recovered) is PreparedGreenhouseReview
-    assert fixture.order == ["sanity", "forensics"]
+    assert fixture.order == [
+        "inventory.passive",
+        "sanity",
+        "forensics",
+        "inventory.passive",
+    ]
     assert resumed.attempt._events() == original
 
 
@@ -1283,7 +1386,44 @@ def test_synthetic_review_backend_failure_is_archived_safely(tmp_path, monkeypat
     assert json.loads(fixture.recorder.attempt.read_artifact(archived[0])) == failure.document()
     assert any(row.role == "review.semantic_intent" for row in objects)
     assert not any(row.role == "assurance.semantic.receipt" for row in objects)
-    assert fixture.order == ["sanity"]
+    assert fixture.order == ["inventory.passive", "sanity"]
+
+
+def test_native_plan_rejects_mismatched_source_question_before_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _synthetic_seam_fixture(
+        tmp_path,
+        monkeypatch,
+        html=_SYNTHETIC_SEAM_HTML,
+        answer_question="Describe your experience for this synthetic role",
+    )
+    fixture.inventory_document["form_state"]["fields"][-1]["labels"] = [
+        "A different synthetic question"
+    ]
+    fixture.session._browser = SimpleNamespace(
+        browser_type=SimpleNamespace(name="synthetic"), version="1"
+    )
+    page = SimpleNamespace(
+        content=lambda: fixture.html,
+        locator=lambda selector: SimpleNamespace(
+            inner_text=lambda: "Graduate Engineer at Example"
+        ),
+        evaluate=lambda script: "synthetic",
+    )
+
+    with pytest.raises(
+        ProductionATSBoundaryError,
+        match="source answer does not identify one exact live Greenhouse question",
+    ):
+        fixture.session.prepare_review(
+            fixture.item, fixture.recorder, page, fixture.sink
+        )
+
+    assert fixture.order == ["inventory.passive"]
+    objects = fixture.recorder.attempt._objects(fixture.recorder.attempt._events())
+    assert not any(row.role == "review.form_inventory" for row in objects)
+    assert not any(row.role == "review.semantic_intent" for row in objects)
 
 
 def test_synthetic_seam_passive_forensics_after_sanity_before_gate(
@@ -1315,7 +1455,14 @@ def test_synthetic_seam_passive_forensics_after_sanity_before_gate(
                 fixture.item, fixture.recorder, page, fixture.sink
             )
         browser.close()
-    assert fixture.order == ["sanity", "forensics", "gate.issue", "fill"]
+    assert fixture.order == [
+        "inventory.passive",
+        "sanity",
+        "forensics",
+        "gate.issue",
+        "inventory.active",
+        "fill",
+    ]
     capture_kwargs = fixture.observed["capture_kwargs"]
     assert capture_kwargs["artifact_set_sha256"] == fixture.artifact_set_sha256
     assert capture_kwargs["release_manifest_sha256"] is None
@@ -1385,7 +1532,7 @@ def test_synthetic_seam_blocked_forensics_archives_then_refuses_before_gate(
                 fixture.item, fixture.recorder, page, fixture.sink
             )
         browser.close()
-    assert fixture.order == ["sanity", "forensics"]
+    assert fixture.order == ["inventory.passive", "sanity", "forensics"]
     manifest = json.loads(
         (
             fixture.archive_root

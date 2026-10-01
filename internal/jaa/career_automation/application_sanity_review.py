@@ -299,6 +299,8 @@ class SanityReviewPackage:
     application_source_identity: str
     vacancy_review_material: VacancyReviewMaterial | None = None
     form_answer_bindings: tuple[tuple[str, str], ...] = ()
+    form_field_authorities: tuple[tuple[str, str], ...] = ()
+    form_inventory_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.intended_vacancy) is not IntendedVacancy:
@@ -328,9 +330,24 @@ class SanityReviewPackage:
             if any(not isinstance(row, tuple) or len(row) != 2 for row in binding_rows):
                 raise ValueError("sanity review field binding is invalid")
             field_ids = tuple(row[0] for row in binding_rows)
+            authority_rows = tuple(self.form_field_authorities)
+            authority_ids = tuple(
+                row[0] for row in authority_rows
+                if isinstance(row, tuple) and len(row) == 2
+            )
+            native_authority_coverage = (
+                self.form_inventory_sha256 is not None
+                and bool(authority_rows)
+                and authority_ids == tuple(sorted(set(authority_ids)))
+                and set(authority_ids) == set(question_ids)
+            )
             if (
                 field_ids != tuple(sorted(set(field_ids)))
-                or set(field_ids) != set(question_ids)
+                or not set(field_ids).issubset(question_ids)
+                or (
+                    set(field_ids) != set(question_ids)
+                    and not native_authority_coverage
+                )
                 or any(
                     not isinstance(field_id, str)
                     or not field_id
@@ -340,6 +357,27 @@ class SanityReviewPackage:
                 )
             ):
                 raise ValueError("sanity review field bindings differ from form fields")
+        authority_rows = tuple(self.form_field_authorities)
+        if authority_rows:
+            if any(not isinstance(row, tuple) or len(row) != 2 for row in authority_rows):
+                raise ValueError("sanity review field authority is invalid")
+            authority_ids = tuple(row[0] for row in authority_rows)
+            if (
+                authority_ids != tuple(sorted(set(authority_ids)))
+                or set(authority_ids) != set(question_ids)
+                or any(
+                    not isinstance(field_id, str)
+                    or not field_id
+                    or not isinstance(authority, str)
+                    or not authority
+                    for field_id, authority in authority_rows
+                )
+            ):
+                raise ValueError("sanity review field authorities differ from form fields")
+        if self.form_inventory_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", self.form_inventory_sha256
+        ):
+            raise ValueError("sanity review form inventory hash is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", self.application_source_identity):
             raise ValueError("sanity review requires an application-source identity")
         if not self.vacancy_requirements:
@@ -417,12 +455,20 @@ def package_from_application(
     field_answer_bindings: Sequence[tuple[str, str]] | None = None,
     vacancy_requirements: Sequence[str] | None = None,
     vacancy_review_material: VacancyReviewMaterial | None = None,
+    planned_form_fields: Sequence[tuple[str, str, str]] | None = None,
+    form_field_authorities: Sequence[tuple[str, str]] = (),
+    form_inventory_sha256: str | None = None,
 ) -> SanityReviewPackage:
     """Build review data from the exact immutable application objects."""
-    form_fields = canonical_form_fields(
+    canonical_fields = canonical_form_fields(
         source,
         questions,
         field_answer_bindings=field_answer_bindings,
+    )
+    form_fields = (
+        tuple(planned_form_fields)
+        if planned_form_fields is not None
+        else canonical_fields
     )
     answer_bindings = (
         tuple((field_id, field_id) for field_id, _question, _answer in form_fields)
@@ -433,6 +479,23 @@ def package_from_application(
             in source_form_answer_bindings(source, questions, field_answer_bindings)
         )
     )
+    if planned_form_fields is not None and field_answer_bindings is not None:
+        planned_by_id = {row[0]: (row[1], row[2]) for row in form_fields}
+        resolved_rows = source_form_answer_bindings(
+            source, questions, field_answer_bindings
+        )
+        for field_id, _question_id, question, answer in resolved_rows:
+            if planned_by_id.get(field_id) != (question, answer):
+                raise ValueError("planned form field differs from its canonical source answer")
+    if planned_form_fields is not None:
+        authored_rows = (
+            source_form_answers(source, questions)
+            if questions is not None
+            else embedded_source_form_answers(source)
+        )
+        planned_content = {(row[1], row[2]) for row in form_fields}
+        if any((question, answer) not in planned_content for _, question, answer in authored_rows):
+            raise ValueError("planned form fields omit or override an authored source answer")
     return SanityReviewPackage(
         cv_pdf_bytes=artifacts.cv_pdf.pdf_bytes,
         cover_letter_pdf_bytes=artifacts.cover_letter_pdf.pdf_bytes,
@@ -452,6 +515,8 @@ def package_from_application(
         approved_evidence_ids=approved_evidence_projection(source),
         application_source_identity=source.source_id,
         vacancy_review_material=vacancy_review_material,
+        form_field_authorities=tuple(form_field_authorities),
+        form_inventory_sha256=form_inventory_sha256,
     )
 
 
@@ -485,15 +550,22 @@ def _package_document(
     cv_text = _independent_pdf_text(package.cv_pdf_bytes)
     letter_text = _independent_pdf_text(package.cover_letter_pdf_bytes)
     bound_question_ids = dict(package.form_answer_bindings)
+    field_authorities = dict(package.form_field_authorities)
     form_document = [
         {
             "field_id": row[0],
             "question_id": bound_question_ids[row[0]],
             "question": row[1],
             "answer": row[2],
+            **({"authority": field_authorities[row[0]]} if field_authorities else {}),
         }
         if row[0] in bound_question_ids
-        else {"field_id": row[0], "question": row[1], "answer": row[2]}
+        else {
+            "field_id": row[0],
+            "question": row[1],
+            "answer": row[2],
+            **({"authority": field_authorities[row[0]]} if field_authorities else {}),
+        }
         for row in package.form_fields
     ]
     evidence_document = list(package.approved_evidence_ids)
@@ -531,6 +603,11 @@ def _package_document(
             "form_fields": form_document,
             "approved_evidence_ids": evidence_document,
             "application_source_identity": package.application_source_identity,
+            **(
+                {"form_inventory_sha256": package.form_inventory_sha256}
+                if package.form_inventory_sha256 is not None
+                else {}
+            ),
         },
         "instruction_boundary_end": "END UNTRUSTED QUOTED DATA",
     }

@@ -221,10 +221,13 @@ def form_answer_bindings_bytes(
 def embedded_source_form_answers(source: object) -> tuple[tuple[str, str, str], ...]:
     """Render already inventory-bound structured answers from a source manifest."""
 
+    answers = tuple(getattr(source, "answers", ()))
+    if not answers:
+        return canonical_form_answers((), allow_empty=True)
     facts = {row.sentence_id: row.text for row in getattr(source, "facts", ())}
     slots = {row.slot_id: row.text for row in getattr(source, "style_slots", ())}
     rows: list[tuple[str, str, str]] = []
-    for answer in getattr(source, "answers", ()):
+    for answer in answers:
         try:
             text = "\n".join(
                 [

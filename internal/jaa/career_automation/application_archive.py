@@ -737,11 +737,41 @@ def _verify_review_only_evidence(objects, selected, *, root, vacancy) -> None:
         cover_letter_pdf_bytes=value("document.cover_letter.final_pdf"),
         intended_vacancy=intended,
         form_fields=tuple(tuple(row) for row in package["form_fields"]),
+        form_answer_bindings=tuple(
+            tuple(row) for row in package.get("form_answer_bindings", ())
+        ),
+        form_field_authorities=tuple(
+            tuple(row) for row in package.get("form_field_authorities", ())
+        ),
+        form_inventory_sha256=package.get("form_inventory_sha256"),
         vacancy_requirements=tuple(package["vacancy_requirements"]),
         approved_evidence_ids=tuple(package["approved_evidence_ids"]),
         application_source_identity=package["application_source_identity"],
         vacancy_review_material=material,
     )
+    if "form_inventory" in package:
+        inventory = package["form_inventory"]
+        if (
+            not isinstance(inventory, dict)
+            or _sha256(_json_bytes(inventory)) != package.get("form_inventory_sha256")
+            or inventory.get("url") != vacancy.source_url
+        ):
+            raise ApplicationArchiveError("review-only form inventory binding differs")
+        if value("review.form_inventory") != _json_bytes(inventory):
+            raise ApplicationArchiveError("review-only form inventory artifact differs")
+        form_state = inventory.get("form_state")
+        inventory_fields = form_state.get("fields") if isinstance(form_state, dict) else None
+        if not isinstance(inventory_fields, list):
+            raise ApplicationArchiveError("review-only form inventory is malformed")
+        observed_ids = {
+            str(row.get("name") or row.get("id") or "")
+            for row in inventory_fields
+            if isinstance(row, dict)
+        }
+        if any(row[0] not in observed_ids for row in reviewed.form_fields):
+            raise ApplicationArchiveError("reviewed form field is absent from inventory")
+    elif reviewed.form_inventory_sha256 is not None:
+        raise ApplicationArchiveError("review-only form inventory is missing")
     semantic = document("assurance.semantic.receipt")
     verify_sanity_review_receipt(SanityReviewReceipt.from_document(semantic), reviewed)
     source = document("document.source_inputs")
