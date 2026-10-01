@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
-from llm.client import LLMClient, MockBackend
+from llm.client import Backend, LLMClient, LLMResponse, MockBackend
 
 import career_automation.application_quality as application_quality
 from career_automation.application_artifacts import publish_application_artifacts
@@ -22,8 +23,15 @@ from career_automation.application_quality import (
     QUALITY_POLICY_SHA256,
     build_editorial_skill_review_receipt,
     build_deterministic_preflight_quality_review,
+    review_application_package_with_pinned_skills,
     run_pinned_editorial_skill_reviews,
 )
+from career_automation.application_sanity_review import (
+    COMBINED_RESULT_SCHEMA_VERSION,
+    SanityReviewPackage,
+    approved_evidence_projection,
+)
+from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.ats_application_authority import (
     AtsFieldPlan,
     AtsFormInventory,
@@ -170,8 +178,25 @@ def _quality_input(tmp_path: Path, source: ApplicationSource) -> ApplicationQual
 def _quality_input_with_ats(
     tmp_path: Path,
     source: ApplicationSource,
+    *,
+    provider_managed_value: str | None = None,
 ) -> ApplicationQualityInput:
     quality_input = _quality_input(tmp_path, source)
+    provider_field = (
+        (
+            AtsObservedField(
+                "provider_state",
+                "hidden",
+                "Provider state",
+                False,
+                False,
+                automation_role="provider_managed",
+                current_value=provider_managed_value,
+            ),
+        )
+        if provider_managed_value is not None
+        else ()
+    )
     inventory = AtsFormInventory(
         provider="fixture",
         application_url="https://jobs.example.test/application/quality",
@@ -196,6 +221,7 @@ def _quality_input_with_ats(
                 False,
                 automation_role="honeypot",
             ),
+            *provider_field,
         ),
     )
     authority = build_ats_application_authority(
@@ -227,6 +253,7 @@ def _quality_input_with_ats(
                     current_value=quality_input.artifacts.cv_pdf.pdf_sha256,
                 ),
                 inventory.fields[3],
+                *provider_field,
             ),
         ),
         plans=(
@@ -234,6 +261,18 @@ def _quality_input_with_ats(
             AtsFieldPlan("delivery", "fill", "answer.delivery-example"),
             AtsFieldPlan("cv", "upload", "artifact.cv"),
             AtsFieldPlan("robot_check", "omit", "none"),
+            *(
+                (
+                    AtsFieldPlan(
+                        "provider_state",
+                        "omit",
+                        "none",
+                        observed_value=provider_managed_value,
+                    ),
+                )
+                if provider_managed_value is not None
+                else ()
+            ),
         ),
     )
     return _with_editorial_reviews(replace(
@@ -242,6 +281,124 @@ def _quality_input_with_ats(
         form_inventory_bytes=authority.inventory_bytes,
         ats_application_authority=authority,
     ))
+
+
+class _CombinedReviewBackend(Backend):
+    name = "codex_cli"
+
+    def __init__(self, result: dict[str, object]) -> None:
+        self.result = result
+        self.calls = 0
+        self.last_user = ""
+
+    def available(self) -> bool:
+        return True
+
+    def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
+        self.calls += 1
+        self.last_user = user
+        return LLMResponse(
+            text=json.dumps(self.result),
+            model="gpt-6-luna",
+        )
+
+
+def _combined_pass_result() -> dict[str, object]:
+    return {
+        "schema_version": COMBINED_RESULT_SCHEMA_VERSION,
+        "sanity_review": {
+            "schema_version": "jaa.application-sanity-result.v1",
+            "verdict": "pass",
+            "findings": [],
+        },
+        "criteria_reviews": [
+            {
+                "criterion_id": name,
+                "decision": "pass",
+                "findings": [],
+            }
+            for name, _version, _sha256 in application_quality._EDITORIAL_SKILL_POLICIES
+        ],
+    }
+
+
+def _combined_review_fixture(
+    tmp_path: Path,
+    *,
+    changed_delivery: str | None = None,
+):
+    source = _quality_source()
+    quality_input = _quality_input_with_ats(
+        tmp_path / "quality-pack",
+        source,
+        provider_managed_value="synthetic-hidden-provider-state",
+    )
+    authority = quality_input.ats_application_authority
+    assert authority is not None
+    answer_rows = {row.field_id: row for row in authority.answers}
+    delivery_question = source.answers[0].question
+    delivery_value = (
+        str(answer_rows["delivery"].final_value)
+        if changed_delivery is None
+        else changed_delivery
+    )
+    reviewed_fields = tuple(
+        sorted(
+            (
+                ("delivery", delivery_question, delivery_value),
+                ("full_name", "Full name", str(answer_rows["full_name"].final_value)),
+            )
+        )
+    )
+    bindings = (("delivery", source.answers[0].question_id),)
+    field_authorities = (
+        ("delivery", f"answer.{source.answers[0].question_id}"),
+        ("full_name", "contact.full_name"),
+    )
+    requirements = ("SYNTHETIC-REQ: demonstrate reliable delivery",)
+    package = SanityReviewPackage(
+        cv_pdf_bytes=quality_input.artifacts.cv_pdf.pdf_bytes,
+        cover_letter_pdf_bytes=quality_input.artifacts.cover_letter_pdf.pdf_bytes,
+        form_fields=reviewed_fields,
+        intended_vacancy=IntendedVacancy(
+            job_key=source.job_key,
+            vacancy_sha256=source.vacancy_sha256,
+            role_title=source.role_title,
+            company_name=source.company_name,
+        ),
+        vacancy_requirements=requirements,
+        approved_evidence_ids=approved_evidence_projection(source),
+        application_source_identity=source.source_id,
+        form_answer_bindings=bindings,
+        form_field_authorities=field_authorities,
+    )
+    result = _combined_pass_result()
+    backend = _CombinedReviewBackend(result)
+    client = LLMClient(
+        backend=backend,
+        model="codex-cli-default",
+        temperature=0,
+        max_retries=1,
+        cache_enabled=False,
+        cache_dir=tmp_path / "combined-cache",
+        usage_log=tmp_path / "combined-usage.jsonl",
+    )
+    with mock.patch.object(
+        application_quality,
+        "_load_pinned_skill_document",
+        side_effect=lambda name, _sha256: f"# {name}\nSynthetic read-only criterion.\n".encode(),
+    ):
+        receipt = review_application_package_with_pinned_skills(package, client=client)
+    projected_quality_input = replace(
+        quality_input,
+        editorial_skill_reviews=(),
+        combined_review_receipt=receipt,
+        reviewed_form_fields=reviewed_fields,
+        reviewed_form_answer_bindings=bindings,
+        reviewed_form_field_authorities=field_authorities,
+        reviewed_vacancy_requirements=requirements,
+    )
+    return projected_quality_input, backend, receipt
 
 
 def _with_editorial_reviews(
@@ -424,6 +581,34 @@ def test_pinned_editorial_runtime_calls_both_skills_in_order_and_admits_pass(
     review = build_deterministic_preflight_quality_review(reviewed)
     assert review.disposition is QualityReviewDisposition.ACCEPTED
     assert review.editorial_skill_reviews_verified is True
+
+
+def test_native_combined_review_is_one_call_and_rebinds_only_visible_fields(
+    tmp_path: Path,
+) -> None:
+    quality_input, backend, receipt = _combined_review_fixture(tmp_path)
+    assert backend.calls == 1
+    assert receipt.model_identity == "gpt-6-luna"
+    assert receipt.review_coverage["review_stage"] == "pre_fill_semantic_intent"
+    assert "synthetic-hidden-provider-state" not in backend.last_user
+    assert "provider_state" not in backend.last_user
+
+    review = build_deterministic_preflight_quality_review(quality_input)
+    assert review.disposition is QualityReviewDisposition.ACCEPTED
+    assert review.editorial_skill_reviews_verified is True
+    assert review.editorial_skill_review_sha256s == (receipt.receipt_sha256,)
+
+
+def test_native_combined_review_refuses_postfill_visible_answer_mismatch(
+    tmp_path: Path,
+) -> None:
+    quality_input, backend, _receipt = _combined_review_fixture(
+        tmp_path,
+        changed_delivery="Different answer not present in the ATS authority.",
+    )
+    assert backend.calls == 1
+    with pytest.raises(ValueError, match="post-fill applicant field differs"):
+        build_deterministic_preflight_quality_review(quality_input)
 
 
 def test_pinned_editorial_runtime_persists_model_findings_as_release_blockers(

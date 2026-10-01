@@ -36,6 +36,9 @@ from .form_answers import (
 PROMPT_SCHEMA_VERSION = "jaa.application-sanity-prompt.v1"
 RESULT_SCHEMA_VERSION = "jaa.application-sanity-result.v1"
 RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v2"
+COMBINED_RECEIPT_SCHEMA_VERSION = "jaa.application-sanity-receipt.v3"
+COMBINED_RESULT_SCHEMA_VERSION = "jaa.combined-application-review-result.v1"
+COMBINED_REVIEW_COVERAGE_SCHEMA_VERSION = "jaa.combined-application-review-coverage.v1"
 REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v1"
 REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
 MAX_REVIEW_TEXT_BYTES = 500_000
@@ -336,8 +339,7 @@ class SanityReviewPackage:
                 if isinstance(row, tuple) and len(row) == 2
             )
             native_authority_coverage = (
-                self.form_inventory_sha256 is not None
-                and bool(authority_rows)
+                bool(authority_rows)
                 and authority_ids == tuple(sorted(set(authority_ids)))
                 and set(authority_ids) == set(question_ids)
             )
@@ -549,25 +551,11 @@ def _package_document(
     SanityReviewPackage.__post_init__(package)
     cv_text = _independent_pdf_text(package.cv_pdf_bytes)
     letter_text = _independent_pdf_text(package.cover_letter_pdf_bytes)
-    bound_question_ids = dict(package.form_answer_bindings)
-    field_authorities = dict(package.form_field_authorities)
-    form_document = [
-        {
-            "field_id": row[0],
-            "question_id": bound_question_ids[row[0]],
-            "question": row[1],
-            "answer": row[2],
-            **({"authority": field_authorities[row[0]]} if field_authorities else {}),
-        }
-        if row[0] in bound_question_ids
-        else {
-            "field_id": row[0],
-            "question": row[1],
-            "answer": row[2],
-            **({"authority": field_authorities[row[0]]} if field_authorities else {}),
-        }
-        for row in package.form_fields
-    ]
+    form_document = form_field_projection_document(
+        package.form_fields,
+        package.form_answer_bindings,
+        package.form_field_authorities,
+    )
     evidence_document = list(package.approved_evidence_ids)
     hashes = {
         "cv_pdf_sha256": hashlib.sha256(package.cv_pdf_bytes).hexdigest(),
@@ -617,6 +605,109 @@ def _package_document(
     return document, hashes
 
 
+def form_field_projection_document(
+    form_fields: Sequence[tuple[str, str, str]],
+    form_answer_bindings: Sequence[tuple[str, str]],
+    form_field_authorities: Sequence[tuple[str, str]],
+    *,
+    answer_values: Mapping[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Build the exact applicant-visible field projection, never the full ATS inventory."""
+    bindings = dict(form_answer_bindings)
+    authorities = dict(form_field_authorities)
+    values = answer_values
+    if len(bindings) != len(tuple(form_answer_bindings)):
+        raise ValueError("applicant-visible answer bindings are duplicated")
+    if len(authorities) != len(tuple(form_field_authorities)):
+        raise ValueError("applicant-visible field authorities are duplicated")
+    rows: list[dict[str, str]] = []
+    if any(not isinstance(row, (tuple, list)) or len(row) != 3 for row in form_fields):
+        raise ValueError("applicant-visible form projection is malformed")
+    field_ids = {row[0] for row in form_fields}
+    if len(field_ids) != len(form_fields):
+        raise ValueError("applicant-visible form projection has duplicate fields")
+    if values is not None and (
+        set(values) != field_ids
+        or any(not isinstance(value, str) for value in values.values())
+    ):
+        raise ValueError("observed applicant-visible field values are incomplete or invalid")
+    for field_id, question, planned_answer in form_fields:
+        if not all(isinstance(value, str) for value in (field_id, question, planned_answer)):
+            raise ValueError("applicant-visible form projection is malformed")
+        row = {
+            "field_id": field_id,
+            "question": question,
+            "answer": planned_answer if values is None else values[field_id],
+        }
+        if field_id in bindings:
+            row["question_id"] = bindings[field_id]
+        if authorities:
+            if field_id not in authorities:
+                raise ValueError("applicant-visible field authority is incomplete")
+            row["authority"] = authorities[field_id]
+        rows.append(row)
+    if set(bindings) - {row["field_id"] for row in rows}:
+        raise ValueError("applicant-visible answer binding has no field")
+    if set(authorities) - {row["field_id"] for row in rows}:
+        raise ValueError("applicant-visible field authority has no field")
+    return rows
+
+
+def _combined_result_schema(criteria_count: int) -> dict[str, object]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": COMBINED_RESULT_SCHEMA_VERSION,
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "sanity_review", "criteria_reviews"],
+        "properties": {
+            "schema_version": {"const": COMBINED_RESULT_SCHEMA_VERSION},
+            "sanity_review": RESULT_SCHEMA,
+            "criteria_reviews": {
+                "type": "array",
+                "minItems": criteria_count,
+                "maxItems": criteria_count,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["criterion_id", "decision", "findings"],
+                    "properties": {
+                        "criterion_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "decision": {"enum": ["pass", "block"]},
+                        "findings": {
+                            "type": "array",
+                            "maxItems": 32,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": [
+                                    "code",
+                                    "summary",
+                                    "evidence",
+                                    "remediation",
+                                ],
+                                "properties": {
+                                    "code": {
+                                        "type": "string",
+                                        "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                                    },
+                                    "summary": {"type": "string", "maxLength": 4096},
+                                    "evidence": {"type": "string", "maxLength": 16384},
+                                    "remediation": {"type": "string", "maxLength": 8192},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
 @dataclass(frozen=True)
 class SanityReviewReceipt:
     package_hashes: Mapping[str, str]
@@ -634,6 +725,7 @@ class SanityReviewReceipt:
     verdict: str
     receipt_sha256: str
     schema_version: str = RECEIPT_SCHEMA_VERSION
+    review_coverage: Mapping[str, object] | None = None
 
     @classmethod
     def from_document(cls, document: Mapping[str, object]) -> "SanityReviewReceipt":
@@ -654,17 +746,94 @@ class SanityReviewReceipt:
                 self.transport_evidence is not None
                 and type(self.transport_evidence) is not dict
             )
+            or (
+                self.review_coverage is not None
+                and type(self.review_coverage) is not dict
+            )
         ):
             raise TypeError("sanity receipt contains an inexact authority type")
         IntendedVacancy.__post_init__(self.intended_vacancy)
-        if self.schema_version != RECEIPT_SCHEMA_VERSION or self.verdict != "pass":
+        if self.verdict != "pass":
             raise ValueError("only a current PASS sanity receipt is valid")
-        if (
-            self.prompt_sha256 != PROMPT_SHA256
-            or self.schema_sha256 != SCHEMA_SHA256
-            or self.policy_sha256 != POLICY_SHA256
-        ):
-            raise ValueError("sanity receipt policy binding is stale")
+        if self.schema_version == RECEIPT_SCHEMA_VERSION:
+            if self.review_coverage is not None:
+                raise ValueError("standalone sanity receipt has combined coverage")
+            if (
+                self.prompt_sha256 != PROMPT_SHA256
+                or self.schema_sha256 != SCHEMA_SHA256
+                or self.policy_sha256 != POLICY_SHA256
+            ):
+                raise ValueError("sanity receipt policy binding is stale")
+            result_schema = RESULT_SCHEMA
+        elif self.schema_version == COMBINED_RECEIPT_SCHEMA_VERSION:
+            coverage = self.review_coverage
+            if coverage is None or set(coverage) != {
+                "schema_version",
+                "criteria",
+                "applicant_visible_projection_sha256",
+                "review_stage",
+                "post_review_inventory",
+            }:
+                raise ValueError("combined review coverage is missing or malformed")
+            if coverage.get("schema_version") != COMBINED_REVIEW_COVERAGE_SCHEMA_VERSION:
+                raise ValueError("combined review coverage version differs")
+            criteria = coverage.get("criteria")
+            if not isinstance(criteria, list) or not criteria:
+                raise ValueError("combined review criteria are missing")
+            criteria_ids: list[str] = []
+            for row in criteria:
+                if not isinstance(row, dict) or set(row) != {
+                    "criterion_id",
+                    "version",
+                    "sha256",
+                }:
+                    raise ValueError("combined review criterion identity is malformed")
+                criterion_id = row["criterion_id"]
+                version = row["version"]
+                if (
+                    not isinstance(criterion_id, str)
+                    or not re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", criterion_id)
+                    or not isinstance(version, str)
+                    or not version
+                    or len(version.encode("utf-8")) > 128
+                    or not isinstance(row["sha256"], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+                ):
+                    raise ValueError("combined review criterion identity is invalid")
+                criteria_ids.append(criterion_id)
+            if len(criteria_ids) != len(set(criteria_ids)):
+                raise ValueError("combined review criteria are duplicated")
+            projection_sha256 = coverage.get("applicant_visible_projection_sha256")
+            if (
+                not isinstance(projection_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", projection_sha256)
+                or projection_sha256 != self.package_hashes.get("form_package_sha256")
+            ):
+                raise ValueError("combined review field projection binding differs")
+            if (
+                coverage.get("review_stage") != "pre_fill_semantic_intent"
+                or coverage.get("post_review_inventory")
+                != "verified_locally_after_fill"
+            ):
+                raise ValueError("combined review timing boundary is invalid")
+            if not all(
+                isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in (self.prompt_sha256, self.schema_sha256)
+            ):
+                raise ValueError("combined review prompt or schema identity is invalid")
+            expected_policy_sha256 = content_hash(
+                {
+                    "base_sanity_policy_sha256": POLICY_SHA256,
+                    "combined_prompt_sha256": self.prompt_sha256,
+                    "combined_schema_sha256": self.schema_sha256,
+                    "coverage": dict(coverage),
+                }
+            )
+            if self.policy_sha256 != expected_policy_sha256:
+                raise ValueError("combined review policy identity is invalid")
+            result_schema = _combined_result_schema(len(criteria_ids))
+        else:
+            raise ValueError("sanity receipt schema version is unsupported")
         if (
             not self.backend_identity
             or self.backend_identity == "mock"
@@ -703,12 +872,28 @@ class SanityReviewReceipt:
                     raise ValueError("sanity receipt transport hash is invalid")
         elif self.backend_identity.startswith(_OPENAI_TRANSPORT_PREFIX):
             raise ValueError("OpenAI sanity receipt lacks exact transport evidence")
-        validate_json(dict(self.model_result), RESULT_SCHEMA)
-        if (
-            self.model_result.get("verdict") != "pass"
-            or self.model_result.get("findings") != []
-        ):
-            raise ValueError("sanity PASS receipt contains a non-PASS model result")
+        validate_json(dict(self.model_result), result_schema)
+        if self.schema_version == RECEIPT_SCHEMA_VERSION:
+            if (
+                self.model_result.get("verdict") != "pass"
+                or self.model_result.get("findings") != []
+            ):
+                raise ValueError("sanity PASS receipt contains a non-PASS model result")
+        else:
+            sanity_result = self.model_result["sanity_review"]
+            criterion_rows = self.model_result["criteria_reviews"]
+            expected_ids = [row["criterion_id"] for row in self.review_coverage["criteria"]]
+            if (
+                self.model_result.get("schema_version") != COMBINED_RESULT_SCHEMA_VERSION
+                or sanity_result.get("verdict") != "pass"
+                or sanity_result.get("findings") != []
+                or [row["criterion_id"] for row in criterion_rows] != expected_ids
+                or any(
+                    row["decision"] != "pass" or row["findings"]
+                    for row in criterion_rows
+                )
+            ):
+                raise ValueError("combined review PASS receipt contains a blocked criterion")
         if self.model_result_sha256 != content_hash(dict(self.model_result)):
             raise ValueError("sanity receipt model-result identity is invalid")
         if (
@@ -742,6 +927,8 @@ class SanityReviewReceipt:
             "model_result_sha256": self.model_result_sha256,
             "verdict": self.verdict,
         }
+        if self.review_coverage is not None:
+            value["review_coverage"] = dict(self.review_coverage)
         if include_identity:
             value["receipt_sha256"] = self.receipt_sha256
         return value
@@ -860,6 +1047,192 @@ def review_application_package(
     )
 
 
+def review_application_package_with_criteria(
+    package: SanityReviewPackage,
+    *,
+    client: LLMClient,
+    criteria_prompt: str,
+    criteria: Sequence[Mapping[str, str]],
+) -> SanityReviewReceipt:
+    """Issue one receipt for sanity and every declared read-only review criterion."""
+    if isinstance(client.backend, MockBackend) or client.backend.name == "mock":
+        raise ApplicationSanityReviewError(
+            "review.mock_forbidden", "MockBackend cannot issue production authority"
+        )
+    if not client.backend.available():
+        raise ApplicationSanityReviewError(
+            "review.provider_unavailable", "configured backend is unavailable"
+        )
+    if client.cache_enabled or client.max_retries != 1 or client.temperature != 0:
+        raise ApplicationSanityReviewError(
+            "review.runtime_unsafe",
+            "combined review requires one uncached zero-temperature transport attempt",
+        )
+    if (
+        not isinstance(criteria_prompt, str)
+        or not criteria_prompt.strip()
+        or len(criteria_prompt.encode("utf-8")) > MAX_REVIEW_TEXT_BYTES
+    ):
+        raise ValueError("combined review criteria prompt is invalid")
+    criteria_rows = [dict(row) for row in criteria]
+    if not criteria_rows or len(criteria_rows) > 8 or any(
+        set(row) != {"criterion_id", "version", "sha256"}
+        for row in criteria_rows
+    ):
+        raise ValueError("combined review criteria are malformed")
+    criterion_ids = [row["criterion_id"] for row in criteria_rows]
+    if (
+        len(criterion_ids) != len(set(criterion_ids))
+        or any(
+            not isinstance(row["criterion_id"], str)
+            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", row["criterion_id"])
+            or not isinstance(row["version"], str)
+            or not row["version"]
+            or len(row["version"].encode("utf-8")) > 128
+            or not isinstance(row["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+            for row in criteria_rows
+        )
+    ):
+        raise ValueError("combined review criteria are duplicated")
+    document, hashes = _package_document(package)
+    coverage: dict[str, object] = {
+        "schema_version": COMBINED_REVIEW_COVERAGE_SCHEMA_VERSION,
+        "criteria": criteria_rows,
+        "applicant_visible_projection_sha256": hashes["form_package_sha256"],
+        "review_stage": "pre_fill_semantic_intent",
+        "post_review_inventory": "verified_locally_after_fill",
+    }
+    combined_prompt = (
+        REVIEWER_PROMPT
+        + "\n\n"
+        + criteria_prompt.strip()
+        + "\n\nReturn one JSON object containing one sanity_review and one criteria_reviews row for each criterion, in the declared order."
+    )
+    result_schema = _combined_result_schema(len(criteria_rows))
+    prompt_sha256 = hashlib.sha256(combined_prompt.encode("utf-8")).hexdigest()
+    schema_sha256 = hashlib.sha256(canonical_json(result_schema).encode("utf-8")).hexdigest()
+    policy_sha256 = content_hash(
+        {
+            "base_sanity_policy_sha256": POLICY_SHA256,
+            "combined_prompt_sha256": prompt_sha256,
+            "combined_schema_sha256": schema_sha256,
+            "coverage": coverage,
+        }
+    )
+    try:
+        result, response = client.complete_json_with_response(
+            combined_prompt,
+            canonical_json(document),
+            schema=result_schema,
+            task="combined_application_review",
+            json_attempts=1,
+        )
+    except (LLMError, TimeoutError) as exc:
+        raw_failure = getattr(exc, "backend_failure", None)
+        if isinstance(raw_failure, Mapping):
+            backend_failure = sanitize_backend_failure_record(raw_failure)
+        else:
+            backend_failure = sanitize_backend_failure_record(
+                {
+                    "error_category": "timeout" if isinstance(exc, TimeoutError) else "backend_error",
+                    "exit_code": None,
+                }
+            )
+        exit_code = backend_failure["exit_code"]
+        diagnosis = backend_failure["stderr_diagnosis"]
+        message = f"backend execution failed ({backend_failure['error_category']}"
+        if exit_code is not None:
+            message += f", exit {exit_code}"
+        if diagnosis:
+            message += f": {diagnosis}"
+        message += ")"
+        raise ApplicationSanityReviewError(
+            "review.backend_failure",
+            message,
+            backend_failure=backend_failure,
+        ) from exc
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ApplicationSanityReviewError("review.invalid_result", str(exc)) from exc
+    expected_ids = [row["criterion_id"] for row in criteria_rows]
+    observed_ids = [row.get("criterion_id") for row in result["criteria_reviews"]]
+    if observed_ids != expected_ids:
+        raise ApplicationSanityReviewError(
+            "review.criteria_coverage_mismatch",
+            "combined review did not cover the declared criteria in order",
+            result=result,
+        )
+    sanity_result = result["sanity_review"]
+    if (
+        sanity_result["verdict"] != "pass"
+        or sanity_result["findings"]
+        or any(
+            row["decision"] != "pass" or row["findings"]
+            for row in result["criteria_reviews"]
+        )
+    ):
+        raise ApplicationSanityReviewError(
+            "review.combined_finding",
+            "combined review did not return a certain finding-free PASS for every criterion",
+            result=result,
+            transport_evidence=response.transport_evidence,
+        )
+    model_identity = response.model.strip()
+    if not model_identity or model_identity.casefold() in _NON_EXACT_MODEL_IDENTITIES:
+        raise ApplicationSanityReviewError(
+            "review.model_missing",
+            "backend returned no exact response model identity",
+            result=result,
+        )
+    model_result_sha256 = content_hash(result)
+    preimage = {
+        "schema_version": COMBINED_RECEIPT_SCHEMA_VERSION,
+        "package_hashes": hashes,
+        "intended_vacancy": package.intended_vacancy.document(),
+        "vacancy_intent_sha256": package.intended_vacancy.intent_sha256,
+        "application_source_identity": package.application_source_identity,
+        "vacancy_requirements_sha256": content_hash(list(package.vacancy_requirements)),
+        "prompt_sha256": prompt_sha256,
+        "schema_sha256": schema_sha256,
+        "policy_sha256": policy_sha256,
+        "backend_identity": client.backend.name,
+        "model_identity": model_identity,
+        "transport_evidence": (
+            dict(response.transport_evidence)
+            if response.transport_evidence is not None
+            else None
+        ),
+        "model_result": result,
+        "model_result_sha256": model_result_sha256,
+        "verdict": "pass",
+        "review_coverage": coverage,
+    }
+    receipt = SanityReviewReceipt(
+        package_hashes=hashes,
+        intended_vacancy=package.intended_vacancy,
+        application_source_identity=package.application_source_identity,
+        vacancy_requirements_sha256=preimage["vacancy_requirements_sha256"],
+        prompt_sha256=prompt_sha256,
+        schema_sha256=schema_sha256,
+        policy_sha256=policy_sha256,
+        backend_identity=client.backend.name,
+        model_identity=model_identity,
+        transport_evidence=(
+            dict(response.transport_evidence)
+            if response.transport_evidence is not None
+            else None
+        ),
+        model_result=result,
+        model_result_sha256=model_result_sha256,
+        verdict="pass",
+        receipt_sha256=content_hash(preimage),
+        schema_version=COMBINED_RECEIPT_SCHEMA_VERSION,
+        review_coverage=coverage,
+    )
+    verify_sanity_review_receipt(receipt, package)
+    return receipt
+
+
 def verify_sanity_review_receipt(
     receipt: SanityReviewReceipt, package: SanityReviewPackage
 ) -> None:
@@ -879,11 +1252,18 @@ def verify_sanity_review_receipt(
         != content_hash(list(package.vacancy_requirements))
     ):
         raise ValueError("application differs from its sanity-review receipt")
+    if receipt.schema_version == COMBINED_RECEIPT_SCHEMA_VERSION and (
+        receipt.review_coverage["applicant_visible_projection_sha256"]
+        != hashes["form_package_sha256"]
+    ):
+        raise ValueError("combined review differs from the applicant-visible field projection")
 
 
 __all__ = [
     "ApplicationSanityReviewError",
     "FINDING_CODES",
+    "COMBINED_RECEIPT_SCHEMA_VERSION",
+    "COMBINED_RESULT_SCHEMA_VERSION",
     "MAX_REVIEW_TEXT_BYTES",
     "POLICY_SHA256",
     "PROMPT_SHA256",
@@ -897,8 +1277,10 @@ __all__ = [
     "approved_evidence_projection",
     "build_vacancy_review_material",
     "canonical_form_fields",
+    "form_field_projection_document",
     "package_from_application",
     "review_application_package",
+    "review_application_package_with_criteria",
     "vacancy_requirements_projection",
     "verify_sanity_review_receipt",
 ]

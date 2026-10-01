@@ -511,7 +511,7 @@ def test_native_prepare_release_one_call_local_diagnostic(
 
     monkeypatch.setattr(session_module, "LLMClient", _LLMClientFactory)
     review_receipts: list[object] = []
-    real_review = session_module.review_application_package
+    real_review = session_module.review_application_package_with_pinned_skills
 
     def capture_review(package, *, client):
         receipt = real_review(package, client=client)
@@ -533,17 +533,56 @@ def test_native_prepare_release_one_call_local_diagnostic(
         result["sanity_receipt_package_hashes_sha256"] = _sha(
             _json_bytes(document.get("package_hashes", {}))
         )
+        coverage = document.get("review_coverage")
+        if isinstance(coverage, dict):
+            result["combined_review_schema_version"] = document.get("schema_version")
+            result["combined_review_projection_sha256"] = coverage.get(
+                "applicant_visible_projection_sha256"
+            )
+            result["combined_review_stage"] = coverage.get("review_stage")
+            result["combined_review_criteria"] = [
+                row.get("criterion_id")
+                for row in coverage.get("criteria", [])
+                if isinstance(row, dict)
+            ]
         model_result = document.get("model_result")
-        findings = model_result.get("findings") if isinstance(model_result, dict) else None
+        sanity_result = (
+            model_result.get("sanity_review")
+            if isinstance(model_result, dict)
+            else None
+        )
+        findings = (
+            sanity_result.get("findings") if isinstance(sanity_result, dict) else None
+        )
         if isinstance(findings, list):
             result["sanity_finding_codes"] = sorted(
                 str(row.get("code"))
                 for row in findings
                 if isinstance(row, dict) and isinstance(row.get("code"), str)
             )
+        criteria_reviews = (
+            model_result.get("criteria_reviews")
+            if isinstance(model_result, dict)
+            else None
+        )
+        if isinstance(criteria_reviews, list):
+            result["criteria_finding_codes"] = {
+                str(row.get("criterion_id")): sorted(
+                    str(finding.get("code"))
+                    for finding in row.get("findings", [])
+                    if isinstance(finding, dict)
+                    and isinstance(finding.get("code"), str)
+                )
+                for row in criteria_reviews
+                if isinstance(row, dict)
+            }
         return receipt
 
-    monkeypatch.setattr(session_module, "review_application_package", capture_review)
+    monkeypatch.setattr(
+        session_module,
+        "review_application_package_with_pinned_skills",
+        capture_review,
+    )
     fill_results: list[tuple[object, ...]] = []
     real_fill = GutuaGreenhouseSession._fill_supported_form
 
@@ -626,7 +665,12 @@ def test_native_prepare_release_one_call_local_diagnostic(
                                 tmp_path / "sanity-review-result.json", review_bytes
                             )
                             result["sanity_result_sha256"] = _sha(review_bytes)
-                            findings = review_document.get("findings")
+                            sanity_result = review_document.get("sanity_review")
+                            findings = (
+                                sanity_result.get("findings")
+                                if isinstance(sanity_result, dict)
+                                else review_document.get("findings")
+                            )
                             if isinstance(findings, list):
                                 result["sanity_finding_codes"] = sorted(
                                     str(row.get("code"))
@@ -634,6 +678,18 @@ def test_native_prepare_release_one_call_local_diagnostic(
                                     if isinstance(row, dict)
                                     and isinstance(row.get("code"), str)
                                 )
+                            criteria_reviews = review_document.get("criteria_reviews")
+                            if isinstance(criteria_reviews, list):
+                                result["criteria_finding_codes"] = {
+                                    str(row.get("criterion_id")): sorted(
+                                        str(finding.get("code"))
+                                        for finding in row.get("findings", [])
+                                        if isinstance(finding, dict)
+                                        and isinstance(finding.get("code"), str)
+                                    )
+                                    for row in criteria_reviews
+                                    if isinstance(row, dict)
+                                }
                     reason = (
                         "synthetic_diagnostic_stopped_before_submit"
                         if prepared is not None

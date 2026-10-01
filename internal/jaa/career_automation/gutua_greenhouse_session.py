@@ -21,7 +21,7 @@ from .application_artifacts import publish_application_artifacts
 from .application_quality import (
     ApplicationQualityInput,
     build_deterministic_preflight_quality_review,
-    run_pinned_editorial_skill_reviews,
+    review_application_package_with_pinned_skills,
 )
 from .application_quality_contracts import QualityReviewDisposition
 from .application_sanity_review import (
@@ -1525,7 +1525,7 @@ class GutuaGreenhouseSession:
                 vacancy_review_material=vacancy_review_material,
                 planned_form_fields=form_plan.review_form_fields,
                 form_field_authorities=form_plan.form_field_authorities,
-                form_inventory_sha256=inventory_sha256,
+                form_inventory_sha256=inventory_sha256 if review_only else None,
             )
             if review_only:
                 sanity_receipt = recorder.review_once(
@@ -1533,7 +1533,10 @@ class GutuaGreenhouseSession:
                     lambda: review_application_package(sanity_package, client=client),
                 )
             else:
-                sanity_receipt = review_application_package(sanity_package, client=client)
+                sanity_receipt = review_application_package_with_pinned_skills(
+                    sanity_package,
+                    client=client,
+                )
         except ApplicationSanityReviewError as exc:
             if exc.result is not None:
                 recorder.add_revision(
@@ -1758,10 +1761,11 @@ class GutuaGreenhouseSession:
             field_answers_bytes=ats_authority.answer_bytes,
             form_inventory_bytes=ats_authority.inventory_bytes,
             ats_application_authority=ats_authority,
-        )
-        quality_input = run_pinned_editorial_skill_reviews(
-            quality_input,
-            client=client,
+            combined_review_receipt=sanity_receipt,
+            reviewed_form_fields=form_plan.review_form_fields,
+            reviewed_form_answer_bindings=form_plan.answer_field_bindings,
+            reviewed_form_field_authorities=form_plan.form_field_authorities,
+            reviewed_vacancy_requirements=tuple(package.vacancy_requirements),
         )
         quality_review = build_deterministic_preflight_quality_review(quality_input)
         if quality_review.disposition is not QualityReviewDisposition.ACCEPTED:
@@ -1815,7 +1819,7 @@ class GutuaGreenhouseSession:
             form_answer_bindings=form_plan.answer_field_bindings,
             review_form_fields=form_plan.review_form_fields,
             form_field_authorities=form_plan.form_field_authorities,
-            form_inventory_sha256=inventory_sha256,
+            form_inventory_sha256=None,
             form_inventory=form_inventory,
         )
 

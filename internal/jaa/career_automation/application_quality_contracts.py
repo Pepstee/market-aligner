@@ -183,8 +183,8 @@ class ApplicationPreflightQualityReview:
             raise TypeError("ATS answer-authority verification must be bool")
         if not isinstance(self.editorial_skill_reviews_verified, bool):
             raise TypeError("editorial skill review verification must be bool")
-        if len(self.editorial_skill_review_sha256s) not in {0, 2}:
-            raise ValueError("editorial skill review identities must be empty or complete")
+        if len(self.editorial_skill_review_sha256s) not in {0, 1, 2}:
+            raise ValueError("editorial review identities must be empty, composite, or complete")
         for value in self.editorial_skill_review_sha256s:
             _require_sha256(value, "editorial skill review hash")
         if len(set(self.editorial_skill_review_sha256s)) != len(
@@ -211,9 +211,9 @@ class ApplicationPreflightQualityReview:
                 raise ValueError("accepted preflight requires exact ATS answer authority")
             if (
                 not self.editorial_skill_reviews_verified
-                or len(self.editorial_skill_review_sha256s) != 2
+                or len(self.editorial_skill_review_sha256s) not in {1, 2}
             ):
-                raise ValueError("accepted preflight requires exact editorial skill reviews")
+                raise ValueError("accepted preflight requires a bound combined or complete editorial review")
         _require_text(self.summary, "preflight quality summary", maximum=16384)
 
     def to_dict(self) -> dict[str, Any]:

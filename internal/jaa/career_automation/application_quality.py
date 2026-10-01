@@ -28,7 +28,17 @@ from .application_quality_contracts import (
     QualityIssueSeverity,
     QualityReviewDisposition,
 )
+from .application_sanity_review import (
+    COMBINED_RECEIPT_SCHEMA_VERSION,
+    SanityReviewPackage,
+    SanityReviewReceipt,
+    approved_evidence_projection,
+    form_field_projection_document,
+    review_application_package_with_criteria,
+    vacancy_requirements_projection,
+)
 from .evidence_matching import canonical_json, content_hash
+from .external_document_assurance import IntendedVacancy
 from .rendering import (
     ApplicationArtifacts,
     render_pdf_artifacts,
@@ -101,7 +111,7 @@ _EDITORIAL_SKILL_POLICIES = (
         "243aecdafecb5e11c2d45e2e088b7876e3f6eee34aa50c53f624d8468039afa8",
     ),
 )
-_EDITORIAL_REVIEW_RESPONSE_SCHEMA = {
+_EDITORIAL_SKILL_REVIEW_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": ["decision", "findings"],
@@ -127,6 +137,7 @@ _EDITORIAL_REVIEW_RESPONSE_SCHEMA = {
         },
     },
 }
+_EDITORIAL_REVIEW_RESPONSE_SCHEMA = _EDITORIAL_SKILL_REVIEW_SCHEMA
 
 QUALITY_POLICY = {
     "schema_version": "jaa.deterministic-application-quality-policy.v2",
@@ -165,8 +176,8 @@ QUALITY_POLICY = {
     ],
     "editorial_skill_runtime": {
         "provider": _EDITORIAL_RUNTIME_PROVIDER,
-        "configured_model": _EDITORIAL_RUNTIME_CONFIGURED_MODEL,
-        "model": _EDITORIAL_RUNTIME_MODEL,
+        "calls_per_pack": 1,
+        "model_identity": "exact backend response model; defaults are refused",
     },
     "generic_or_ai_patterns": list(_GENERIC_OR_AI_PATTERNS),
     "stale_education_patterns": list(_STALE_EDUCATION_PATTERNS),
@@ -455,6 +466,42 @@ def run_pinned_editorial_skill_reviews(
     )
 
 
+def review_application_package_with_pinned_skills(
+    package: SanityReviewPackage,
+    *,
+    client: LLMClient,
+) -> SanityReviewReceipt:
+    """Review one exact package against sanity and both pinned skills in one call."""
+    if type(package) is not SanityReviewPackage:
+        raise TypeError("combined review requires the exact sanity package")
+    if type(client) is not LLMClient:
+        raise TypeError("combined review requires the exact LLM client")
+    criteria: list[dict[str, str]] = []
+    prompt_sections = [
+        "Apply every pinned skill criterion to the same exact package in this one read-only review. Do not edit or rewrite any content. The criterion decisions are independent coverage fields within one result and one receipt; do not omit a criterion because another passes. Use only the exact package and preserve factual atoms."
+    ]
+    for skill_name, version, skill_sha256 in _EDITORIAL_SKILL_POLICIES:
+        skill_document = _load_pinned_skill_document(skill_name, skill_sha256)
+        criteria.append(
+            {
+                "criterion_id": skill_name,
+                "version": version,
+                "sha256": skill_sha256,
+            }
+        )
+        prompt_sections.append(
+            f"PINNED CRITERION {skill_name} version {version} sha256 {skill_sha256}:\n"
+            "Apply the complete pinned document below as a read-only review. Return pass only when no concrete skill-defined issue remains. Otherwise return detailed findings with exact evidence from the supplied package; do not invent candidate facts.\n\n"
+            + skill_document.decode("utf-8", errors="strict")
+        )
+    return review_application_package_with_criteria(
+        package,
+        client=client,
+        criteria_prompt="\n\n".join(prompt_sections),
+        criteria=criteria,
+    )
+
+
 def editorial_review_input_sha256(
     quality_input: ApplicationQualityInput,
 ) -> str:
@@ -603,6 +650,11 @@ class ApplicationQualityInput:
     form_inventory_bytes: bytes
     ats_application_authority: AtsApplicationAuthority | None = None
     editorial_skill_reviews: tuple[EditorialSkillReviewReceipt, ...] = ()
+    combined_review_receipt: SanityReviewReceipt | None = None
+    reviewed_form_fields: tuple[tuple[str, str, str], ...] = ()
+    reviewed_form_answer_bindings: tuple[tuple[str, str], ...] = ()
+    reviewed_form_field_authorities: tuple[tuple[str, str], ...] = ()
+    reviewed_vacancy_requirements: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_digest(self.candidate_authority_sha256, "candidate authority hash")
@@ -616,6 +668,24 @@ class ApplicationQualityInput:
             self.ats_application_authority
         ) is not AtsApplicationAuthority:
             raise TypeError("quality input ATS authority must use the exact type")
+        if self.combined_review_receipt is not None and type(
+            self.combined_review_receipt
+        ) is not SanityReviewReceipt:
+            raise TypeError("combined quality review must use the exact receipt type")
+        if self.combined_review_receipt is not None and self.editorial_skill_reviews:
+            raise ValueError("combined review cannot be represented by separate skill receipts")
+        object.__setattr__(self, "reviewed_form_fields", tuple(self.reviewed_form_fields))
+        object.__setattr__(
+            self, "reviewed_form_answer_bindings", tuple(self.reviewed_form_answer_bindings)
+        )
+        object.__setattr__(
+            self,
+            "reviewed_form_field_authorities",
+            tuple(self.reviewed_form_field_authorities),
+        )
+        object.__setattr__(
+            self, "reviewed_vacancy_requirements", tuple(self.reviewed_vacancy_requirements)
+        )
         object.__setattr__(self, "editorial_skill_reviews", tuple(self.editorial_skill_reviews))
         if not all(
             type(row) is EditorialSkillReviewReceipt
@@ -660,6 +730,97 @@ def _letter_blocks(text: str) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     ):
         substantive = substantive[:-1]
     return "\n\n".join(body), body, substantive
+
+
+def _form_value_text(value: object) -> str:
+    if value is None:
+        return ""
+    if type(value) is bool:
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value
+    if type(value) is int:
+        return str(value)
+    raise ValueError("ATS applicant-visible form value has an unsupported type")
+
+
+def _verify_combined_review_projection(
+    quality_input: ApplicationQualityInput,
+) -> None:
+    receipt = quality_input.combined_review_receipt
+    authority = quality_input.ats_application_authority
+    if type(receipt) is not SanityReviewReceipt:
+        raise ValueError("combined sanity and skill review receipt is missing")
+    if receipt.schema_version != COMBINED_RECEIPT_SCHEMA_VERSION:
+        raise ValueError("combined review receipt version is unsupported")
+    SanityReviewReceipt.__post_init__(receipt)
+    expected_criteria = [
+        {
+            "criterion_id": name,
+            "version": version,
+            "sha256": skill_sha256,
+        }
+        for name, version, skill_sha256 in _EDITORIAL_SKILL_POLICIES
+    ]
+    coverage = receipt.review_coverage
+    if coverage is None or coverage.get("criteria") != expected_criteria:
+        raise ValueError("combined receipt does not cover both exact pinned skill criteria")
+    source = quality_input.source
+    expected_vacancy = IntendedVacancy(
+        job_key=source.job_key,
+        vacancy_sha256=source.vacancy_sha256,
+        role_title=source.role_title,
+        company_name=source.company_name,
+    )
+    if (
+        receipt.intended_vacancy != expected_vacancy
+        or receipt.application_source_identity != source.source_id
+        or receipt.vacancy_requirements_sha256
+        != content_hash(list(quality_input.reviewed_vacancy_requirements))
+        or receipt.package_hashes.get("cv_pdf_sha256")
+        != quality_input.artifacts.cv_pdf.pdf_sha256
+        or receipt.package_hashes.get("cover_letter_pdf_sha256")
+        != quality_input.artifacts.cover_letter_pdf.pdf_sha256
+        or receipt.package_hashes.get("approved_evidence_projection_sha256")
+        != content_hash(list(approved_evidence_projection(source)))
+    ):
+        raise ValueError("combined review receipt differs from the generated application")
+    if authority is None:
+        raise ValueError("combined review requires the exact post-fill ATS authority")
+    planned_projection = form_field_projection_document(
+        quality_input.reviewed_form_fields,
+        quality_input.reviewed_form_answer_bindings,
+        quality_input.reviewed_form_field_authorities,
+    )
+    projection_sha256 = content_hash(planned_projection)
+    if (
+        projection_sha256
+        != coverage.get("applicant_visible_projection_sha256")
+        or projection_sha256 != receipt.package_hashes.get("form_package_sha256")
+    ):
+        raise ValueError("combined review receipt differs from pre-fill semantic field intent")
+    authority_rows = {row.field_id: row for row in authority.answers}
+    planned_authorities = dict(quality_input.reviewed_form_field_authorities)
+    observed_values: dict[str, str] = {}
+    for field_id, _question, planned_value in quality_input.reviewed_form_fields:
+        answer = authority_rows.get(field_id)
+        if answer is None:
+            raise ValueError("post-fill ATS authority omits a reviewed applicant field")
+        observed_value = _form_value_text(answer.final_value)
+        if observed_value != planned_value:
+            raise ValueError("post-fill applicant field differs from reviewed semantic intent")
+        expected_authority = planned_authorities.get(field_id)
+        if expected_authority is not None and answer.source_reference != expected_authority:
+            raise ValueError("post-fill applicant field authority differs from reviewed intent")
+        observed_values[field_id] = observed_value
+    observed_projection = form_field_projection_document(
+        quality_input.reviewed_form_fields,
+        quality_input.reviewed_form_answer_bindings,
+        quality_input.reviewed_form_field_authorities,
+        answer_values=observed_values,
+    )
+    if content_hash(observed_projection) != projection_sha256:
+        raise ValueError("post-fill applicant-visible projection differs from reviewed receipt")
 
 
 def build_deterministic_preflight_quality_review(
@@ -711,30 +872,43 @@ def build_deterministic_preflight_quality_review(
         ats_answer_authority_verified = True
 
     issues: list[ApplicationQualityIssue] = []
-    review_input_sha256 = editorial_review_input_sha256(quality_input)
     editorial_reviews = quality_input.editorial_skill_reviews
     expected_names = tuple(row[0] for row in _EDITORIAL_SKILL_POLICIES)
-    observed_names = tuple(row.skill_name for row in editorial_reviews)
-    if len(observed_names) != len(set(observed_names)):
-        raise ValueError("editorial skill review names must be unique")
-    if observed_names != tuple(name for name in expected_names if name in observed_names):
-        raise ValueError("editorial skill reviews differ from the required order")
-    if any(row.input_sha256 != review_input_sha256 for row in editorial_reviews):
-        raise ValueError("editorial skill review differs from the exact application pack")
-    for name in expected_names:
-        if name not in observed_names:
-            issues.append(
-                _issue(
-                    f"{name.replace('-', '_')}_review_missing",
-                    summary=f"The exact application pack lacks a {name} skill review.",
-                    evidence="No content-addressed review receipt is bound to the final pack.",
-                    remediation=f"Run the pinned {name} skill and attach its exact review receipt.",
-                    category="editorial_skill",
+    combined_receipt = quality_input.combined_review_receipt
+    if combined_receipt is not None:
+        _verify_combined_review_projection(quality_input)
+        if editorial_reviews:
+            raise ValueError("combined receipt cannot be duplicated as separate skill receipts")
+        observed_names = expected_names
+        editorial_review_hashes = (combined_receipt.receipt_sha256,)
+        editorial_reviews_verified = True
+    else:
+        review_input_sha256 = editorial_review_input_sha256(quality_input)
+        observed_names = tuple(row.skill_name for row in editorial_reviews)
+        if len(observed_names) != len(set(observed_names)):
+            raise ValueError("editorial skill review names must be unique")
+        if observed_names != tuple(name for name in expected_names if name in observed_names):
+            raise ValueError("editorial skill reviews differ from the required order")
+        if any(row.input_sha256 != review_input_sha256 for row in editorial_reviews):
+            raise ValueError("editorial skill review differs from the exact application pack")
+        for name in expected_names:
+            if name not in observed_names:
+                issues.append(
+                    _issue(
+                        f"{name.replace('-', '_')}_review_missing",
+                        summary=f"The exact application pack lacks a {name} skill review.",
+                        evidence="No content-addressed review receipt is bound to the final pack.",
+                        remediation=f"Run the pinned {name} skill and attach its exact review receipt.",
+                        category="editorial_skill",
+                    )
                 )
-            )
-    for receipt in editorial_reviews:
-        if receipt.decision == "block":
-            issues.extend(receipt.findings)
+        for receipt in editorial_reviews:
+            if receipt.decision == "block":
+                issues.extend(receipt.findings)
+        editorial_review_hashes = tuple(row.receipt_sha256 for row in editorial_reviews)
+        editorial_reviews_verified = observed_names == expected_names and all(
+            row.decision == "pass" for row in editorial_reviews
+        )
     letter_text = artifacts.editable.cover_letter_text
     letter_body, body_blocks, substantive = _letter_blocks(letter_text)
     body_folded = letter_body.casefold()
@@ -955,11 +1129,8 @@ def build_deterministic_preflight_quality_review(
         "cover_letter_shingle_sha256s": list(shingles),
         "maximum_prior_similarity_bp": maximum_similarity_bp,
         "ats_answer_authority_verified": ats_answer_authority_verified,
-        "editorial_skill_review_sha256s": [
-            row.receipt_sha256 for row in editorial_reviews
-        ],
-        "editorial_skill_reviews_verified": observed_names == expected_names
-        and all(row.decision == "pass" for row in editorial_reviews),
+        "editorial_skill_review_sha256s": list(editorial_review_hashes),
+        "editorial_skill_reviews_verified": editorial_reviews_verified,
         "scores": {
             "factual_accuracy": 10,
             "role_targeting": targeting,
@@ -996,11 +1167,8 @@ def build_deterministic_preflight_quality_review(
         cover_letter_shingle_sha256s=shingles,
         maximum_prior_similarity_bp=maximum_similarity_bp,
         ats_answer_authority_verified=ats_answer_authority_verified,
-        editorial_skill_review_sha256s=tuple(
-            row.receipt_sha256 for row in editorial_reviews
-        ),
-        editorial_skill_reviews_verified=observed_names == expected_names
-        and all(row.decision == "pass" for row in editorial_reviews),
+        editorial_skill_review_sha256s=editorial_review_hashes,
+        editorial_skill_reviews_verified=editorial_reviews_verified,
         issues=issue_rows,
         summary=(
             "The exact application pack passed every deterministic quality gate."

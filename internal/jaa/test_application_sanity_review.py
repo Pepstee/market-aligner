@@ -12,11 +12,14 @@ import pytest
 import career_automation.application_sanity_review as review_module
 from career_automation.application_sanity_review import (
     ApplicationSanityReviewError,
+    COMBINED_RECEIPT_SCHEMA_VERSION,
     RESULT_SCHEMA_VERSION,
     SanityReviewPackage,
     SanityReviewReceipt,
     build_vacancy_review_material,
+    form_field_projection_document,
     review_application_package,
+    review_application_package_with_criteria,
     verify_sanity_review_receipt,
 )
 from career_automation.external_document_assurance import IntendedVacancy
@@ -47,11 +50,13 @@ class ScriptedBackend(Backend):
         self.model = model
         self.last_system = ""
         self.last_user = ""
+        self.calls = 0
 
     def available(self) -> bool:
         return True
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
+        self.calls += 1
         self.last_system = system
         self.last_user = user
         text = self.result if isinstance(self.result, str) else json.dumps(self.result)
@@ -190,6 +195,128 @@ def test_clean_relevant_canary_passes_and_legitimate_llm_claim_is_quoted(
         receipt.package_hashes["raw_listing_sha256"]
         == hashlib.sha256(b"vacancy").hexdigest()
     )
+
+
+def _combined_result(
+    *,
+    sanity: dict[str, object] | None = None,
+    blocked_criterion: str | None = None,
+) -> dict[str, object]:
+    criteria_reviews = []
+    for criterion_id in ("resume-cover-letter", "humanizer"):
+        blocked = criterion_id == blocked_criterion
+        criteria_reviews.append(
+            {
+                "criterion_id": criterion_id,
+                "decision": "block" if blocked else "pass",
+                "findings": (
+                    [
+                        {
+                            "code": "synthetic_issue",
+                            "summary": "Synthetic blocking example.",
+                            "evidence": "The exact synthetic text is unsuitable.",
+                            "remediation": "Retain the finding and stop release.",
+                        }
+                    ]
+                    if blocked
+                    else []
+                ),
+            }
+        )
+    return {
+        "schema_version": "jaa.combined-application-review-result.v1",
+        "sanity_review": sanity or PASS,
+        "criteria_reviews": criteria_reviews,
+    }
+
+
+def test_combined_review_issues_one_content_bound_receipt_for_all_criteria(
+    tmp_path,
+) -> None:
+    candidate = package(fields=(("email", "Email address", "synthetic@example.invalid"),))
+    backend = ScriptedBackend(_combined_result(), model="gpt-6-luna")
+    criteria = (
+        {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+        {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+    )
+    receipt = review_application_package_with_criteria(
+        candidate,
+        client=client(backend, tmp_path),
+        criteria_prompt="Apply both synthetic read-only review criteria.",
+        criteria=criteria,
+    )
+
+    verify_sanity_review_receipt(receipt, candidate)
+    assert backend.calls == 1
+    assert receipt.schema_version == COMBINED_RECEIPT_SCHEMA_VERSION
+    assert receipt.model_identity == "gpt-6-luna"
+    assert receipt.review_coverage["criteria"] == list(criteria)
+    assert receipt.review_coverage["review_stage"] == "pre_fill_semantic_intent"
+    assert receipt.review_coverage["post_review_inventory"] == "verified_locally_after_fill"
+    assert receipt.package_hashes["form_package_sha256"] == receipt.review_coverage[
+        "applicant_visible_projection_sha256"
+    ]
+    assert "provider-managed-sentinel" not in backend.last_user
+    restored = SanityReviewReceipt.from_document(receipt.document())
+    assert restored.receipt_sha256 == receipt.receipt_sha256
+
+
+@pytest.mark.parametrize(
+    ("sanity", "blocked_criterion"),
+    (
+        (block("content.irrelevant"), None),
+        (None, "resume-cover-letter"),
+        (None, "humanizer"),
+    ),
+)
+def test_combined_review_blocks_if_any_component_finds_a_problem(
+    tmp_path, sanity, blocked_criterion
+) -> None:
+    backend = ScriptedBackend(
+        _combined_result(sanity=sanity, blocked_criterion=blocked_criterion),
+        model="gpt-6-luna",
+    )
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package_with_criteria(
+            package(),
+            client=client(backend, tmp_path),
+            criteria_prompt="Apply both synthetic read-only review criteria.",
+            criteria=(
+                {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+                {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+            ),
+        )
+    assert backend.calls == 1
+    assert captured.value.result is not None
+    assert captured.value.document()["code"] == "review.combined_finding"
+
+
+def test_applicant_projection_requires_every_postfill_value_and_keeps_scope_narrow() -> None:
+    fields = (("email", "Email address", "planned@example.invalid"),)
+    bindings = (("email", "contact-email"),)
+    authorities = (("email", "contact.email"),)
+    planned = form_field_projection_document(fields, bindings, authorities)
+    assert planned[0]["answer"] == "planned@example.invalid"
+    with pytest.raises(ValueError, match="incomplete or invalid"):
+        form_field_projection_document(fields, bindings, authorities, answer_values={})
+    observed = form_field_projection_document(
+        fields,
+        bindings,
+        authorities,
+        answer_values={"email": "changed@example.invalid"},
+    )
+    assert observed[0]["answer"] == "changed@example.invalid"
+    assert observed != planned
+    with pytest.raises(ValueError, match="incomplete or invalid"):
+        form_field_projection_document(
+            fields,
+            bindings,
+            authorities,
+            answer_values={
+                "email": "planned@example.invalid",
+                "provider-managed-hidden": "provider-managed-sentinel",
+            },
+        )
 
 
 def test_review_listing_projection_is_exact_utf8_nfc_lf_and_source_bound() -> None:
