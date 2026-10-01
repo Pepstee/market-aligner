@@ -12,7 +12,13 @@ import pytest
 from career_automation import application_compiler as application_compiler_module
 from career_automation.application_compiler import CandidateContact, FactAuthority
 from career_automation.application_compiler import verify_application_source
-from career_automation.rendering import _letter_paragraphs, render_pdf_artifacts
+from career_automation.rendering import (
+    RENDERER_POLICY,
+    RENDERER_POLICY_SHA256,
+    _letter_paragraphs,
+    _outward_cv_sections,
+    render_pdf_artifacts,
+)
 from career_automation.candidate_application_factory import (
     _approved_statements,
     _evidence_document_targets,
@@ -27,7 +33,7 @@ from career_automation.candidate_application_factory import (
     build_candidate_application_package,
     materialize_candidate_application_source,
 )
-from career_automation.evidence_matching import canonical_json
+from career_automation.evidence_matching import canonical_json, content_hash
 from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.candidate_authority import APPROVED_EVIDENCE_PATH
 from career_automation.candidate_authority import APPROVED_CANDIDATE_SOURCE_HASHES
@@ -809,6 +815,95 @@ def test_generic_package_relocates_verified_capability_fact_verbatim(
         for row in source.facts
         if row.document_kind == "cv" and row.fact_kind == "candidate"
     }) == 8
+
+    editable_cv = package.artifacts.editable.cv_text
+    extracted_cv = package.artifacts.cv_pdf.extracted_text
+    editable_headings = [line.strip() for line in editable_cv.splitlines()]
+    extracted_headings = [line.strip() for line in extracted_cv.splitlines()]
+    assert any(section.heading == "Core Capabilities" for section in source.cv_sections)
+    assert editable_headings.count("Skills") == 1
+    assert extracted_headings.count("Skills") == 1
+    assert "Core Capabilities" not in editable_headings
+    assert "Core Capabilities" not in extracted_headings
+    for fact in (row for row in source.facts if row.document_kind == "cv"):
+        normalized_fact = " ".join(fact.text.split())
+        assert " ".join(editable_cv.split()).count(normalized_fact) == 1
+        assert " ".join(extracted_cv.split()).count(normalized_fact) == 1
+    assert RENDERER_POLICY["schema_version"] == "jaa.ats-pdf-renderer-policy.v6"
+    assert (
+        RENDERER_POLICY["cv_section_projection"]
+        == "core-capabilities-and-skills-merge-as-skills-v1"
+    )
+    assert RENDERER_POLICY_SHA256 == content_hash(RENDERER_POLICY)
+
+
+@pytest.mark.parametrize(
+    ("input_sections", "expected_sections"),
+    (
+        (
+            (
+                SimpleNamespace(
+                    heading="Core Capabilities",
+                    sentence_ids=("core-1",),
+                    style_slot_ids=("core-slot",),
+                ),
+            ),
+            (("Skills", ("core-1",), ("core-slot",)),),
+        ),
+        (
+            (
+                SimpleNamespace(
+                    heading="Skills",
+                    sentence_ids=("skills-1",),
+                    style_slot_ids=("skills-slot",),
+                ),
+            ),
+            (("Skills", ("skills-1",), ("skills-slot",)),),
+        ),
+        (
+            (
+                SimpleNamespace(
+                    heading="Core Capabilities",
+                    sentence_ids=("core-1",),
+                    style_slot_ids=("core-slot",),
+                ),
+                SimpleNamespace(
+                    heading="Projects",
+                    sentence_ids=("project-1",),
+                    style_slot_ids=(),
+                ),
+                SimpleNamespace(
+                    heading="Skills",
+                    sentence_ids=("skills-1",),
+                    style_slot_ids=("skills-slot",),
+                ),
+            ),
+            (
+                ("Skills", ("core-1", "skills-1"), ("core-slot", "skills-slot")),
+                ("Projects", ("project-1",), ()),
+            ),
+        ),
+        (
+            (
+                SimpleNamespace(
+                    heading="Projects",
+                    sentence_ids=("project-1",),
+                    style_slot_ids=(),
+                ),
+            ),
+            (("Projects", ("project-1",), ()),),
+        ),
+    ),
+)
+def test_outward_cv_section_view_merges_capability_labels_without_losing_atoms(
+    input_sections: tuple[SimpleNamespace, ...],
+    expected_sections: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...],
+) -> None:
+    rendered = _outward_cv_sections(SimpleNamespace(cv_sections=input_sections))
+    assert tuple(
+        (section.heading, section.sentence_ids, section.style_slot_ids)
+        for section in rendered
+    ) == expected_sections
 
 
 def test_generic_first_person_rewrite_uses_verified_evidence_source_context(

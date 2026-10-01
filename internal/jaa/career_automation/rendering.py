@@ -56,7 +56,7 @@ BOTTOM_MARGIN = 47.0
 CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
 
 RENDERER_POLICY = {
-    "schema_version": "jaa.ats-pdf-renderer-policy.v5",
+    "schema_version": "jaa.ats-pdf-renderer-policy.v6",
     "page": {"width": PAGE_WIDTH, "height": PAGE_HEIGHT},
     "margins": {
         "left": LEFT_MARGIN,
@@ -66,6 +66,7 @@ RENDERER_POLICY = {
     },
     "fonts": ["Helvetica", "Helvetica-Bold"],
     "layout": "single-column-point-width-v1",
+    "cv_section_projection": "core-capabilities-and-skills-merge-as-skills-v1",
     "width_metrics": "helvetica-afm-plus-conservative-bold-v1",
     "styles": {
         "name": {"font": "Helvetica-Bold", "size": 16.0},
@@ -79,6 +80,47 @@ RENDERER_POLICY = {
     "cover_letter_pages": [1],
 }
 RENDERER_POLICY_SHA256 = content_hash(RENDERER_POLICY)
+
+
+@dataclass(frozen=True)
+class _OutwardCVSection:
+    heading: str
+    sentence_ids: tuple[str, ...]
+    style_slot_ids: tuple[str, ...]
+
+
+def _outward_cv_sections(
+    source: ApplicationSource,
+) -> tuple[_OutwardCVSection, ...]:
+    sections: list[_OutwardCVSection] = []
+    skills_index: int | None = None
+    for section in source.cv_sections:
+        if section.heading in {"Core Capabilities", "Skills"}:
+            if skills_index is None:
+                sections.append(
+                    _OutwardCVSection(
+                        "Skills",
+                        section.sentence_ids,
+                        section.style_slot_ids,
+                    )
+                )
+                skills_index = len(sections) - 1
+            else:
+                existing = sections[skills_index]
+                sections[skills_index] = _OutwardCVSection(
+                    "Skills",
+                    existing.sentence_ids + section.sentence_ids,
+                    existing.style_slot_ids + section.style_slot_ids,
+                )
+            continue
+        sections.append(
+            _OutwardCVSection(
+                section.heading,
+                section.sentence_ids,
+                section.style_slot_ids,
+            )
+        )
+    return tuple(sections)
 
 # Standard Helvetica AFM widths in thousandths of an em. Unknown WinAnsi glyphs
 # conservatively use 1000, which may over-wrap but cannot claim a clipped line.
@@ -492,7 +534,7 @@ def render_editable_text(source: ApplicationSource) -> EditableArtifacts:
                         section.style_slot_ids,
                         bullet_facts=section.heading != "Professional Summary",
                     )
-                    for section in source.cv_sections
+                    for section in _outward_cv_sections(source)
                 ),
             )
         )
@@ -904,7 +946,7 @@ def _cv_blocks(source: ApplicationSource) -> list[tuple[_LineSpec, ...]]:
             ),
         ),
     ]
-    for section in source.cv_sections:
+    for section in _outward_cv_sections(source):
         values: list[_LineSpec] = []
         values.extend(
             _LineSpec(slots[value], "connective", _BODY, spacing_after=1.5)
