@@ -1,11 +1,11 @@
 {
-  "community_count": 30073,
-  "edge_count": 73512,
+  "community_count": 30063,
+  "edge_count": 73510,
   "node_count": 56602,
   "outputs": {
-    ".graphify_labels.json": "0d377516771529e0e98a2ef473e5482daf6570dd58ab2d80257894261b945a3f",
-    "GRAPH_REPORT.md": "47b168f31d67447b52e457b81dcb937a1a97d9ae0e547967bc58bc17db392ed9",
-    "graph.json": "52e154282d15282cecb4b04e844f41d93ab4102e8198e42d588b44467abdb6d3"
+    ".graphify_labels.json": "cbfc4f762652dc6df34723cb80c33532b40300bf4f5ed3209e24b761af82857a",
+    "GRAPH_REPORT.md": "eadcbdc0bf324e9f307fb7fe712b0f82792966b78937018aaaee732c099a8aa0",
+    "graph.json": "a5913dfaa701c1f5d8ad097e4a90d64adda6668855d0dd17f7626d06de8e327f"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "5066f9432b7e85104c5f2ce2ff16dc55de737fe4",
+  "source_base_commit": "77150e03fce1577eb2c95546badde620b5c514cf",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -491,7 +491,7 @@
     "internal/jaa/skeleton/scoring.py": "782baec702e18f17a8bdae767f6d0186da5b27a988d591ef0bd2cfbd91879510",
     "internal/jaa/skeleton/test_graph_gate.py": "cbd5d55cad297911829d72eefdb9d1c737b8d710a2bcc621ef8574ed89a729a8",
     "internal/jaa/skeleton/test_skeleton.py": "2bf6df00b8b240d5c7edd240d67ec775bf3666a38f68e37f8c8a807547cf579c",
-    "internal/jaa/test_acceptance_declaration_contract.py": "5685920fb467707cc1dbf18e0d5f0c2ef0b1a1ff435ae3d0bf4aaa5b39402eeb",
+    "internal/jaa/test_acceptance_declaration_contract.py": "192eb5bc96b6a2fbcd39ea3bd3f0e767616069274b87e5fa69c12af853aca6ee",
     "internal/jaa/test_adversarial_recruiter.py": "97ddc0b7f1f7247a6f4efd72a88904287d22c6a116029077767bf05a055ee936",
     "internal/jaa/test_adversarial_recruiter_archive.py": "9afb6ff9a525561f884592ef5b8a9fb1381fbab886c7fe6212bd4e7b782bae4b",
     "internal/jaa/test_adversarial_recruiter_runtime.py": "889ab2c2604392608012607ee105e7cd669902f59b64a6bbd3873528c0e16a5f",

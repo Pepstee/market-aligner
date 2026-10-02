@@ -1,24 +1,23 @@
-"""Execution-context contract for the repository's shell acceptance declaration."""
+"""Execution-context controls for the declared JAA acceptance shell."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
-
-from testing_repository import clone_jaa_repository
 
 
 ROOT = Path(__file__).resolve().parent
 
 
 @pytest.fixture()
-def repository(tmp_path: Path) -> Path:
-    return clone_jaa_repository(ROOT, tmp_path / "repository")
+def repository() -> Path:
+    return ROOT
 
 
-def test_disposable_repository_preserves_the_market_aligner_jaa_boundary(
+def test_repository_preserves_the_market_aligner_jaa_boundary(
     repository: Path,
 ) -> None:
     discovered = subprocess.run(
@@ -49,10 +48,36 @@ def test_acceptance_declaration_runs_directly_and_as_extracted_data(
     assert "-c" not in records[0] and "$0" not in records[0]
 
     runner = repository / "scripts" / "run_acceptance_declaration.py"
-    runner.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    original_runner = runner.read_bytes()
+    shim_directory = tmp_path / "bin"
+    shim_directory.mkdir()
+    shim = shim_directory / "python3"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "[ \"$#\" -eq 1 ] || exit 90\n"
+        "if [ \"$1\" = \"$PYTHON3_EXPECTED_RUNNER\" ]; then\n"
+        "  printf '%s\\t%s\\t%s\\n' direct \"$PWD\" \"$1\" >> \"$PYTHON3_TEST_LOG\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = scripts/run_acceptance_declaration.py ]; then\n"
+        "  printf '%s\\t%s\\t%s\\n' extracted \"$PWD\" \"$1\" >> \"$PYTHON3_TEST_LOG\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o700)
+    invocations = tmp_path / "python3-invocations.txt"
+    environment = {
+        **os.environ,
+        "PATH": f"{shim_directory}{os.pathsep}{os.defpath}",
+        "PYTHON3_EXPECTED_RUNNER": str(runner),
+        "PYTHON3_TEST_LOG": str(invocations),
+    }
     direct = subprocess.run(
         ("bash", str(declaration)),
         cwd=tmp_path,
+        env=environment,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -62,9 +87,15 @@ def test_acceptance_declaration_runs_directly_and_as_extracted_data(
     extracted = subprocess.run(
         ("/bin/sh", "-c", records[0]),
         cwd=repository,
+        env=environment,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
     assert extracted.returncode == 0, extracted.stderr
+    assert invocations.read_text(encoding="utf-8").splitlines() == [
+        f"direct\t{tmp_path}\t{runner}",
+        f"extracted\t{repository}\tscripts/run_acceptance_declaration.py",
+    ]
+    assert runner.read_bytes() == original_runner
