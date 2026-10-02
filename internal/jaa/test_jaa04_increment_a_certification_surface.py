@@ -213,15 +213,20 @@ def test_failed_focused_suite_suppresses_receipt(tmp_path: Path) -> None:
     plugin_directory.mkdir(mode=0o700)
     plugin_path = plugin_directory / "ma_certifier_failure_plugin.py"
     plugin_path.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
         "import pytest\n"
         "_failed = False\n"
         "def pytest_runtest_call(item):\n"
         "    global _failed\n"
-        "    if not _failed and item.nodeid.startswith(\n"
-        "        'test_jaa04_increment_a_authority_canaries.py::'\n"
-        "    ):\n"
+        "    target_file = Path(item.nodeid.partition('::')[0]).name\n"
+        "    if not _failed and target_file == 'test_jaa04_increment_a_authority_canaries.py':\n"
         "        _failed = True\n"
-        "        pytest.fail('synthetic certifier suite failure')\n",
+        "        pytest.fail('synthetic certifier suite failure')\n"
+        "def pytest_unconfigure(config):\n"
+        "    source = Path(os.environ['JAA04_PYTEST_REPORT'])\n"
+        "    target = Path(os.environ['MA_JAA04_OUTCOME_CAPTURE'])\n"
+        "    target.write_bytes(source.read_bytes())\n",
         encoding="utf-8",
     )
     environment = os.environ.copy()
@@ -230,6 +235,8 @@ def test_failed_focused_suite_suppresses_receipt(tmp_path: Path) -> None:
         item for item in (str(plugin_directory), existing_pythonpath) if item
     )
     environment["PYTEST_ADDOPTS"] = "-p ma_certifier_failure_plugin"
+    outcome_capture = tmp_path / "certifier-outcome.json"
+    environment["MA_JAA04_OUTCOME_CAPTURE"] = str(outcome_capture)
     base_head = environment["MA_JAA04_INPLACE_BASE_HEAD"]
     result, receipt_directory = certify_in_place(
         tmp_path,
@@ -238,6 +245,15 @@ def test_failed_focused_suite_suppresses_receipt(tmp_path: Path) -> None:
         env=environment,
     )
     _assert_rejected_without_receipt(result, receipt_directory)
+    assert outcome_capture.is_file() and not outcome_capture.is_symlink()
+    report = json.loads(outcome_capture.read_text(encoding="utf-8"))
+    assert report["collected"] == 47
+    assert report["deselected"] == 0
+    assert report["outcomes"]["passed"] == 46
+    assert report["outcomes"]["failed"] == 1
+    assert all(report["outcomes"][name] == 0 for name in (
+        "skipped", "xfailed", "xpassed", "error"
+    ))
 
 
 def test_full_jaa04_gate_fails_closed_without_external_capture_and_policy(tmp_path: Path) -> None:

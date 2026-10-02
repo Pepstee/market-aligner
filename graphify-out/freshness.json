@@ -4,8 +4,8 @@
   "node_count": 56592,
   "outputs": {
     ".graphify_labels.json": "53851afa11b59bde99de959ae1e6b7b57ec5e5798ec5b9ed3bcc2527724a1a4a",
-    "GRAPH_REPORT.md": "d02b55faaf28e55e0645544b7032394f66308104c3f9f9439ab13379998c85b9",
-    "graph.json": "56fb44b89dcdde278f6b92e250c6f94184b3d4d713f79767544afe3bbb829866"
+    "GRAPH_REPORT.md": "2eb804a81e88d8355117226d55ef08e1744aeff2ac6bb8f115ffccf258f7601f",
+    "graph.json": "a4907ffa5e3b25af1996225cbf1e1a7c2a52aca44307ffa49c5008064c71f48b"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "19f3b88278806e191fa59076d296b1db4050c749",
+  "source_base_commit": "42897b17f0a0f8eba7a85f904a2643a14edff241",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -551,9 +551,9 @@
     "internal/jaa/test_jaa04_authority_recertification.py": "12747aecdb0b4c08ecc1c60b5cd23150f4e97af72088a0d621ed342d53b7bd51",
     "internal/jaa/test_jaa04_evidence_authority_contract.py": "68c543f722c291ab4e2b784324779fdd9b573a62b106f4be0da38b7a6e6aa1dc",
     "internal/jaa/test_jaa04_increment_a_authority_canaries.py": "fb5f61a959a33c70d8c937da99c8ba1b8b2b9a2c25879e4d7bf38fc6a0739177",
-    "internal/jaa/test_jaa04_increment_a_certification_surface.py": "d3f85888e158517150ff08e32b2022a1a5aea2ae5b91c748fe9bab7a35806a60",
+    "internal/jaa/test_jaa04_increment_a_certification_surface.py": "a5da49ec1a2adbf5f7513ca8327f3b24c9294d0a8a9098d6f76792e52359cc6a",
     "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": "9575dd0e4ac837ad644658baafafe1d37479965b895f8eb966c45bbc3f523a2b",
-    "internal/jaa/test_jaa04_increment_a_independent_regressions.py": "80cd617022918fc21a45123e4d3d56d5b4253b96ab87552eae6495d99281728a",
+    "internal/jaa/test_jaa04_increment_a_independent_regressions.py": "fe87763735b6b3a6e162cd82f35411395f08b9f4d5f1affe6f3d46b9c6132ad5",
     "internal/jaa/test_jaa04_increment_a_temporal_authority_regression.py": "427ecb5d8174b805d021b0c01c71a5105aee2f8971178d43988488daca684d68",
     "internal/jaa/test_jaa04_increment_a_temporal_provenance_certification.py": "4309ed030270f0bc125ac1b1296d8ad6d5108b9d764e0bbf158aaab5b0a0fb55",
     "internal/jaa/test_jaa04_independent_acceptance.py": "2c331428c007f3529e517a96b132deea228db263684c76a72cb82de46c460297",

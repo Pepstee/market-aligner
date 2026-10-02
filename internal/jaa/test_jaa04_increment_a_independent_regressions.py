@@ -65,15 +65,26 @@ def _outcome_environment(tmp_path: Path, outcome: str) -> dict[str, str]:
     plugin = tmp_path / f"{module_name}.py"
     plugin.write_text(
         f'''\
+import os
+from pathlib import Path
 import pytest
 
 MODE = {outcome!r}
+TARGET_NODEID = None
+
+def _authority_suite_item(item):
+    return Path(item.nodeid.partition("::")[0]).name == "test_jaa04_increment_a_authority_canaries.py"
 
 def _target(item):
-    return item.nodeid.startswith("test_jaa04_increment_a_authority_canaries.py::")
+    return item.nodeid == TARGET_NODEID
 
 def pytest_collection_modifyitems(config, items):
-    target = next(item for item in items if _target(item))
+    global TARGET_NODEID
+    targets = [item for item in items if _authority_suite_item(item)]
+    if not targets:
+        raise RuntimeError("expected authority-canary outcome target was not collected")
+    target = targets[0]
+    TARGET_NODEID = target.nodeid
     if MODE == "xpassed":
         target.add_marker(pytest.mark.xfail(reason="independent xpass control"))
     elif MODE == "deselected":
@@ -93,10 +104,16 @@ def pytest_runtest_call(item):
         pytest.xfail("independent xfail control")
     if MODE == "failed":
         pytest.fail("independent failure control")
+
+def pytest_unconfigure(config):
+    source = Path(os.environ["JAA04_PYTEST_REPORT"])
+    target = Path(os.environ["MA_JAA04_OUTCOME_CAPTURE"])
+    target.write_bytes(source.read_bytes())
 ''',
         encoding="utf-8",
     )
     environment = os.environ.copy()
+    environment["MA_JAA04_OUTCOME_CAPTURE"] = str(tmp_path / "outcome-report.json")
     existing_plugins = environment.get("PYTEST_PLUGINS", "")
     environment["PYTEST_PLUGINS"] = ",".join(
         value for value in (existing_plugins, module_name) if value
@@ -124,6 +141,22 @@ def test_every_non_passing_pytest_outcome_reaches_and_is_rejected_by_certifier(
             state.head,
             env=_outcome_environment(tmp_path, outcome),
         )
+    report_path = tmp_path / "outcome-report.json"
+    assert report_path.is_file() and not report_path.is_symlink()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["outcomes"]["passed"] == 46
+    assert sum(report["passed_by_suite"].values()) == 46
+    if outcome == "deselected":
+        assert report["deselected"] == 1
+        assert all(report["outcomes"][name] == 0 for name in (
+            "skipped", "xfailed", "xpassed", "failed", "error"
+        ))
+    else:
+        assert report["deselected"] == 0
+        assert report["outcomes"][outcome] == 1
+        assert all(report["outcomes"][name] == 0 for name in (
+            "skipped", "xfailed", "xpassed", "failed", "error"
+        ) if name != outcome)
 
 
 def test_omitting_temporal_semantics_and_lowering_legacy_count_cannot_mint_success(
