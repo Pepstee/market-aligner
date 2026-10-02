@@ -198,11 +198,11 @@ def test_fresh_receipt_matches_independent_current_tree_revision(
 
 
 def test_certifier_rejects_a_clean_but_unexpected_git_revision(
-    isolated_repository: Path,
+    tmp_path: Path,
 ) -> None:
-    runtime = _runtime()
-    database = runtime / "databases" / "career_pipeline.sqlite3"
-    receipt = runtime / "receipts" / f"migration-{MIGRATION_CONTENT_HASH}.json"
+    database = tmp_path / "absent-baseline.sqlite3"
+    receipt = tmp_path / "absent-migration-receipt.json"
+    evidence = tmp_path / "unexpected-revision-evidence"
 
     completed = subprocess.run(
         (
@@ -215,9 +215,9 @@ def test_certifier_rejects_a_clean_but_unexpected_git_revision(
             "--expected-source-commit",
             "0" * 40,
             "--evidence-directory",
-            "unexpected-revision-evidence",
+            str(evidence),
         ),
-        cwd=isolated_repository,
+        cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
@@ -225,9 +225,7 @@ def test_certifier_rejects_a_clean_but_unexpected_git_revision(
 
     assert completed.returncode == 2
     assert "does not match the expected component revision" in completed.stderr
-    assert not list(
-        (isolated_repository / "unexpected-revision-evidence").glob("*.json")
-    )
+    assert not list(evidence.glob("*.json"))
 
 
 def test_certifier_rejects_dirty_tracked_jaa00_trust_evidence(
