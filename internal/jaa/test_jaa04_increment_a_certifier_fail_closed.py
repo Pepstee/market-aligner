@@ -34,6 +34,10 @@ ALLOWED_MUTATIONS = {
     f"internal/jaa/{CERTIFIER}",
     "internal/jaa/test_jaa04_increment_a_authority_canaries.py",
 }
+PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
+    "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
+    "internal/jaa/test_jaa04_sidecar_temporal_semantics.py",
+}
 SUITES = (
     "test_jaa04_increment_a_authority_canaries.py",
     "test_jaa04_increment_a_temporal_authority_regression.py",
@@ -42,9 +46,14 @@ SUITES = (
 )
 
 
-def _run(directory: Path, *argv: str, timeout: int = 240) -> subprocess.CompletedProcess[str]:
+def _run(
+    directory: Path,
+    *argv: str,
+    timeout: int = 240,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, cwd=directory, text=True, capture_output=True,
-                          check=False, timeout=timeout)
+                          check=False, timeout=timeout, env=env)
 
 
 def _git(*argv: str) -> str:
@@ -202,6 +211,7 @@ class _FixtureBranch:
     branch: str
     run_id: str
     head: str
+    allowed_mutations: frozenset[str]
     changed_path: str | None = None
     changed_sha256: str | None = None
 
@@ -225,7 +235,11 @@ def _admit_each_test() -> Iterator[None]:
 
 
 @contextmanager
-def _committed_inplace_branch(case: str) -> Iterator[_FixtureBranch]:
+def _committed_inplace_branch(
+    case: str,
+    *,
+    allowed_mutations: frozenset[str] | set[str] | None = None,
+) -> Iterator[_FixtureBranch]:
     try:
         lock_fd = os.open(FIXTURE_LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     except OSError:
@@ -251,6 +265,11 @@ def _committed_inplace_branch(case: str) -> Iterator[_FixtureBranch]:
             raise
         except Exception:
             _abort_suite("in-place certifier fixture run is not admitted")
+        exact_mutations = frozenset(
+            ALLOWED_MUTATIONS if allowed_mutations is None else allowed_mutations
+        )
+        if not exact_mutations <= PERMITTED_MUTATION_PATHS:
+            _abort_suite("fixture mutation scope is outside its reviewed exact paths")
         base_branch = BASE_BRANCH
         base_head = os.environ.get("MA_JAA04_INPLACE_BASE_HEAD", "")
         try:
@@ -270,7 +289,9 @@ def _committed_inplace_branch(case: str) -> Iterator[_FixtureBranch]:
             _abort_suite("in-place fixture branch creation did not complete safely")
         if created.returncode != 0:
             _abort_suite("cannot create the admitted in-place fixture branch")
-        state = _FixtureBranch(base_branch, base_head, branch, run_id, base_head)
+        state = _FixtureBranch(
+            base_branch, base_head, branch, run_id, base_head, exact_mutations
+        )
         try:
             _assert_admission(branch, base_head, False)
             yield state
@@ -328,7 +349,7 @@ def _committed_inplace_branch(case: str) -> Iterator[_FixtureBranch]:
 
 
 def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) -> None:
-    if path not in ALLOWED_MUTATIONS:
+    if path not in state.allowed_mutations:
         _abort_suite("fixture mutation path is not allowlisted")
     _assert_admission(state.branch, state.head, False)
     target = CANON_ROOT / path
@@ -380,7 +401,11 @@ def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) 
 
 
 def _certify(
-    tmp_path: Path, branch: str, head: str
+    tmp_path: Path,
+    branch: str,
+    head: str,
+    *,
+    env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     _assert_admission(branch, head, False)
     receipt_directory = tmp_path / "receipt"
@@ -388,7 +413,17 @@ def _certify(
         receipt_directory.resolve().relative_to(Path("/tmp").resolve())
     except ValueError as error:
         raise RuntimeError("certifier receipts must remain under /tmp") from error
-    return _run(ROOT, sys.executable, CERTIFIER, "--receipt", str(receipt_directory)), receipt_directory
+    return (
+        _run(
+            ROOT,
+            sys.executable,
+            CERTIFIER,
+            "--receipt",
+            str(receipt_directory),
+            env=env,
+        ),
+        receipt_directory,
+    )
 
 
 def _rejects(tmp_path: Path, branch: str, head: str) -> None:

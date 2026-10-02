@@ -1926,8 +1926,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/certify_jaa04_increment_a.py": {
-    "mtime": 1790929870.295031,
-    "seen": 1790933807.899555,
+    "mtime": 1790936524.7749126,
+    "seen": 1790938017.2910354,
     "ast_hash": "85be558982ba31f4c2af06beeab50d36",
     "semantic_hash": ""
   },
@@ -2496,8 +2496,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_authority_canaries.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.520167,
+    "mtime": 1790936536.1949182,
+    "seen": 1790938017.29122,
     "ast_hash": "4624a315882844dd3412eb01e2084990",
     "semantic_hash": ""
   },
@@ -2508,15 +2508,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": {
-    "mtime": 1790933171.3189676,
-    "seen": 1790933807.899664,
-    "ast_hash": "f30ec8ba165982ed4bece0e1e1c81a15",
+    "mtime": 1790937613.474897,
+    "seen": 1790938017.291222,
+    "ast_hash": "cc20939377439b94d3f61d5303b08cb3",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_independent_regressions.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.5201697,
-    "ast_hash": "6016d10f7a1cccfee7286de379c2cec4",
+    "mtime": 1790937834.7548947,
+    "seen": 1790938017.291223,
+    "ast_hash": "1c588982bfaaee55b234a97f3c436db2",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_temporal_authority_regression.py": {
