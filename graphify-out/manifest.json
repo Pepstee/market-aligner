@@ -2484,9 +2484,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_authority_recertification.py": {
-    "mtime": 1790926113.6230803,
-    "seen": 1790926328.7710733,
-    "ast_hash": "3ae4fd7df0cbee175a574f9d6002134d",
+    "mtime": 1790927327.4830608,
+    "seen": 1790927761.7523549,
+    "ast_hash": "b55b5b9557853cc6d5b0beced5419eea",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_evidence_authority_contract.py": {
@@ -2562,9 +2562,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_portable_authority_contract.py": {
-    "mtime": 1790812858.7267387,
-    "seen": 1790813292.126125,
-    "ast_hash": "8cb63b74f58caee7f04414beca7fad61",
+    "mtime": 1790927524.2350645,
+    "seen": 1790927761.7523656,
+    "ast_hash": "f9a63b6e39b043669b8f6c3eaebbac55",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_public_access.py": {
