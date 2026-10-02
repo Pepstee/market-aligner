@@ -41,6 +41,7 @@ CERTIFICATION_SURFACE_MUTATIONS = {
     "internal/jaa/career_automation/dirty-certifier-control.txt",
 }
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
+    "internal/jaa/README.md",
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
     "internal/jaa/test_jaa04_sidecar_temporal_semantics.py",
     "internal/jaa/baseline_adoption/cli.py",
@@ -359,6 +360,7 @@ def _committed_inplace_branch(
                         "modified": "M",
                         "added": "A",
                         "deleted": "D",
+                        "symlink": "T",
                     }.get(record.operation)
                     if (
                         expected_status is None
@@ -376,6 +378,9 @@ def _committed_inplace_branch(
                         ))
                         or (record.operation == "deleted" and (
                             record.parent_blob_sha256 is None or record.result_blob_sha256 is not None
+                        ))
+                        or (record.operation == "symlink" and (
+                            record.parent_blob_sha256 is None or record.result_blob_sha256 is None
                         ))
                     ):
                         raise RuntimeError("fixture commit record differs from its exact path or blob history")
@@ -477,7 +482,7 @@ def _commit_path_change(
     target = _safe_mutation_target(path)
     parent_head = state.head
     parent_blob_sha256 = _git_path_blob_sha256(parent_head, path)
-    if operation in {"modified", "deleted"}:
+    if operation in {"modified", "deleted", "symlink"}:
         if (
             parent_blob_sha256 is None
             or not target.is_file()
@@ -499,6 +504,10 @@ def _commit_path_change(
     try:
         if operation == "modified":
             target.write_bytes(content or b"")
+        elif operation == "symlink":
+            target.unlink()
+            _assert_admission(state.branch, state.head, True)
+            target.symlink_to(os.fsdecode(content or b""))
         elif operation == "added":
             descriptor = os.open(
                 target,
@@ -518,15 +527,20 @@ def _commit_path_change(
         "modified": f" M {path}",
         "added": f"?? {path}",
         "deleted": f" D {path}",
+        "symlink": f" T {path}",
     }[operation]
     if _git("status", "--porcelain", "--untracked-files=all").splitlines() != [expected_unstaged]:
         _abort_suite("fixture working diff is not the single exact allowlisted path")
-    if content is not None and (
-        not target.is_file()
-        or target.is_symlink()
-        or hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256
-    ):
-        _abort_suite("fixture working bytes differ from the exact admitted content")
+    if content is not None:
+        if operation == "symlink":
+            if not target.is_symlink() or os.fsencode(os.readlink(target)) != content:
+                _abort_suite("fixture symlink differs from its exact admitted target")
+        elif (
+            not target.is_file()
+            or target.is_symlink()
+            or hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256
+        ):
+            _abort_suite("fixture working bytes differ from the exact admitted content")
     _assert_admission(state.branch, state.head, True)
     staged = _run(
         REPOSITORY_ROOT,
@@ -539,12 +553,22 @@ def _commit_path_change(
         "modified": f"M  {path}",
         "added": f"A  {path}",
         "deleted": f"D  {path}",
+        "symlink": f"T  {path}",
     }[operation]
     if (
         _git("status", "--porcelain", "--untracked-files=all").splitlines() != [expected_staged]
         or _git("diff", "--cached", "--name-only").splitlines() != [path]
         or _git("diff", "--name-only")
-        or (content is not None and hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256)
+        or (
+            content is not None
+            and operation == "symlink"
+            and (not target.is_symlink() or os.fsencode(os.readlink(target)) != content)
+        )
+        or (
+            content is not None
+            and operation != "symlink"
+            and hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256
+        )
         or (content is None and target.exists())
     ):
         _abort_suite("fixture staged diff is not exactly its allowlisted path")
@@ -574,6 +598,7 @@ def _commit_path_change(
         "modified": "M",
         "added": "A",
         "deleted": "D",
+        "symlink": "T",
     }[operation]
     if (
         _git("rev-parse", f"{new_head}^") != parent_head
@@ -596,6 +621,12 @@ def _commit_added_file(state: _FixtureBranch, path: str, content: bytes, case: s
 
 def _commit_deleted_file(state: _FixtureBranch, path: str, case: str) -> None:
     _commit_path_change(state, path, "deleted", None, case)
+
+
+def _commit_symlink_change(
+    state: _FixtureBranch, path: str, target: str, case: str
+) -> None:
+    _commit_path_change(state, path, "symlink", os.fsencode(target), case)
 
 
 @contextmanager
