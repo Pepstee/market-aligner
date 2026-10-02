@@ -566,6 +566,29 @@ def test_one_call_backend_forwards_review_images_without_second_dispatch() -> No
     assert guarded.refused_before_dispatch == 1
 
 
+def _configure_private_backend_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    capture_root = tmp_path / "backend-diagnostics"
+    capture_root.mkdir(mode=0o700)
+    capture_root.chmod(0o700)
+    if capture_root.is_symlink() or stat.S_IMODE(capture_root.stat().st_mode) != 0o700:
+        raise ValueError("private backend capture directory is not mode 0700")
+    monkeypatch.setenv("JAA_LLM_DIAGNOSTIC_CAPTURE_DIR", str(capture_root))
+    return capture_root
+
+
+def test_native_diagnostic_configures_private_backend_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    capture_root = _configure_private_backend_capture(tmp_path, monkeypatch)
+
+    assert os.environ["JAA_LLM_DIAGNOSTIC_CAPTURE_DIR"] == str(capture_root)
+    assert stat.S_IMODE(capture_root.stat().st_mode) == 0o700
+    assert not (capture_root / "child-process-output.json").exists()
+
+
 @_capture_setup_failures
 def test_native_prepare_release_one_call_local_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -581,6 +604,7 @@ def test_native_prepare_release_one_call_local_diagnostic(
     tmp_path.chmod(0o700)
     if tmp_path.is_symlink() or not tmp_path.is_absolute():
         pytest.fail("diagnostic root must be a fresh private absolute directory")
+    _configure_private_backend_capture(tmp_path, monkeypatch)
     result: dict[str, object] = {
         "diagnostic_only": True,
         "synthetic_fixture": True,
@@ -1031,6 +1055,15 @@ def test_native_prepare_release_one_call_local_diagnostic(
                     )
                     result["review_backend_failure_exit_code"] = backend_failure.get(
                         "exit_code"
+                    )
+                    result["review_backend_private_capture_status"] = (
+                        backend_failure.get("private_capture_status")
+                    )
+                    result["review_backend_private_capture_sha256"] = (
+                        backend_failure.get("private_capture_sha256")
+                    )
+                    result["review_backend_private_capture_errno"] = (
+                        backend_failure.get("private_capture_errno")
                     )
                     result["review_backend_diagnosis_present"] = bool(
                         backend_failure.get("stderr_diagnosis")
