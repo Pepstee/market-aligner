@@ -6,6 +6,7 @@ lifecycle implementation function is substituted.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import hashlib
 import json
 import shutil
@@ -18,7 +19,6 @@ import pytest
 
 from career_automation.database import SCHEMA
 from career_automation.migrations import JAA_01_MIGRATIONS
-from testing_repository import clone_jaa_repository
 from tracked_source_revision import source_content_revision
 
 
@@ -44,6 +44,45 @@ def _head(root: Path) -> str:
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout.strip()
+
+
+def _clean_certifier_source_state() -> tuple[str, str, str, str]:
+    root = ROOT.resolve()
+    completed = subprocess.run(
+        ("git", "rev-parse", "--show-toplevel"),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    repository = Path(completed.stdout.strip()).resolve()
+    assert root == repository / "internal" / "jaa"
+
+    status = subprocess.run(
+        ("git", "status", "--porcelain", "--untracked-files=all"),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert status.returncode == 0, status.stderr
+    assert status.stdout == "", "JAA-01 certification requires a clean source root"
+
+    tree = subprocess.run(
+        ("git", "rev-parse", "--verify", "HEAD^{tree}"),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert tree.returncode == 0, tree.stderr
+    return (
+        _head(root),
+        tree.stdout.strip(),
+        _sha256(CERTIFIER),
+        _sha256(root / "tracked_source_revision.py"),
+    )
 
 
 def _jaa01_receipt() -> Path:
@@ -165,41 +204,11 @@ def _receipt_for(database: Path, directory: Path) -> Path:
 
 
 @pytest.fixture()
-def clean_certifier_root(tmp_path: Path) -> Path:
-    """Run clean-tree certification checks outside this edited test checkout."""
-    clone = clone_jaa_repository(ROOT, tmp_path / "clean-certifier-repository")
-    current_sources = (
-        CERTIFIER.relative_to(ROOT),
-        Path("tracked_source_revision.py"),
-    )
-    for source in current_sources:
-        shutil.copyfile(ROOT / source, clone / source)
-    changed = subprocess.run(
-        ["git", "diff", "--quiet", "--", *(str(source) for source in current_sources)],
-        cwd=clone,
-        check=False,
-    )
-    if changed.returncode == 1:
-        for command in (
-            ["git", "add", *(str(source) for source in current_sources)],
-            [
-                "git",
-                "-c",
-                "user.name=JAA-01 test",
-                "-c",
-                "user.email=jaa01@example.test",
-                "commit",
-                "-m",
-                "test current JAA-01 certifier",
-            ],
-        ):
-            completed = subprocess.run(
-                command, cwd=clone, text=True, capture_output=True, check=False
-            )
-            assert completed.returncode == 0, completed.stderr
-    else:
-        assert changed.returncode == 0
-    return clone
+def clean_certifier_root() -> Iterator[Path]:
+    """Run certification checks against the admitted, clean canonical source root."""
+    before = _clean_certifier_source_state()
+    yield ROOT
+    assert _clean_certifier_source_state() == before
 
 
 def _run(

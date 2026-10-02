@@ -1,11 +1,11 @@
 {
-  "community_count": 30093,
-  "edge_count": 73612,
-  "node_count": 56619,
+  "community_count": 30106,
+  "edge_count": 73614,
+  "node_count": 56620,
   "outputs": {
-    ".graphify_labels.json": "fae2b01f273f8cc9e487e697437143da79d2bfd1e485bea43452c0d46fe39cd6",
-    "GRAPH_REPORT.md": "2f5be7ddc2ed88124303c18303d06c893359d8265f06f5a8c4143dee18f1bac2",
-    "graph.json": "7f95ab2ea7d496f60c59fc9fb953330978500ae109d6ff6ca178e3102aa4f17f"
+    ".graphify_labels.json": "741b6feaccb4ec854f67367e6fb2a43f1bcf462b6e83e2ec5c80c5f9856d4cf7",
+    "GRAPH_REPORT.md": "02c141dd15f922f52e13af14459b1485d0fe619d097206cc3cb3c88d6659f46b",
+    "graph.json": "873359d35318f0538fb31b5a30e7e29a810287f989dd77fcc88ed36d7ac25622"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "92f338ca1132cbf03913e55e1f59dfa23fc7aeed",
+  "source_base_commit": "857752b0da76ef6e7ca89b6c50652e4613f47e13",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -534,7 +534,7 @@
     "internal/jaa/test_install_market_handoff_config.py": "0899b6472d97b90d6af3c462939a02430c2d443f22534f0c37ef061badeabf21",
     "internal/jaa/test_jaa01_adversarial_runtime.py": "05f1bc558d7bdee2bc47d9e5b9d3057fd34583a703f5e8ac7be2067d579bcbef",
     "internal/jaa/test_jaa01_checked_receipt_current_revision.py": "60632623dcdd1f071b8972a11530d919ad26741c6af405b7016f91a8daaabfe1",
-    "internal/jaa/test_jaa01_runtime_certification.py": "f0f7526ab090195046c51c5d425ff970abb8734d4f1be1e0b123e4d19dbba369",
+    "internal/jaa/test_jaa01_runtime_certification.py": "9e7d366397b0d6839012a87d393e673d5eeacb381ba02a543286d9a1c6dccd08",
     "internal/jaa/test_jaa01_source_revision_binding.py": "6da4942adc2b0c12b590f7bcb536891f3617a514d8d5246c4125315716704447",
     "internal/jaa/test_jaa02_independent_acceptance.py": "0742d26c42d961c4e51266723015d45c4a33186e28a57aeefc22b31b4727a7ab",
     "internal/jaa/test_jaa02_receipt_command_tamper.py": "1e975ad85b5acebad0035705a66518bcb2656b84ed913bcc67fe0ecdecd6882a",
