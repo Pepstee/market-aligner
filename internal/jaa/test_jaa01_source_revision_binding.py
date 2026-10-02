@@ -337,8 +337,8 @@ def _restore_unmerged_index(
     staged = _index_entries(relative)
     parsed = sorted((_index_entry_fields(entry) for entry in staged), key=lambda item: item[2])
     if (
-        len(parsed) != 2
-        or [entry[2] for entry in parsed] != [b"1", b"2"]
+        len(parsed) != 3
+        or [entry[2] for entry in parsed] != [b"0", b"1", b"2"]
         or any(
             mode != b"100644" or object_id != original_oid or path != repository_path
             for mode, object_id, _stage, path in parsed
@@ -346,8 +346,8 @@ def _restore_unmerged_index(
     ):
         inplace_fixture._abort_suite("unmerged index stages differ from the exact expected mode, blob, or path")
     _assert_only_status_path(str(snapshot["repository_path"]))
-    if not _status_lines()[0].startswith("UD "):
-        inplace_fixture._abort_suite("unmerged index status differs from the observed stage-1/stage-2 conflict")
+    if not _status_lines()[0].startswith("UU "):
+        inplace_fixture._abort_suite("unmerged index status differs from the observed stage-0/1/2 conflict")
 
     inplace_fixture._assert_admission(state.branch, state.head, True)
     clear_entry = (

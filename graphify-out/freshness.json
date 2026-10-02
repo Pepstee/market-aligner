@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "d2b14f7b97ab43e26146b34b7208042c19b59d73",
+  "source_base_commit": "92f338ca1132cbf03913e55e1f59dfa23fc7aeed",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -535,7 +535,7 @@
     "internal/jaa/test_jaa01_adversarial_runtime.py": "05f1bc558d7bdee2bc47d9e5b9d3057fd34583a703f5e8ac7be2067d579bcbef",
     "internal/jaa/test_jaa01_checked_receipt_current_revision.py": "60632623dcdd1f071b8972a11530d919ad26741c6af405b7016f91a8daaabfe1",
     "internal/jaa/test_jaa01_runtime_certification.py": "f0f7526ab090195046c51c5d425ff970abb8734d4f1be1e0b123e4d19dbba369",
-    "internal/jaa/test_jaa01_source_revision_binding.py": "b64b7832065deee87a7abfaaf1cdf9bdb709c083cf85bbd711b6900e622607cd",
+    "internal/jaa/test_jaa01_source_revision_binding.py": "6da4942adc2b0c12b590f7bcb536891f3617a514d8d5246c4125315716704447",
     "internal/jaa/test_jaa02_independent_acceptance.py": "0742d26c42d961c4e51266723015d45c4a33186e28a57aeefc22b31b4727a7ab",
     "internal/jaa/test_jaa02_receipt_command_tamper.py": "1e975ad85b5acebad0035705a66518bcb2656b84ed913bcc67fe0ecdecd6882a",
     "internal/jaa/test_jaa02_runtime_certification.py": "874eca3d78e7fe2eb6341a6294eca0c6b0820e2b3f0c80f7e62c3ca603735e05",
