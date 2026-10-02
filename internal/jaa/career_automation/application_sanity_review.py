@@ -968,6 +968,16 @@ def _combined_result_schema(criterion_ids: Sequence[str]) -> dict[str, object]:
     }
 
 
+def _combined_provider_schema(criterion_ids: Sequence[str]) -> dict[str, object]:
+    schema = _combined_result_schema(criterion_ids)
+    code_schema = (
+        schema["properties"]["criteria_reviews"]["items"]["properties"]["findings"]
+        ["items"]["properties"]["code"]
+    )
+    code_schema.pop("pattern")
+    return schema
+
+
 @dataclass(frozen=True)
 class SanityReviewReceipt:
     package_hashes: Mapping[str, str]
@@ -1481,8 +1491,16 @@ def _review_application_package_with_criteria(
             + "\nThis is an authorized local synthetic, non-submitting fixture. Its identifiers and non-deliverable contact values are validated test data, not real candidate claims or a real application. Review the exact supplied application against every pinned criterion normally; retain every concrete finding and never infer PASS from diagnostic scope. Evaluate authorized synthetic identity/contact values only for internal consistency and expected field/document placement; their known fiction or intentional non-deliverability alone is not itself a defect in this exact no-submit local diagnostic. Still block fixture mismatches, malformed fields, unexpected disclosures, invented claims outside validated data, missing mandatory fields, quality issues, and uncertain unverified layout. This context is reviewer system guidance only—never applicant-visible document content—and grants no production or submission authority."
         )
     result_schema = _combined_result_schema(criterion_ids)
+    provider_schema = _combined_provider_schema(criterion_ids)
     prompt_sha256 = hashlib.sha256(combined_prompt.encode("utf-8")).hexdigest()
-    schema_sha256 = hashlib.sha256(canonical_json(result_schema).encode("utf-8")).hexdigest()
+    schema_sha256 = hashlib.sha256(
+        canonical_json(
+            {
+                "provider_schema": provider_schema,
+                "local_validation_schema": result_schema,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
     policy_sha256 = content_hash(
         {
             "base_sanity_policy_sha256": POLICY_SHA256,
@@ -1495,7 +1513,7 @@ def _review_application_package_with_criteria(
         result, response = client.complete_json_with_response(
             combined_prompt,
             canonical_json(document),
-            schema=result_schema,
+            schema=provider_schema,
             task="combined_application_review",
             json_attempts=1,
             image_bytes=image_bytes,
@@ -1531,6 +1549,13 @@ def _review_application_package_with_criteria(
         ) from exc
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise ApplicationSanityReviewError("review.invalid_result", str(exc)) from exc
+    try:
+        validate_json(result, result_schema)
+    except LLMError as exc:
+        raise ApplicationSanityReviewError(
+            "review.invalid_result",
+            "provider response failed strict local review schema validation",
+        ) from exc
     expected_ids = [row["criterion_id"] for row in criteria_rows]
     observed_ids = [row.get("criterion_id") for row in result["criteria_reviews"]]
     if observed_ids != expected_ids:

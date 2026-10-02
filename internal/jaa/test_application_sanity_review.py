@@ -51,6 +51,7 @@ class ScriptedBackend(Backend):
         self.last_system = ""
         self.last_user = ""
         self.last_images: tuple[bytes, ...] = ()
+        self.last_schema: dict[str, object] | None = None
         self.calls = 0
 
     def available(self) -> bool:
@@ -74,6 +75,7 @@ class ScriptedBackend(Backend):
         image_bytes: tuple[bytes, ...] = (),
     ) -> LLMResponse:
         self.last_images = image_bytes
+        self.last_schema = schema
         return self.complete(system, user, temperature)
 
 
@@ -303,6 +305,21 @@ def test_combined_review_issues_one_content_bound_receipt_for_all_criteria(
     assert receipt.schema_version == COMBINED_RECEIPT_SCHEMA_VERSION
     assert receipt.model_identity == "gpt-6-luna"
     assert receipt.review_coverage["criteria"] == list(criteria)
+    provider_schema = review_module._combined_provider_schema(
+        tuple(row["criterion_id"] for row in criteria)
+    )
+    validation_schema = review_module._combined_result_schema(
+        tuple(row["criterion_id"] for row in criteria)
+    )
+    assert backend.last_schema == provider_schema
+    assert receipt.schema_sha256 == hashlib.sha256(
+        review_module.canonical_json(
+            {
+                "provider_schema": provider_schema,
+                "local_validation_schema": validation_schema,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
     assert receipt.review_coverage["review_stage"] == "pre_fill_semantic_intent"
     assert receipt.review_coverage["post_review_inventory"] == "verified_locally_after_fill"
     assert receipt.package_hashes["form_package_sha256"] == receipt.review_coverage[
@@ -580,6 +597,34 @@ def test_combined_criterion_finding_code_schema_accepts_only_bounded_dotted_code
     ):
         with pytest.raises(llm_client_module.LLMError):
             llm_client_module.validate_json(result_with_code(code), schema)
+
+
+def test_provider_schema_omits_pattern_but_strict_local_validation_rejects_invalid_code(
+    tmp_path,
+) -> None:
+    result = _combined_result(blocked_criterion="resume-cover-letter")
+    result["criteria_reviews"][0]["findings"][0]["code"] = "invalid\n"
+    backend = ScriptedBackend(result, model="gpt-6-luna")
+    criteria = (
+        {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+        {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+    )
+
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package_with_criteria(
+            package(),
+            client=client(backend, tmp_path),
+            criteria_prompt="Apply both synthetic read-only review criteria.",
+            criteria=criteria,
+        )
+
+    provider_code_schema = (
+        backend.last_schema["properties"]["criteria_reviews"]["items"]["properties"]
+        ["findings"]["items"]["properties"]["code"]
+    )
+    assert provider_code_schema == {"type": "string", "maxLength": 64}
+    assert captured.value.document()["code"] == "review.invalid_result"
+    assert backend.calls == 1
 
 
 def test_sanity_finding_severity_schema_declares_string_type() -> None:
