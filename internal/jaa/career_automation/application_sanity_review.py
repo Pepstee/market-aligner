@@ -149,13 +149,28 @@ RESULT_SCHEMA: dict[str, object] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["code", "severity", "location", "explanation"],
+                "required": [
+                    "code",
+                    "severity",
+                    "location",
+                    "explanation",
+                    "suggestion",
+                ],
                 "properties": {
                     "code": {"enum": list(FINDING_CODES)},
                     "severity": {"type": "string", "const": "material"},
                     "location": {"type": "string", "minLength": 1, "maxLength": 160},
                     "explanation": {"type": "string", "minLength": 1, "maxLength": 500},
-                    "suggestion": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "suggestion": {
+                        "anyOf": [
+                            {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                            },
+                            {"type": "null"},
+                        ]
+                    },
                 },
             },
         },

@@ -591,6 +591,38 @@ def test_sanity_finding_severity_schema_declares_string_type() -> None:
     assert severity_schema == {"type": "string", "const": "material"}
 
 
+def test_sanity_finding_suggestion_is_required_but_nullable() -> None:
+    finding_schema = review_module.RESULT_SCHEMA["properties"]["findings"]["items"]
+    assert "suggestion" in finding_schema["required"]
+    assert finding_schema["properties"]["suggestion"] == {
+        "anyOf": [
+            {"type": "string", "minLength": 1, "maxLength": 500},
+            {"type": "null"},
+        ]
+    }
+
+    result = {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "verdict": "block",
+        "findings": [
+            {
+                "code": review_module.FINDING_CODES[0],
+                "severity": "material",
+                "location": "Synthetic section",
+                "explanation": "A synthetic finding requires a disposition.",
+                "suggestion": None,
+            }
+        ],
+    }
+    llm_client_module.validate_json(result, review_module.RESULT_SCHEMA)
+    result["findings"][0]["suggestion"] = "Keep the bounded synthetic correction."
+    llm_client_module.validate_json(result, review_module.RESULT_SCHEMA)
+
+    del result["findings"][0]["suggestion"]
+    with pytest.raises(llm_client_module.LLMError):
+        llm_client_module.validate_json(result, review_module.RESULT_SCHEMA)
+
+
 def test_combined_criterion_schema_rejects_decorated_undeclared_ids() -> None:
     schema = review_module._combined_result_schema(
         ("resume-cover-letter", "humanizer")
