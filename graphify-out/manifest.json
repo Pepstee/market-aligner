@@ -480,14 +480,14 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/fixtures/jaa04_authority_canaries/ashby.json": {
-    "mtime": 1788246507.271223,
-    "seen": 1790775868.5197313,
+    "mtime": 1790941127.530865,
+    "seen": 1790941462.7956204,
     "ast_hash": "e6c49e6521a0ed389134b34880ec2f3f",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/fixtures/jaa04_authority_canaries/greenhouse.json": {
-    "mtime": 1788246507.2727973,
-    "seen": 1790775868.5197322,
+    "mtime": 1790941123.9788651,
+    "seen": 1790941462.7956214,
     "ast_hash": "2a52a4697b0aa3c86e17154cd7b01824",
     "semantic_hash": ""
   },
@@ -1926,8 +1926,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/certify_jaa04_increment_a.py": {
-    "mtime": 1790938652.6309042,
-    "seen": 1790940315.9522371,
+    "mtime": 1790941094.998873,
+    "seen": 1790941462.795823,
     "ast_hash": "85be558982ba31f4c2af06beeab50d36",
     "semantic_hash": ""
   },
@@ -2028,8 +2028,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/jaa04_increment_a_test_inventory.json": {
-    "mtime": 1790938655.9389045,
-    "seen": 1790940315.952257,
+    "mtime": 1790941097.9748707,
+    "seen": 1790941462.7958415,
     "ast_hash": "bb6ac4b018ccf18b02e7485e0b729057",
     "semantic_hash": ""
   },
@@ -2496,15 +2496,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_authority_canaries.py": {
-    "mtime": 1790938631.6428978,
-    "seen": 1790940315.952347,
+    "mtime": 1790941074.2548425,
+    "seen": 1790941462.795928,
     "ast_hash": "4624a315882844dd3412eb01e2084990",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_certification_surface.py": {
-    "mtime": 1790940034.3148587,
-    "seen": 1790940315.9523487,
-    "ast_hash": "b9b2e44401e6a1dd31f7025fea60cb1a",
+    "mtime": 1790941316.1468468,
+    "seen": 1790941462.7959294,
+    "ast_hash": "728794b335c18e24f48af076a1b59c17",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": {
@@ -2592,8 +2592,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_sidecar_temporal_semantics.py": {
-    "mtime": 1790938659.2789052,
-    "seen": 1790940315.952361,
+    "mtime": 1790941100.9748685,
+    "seen": 1790941462.795942,
     "ast_hash": "d829f1fa1efa7df1a9c5cba7e33296d1",
     "semantic_hash": ""
   },

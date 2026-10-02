@@ -229,8 +229,7 @@ def test_failed_focused_suite_suppresses_receipt(tmp_path: Path) -> None:
     environment["PYTHONPATH"] = os.pathsep.join(
         item for item in (str(plugin_directory), existing_pythonpath) if item
     )
-    environment["PYTEST_PLUGINS"] = "ma_certifier_failure_plugin"
-    environment["PYTEST_ADDOPTS"] = ""
+    environment["PYTEST_ADDOPTS"] = "-p ma_certifier_failure_plugin"
     base_head = environment["MA_JAA04_INPLACE_BASE_HEAD"]
     result, receipt_directory = certify_in_place(
         tmp_path,
