@@ -58,6 +58,10 @@ _NAMED_TEST_ROOT = (
     "/srv/artvault/control/operator-glm/programme/canary/"
     "market-aligner-linux-verification"
 )
+_CANON_ROOT = "/srv/artvault/projects/market-aligner"
+_LOCAL_SYNTHETIC_REPOSITORY_ROOTS = frozenset(
+    {_NAMED_TEST_ROOT, _CANON_ROOT}
+)
 REVIEW_TEXT_PROJECTION_ID = "market-aligner.review-text-projection.utf8-nfc-lf.v1"
 REVIEW_TEXT_PROJECTION_SCHEMA = "market-aligner.review-text-projection.v1"
 MAX_REVIEW_TEXT_BYTES = 500_000
@@ -476,8 +480,10 @@ class LocalSyntheticReviewContext:
             or self.observed_page_url != LOCAL_SYNTHETIC_REVIEW_URL
         ):
             raise ValueError("local synthetic review requires the exact fixture URL")
-        if self.repository_root != _NAMED_TEST_ROOT:
-            raise ValueError("local synthetic review requires the exact named test root")
+        if self.repository_root not in _LOCAL_SYNTHETIC_REPOSITORY_ROOTS:
+            raise ValueError(
+                "local synthetic review requires the exact registered canon or test root"
+            )
 
     def document(self) -> dict[str, object]:
         return {
@@ -497,7 +503,7 @@ class LocalSyntheticReviewContext:
         return content_hash(self.document())
 
 
-def _actual_named_test_root(repository_root: Path) -> str:
+def _actual_local_synthetic_root(repository_root: Path) -> str:
     root = Path(repository_root)
     if not root.is_absolute() or root.is_symlink() or not root.is_dir():
         raise ValueError("diagnostic repository root must be an existing absolute directory")
@@ -515,8 +521,10 @@ def _actual_named_test_root(repository_root: Path) -> str:
         actual_root = str(Path(completed.stdout.removesuffix("\n")).resolve(strict=True))
     except OSError as exc:
         raise ValueError("diagnostic repository root could not be resolved") from exc
-    if actual_root != _NAMED_TEST_ROOT:
-        raise ValueError("diagnostic repository root is not the exact named test path")
+    if actual_root not in _LOCAL_SYNTHETIC_REPOSITORY_ROOTS:
+        raise ValueError(
+            "diagnostic repository root is not an exact registered canon or test path"
+        )
     return actual_root
 
 
@@ -537,7 +545,7 @@ def build_local_synthetic_review_context(
         application_source_identity=package.application_source_identity,
         source_url=source_url,
         observed_page_url=observed_page_url,
-        repository_root=_actual_named_test_root(repository_root),
+        repository_root=_actual_local_synthetic_root(repository_root),
     )
     verify_local_synthetic_review_context(
         context,
@@ -563,7 +571,7 @@ def verify_local_synthetic_review_context(
     if type(context) is not LocalSyntheticReviewContext:
         raise TypeError("diagnostic review requires the exact context type")
     LocalSyntheticReviewContext.__post_init__(context)
-    if context.repository_root != _actual_named_test_root(repository_root):
+    if context.repository_root != _actual_local_synthetic_root(repository_root):
         raise ValueError("diagnostic repository root differs from the context")
     if actual_source_url != context.source_url:
         raise ValueError("diagnostic source URL differs from the context")

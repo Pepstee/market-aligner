@@ -448,6 +448,28 @@ def test_local_diagnostic_receipt_is_context_bound_and_rejected_by_default(
         )
 
 
+def test_local_synthetic_review_context_accepts_registered_canon_root() -> None:
+    fixture_sha256 = "c" * 64
+    candidate = replace(
+        package(),
+        intended_vacancy=replace(
+            package().intended_vacancy,
+            job_key=review_module.LOCAL_SYNTHETIC_JOB_KEY_PREFIX
+            + fixture_sha256[:16],
+        ),
+    )
+    source_url = review_module.LOCAL_SYNTHETIC_REVIEW_URL
+    context = review_module.build_local_synthetic_review_context(
+        fixture_sha256=fixture_sha256,
+        package=candidate,
+        source_url=source_url,
+        observed_page_url=source_url,
+        repository_root=Path(review_module._CANON_ROOT) / "internal" / "jaa",
+    )
+
+    assert context.repository_root == review_module._CANON_ROOT
+
+
 @pytest.mark.parametrize(
     "mismatch",
     ("source_url", "observed_page_url", "repository_root", "package"),
