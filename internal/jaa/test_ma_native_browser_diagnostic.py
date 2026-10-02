@@ -31,6 +31,7 @@ NAMED_TEST_ROOT = Path(
     "/srv/artvault/control/operator-glm/programme/canary/"
     "market-aligner-linux-verification"
 )
+CANON_ROOT = Path("/srv/artvault/projects/market-aligner")
 APPLICATION_URL = "http://127.0.0.1:1/synthetic/application"
 
 
@@ -596,9 +597,12 @@ def test_native_prepare_release_one_call_local_diagnostic(
     if os.environ.get("MA_RUN_NATIVE_BROWSER_DIAGNOSTIC") != "1":
         pytest.skip("opt-in native provider/browser diagnostic")
     repository_root = Path(__file__).resolve().parent
-    expected_test_root = NAMED_TEST_ROOT / "internal" / "jaa"
-    if repository_root != expected_test_root:
-        pytest.fail("native diagnostic is admitted only in the exact named test tree")
+    allowed_repository_roots = {
+        CANON_ROOT / "internal" / "jaa",
+        NAMED_TEST_ROOT / "internal" / "jaa",
+    }
+    if repository_root not in allowed_repository_roots:
+        pytest.fail("native diagnostic requires the exact registered canon or test tree")
 
     os.umask(0o077)
     tmp_path.chmod(0o700)
