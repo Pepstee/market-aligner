@@ -296,16 +296,10 @@ def test_production_worker_consumes_real_database_queue_and_fails_closed_for_ret
 def test_jaa04_command_is_declared_and_refuses_missing_external_authority(tmp_path: Path) -> None:
     declaration = (ROOT / "acceptance").read_text(encoding="utf-8")
     assert "scripts/run_acceptance_declaration.py" in declaration
-    repository = tmp_path / "certification-repository"
-    copied = subprocess.run(("git", "clone", "--no-local", "--single-branch", "--depth", "1",
-                             str(REPOSITORY_ROOT), str(repository)), text=True,
-                            capture_output=True, check=False)
-    assert copied.returncode == 0, copied.stderr
-    clone = repository / "internal" / "jaa"
     receipt = tmp_path / "receipt"
     completed = subprocess.run(
         (sys.executable, "scripts/accept_jaa_04.py", "--receipt", str(receipt)),
-        cwd=clone,
+        cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,

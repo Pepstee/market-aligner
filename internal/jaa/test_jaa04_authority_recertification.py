@@ -271,20 +271,12 @@ def test_operator_gate_declares_zero_skip_authority_suite() -> None:
 
 
 def test_recertification_refuses_receipt_for_invalid_authority_corpus(tmp_path: Path) -> None:
-    repository = tmp_path / "clone"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", "--single-branch", "--depth", "1",
-         str(REPOSITORY_ROOT), str(repository)),
-        text=True,
-        capture_output=True,
-    )
-    assert copied.returncode == 0, copied.stderr
-    clone = repository / "internal" / "jaa"
+    receipt = tmp_path / "receipt"
     result = subprocess.run(
-        (sys.executable, "scripts/accept_jaa_04.py"),
-        cwd=clone,
+        (sys.executable, "scripts/accept_jaa_04.py", "--receipt", str(receipt)),
+        cwd=ROOT,
         text=True,
         capture_output=True,
     )
     assert result.returncode != 0
-    assert not list((clone / "runtime_evidence/jaa04").glob("*.json"))
+    assert not receipt.exists()

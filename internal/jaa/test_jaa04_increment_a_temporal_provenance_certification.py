@@ -126,21 +126,10 @@ def test_real_passing_certification_runtime_emits_content_addressed_revision_bou
     tmp_path: Path,
 ) -> None:
     """Only the public runtime command is allowed to mint the certification receipt."""
-    repository = tmp_path / "clean-certification-source"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", "--single-branch", "--depth", "1",
-         str(REPOSITORY_ROOT), str(repository)),
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-    assert copied.returncode == 0, copied.stderr
-    clone = repository / "internal" / "jaa"
     destination = tmp_path / "receipt"
     completed = subprocess.run(
         (sys.executable, "scripts/certify_jaa04_increment_a.py", "--receipt", str(destination)),
-        cwd=clone, text=True, capture_output=True, check=False, timeout=180,
+        cwd=ROOT, text=True, capture_output=True, check=False, timeout=180,
     )
     assert completed.returncode == 0, completed.stderr
     receipts = list(destination.glob("sha256-*.json"))

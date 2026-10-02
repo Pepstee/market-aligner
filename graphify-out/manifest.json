@@ -2484,9 +2484,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_authority_recertification.py": {
-    "mtime": 1790813080.510735,
-    "seen": 1790813292.1261132,
-    "ast_hash": "8ef3cbf50a193413381b89de7326254b",
+    "mtime": 1790926113.6230803,
+    "seen": 1790926328.7710733,
+    "ast_hash": "3ae4fd7df0cbee175a574f9d6002134d",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_evidence_authority_contract.py": {
@@ -2526,15 +2526,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_temporal_provenance_certification.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.5201714,
-    "ast_hash": "a9091fedd1bb87e22646588db0088d09",
+    "mtime": 1790926113.6550803,
+    "seen": 1790926328.7710795,
+    "ast_hash": "970a77180e27deabf1c7cb32a5dab846",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_independent_acceptance.py": {
-    "mtime": 1788246507.3149762,
-    "seen": 1790775868.5201724,
-    "ast_hash": "df868dece809a7b519bc4d748e37e50f",
+    "mtime": 1790926113.5870802,
+    "seen": 1790926328.7710805,
+    "ast_hash": "5910795849d3a8c72b6bb1e6726cf34d",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_official_cohort_config.py": {
@@ -2574,9 +2574,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_runtime_recertification.py": {
-    "mtime": 1788246507.3149762,
-    "seen": 1790775868.520178,
-    "ast_hash": "6596eb1de9457be7c92c5604ef5c5b2c",
+    "mtime": 1790926113.5550802,
+    "seen": 1790926328.7710865,
+    "ast_hash": "46815dc1abb2d93095feca7e5d382d53",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_seed_cohort.py": {
@@ -3258,9 +3258,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_provider_observation_authority.py": {
-    "mtime": 1788246507.327775,
-    "seen": 1790775868.5202925,
-    "ast_hash": "fc40c3dc7dcd7b6cb021c3a1e1b06c03",
+    "mtime": 1790925828.9990892,
+    "seen": 1790926328.771186,
+    "ast_hash": "ccd68402c90485062b5532455ca529fb",
     "semantic_hash": ""
   },
   "internal/jaa/test_provider_observation_capture.py": {
