@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -15,6 +16,11 @@ from career_automation.ats_application_authority import (
     compile_ats_answer_entries,
     is_ats_omitted_value_empty,
     verify_ats_application_authority,
+)
+from career_automation.application_sanity_review import (
+    LOCAL_SYNTHETIC_JOB_KEY_PREFIX,
+    LOCAL_SYNTHETIC_REVIEW_URL,
+    LocalSyntheticReviewContext,
 )
 from test_application_quality import _quality_input, _quality_source
 
@@ -84,10 +90,23 @@ def _plans(*, observed_name=None, correction_reason=None):
     )
 
 
-def _build(tmp_path, *, inventory=None, plans=None):
-    quality_input = _quality_input(tmp_path, _quality_source())
+def _build(
+    tmp_path,
+    *,
+    inventory=None,
+    plans=None,
+    source=None,
+    local_synthetic_context=None,
+):
+    quality_input = _quality_input(tmp_path, source or _quality_source())
     plan_rows = tuple(plans or _plans())
     base_inventory = inventory or _inventory()
+    if local_synthetic_context is not None and inventory is None:
+        base_inventory = replace(
+            base_inventory,
+            application_url=local_synthetic_context.source_url,
+            local_synthetic_context=local_synthetic_context,
+        )
     observed_by_id = {row.field_id: row.observed_value for row in plan_rows}
     observed_inventory = replace(
         base_inventory,
@@ -126,8 +145,20 @@ def _build(tmp_path, *, inventory=None, plans=None):
             ),
         ),
         plans=plan_rows,
+        local_synthetic_context=local_synthetic_context,
     )
     return quality_input, authority
+
+
+def _local_context(source, fixture_sha256="a" * 64):
+    return LocalSyntheticReviewContext(
+        fixture_sha256=fixture_sha256,
+        job_key=LOCAL_SYNTHETIC_JOB_KEY_PREFIX + fixture_sha256[:16],
+        application_source_identity=source.source_id,
+        source_url=LOCAL_SYNTHETIC_REVIEW_URL,
+        observed_page_url=LOCAL_SYNTHETIC_REVIEW_URL,
+        repository_root="/srv/artvault/projects/market-aligner",
+    )
 
 
 def test_closed_inventory_and_answers_rebuild_from_exact_application(tmp_path) -> None:
@@ -170,6 +201,131 @@ def test_provider_parser_correction_is_exact_and_reason_bound(tmp_path) -> None:
     assert entry.correction_reason == "resume_parser_drift"
 
 
+def test_local_synthetic_context_is_bound_and_required_for_both_inventories(
+    tmp_path,
+) -> None:
+    fixture_sha256 = "a" * 64
+    source = _quality_source(
+        job_key=LOCAL_SYNTHETIC_JOB_KEY_PREFIX + fixture_sha256[:16]
+    )
+    context = _local_context(source, fixture_sha256)
+    quality_input, authority = _build(
+        tmp_path,
+        source=source,
+        local_synthetic_context=context,
+    )
+
+    inventory_pair = json.loads(authority.inventory_bytes)
+    assert inventory_pair["observed"]["local_synthetic_context"] == context.document()
+    assert inventory_pair["reviewed"]["local_synthetic_context"] == context.document()
+    assert authority.inventory.application_url == LOCAL_SYNTHETIC_REVIEW_URL
+    assert authority.reviewed_inventory.application_url == LOCAL_SYNTHETIC_REVIEW_URL
+    assert verify_ats_application_authority(
+        authority,
+        candidate_authority_sha256=quality_input.candidate_authority_sha256,
+        source=quality_input.source,
+        artifacts=quality_input.artifacts,
+        publication_receipt=quality_input.publication_receipt,
+        local_synthetic_context=context,
+    ) is authority
+
+    with pytest.raises(ValueError, match="explicit matching local context"):
+        verify_ats_application_authority(
+            authority,
+            candidate_authority_sha256=quality_input.candidate_authority_sha256,
+            source=quality_input.source,
+            artifacts=quality_input.artifacts,
+            publication_receipt=quality_input.publication_receipt,
+        )
+
+    other_context = _local_context(source, "b" * 64)
+    with pytest.raises(ValueError, match="differs from the explicit local synthetic context"):
+        verify_ats_application_authority(
+            authority,
+            candidate_authority_sha256=quality_input.candidate_authority_sha256,
+            source=quality_input.source,
+            artifacts=quality_input.artifacts,
+            publication_receipt=quality_input.publication_receipt,
+            local_synthetic_context=other_context,
+        )
+
+    plans = tuple(
+        AtsFieldPlan(
+            row.field_id,
+            row.action,
+            row.source_reference,
+            row.observed_value,
+            row.correction_reason,
+        )
+        for row in authority.answers
+    )
+    mismatched_reviewed_inventory = replace(
+        authority.reviewed_inventory,
+        local_synthetic_context=other_context,
+    )
+    with pytest.raises(ValueError, match="differs from the explicit local synthetic context"):
+        build_ats_application_authority(
+            reviewed_at=quality_input.reviewed_at,
+            candidate_authority_sha256=quality_input.candidate_authority_sha256,
+            source=quality_input.source,
+            artifacts=quality_input.artifacts,
+            publication_receipt=quality_input.publication_receipt,
+            inventory=authority.inventory,
+            reviewed_inventory=mismatched_reviewed_inventory,
+            plans=plans,
+            local_synthetic_context=context,
+        )
+
+
+@pytest.mark.parametrize("identity_mismatch", ["source", "job"])
+def test_local_synthetic_inventory_rejects_source_or_job_mismatch(
+    tmp_path, identity_mismatch
+) -> None:
+    fixture_sha256 = "a" * 64
+    source = _quality_source(
+        job_key=LOCAL_SYNTHETIC_JOB_KEY_PREFIX + fixture_sha256[:16]
+    )
+    context = _local_context(source, fixture_sha256)
+    quality_input, authority = _build(
+        tmp_path,
+        source=source,
+        local_synthetic_context=context,
+    )
+    wrong_context = (
+        replace(context, application_source_identity="f" * 64)
+        if identity_mismatch == "source"
+        else _local_context(source, "b" * 64)
+    )
+    observed = replace(
+        authority.inventory,
+        local_synthetic_context=wrong_context,
+    )
+    reviewed = replace(
+        authority.reviewed_inventory,
+        local_synthetic_context=wrong_context,
+    )
+    plans = tuple(
+        AtsFieldPlan(
+            row.field_id,
+            row.action,
+            row.source_reference,
+            row.observed_value,
+            row.correction_reason,
+        )
+        for row in authority.answers
+    )
+    with pytest.raises(ValueError, match="source or job identity"):
+        build_ats_application_authority(
+            reviewed_at=quality_input.reviewed_at,
+            candidate_authority_sha256=quality_input.candidate_authority_sha256,
+            source=quality_input.source,
+            artifacts=quality_input.artifacts,
+            publication_receipt=quality_input.publication_receipt,
+            inventory=observed,
+            reviewed_inventory=reviewed,
+            plans=plans,
+            local_synthetic_context=wrong_context,
+        )
 @pytest.mark.parametrize(
     "plans,match",
     (

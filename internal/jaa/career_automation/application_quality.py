@@ -959,6 +959,7 @@ def build_deterministic_preflight_quality_review(
             source=source,
             artifacts=artifacts,
             publication_receipt=quality_input.publication_receipt,
+            local_synthetic_context=local_synthetic_context,
         )
         if field_answers != authority.answer_bytes:
             raise ValueError("captured field answers differ from exact ATS authority")

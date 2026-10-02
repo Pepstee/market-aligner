@@ -1758,6 +1758,7 @@ class GutuaGreenhouseSession:
             screenshot_sha256=hashlib.sha256(
                 page.screenshot(full_page=True)
             ).hexdigest(),
+            local_synthetic_context=local_synthetic_context,
         )
         (
             attached_roles,
@@ -1793,6 +1794,7 @@ class GutuaGreenhouseSession:
                 page.screenshot(full_page=True)
             ).hexdigest(),
             uploaded_sha256_by_field=uploaded_sha256_by_field,
+            local_synthetic_context=local_synthetic_context,
         )
         plans = compile_greenhouse_ats_plans(
             observed_inventory,
@@ -1812,6 +1814,7 @@ class GutuaGreenhouseSession:
             inventory=observed_inventory,
             reviewed_inventory=reviewed_inventory,
             plans=plans,
+            local_synthetic_context=local_synthetic_context,
         )
         quality_input = ApplicationQualityInput(
             reviewed_at=max(reviewed_at, reviewed_inventory.captured_at),

@@ -36,7 +36,10 @@ from .ats_application_authority import (
     AtsFormInventory,
     AtsObservedField,
 )
-from .application_sanity_review import verify_sanity_review_receipt
+from .application_sanity_review import (
+    LocalSyntheticReviewContext,
+    verify_sanity_review_receipt,
+)
 from .browser_executor import (
     FinalClickRevalidationError,
     GreenhouseSuccessEvidence,
@@ -344,6 +347,7 @@ def greenhouse_ats_inventory_from_capture(
     page_snapshot_sha256: str,
     screenshot_sha256: str,
     uploaded_sha256_by_field: Mapping[str, str] | None = None,
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
 ) -> AtsFormInventory:
     """Convert the existing Greenhouse capture into the closed ATS contract."""
     try:
@@ -489,6 +493,7 @@ def greenhouse_ats_inventory_from_capture(
             page_snapshot_sha256=page_snapshot_sha256,
             screenshot_sha256s=(screenshot_sha256,),
             fields=tuple(observed),
+            local_synthetic_context=local_synthetic_context,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ProductionATSBoundaryError(

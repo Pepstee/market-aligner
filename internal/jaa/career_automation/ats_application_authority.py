@@ -20,6 +20,7 @@ from .application_artifacts import (
 )
 from .application_compiler import ApplicationSource, verify_application_source
 from .evidence_matching import canonical_json, content_hash
+from .application_sanity_review import LocalSyntheticReviewContext
 from .rendering import ApplicationArtifacts, verify_application_artifacts
 
 
@@ -296,6 +297,9 @@ class AtsFormInventory:
     screenshot_sha256s: tuple[str, ...]
     fields: tuple[AtsObservedField, ...]
     schema_version: str = "jaa.ats-form-inventory.v1"
+    local_synthetic_context: LocalSyntheticReviewContext | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "screenshot_sha256s", tuple(self.screenshot_sha256s))
@@ -308,7 +312,18 @@ class AtsFormInventory:
             or self.provider not in _PROVIDERS
         ):
             raise ValueError("ATS provider must be a stable lowercase identifier")
-        _exact_url(self.application_url)
+        if self.local_synthetic_context is None:
+            _exact_url(self.application_url)
+        else:
+            if type(self.local_synthetic_context) is not LocalSyntheticReviewContext:
+                raise TypeError("ATS diagnostic inventory requires the exact local context")
+            LocalSyntheticReviewContext.__post_init__(self.local_synthetic_context)
+            if (
+                self.application_url != self.local_synthetic_context.source_url
+                or self.application_url
+                != self.local_synthetic_context.observed_page_url
+            ):
+                raise ValueError("local synthetic ATS inventory URL differs from its context")
         _require_time(self.captured_at, "inventory capture time")
         _require_sha256(self.page_snapshot_sha256, "page snapshot hash")
         if (
@@ -327,7 +342,7 @@ class AtsFormInventory:
             raise ValueError("ATS inventory field IDs must be unique")
 
     def document(self) -> dict[str, object]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "provider": self.provider,
             "application_url": self.application_url,
@@ -336,6 +351,9 @@ class AtsFormInventory:
             "screenshot_sha256s": list(self.screenshot_sha256s),
             "fields": [row.document() for row in self.fields],
         }
+        if self.local_synthetic_context is not None:
+            result["local_synthetic_context"] = self.local_synthetic_context.document()
+        return result
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -435,6 +453,9 @@ class AtsApplicationAuthority:
     authority_sha256: str
     schema_version: str = "jaa.ats-application-authority.v1"
     external_action_capability: bool = False
+    local_synthetic_context: LocalSyntheticReviewContext | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "answers", tuple(self.answers))
@@ -457,6 +478,18 @@ class AtsApplicationAuthority:
             raise TypeError("ATS authority requires the exact inventory type")
         if type(self.reviewed_inventory) is not AtsFormInventory:
             raise TypeError("ATS authority requires the exact reviewed inventory type")
+        _verify_inventory_context_binding(
+            self.inventory,
+            self.local_synthetic_context,
+            application_source_sha256=self.application_source_sha256,
+            job_key=self.job_key,
+        )
+        _verify_inventory_context_binding(
+            self.reviewed_inventory,
+            self.local_synthetic_context,
+            application_source_sha256=self.application_source_sha256,
+            job_key=self.job_key,
+        )
         if not _inventories_share_shape(self.inventory, self.reviewed_inventory):
             raise ValueError("reviewed ATS inventory differs from the observed form shape")
         if self.reviewed_at < self.reviewed_inventory.captured_at:
@@ -528,6 +561,10 @@ class AtsApplicationAuthority:
             "policy_sha256": self.policy_sha256,
             "external_action_capability": False,
         }
+        if self.local_synthetic_context is not None:
+            result["local_synthetic_context_sha256"] = (
+                self.local_synthetic_context.context_sha256
+            )
         if include_hash:
             result["authority_sha256"] = self.authority_sha256
         return result
@@ -563,9 +600,43 @@ def _inventories_share_shape(
     return (
         reviewed.provider == observed.provider
         and reviewed.application_url == observed.application_url
+        and reviewed.local_synthetic_context == observed.local_synthetic_context
         and reviewed.shape_sha256 == observed.shape_sha256
         and reviewed.captured_at >= observed.captured_at
     )
+
+
+def _verify_inventory_context_binding(
+    inventory: AtsFormInventory,
+    local_synthetic_context: LocalSyntheticReviewContext | None,
+    *,
+    application_source_sha256: str,
+    job_key: str,
+) -> None:
+    if type(inventory) is not AtsFormInventory:
+        raise TypeError("ATS authority requires the exact inventory type")
+    if local_synthetic_context is None:
+        if inventory.local_synthetic_context is not None:
+            raise ValueError(
+                "contextual ATS inventory requires an explicit matching local context"
+            )
+        return
+    if type(local_synthetic_context) is not LocalSyntheticReviewContext:
+        raise TypeError("ATS authority requires the exact local synthetic context")
+    LocalSyntheticReviewContext.__post_init__(local_synthetic_context)
+    if inventory.local_synthetic_context != local_synthetic_context:
+        raise ValueError("ATS inventory differs from the explicit local synthetic context")
+    if (
+        local_synthetic_context.application_source_identity
+        != application_source_sha256
+        or local_synthetic_context.job_key != job_key
+    ):
+        raise ValueError("local synthetic ATS context differs from source or job identity")
+    if (
+        inventory.application_url != local_synthetic_context.source_url
+        or inventory.application_url != local_synthetic_context.observed_page_url
+    ):
+        raise ValueError("local synthetic ATS inventory URL differs from its context")
 
 
 def is_ats_omitted_value_empty(
@@ -755,6 +826,7 @@ def compile_ats_answer_entries(
     plans: Iterable[AtsFieldPlan],
     source: ApplicationSource,
     artifacts: ApplicationArtifacts,
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
 ) -> tuple[AtsAnswerEntry, ...]:
     """Pure exact answer-compilation seam between observation and action.
 
@@ -771,6 +843,12 @@ def compile_ats_answer_entries(
         raise TypeError("ATS answers require the exact artifact set type")
     verify_application_source(source)
     verify_application_artifacts(artifacts)
+    _verify_inventory_context_binding(
+        inventory,
+        local_synthetic_context,
+        application_source_sha256=source.source_id,
+        job_key=source.job_key,
+    )
     return _build_entries(inventory, plans, source, artifacts)
 
 
@@ -784,6 +862,7 @@ def build_ats_application_authority(
     inventory: AtsFormInventory,
     reviewed_inventory: AtsFormInventory,
     plans: Iterable[AtsFieldPlan],
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
 ) -> AtsApplicationAuthority:
     """Build a closed, non-release ATS authority from exact application objects."""
     _require_time(reviewed_at, "ATS authority review time")
@@ -793,9 +872,16 @@ def build_ats_application_authority(
         plans=plans,
         source=source,
         artifacts=artifacts,
+        local_synthetic_context=local_synthetic_context,
     )
     if type(reviewed_inventory) is not AtsFormInventory:
         raise TypeError("ATS authority requires the exact reviewed inventory type")
+    _verify_inventory_context_binding(
+        reviewed_inventory,
+        local_synthetic_context,
+        application_source_sha256=source.source_id,
+        job_key=source.job_key,
+    )
     if not _inventories_share_shape(inventory, reviewed_inventory):
         raise ValueError("reviewed ATS inventory differs from the observed form shape")
     if reviewed_at < reviewed_inventory.captured_at:
@@ -815,6 +901,7 @@ def build_ats_application_authority(
         "cv_pdf_sha256": artifacts.cv_pdf.pdf_sha256,
         "cover_letter_pdf_sha256": artifacts.cover_letter_pdf.pdf_sha256,
         "policy_sha256": ATS_AUTHORITY_POLICY_SHA256,
+        "local_synthetic_context": local_synthetic_context,
     }
     answer_document = {
         "schema_version": "jaa.ats-field-answers.v1",
@@ -851,6 +938,10 @@ def build_ats_application_authority(
         "policy_sha256": ATS_AUTHORITY_POLICY_SHA256,
         "external_action_capability": False,
     }
+    if local_synthetic_context is not None:
+        document["local_synthetic_context_sha256"] = (
+            local_synthetic_context.context_sha256
+        )
     return AtsApplicationAuthority(
         **values,
         authority_sha256=content_hash(document),
@@ -864,6 +955,7 @@ def verify_ats_application_authority(
     source: ApplicationSource,
     artifacts: ApplicationArtifacts,
     publication_receipt: PublishedArtifactReceipt,
+    local_synthetic_context: LocalSyntheticReviewContext | None = None,
 ) -> AtsApplicationAuthority:
     """Rebuild an exact authority so forged or substituted objects fail closed."""
     if type(authority) is not AtsApplicationAuthority:
@@ -887,6 +979,7 @@ def verify_ats_application_authority(
         inventory=authority.inventory,
         reviewed_inventory=authority.reviewed_inventory,
         plans=plans,
+        local_synthetic_context=local_synthetic_context,
     )
     if authority != expected:
         raise ValueError("ATS application authority differs from exact application evidence")

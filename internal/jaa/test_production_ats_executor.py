@@ -24,6 +24,11 @@ from career_automation.application_archive import (
     VacancyArchiveIdentity,
     selected_archive_object_bytes,
 )
+from career_automation.application_sanity_review import (
+    LOCAL_SYNTHETIC_JOB_KEY_PREFIX,
+    LOCAL_SYNTHETIC_REVIEW_URL,
+    LocalSyntheticReviewContext,
+)
 from career_automation.browser_executor import (
     GreenhouseSuccessEvidence,
     ReleaseExecutionAuthority,
@@ -1536,6 +1541,57 @@ def test_greenhouse_capture_compiles_closed_exact_ats_inventory_and_plans() -> N
         ("upload", "artifact.cv"),
         ("fill", "consent.true"),
     ]
+
+
+def test_http_capture_inventory_requires_exact_local_synthetic_context() -> None:
+    fixture_sha256 = "a" * 64
+    context = LocalSyntheticReviewContext(
+        fixture_sha256=fixture_sha256,
+        job_key=LOCAL_SYNTHETIC_JOB_KEY_PREFIX + fixture_sha256[:16],
+        application_source_identity="c" * 64,
+        source_url=LOCAL_SYNTHETIC_REVIEW_URL,
+        observed_page_url=LOCAL_SYNTHETIC_REVIEW_URL,
+        repository_root=str(ROOT.parent.parent.resolve()),
+    )
+    capture = {
+        "form_state": {
+            "url": LOCAL_SYNTHETIC_REVIEW_URL,
+            "fields": [
+                {
+                    "id": "full_name",
+                    "tag": "input",
+                    "type": "text",
+                    "labels": ["Full name"],
+                    "required": True,
+                    "visible": True,
+                    "value": "",
+                }
+            ],
+        },
+        "select_inventories": [],
+    }
+    capture_bytes = (json.dumps(capture, sort_keys=True) + "\n").encode()
+    arguments = {
+        "captured_at": "2026-10-02T12:00:00Z",
+        "page_snapshot_sha256": "1" * 64,
+        "screenshot_sha256": "2" * 64,
+    }
+
+    with pytest.raises(
+        ProductionATSBoundaryError,
+        match="application URL must be an exact public HTTPS route",
+    ):
+        greenhouse_ats_inventory_from_capture(capture_bytes, **arguments)
+
+    inventory = greenhouse_ats_inventory_from_capture(
+        capture_bytes,
+        **arguments,
+        local_synthetic_context=context,
+    )
+    assert inventory.application_url == LOCAL_SYNTHETIC_REVIEW_URL
+    assert json.loads(inventory.canonical_bytes)["local_synthetic_context"] == (
+        context.document()
+    )
 
 
 def test_greenhouse_authority_rejects_nonofficial_or_mismatched_routes(
