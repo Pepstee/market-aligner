@@ -623,6 +623,28 @@ def test_sanity_finding_suggestion_is_required_but_nullable() -> None:
         llm_client_module.validate_json(result, review_module.RESULT_SCHEMA)
 
 
+def test_review_output_schema_declares_types_for_string_constants_and_enums() -> None:
+    schemas = (
+        review_module.RESULT_SCHEMA,
+        review_module._combined_result_schema(
+            ("resume-cover-letter", "humanizer")
+        ),
+    )
+
+    def assert_string_constraints_have_types(value: object) -> None:
+        if isinstance(value, dict):
+            if "const" in value or "enum" in value:
+                assert value.get("type") == "string"
+            for child in value.values():
+                assert_string_constraints_have_types(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_string_constraints_have_types(child)
+
+    for schema in schemas:
+        assert_string_constraints_have_types(schema)
+
+
 def test_combined_criterion_schema_rejects_decorated_undeclared_ids() -> None:
     schema = review_module._combined_result_schema(
         ("resume-cover-letter", "humanizer")

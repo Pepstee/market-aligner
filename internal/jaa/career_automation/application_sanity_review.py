@@ -142,8 +142,8 @@ RESULT_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
     "required": ["schema_version", "verdict", "findings"],
     "properties": {
-        "schema_version": {"const": RESULT_SCHEMA_VERSION},
-        "verdict": {"enum": ["pass", "block", "uncertain"]},
+        "schema_version": {"type": "string", "const": RESULT_SCHEMA_VERSION},
+        "verdict": {"type": "string", "enum": ["pass", "block", "uncertain"]},
         "findings": {
             "type": "array",
             "items": {
@@ -157,7 +157,7 @@ RESULT_SCHEMA: dict[str, object] = {
                     "suggestion",
                 ],
                 "properties": {
-                    "code": {"enum": list(FINDING_CODES)},
+                    "code": {"type": "string", "enum": list(FINDING_CODES)},
                     "severity": {"type": "string", "const": "material"},
                     "location": {"type": "string", "minLength": 1, "maxLength": 160},
                     "explanation": {"type": "string", "minLength": 1, "maxLength": 500},
@@ -915,7 +915,10 @@ def _combined_result_schema(criterion_ids: Sequence[str]) -> dict[str, object]:
         "additionalProperties": False,
         "required": ["schema_version", "sanity_review", "criteria_reviews"],
         "properties": {
-            "schema_version": {"const": COMBINED_RESULT_SCHEMA_VERSION},
+            "schema_version": {
+                "type": "string",
+                "const": COMBINED_RESULT_SCHEMA_VERSION,
+            },
             "sanity_review": RESULT_SCHEMA,
             "criteria_reviews": {
                 "type": "array",
@@ -927,9 +930,13 @@ def _combined_result_schema(criterion_ids: Sequence[str]) -> dict[str, object]:
                     "required": ["criterion_id", "decision", "findings"],
                     "properties": {
                         "criterion_id": {
+                            "type": "string",
                             "enum": list(criterion_ids),
                         },
-                        "decision": {"enum": ["pass", "block"]},
+                        "decision": {
+                            "type": "string",
+                            "enum": ["pass", "block"],
+                        },
                         "findings": {
                             "type": "array",
                             "maxItems": 32,
