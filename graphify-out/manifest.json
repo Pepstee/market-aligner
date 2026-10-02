@@ -102,8 +102,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/README.md": {
-    "mtime": 1790964228.964799,
-    "seen": 1790965460.4601085,
+    "mtime": 1790973236.525974,
+    "seen": 1790974102.9118097,
     "ast_hash": "45f42f20cdc97c40db4eb97d30baf983",
     "semantic_hash": ""
   },
@@ -1926,8 +1926,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/certify_jaa04_increment_a.py": {
-    "mtime": 1790971367.3343806,
-    "seen": 1790972804.9710605,
+    "mtime": 1790973254.4379945,
+    "seen": 1790974102.9114015,
     "ast_hash": "85be558982ba31f4c2af06beeab50d36",
     "semantic_hash": ""
   },
@@ -2436,9 +2436,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa03_historical_receipt.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.520159,
-    "ast_hash": "0c09d9a4b18bf26919dca19ba1cb9f77",
+    "mtime": 1790973951.9619818,
+    "seen": 1790974102.9115005,
+    "ast_hash": "cfec0340898df765bbed8e21e856972b",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa03_independent_acceptance.py": {
@@ -2448,9 +2448,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa03_receipt_tamper_controls.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.5201607,
-    "ast_hash": "b8ae1b20551fe8c1143608ca46747e0e",
+    "mtime": 1790973887.0539622,
+    "seen": 1790974102.9115026,
+    "ast_hash": "030d04235913d997b506b967a9b89492",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_acceptance_boundary.py": {
@@ -2496,8 +2496,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_authority_canaries.py": {
-    "mtime": 1790971381.194379,
-    "seen": 1790972804.9711702,
+    "mtime": 1790973268.2340064,
+    "seen": 1790974102.9115098,
     "ast_hash": "4624a315882844dd3412eb01e2084990",
     "semantic_hash": ""
   },
@@ -2508,9 +2508,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": {
-    "mtime": 1790972616.1299896,
-    "seen": 1790972804.971172,
-    "ast_hash": "d254cd0a84921449f572c112a6731e6f",
+    "mtime": 1790973951.9299817,
+    "seen": 1790974102.9115117,
+    "ast_hash": "e20d24106b0b30bccee30ccc6d16e43b",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_independent_regressions.py": {

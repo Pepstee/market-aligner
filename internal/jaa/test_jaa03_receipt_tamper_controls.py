@@ -7,10 +7,11 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
-from testing_repository import clone_jaa_repository
+import test_jaa04_increment_a_certifier_fail_closed as inplace_fixture
 
 
 ROOT = Path(__file__).resolve().parent
@@ -47,79 +48,123 @@ def _canonical(document: object) -> bytes:
 
 
 @pytest.fixture()
-def certified_repository(tmp_path: Path) -> Path:
-    clone = clone_jaa_repository(ROOT, tmp_path / "certified")
-    assert (
-        _git(
-            clone, "config", "user.name", "independent JAA-03 receipt tester"
-        ).returncode
-        == 0
-    )
-    assert (
-        _git(clone, "config", "user.email", "jaa03-tester@example.test").returncode == 0
-    )
-    return clone
+def certified_repository(
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[Path, inplace_fixture._FixtureBranch]]:
+    node_name = getattr(request.node, "originalname", request.node.name)
+    params = getattr(getattr(request.node, "callspec", None), "params", {})
+    attack = params.get("attack")
+    if node_name == "test_historical_receipt_acceptance_survives_a_later_source_revision":
+        case = "jaa03-later-readme"
+        allowed = {"internal/jaa/README.md"}
+        sequence = inplace_fixture.JAA03_README_COMMIT_SEQUENCE
+    elif node_name == "test_jaa03_rehashed_runtime_identity_substitution_fails_closed":
+        case = "jaa03-runtime-identity"
+        allowed = {inplace_fixture.JAA03_REHASHED_RECEIPT_COMMIT}
+        sequence = inplace_fixture.JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE
+    elif node_name == "test_jaa03_receipt_tampering_fails_closed" and attack == "byte_tamper":
+        case = "jaa03-byte-tamper"
+        allowed = {inplace_fixture.JAA03_INITIAL_RECEIPT_PATH}
+        sequence = None
+    elif node_name == "test_jaa03_receipt_tampering_fails_closed" and attack == "rehashed_result_tamper":
+        case = "jaa03-result-tamper"
+        allowed = {inplace_fixture.JAA03_REHASHED_RECEIPT_COMMIT}
+        sequence = inplace_fixture.JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE
+    else:
+        pytest.exit("JAA-03 tamper case is not admitted by the in-place fixture", returncode=2)
+    with inplace_fixture._committed_inplace_branch(
+        case,
+        allowed_mutations=allowed,
+        commit_sequence=sequence,
+    ) as state:
+        expected = Path(inplace_fixture.JAA03_INITIAL_RECEIPT_PATH).relative_to(
+            "internal/jaa"
+        ).as_posix()
+        tracked = _git(ROOT, "ls-files", "runtime_evidence/jaa03/sha256-*.json")
+        assert tracked.returncode == 0
+        assert tracked.stdout.splitlines() == [expected]
+        yield ROOT, state
 
 
-def _replace_receipt(root: Path, document: dict[str, object]) -> Path:
+def _replace_receipt(
+    root: Path,
+    state: inplace_fixture._FixtureBranch,
+    document: dict[str, object],
+    case: str,
+) -> Path:
     evidence = root / "runtime_evidence" / "jaa03"
     originals = list(evidence.glob("sha256-*.json"))
     assert len(originals) == 1
     payload = _canonical(document)
     replacement = evidence / f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
-    originals[0].unlink()
-    replacement.write_bytes(payload)
-    assert _git(root, "add", "-A", "--", "runtime_evidence/jaa03").returncode == 0
-    assert _git(root, "commit", "-m", "tamper JAA-03 receipt").returncode == 0
+    inplace_fixture._commit_rehashed_receipt_replacement(
+        state,
+        replacement.relative_to(inplace_fixture.REPOSITORY_ROOT).as_posix(),
+        payload,
+        case,
+        old_path=inplace_fixture.JAA03_INITIAL_RECEIPT_PATH,
+        replacement_marker=inplace_fixture.JAA03_REHASHED_RECEIPT_COMMIT,
+        receipt_marker=inplace_fixture.JAA03_RECEIPT_MUTATION,
+    )
     return replacement
 
 
 def test_historical_receipt_acceptance_survives_a_later_source_revision(
-    certified_repository: Path,
+    certified_repository: tuple[Path, inplace_fixture._FixtureBranch],
 ) -> None:
-    accepted = _run(certified_repository)
+    repository_root, state = certified_repository
+    accepted = _run(repository_root)
     assert accepted.returncode == 0, accepted.stderr
-    readme = certified_repository / "README.md"
-    readme.write_bytes(readme.read_bytes() + b"\nindependent source-revision drift\n")
-    assert _git(certified_repository, "add", "README.md").returncode == 0
-    assert (
-        _git(certified_repository, "commit", "-m", "later source revision").returncode
-        == 0
+    readme = repository_root / "README.md"
+    source_path = readme.relative_to(inplace_fixture.REPOSITORY_ROOT).as_posix()
+    assert source_path == "internal/jaa/README.md"
+    changed = (readme.read_bytes() + b"\nindependent source-revision drift\n").decode("utf-8")
+    inplace_fixture._commit_mutation(
+        state, source_path, changed, "later source revision"
     )
-    accepted = _run(certified_repository)
+    accepted = _run(repository_root)
     assert accepted.returncode == 0, accepted.stderr
 
 
 def test_jaa03_rehashed_runtime_identity_substitution_fails_closed(
-    certified_repository: Path,
+    certified_repository: tuple[Path, inplace_fixture._FixtureBranch],
 ) -> None:
+    repository_root, state = certified_repository
     receipt = next(
-        (certified_repository / "runtime_evidence" / "jaa03").glob("sha256-*.json")
+        (repository_root / "runtime_evidence" / "jaa03").glob("sha256-*.json")
     )
     document = json.loads(receipt.read_text(encoding="utf-8"))
     runtime = document["runtime"]
     assert isinstance(runtime, dict)
     runtime["python_version"] = "0.0.0-attacker"
-    _replace_receipt(certified_repository, document)
-    rejected = _run(certified_repository)
+    _replace_receipt(repository_root, state, document, "runtime identity substitution")
+    rejected = _run(repository_root)
     assert rejected.returncode != 0, rejected.stdout
 
 
 @pytest.mark.parametrize("attack", ["byte_tamper", "rehashed_result_tamper"])
 def test_jaa03_receipt_tampering_fails_closed(
-    certified_repository: Path,
+    certified_repository: tuple[Path, inplace_fixture._FixtureBranch],
     attack: str,
 ) -> None:
+    repository_root, state = certified_repository
     receipt = next(
-        (certified_repository / "runtime_evidence" / "jaa03").glob("sha256-*.json")
+        (repository_root / "runtime_evidence" / "jaa03").glob("sha256-*.json")
     )
     if attack == "byte_tamper":
-        receipt.write_bytes(receipt.read_bytes() + b" ")
+        receipt_path = receipt.relative_to(inplace_fixture.REPOSITORY_ROOT).as_posix()
+        original = receipt.read_bytes()
+        with inplace_fixture._temporarily_dirty_tracked_path_on_branch(
+            state, receipt_path, b" "
+        ) as tampered:
+            rejected = _run(repository_root)
+            assert tampered.read_bytes() == original + b" "
+        assert receipt.read_bytes() == original
     else:
         document = json.loads(receipt.read_text(encoding="utf-8"))
         result = document["acceptance_result"]
         assert isinstance(result, dict)
         result["metrics_hash"] = "sha256:" + "0" * 64
-        _replace_receipt(certified_repository, document)
-    rejected = _run(certified_repository)
+        _replace_receipt(repository_root, state, document, "rehashed result tampering")
+        rejected = _run(repository_root)
     assert rejected.returncode != 0, rejected.stdout

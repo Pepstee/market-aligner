@@ -43,9 +43,15 @@ CERTIFICATION_SURFACE_MUTATIONS = {
 JAA02_RECEIPT_MUTATION = "@jaa02-content-addressed-receipt"
 JAA02_TWO_RECEIPTS_MUTATION = "@jaa02-two-receipts"
 JAA02_REHASHED_RECEIPT_COMMIT = "@jaa02-rehashed-receipt-commit"
+JAA03_RECEIPT_MUTATION = "@jaa03-content-addressed-receipt"
+JAA03_REHASHED_RECEIPT_COMMIT = "@jaa03-rehashed-receipt-commit"
 JAA02_INITIAL_RECEIPT_PATH = (
     "internal/jaa/runtime_evidence/jaa02/"
     "sha256-8d49a1543093644703e95a78d424c971f55465111baece7a45f6e3c0a71805d2.json"
+)
+JAA03_INITIAL_RECEIPT_PATH = (
+    "internal/jaa/runtime_evidence/jaa03/"
+    "sha256-1dac4965ea4ef0b3861ed248b4c99c5aff215a6092ea5557bf13b2564f81c240.json"
 )
 JAA02_CONFLICT_RECEIPT_PATH = (
     "internal/jaa/runtime_evidence/jaa02/sha256-"
@@ -88,6 +94,10 @@ JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE = (
 JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE = (
     (JAA02_REHASHED_RECEIPT_COMMIT, "replaced"),
 )
+JAA03_README_COMMIT_SEQUENCE = (("internal/jaa/README.md", "modified"),)
+JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE = (
+    (JAA03_REHASHED_RECEIPT_COMMIT, "replaced"),
+)
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/README.md",
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
@@ -99,6 +109,9 @@ PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     JAA02_RECEIPT_MUTATION,
     JAA02_TWO_RECEIPTS_MUTATION,
     JAA02_REHASHED_RECEIPT_COMMIT,
+    JAA03_INITIAL_RECEIPT_PATH,
+    JAA03_RECEIPT_MUTATION,
+    JAA03_REHASHED_RECEIPT_COMMIT,
     JAA02_COMMAND_FAILURE_PATH,
     JAA02_WRONG_TOTALS_PATH,
     JAA02_HISTORICAL_SOURCE_PATH,
@@ -376,6 +389,8 @@ def _committed_inplace_branch(
                 JAA02_HISTORICAL_COMMIT_SEQUENCE,
                 JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE,
                 JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE,
+                JAA03_README_COMMIT_SEQUENCE,
+                JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE,
             )
             if (
                 commit_sequence not in permitted_sequences
@@ -566,14 +581,26 @@ def _is_jaa02_receipt_path(path: str) -> bool:
     ) is not None
 
 
+def _is_jaa03_receipt_path(path: str) -> bool:
+    return re.fullmatch(
+        r"internal/jaa/runtime_evidence/jaa03/sha256-[0-9a-f]{64}\.json",
+        path,
+    ) is not None
+
+
 def _mutation_path_matches(expected: str, actual: str) -> bool:
     return actual == expected or (
         expected == JAA02_RECEIPT_MUTATION and _is_jaa02_receipt_path(actual)
+    ) or (
+        expected == JAA03_RECEIPT_MUTATION and _is_jaa03_receipt_path(actual)
     ) or (
         expected == JAA02_TWO_RECEIPTS_MUTATION and actual in JAA02_MULTIPLE_RECEIPT_PATHS
     ) or (
         expected == JAA02_REHASHED_RECEIPT_COMMIT
         and (actual == JAA02_INITIAL_RECEIPT_PATH or _is_jaa02_receipt_path(actual))
+    ) or (
+        expected == JAA03_REHASHED_RECEIPT_COMMIT
+        and (actual == JAA03_INITIAL_RECEIPT_PATH or _is_jaa03_receipt_path(actual))
     )
 
 
@@ -597,6 +624,21 @@ def _fixture_commit_group_matches(
             and len(added) == 1
             and _is_jaa02_receipt_path(added[0].path)
             and added[0].path != JAA02_INITIAL_RECEIPT_PATH
+            and added[0].result_blob_sha256 is not None
+            and Path(added[0].path).name
+            == f"sha256-{added[0].result_blob_sha256}.json"
+        )
+    if expected_path == JAA03_REHASHED_RECEIPT_COMMIT:
+        deleted = [record for record in group if record.operation == "deleted"]
+        added = [record for record in group if record.operation == "added"]
+        return (
+            expected_operation == "replaced"
+            and len(group) == 2
+            and len(deleted) == 1
+            and deleted[0].path == JAA03_INITIAL_RECEIPT_PATH
+            and len(added) == 1
+            and _is_jaa03_receipt_path(added[0].path)
+            and added[0].path != JAA03_INITIAL_RECEIPT_PATH
             and added[0].result_blob_sha256 is not None
             and Path(added[0].path).name
             == f"sha256-{added[0].result_blob_sha256}.json"
@@ -939,23 +981,40 @@ def _commit_rehashed_receipt_replacement(
     new_path: str,
     content: bytes,
     case: str,
+    *,
+    old_path: str = JAA02_INITIAL_RECEIPT_PATH,
+    replacement_marker: str = JAA02_REHASHED_RECEIPT_COMMIT,
+    receipt_marker: str = JAA02_RECEIPT_MUTATION,
 ) -> None:
     if (
-        state.commit_sequence != JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE
-        or state.allowed_mutations != frozenset({JAA02_REHASHED_RECEIPT_COMMIT})
+        (old_path, replacement_marker, receipt_marker)
+        not in (
+            (
+                JAA02_INITIAL_RECEIPT_PATH,
+                JAA02_REHASHED_RECEIPT_COMMIT,
+                JAA02_RECEIPT_MUTATION,
+            ),
+            (
+                JAA03_INITIAL_RECEIPT_PATH,
+                JAA03_REHASHED_RECEIPT_COMMIT,
+                JAA03_RECEIPT_MUTATION,
+            ),
+        )
+        or state.commit_sequence != ((replacement_marker, "replaced"),)
+        or state.allowed_mutations != frozenset({replacement_marker})
         or len(state.commit_records) != 0
         or state.head != state.base_head
-        or not _is_jaa02_receipt_path(new_path)
-        or new_path == JAA02_INITIAL_RECEIPT_PATH
+        or not _mutation_path_matches(receipt_marker, new_path)
+        or new_path == old_path
         or Path(new_path).name != f"sha256-{hashlib.sha256(content).hexdigest()}.json"
     ):
         _abort_suite("rehashed-receipt replacement differs from its exact admitted history")
 
-    old_target = _safe_mutation_target(JAA02_INITIAL_RECEIPT_PATH)
+    old_target = _safe_mutation_target(old_path)
     new_target = _safe_mutation_target(new_path)
     _assert_admission(state.branch, state.head, False)
     parent_head = state.head
-    parent_blob_sha256 = _git_path_blob_sha256(parent_head, JAA02_INITIAL_RECEIPT_PATH)
+    parent_blob_sha256 = _git_path_blob_sha256(parent_head, old_path)
     original = old_target.read_bytes() if old_target.is_file() and not old_target.is_symlink() else b""
     if (
         _git("status", "--porcelain", "--untracked-files=all")
@@ -978,7 +1037,7 @@ def _commit_rehashed_receipt_replacement(
         or _git(
             "status", "--no-renames", "--porcelain", "--untracked-files=all"
         ).splitlines()
-        != [f" D {JAA02_INITIAL_RECEIPT_PATH}"]
+        != [f" D {old_path}"]
         or new_target.exists()
         or new_target.is_symlink()
     ):
@@ -1005,7 +1064,7 @@ def _commit_rehashed_receipt_replacement(
             os.close(descriptor)
 
     expected_unstaged = sorted(
-        (f" D {JAA02_INITIAL_RECEIPT_PATH}", f"?? {new_path}")
+        (f" D {old_path}", f"?? {new_path}")
     )
     if (
         sorted(
@@ -1027,13 +1086,13 @@ def _commit_rehashed_receipt_replacement(
     staged = _run(
         REPOSITORY_ROOT,
         "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
-        "add", "--", JAA02_INITIAL_RECEIPT_PATH, new_path,
+        "add", "--", old_path, new_path,
     )
     expected_staged = sorted(
-        (f"A  {new_path}", f"D  {JAA02_INITIAL_RECEIPT_PATH}")
+        (f"A  {new_path}", f"D  {old_path}")
     )
     expected_cached = sorted(
-        (f"A\t{new_path}", f"D\t{JAA02_INITIAL_RECEIPT_PATH}")
+        (f"A\t{new_path}", f"D\t{old_path}")
     )
     if (
         staged.returncode != 0
@@ -1050,10 +1109,10 @@ def _commit_rehashed_receipt_replacement(
         or sorted(
             _git("diff", "--no-renames", "--cached", "--name-only").splitlines()
         )
-        != sorted((JAA02_INITIAL_RECEIPT_PATH, new_path))
+        != sorted((old_path, new_path))
         or _git("diff", "--name-only")
         or _git_blob_sha256(f":{new_path}") != hashlib.sha256(content).hexdigest()
-        or _git("ls-files", "--stage", "--", JAA02_INITIAL_RECEIPT_PATH)
+        or _git("ls-files", "--stage", "--", old_path)
     ):
         _abort_suite("staged receipt replacement is not the exact delete/add pair")
 
@@ -1063,7 +1122,7 @@ def _commit_rehashed_receipt_replacement(
         "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
         "-c", "user.email=tester@example.invalid", "-c", "user.name=Independent tester",
         "commit", "--only", "-m", f"adversarial certification control: {case}",
-        "--", JAA02_INITIAL_RECEIPT_PATH, new_path,
+        "--", old_path, new_path,
     )
     if committed.returncode != 0:
         _abort_suite("receipt replacement commit failed; preserving staged work")
@@ -1075,7 +1134,7 @@ def _commit_rehashed_receipt_replacement(
             _FixtureCommit(
                 parent_head,
                 new_head,
-                JAA02_INITIAL_RECEIPT_PATH,
+                old_path,
                 "deleted",
                 parent_blob_sha256,
                 None,
@@ -1093,7 +1152,7 @@ def _commit_rehashed_receipt_replacement(
     state.head = new_head
     _assert_admission(state.branch, state.head, False)
     expected_diff = sorted(
-        (f"A\t{new_path}", f"D\t{JAA02_INITIAL_RECEIPT_PATH}")
+        (f"A\t{new_path}", f"D\t{old_path}")
     )
     if (
         _git("rev-parse", f"{new_head}^") != parent_head
@@ -1104,10 +1163,10 @@ def _commit_rehashed_receipt_replacement(
             ).splitlines()
         )
         != expected_diff
-        or _git_path_blob_sha256(parent_head, JAA02_INITIAL_RECEIPT_PATH)
+        or _git_path_blob_sha256(parent_head, old_path)
         != parent_blob_sha256
         or _git_path_blob_sha256(parent_head, new_path) is not None
-        or _git_path_blob_sha256(new_head, JAA02_INITIAL_RECEIPT_PATH) is not None
+        or _git_path_blob_sha256(new_head, old_path) is not None
         or _git_path_blob_sha256(new_head, new_path) != result_blob_sha256
         or _git("status", "--porcelain", "--untracked-files=all")
     ):
