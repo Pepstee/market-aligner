@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import fcntl
 import hashlib
 import json
@@ -43,7 +43,15 @@ CERTIFICATION_SURFACE_MUTATIONS = {
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
     "internal/jaa/test_jaa04_sidecar_temporal_semantics.py",
+    "internal/jaa/baseline_adoption/cli.py",
+    "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml",
 } | CERTIFICATION_SURFACE_MUTATIONS
+PUBLICATION_EVIDENCE_PATH = "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml"
+PUBLICATION_SOURCE_PATH = "internal/jaa/baseline_adoption/cli.py"
+PUBLICATION_COMMIT_SEQUENCE = (
+    (PUBLICATION_EVIDENCE_PATH, "modified"),
+    (PUBLICATION_SOURCE_PATH, "modified"),
+)
 SUITES = (
     "test_jaa04_increment_a_authority_canaries.py",
     "test_jaa04_increment_a_temporal_authority_regression.py",
@@ -211,6 +219,16 @@ def _assert_admission(expected_branch: str, expected_head: str, expected_dirty: 
 
 
 @dataclass
+class _FixtureCommit:
+    parent_head: str
+    head: str
+    path: str
+    operation: str
+    parent_blob_sha256: str | None
+    result_blob_sha256: str | None
+
+
+@dataclass
 class _FixtureBranch:
     base_branch: str
     base_head: str
@@ -218,10 +236,8 @@ class _FixtureBranch:
     run_id: str
     head: str
     allowed_mutations: frozenset[str]
-    changed_path: str | None = None
-    changed_kind: str | None = None
-    changed_sha256: str | None = None
-    base_blob_sha256: str | None = None
+    commit_sequence: tuple[tuple[str, str], ...] | None = None
+    commit_records: list[_FixtureCommit] = field(default_factory=list)
 
 
 @pytest.fixture(autouse=True)
@@ -247,6 +263,7 @@ def _committed_inplace_branch(
     case: str,
     *,
     allowed_mutations: frozenset[str] | set[str] | None = None,
+    commit_sequence: tuple[tuple[str, str], ...] | None = None,
 ) -> Iterator[_FixtureBranch]:
     try:
         lock_fd = os.open(FIXTURE_LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -278,6 +295,11 @@ def _committed_inplace_branch(
         )
         if not exact_mutations <= PERMITTED_MUTATION_PATHS:
             _abort_suite("fixture mutation scope is outside its reviewed exact paths")
+        if commit_sequence is not None and (
+            commit_sequence != PUBLICATION_COMMIT_SEQUENCE
+            or exact_mutations != frozenset(path for path, _ in PUBLICATION_COMMIT_SEQUENCE)
+        ):
+            _abort_suite("multi-commit fixture is outside its exact publication history")
         base_branch = BASE_BRANCH
         base_head = os.environ.get("MA_JAA04_INPLACE_BASE_HEAD", "")
         try:
@@ -298,7 +320,13 @@ def _committed_inplace_branch(
         if created.returncode != 0:
             _abort_suite("cannot create the admitted in-place fixture branch")
         state = _FixtureBranch(
-            base_branch, base_head, branch, run_id, base_head, exact_mutations
+            base_branch,
+            base_head,
+            branch,
+            run_id,
+            base_head,
+            exact_mutations,
+            commit_sequence,
         )
         try:
             _assert_admission(branch, base_head, False)
@@ -308,38 +336,57 @@ def _committed_inplace_branch(
                 _assert_admission(branch, state.head, False)
                 if _git("rev-parse", base_branch) != base_head:
                     raise RuntimeError("original branch ref changed")
-                if state.changed_path is None:
-                    if (
-                        state.changed_kind is not None
-                        or state.changed_sha256 is not None
-                        or state.base_blob_sha256 is not None
-                        or _git("rev-list", "--count", f"{base_head}..{branch}") != "0"
-                    ):
-                        raise RuntimeError("fixture branch has an unexpected commit")
-                else:
+                expected_records = state.commit_sequence
+                actual_sequence = tuple(
+                    (record.path, record.operation) for record in state.commit_records
+                )
+                if expected_records is None:
+                    if len(state.commit_records) > 1:
+                        raise RuntimeError("single-commit fixture contains multiple commits")
+                    if state.commit_records and state.commit_records[0].parent_head != base_head:
+                        raise RuntimeError("single fixture commit does not descend from its base")
+                    if state.commit_records and state.commit_records[0].path not in state.allowed_mutations:
+                        raise RuntimeError("single fixture commit changed an unapproved path")
+                elif (
+                    actual_sequence != expected_records
+                    or state.allowed_mutations
+                    != frozenset(path for path, _ in expected_records)
+                ):
+                    raise RuntimeError("fixture commit sequence differs from its exact admitted history")
+                previous_head = base_head
+                for record in state.commit_records:
                     expected_status = {
                         "modified": "M",
                         "added": "A",
                         "deleted": "D",
-                    }.get(state.changed_kind or "")
-                    current_blob = _git_path_blob_sha256(branch, state.changed_path)
+                    }.get(record.operation)
                     if (
-                        state.changed_kind not in {"modified", "added", "deleted"}
-                        or state.changed_path not in state.allowed_mutations
-                        or _git("rev-list", "--count", f"{base_head}..{branch}") != "1"
-                        or _git("rev-parse", f"{branch}^") != base_head
-                        or _git("diff", "--name-status", f"{base_head}..{branch}").splitlines()
-                        != [f"{expected_status}\t{state.changed_path}"]
-                        or _git_path_blob_sha256(base_head, state.changed_path)
-                        != state.base_blob_sha256
-                        or current_blob != state.changed_sha256
-                        or (state.changed_kind == "added" and state.base_blob_sha256 is not None)
-                        or (state.changed_kind == "modified" and state.base_blob_sha256 is None)
-                        or (state.changed_kind == "deleted" and (
-                            state.base_blob_sha256 is None or state.changed_sha256 is not None
+                        expected_status is None
+                        or record.parent_head != previous_head
+                        or _git("rev-parse", f"{record.head}^") != record.parent_head
+                        or _git("diff", "--name-status", f"{record.parent_head}..{record.head}").splitlines()
+                        != [f"{expected_status}\t{record.path}"]
+                        or _git_path_blob_sha256(record.parent_head, record.path)
+                        != record.parent_blob_sha256
+                        or _git_path_blob_sha256(record.head, record.path)
+                        != record.result_blob_sha256
+                        or (record.operation == "added" and record.parent_blob_sha256 is not None)
+                        or (record.operation == "modified" and (
+                            record.parent_blob_sha256 is None or record.result_blob_sha256 is None
+                        ))
+                        or (record.operation == "deleted" and (
+                            record.parent_blob_sha256 is None or record.result_blob_sha256 is not None
                         ))
                     ):
-                        raise RuntimeError("fixture branch diff is outside its exact allowed path")
+                        raise RuntimeError("fixture commit record differs from its exact path or blob history")
+                    previous_head = record.head
+                expected_count = str(len(state.commit_records))
+                if (
+                    state.head != previous_head
+                    or _git("rev-list", "--count", f"{base_head}..{branch}") != expected_count
+                    or _git("status", "--porcelain", "--untracked-files=all")
+                ):
+                    raise RuntimeError("fixture branch history or working tree is unexpected")
             except pytest.exit.Exception:
                 raise
             except Exception:
@@ -417,19 +464,29 @@ def _commit_path_change(
 ) -> None:
     if path not in state.allowed_mutations:
         _abort_suite("fixture mutation path is not allowlisted")
+    commit_index = len(state.commit_records)
+    if state.commit_sequence is None:
+        if commit_index != 0:
+            _abort_suite("single-commit fixture cannot accept another commit")
+    elif (
+        commit_index >= len(state.commit_sequence)
+        or state.commit_sequence[commit_index] != (path, operation)
+    ):
+        _abort_suite("fixture commit does not match its exact admitted sequence")
     _assert_admission(state.branch, state.head, False)
     target = _safe_mutation_target(path)
-    base_blob_sha256 = _git_path_blob_sha256(state.base_head, path)
+    parent_head = state.head
+    parent_blob_sha256 = _git_path_blob_sha256(parent_head, path)
     if operation in {"modified", "deleted"}:
         if (
-            base_blob_sha256 is None
+            parent_blob_sha256 is None
             or not target.is_file()
             or target.is_symlink()
-            or hashlib.sha256(target.read_bytes()).hexdigest() != base_blob_sha256
+            or hashlib.sha256(target.read_bytes()).hexdigest() != parent_blob_sha256
         ):
             _abort_suite("fixture mutation source differs from its admitted base blob")
     elif operation == "added":
-        if base_blob_sha256 is not None or target.exists() or target.is_symlink():
+        if parent_blob_sha256 is not None or target.exists() or target.is_symlink():
             _abort_suite("fixture addition target already exists in the admitted source")
     else:
         _abort_suite("fixture mutation operation is not permitted")
@@ -438,10 +495,7 @@ def _commit_path_change(
     if operation != "deleted" and content is None:
         _abort_suite("fixture write is missing its exact content bytes")
 
-    state.changed_path = path
-    state.changed_kind = operation
-    state.changed_sha256 = hashlib.sha256(content).hexdigest() if content is not None else None
-    state.base_blob_sha256 = base_blob_sha256
+    result_blob_sha256 = hashlib.sha256(content).hexdigest() if content is not None else None
     try:
         if operation == "modified":
             target.write_bytes(content or b"")
@@ -470,7 +524,7 @@ def _commit_path_change(
     if content is not None and (
         not target.is_file()
         or target.is_symlink()
-        or hashlib.sha256(target.read_bytes()).hexdigest() != state.changed_sha256
+        or hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256
     ):
         _abort_suite("fixture working bytes differ from the exact admitted content")
     _assert_admission(state.branch, state.head, True)
@@ -490,7 +544,7 @@ def _commit_path_change(
         _git("status", "--porcelain", "--untracked-files=all").splitlines() != [expected_staged]
         or _git("diff", "--cached", "--name-only").splitlines() != [path]
         or _git("diff", "--name-only")
-        or (content is not None and hashlib.sha256(target.read_bytes()).hexdigest() != state.changed_sha256)
+        or (content is not None and hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256)
         or (content is None and target.exists())
     ):
         _abort_suite("fixture staged diff is not exactly its allowlisted path")
@@ -503,7 +557,18 @@ def _commit_path_change(
     )
     if committed.returncode != 0:
         _abort_suite("fixture commit failed; preserving staged work")
-    state.head = _git("rev-parse", "HEAD")
+    new_head = _git("rev-parse", "HEAD")
+    state.commit_records.append(
+        _FixtureCommit(
+            parent_head,
+            new_head,
+            path,
+            operation,
+            parent_blob_sha256,
+            result_blob_sha256,
+        )
+    )
+    state.head = new_head
     _assert_admission(state.branch, state.head, False)
     expected_diff = {
         "modified": "M",
@@ -511,11 +576,11 @@ def _commit_path_change(
         "deleted": "D",
     }[operation]
     if (
-        _git("rev-parse", f"{state.branch}^") != state.base_head
-        or _git("diff", "--name-status", f"{state.base_head}..{state.branch}").splitlines()
+        _git("rev-parse", f"{new_head}^") != parent_head
+        or _git("diff", "--name-status", f"{parent_head}..{new_head}").splitlines()
         != [f"{expected_diff}\t{path}"]
-        or _git_path_blob_sha256(state.base_head, path) != state.base_blob_sha256
-        or _git_path_blob_sha256(state.branch, path) != state.changed_sha256
+        or _git_path_blob_sha256(parent_head, path) != parent_blob_sha256
+        or _git_path_blob_sha256(new_head, path) != result_blob_sha256
         or _git("status", "--porcelain", "--untracked-files=all")
     ):
         _abort_suite("fixture commit changed more than the exact intended path")
@@ -531,6 +596,125 @@ def _commit_added_file(state: _FixtureBranch, path: str, content: bytes, case: s
 
 def _commit_deleted_file(state: _FixtureBranch, path: str, case: str) -> None:
     _commit_path_change(state, path, "deleted", None, case)
+
+
+@contextmanager
+def _temporarily_dirty_tracked_path(path: str, suffix: bytes) -> Iterator[Path]:
+    if path not in PERMITTED_MUTATION_PATHS or not suffix:
+        _abort_suite("temporary dirty path is outside the exact fixture scope")
+    try:
+        lock_fd = os.open(FIXTURE_LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        _abort_suite("cannot establish the in-place certifier fixture lock")
+    locked = False
+    write_started = False
+    changed = False
+    try:
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_uid != os.getuid():
+            _abort_suite("in-place certifier lock is not an owned regular file")
+        if stat.S_IMODE(lock_stat.st_mode) != 0o600:
+            _abort_suite("in-place certifier lock does not have mode 0600")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError:
+            _abort_suite("another in-place certifier fixture is active")
+
+        branch = _git("branch", "--show-current")
+        head = _git("rev-parse", "HEAD")
+        _assert_admission(branch, head, False)
+        target = _safe_mutation_target(path)
+        base_blob_sha256 = _git_path_blob_sha256(head, path)
+        if (
+            base_blob_sha256 is None
+            or not target.is_file()
+            or target.is_symlink()
+        ):
+            _abort_suite("temporary dirty source is not an exact tracked regular file")
+        original = target.read_bytes()
+        if hashlib.sha256(original).hexdigest() != base_blob_sha256:
+            _abort_suite("temporary dirty source differs from its admitted HEAD blob")
+        changed_bytes = original + suffix
+        changed_sha256 = hashlib.sha256(changed_bytes).hexdigest()
+        if _git("status", "--porcelain", "--untracked-files=all"):
+            _abort_suite("temporary dirty source requires an initially clean canon")
+
+        try:
+            descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+            write_started = True
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(changed_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            _abort_suite("temporary dirty source write failed; preserving current bytes")
+        changed = True
+        if (
+            _git("status", "--porcelain", "--untracked-files=all").splitlines()
+            != [f" M {path}"]
+            or not target.is_file()
+            or target.is_symlink()
+            or hashlib.sha256(target.read_bytes()).hexdigest() != changed_sha256
+        ):
+            _abort_suite("temporary dirty source is not the exact appended mutation")
+        _assert_admission(branch, head, True)
+        yield target
+    finally:
+        if write_started:
+            if not changed:
+                if (
+                    target.is_file()
+                    and not target.is_symlink()
+                    and hashlib.sha256(target.read_bytes()).hexdigest() == changed_sha256
+                    and _git("status", "--porcelain", "--untracked-files=all").splitlines()
+                    == [f" M {path}"]
+                ):
+                    changed = True
+                else:
+                    _abort_suite("partial or unexpected source bytes detected; preserving work")
+            try:
+                _assert_admission(branch, head, True)
+            except pytest.exit.Exception:
+                raise
+            except Exception:
+                _abort_suite("temporary dirty source lost admission; preserving work")
+            if (
+                not target.is_file()
+                or target.is_symlink()
+                or hashlib.sha256(target.read_bytes()).hexdigest() != changed_sha256
+                or _git("status", "--porcelain", "--untracked-files=all").splitlines()
+                != [f" M {path}"]
+            ):
+                _abort_suite("unexpected source drift detected; preserving work")
+            try:
+                _assert_admission(branch, head, True)
+            except pytest.exit.Exception:
+                raise
+            except Exception:
+                _abort_suite("temporary dirty source lost admission before restoration")
+            try:
+                descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except OSError:
+                _abort_suite("cannot restore exact source bytes; preserving current work")
+            try:
+                _assert_admission(branch, head, False)
+            except pytest.exit.Exception:
+                raise
+            except Exception:
+                _abort_suite("source bytes restored but canon admission is not clean")
+            if (
+                hashlib.sha256(target.read_bytes()).hexdigest() != base_blob_sha256
+                or _git("status", "--porcelain", "--untracked-files=all")
+            ):
+                _abort_suite("source restoration did not reproduce the exact clean HEAD")
+        if locked:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 @contextmanager
