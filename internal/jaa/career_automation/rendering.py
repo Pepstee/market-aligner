@@ -490,6 +490,24 @@ def _letter_paragraphs(source: ApplicationSource) -> tuple[str, ...]:
         )
         for section in source.letter_sections
     )
+    if source.letter_sections:
+        opening = source.letter_sections[0]
+        if opening.style_slot_ids:
+            slots = {row.slot_id: row.text for row in source.style_slots}
+            salutation = slots[opening.style_slot_ids[0]].strip()
+            if salutation.casefold().startswith("dear "):
+                if not salutation.endswith((",", ".", "!", "?")):
+                    salutation += ","
+                opening_body = _join_letter_paragraph(
+                    source,
+                    opening.sentence_ids,
+                    opening.style_slot_ids[1:],
+                ).strip()
+                paragraphs = (
+                    salutation,
+                    *((opening_body,) if opening_body else ()),
+                    *paragraphs[1:],
+                )
     if not paragraphs or not paragraphs[0].casefold().startswith("dear "):
         paragraphs = ("Dear Hiring Manager,", *paragraphs)
     closing = paragraphs[-1]

@@ -1148,6 +1148,9 @@ def test_letter_only_evidence_stays_out_of_cv_and_keeps_strategy_pairs(
     ]["statement"]
     assert cv_context.text == evidence_by_id["SYNTHETIC-CV-CONTEXT-01"]["statement"]
     assert source.letter_sections[0].sentence_ids == (letter_context.sentence_id,)
+    paragraphs = _letter_paragraphs(source)
+    assert paragraphs[0] == "Dear Hiring Manager,"
+    assert paragraphs[1] == letter_context.text
     evidence_match = source.letter_sections[1]
     evidence_match_ids = set(evidence_match.sentence_ids)
     for employer_fact in (
@@ -1187,6 +1190,12 @@ def test_letter_only_evidence_stays_out_of_cv_and_keeps_strategy_pairs(
         " ".join(statement.split()) not in normalized_cv
         for statement in context_statements
     )
+    assert "\n\nDear Hiring Manager,\n\n" in package.artifacts.editable.cover_letter_text
+    pdf_lines = [
+        line.strip()
+        for line in package.artifacts.cover_letter_pdf.extracted_text.splitlines()
+    ]
+    assert "Dear Hiring Manager," in pdf_lines
     for text in (
         package.artifacts.editable.cover_letter_text,
         package.artifacts.cover_letter_pdf.extracted_text,
@@ -1494,6 +1503,7 @@ def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
         "Evidence Match",
         "Close",
     )
+    assert paragraphs[0] == "Dear Hiring Manager,"
     opening_section = source.letter_sections[0]
     opening_facts = [
         fact for fact in source.facts if fact.sentence_id in opening_section.sentence_ids
@@ -1514,6 +1524,7 @@ def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
     assert tuple(getattr(candidate_fact.authority, key) for key in sibling_fields) == tuple(
         getattr(employer_fact.authority, key) for key in sibling_fields
     )
+    assert paragraphs[1] == f"{candidate_fact.text} {employer_fact.text}"
     letter_fact_text = " ".join(
         fact.text for fact in source.facts if fact.document_kind == "cover_letter"
     )
@@ -1561,7 +1572,7 @@ def test_generic_zero_match_keeps_vacancy_fact_in_a_candidate_factual_section(
     assert any(row.fact_kind == "candidate" for row in evidence_facts)
     employer_facts = [row for row in evidence_facts if row.fact_kind == "employer"]
     assert employer_facts
-    evidence_paragraph = " ".join(_letter_paragraphs(source)[1].split())
+    evidence_paragraph = " ".join(_letter_paragraphs(source)[2].split())
     assert any(
         evidence_paragraph.index(" ".join(row.text.split()))
         < evidence_paragraph.index(" ".join(employer_facts[0].text.split()))

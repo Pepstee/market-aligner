@@ -127,27 +127,11 @@ def _contract(
 def _run(
     source_root: Path, evidence: Path, contract: list[dict[str, object]] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    # The command certifies its own tracked source tree.  Run it from a fresh
-    # clone so this test module's deliberately uncommitted edits cannot mask
-    # the source-side behaviour being tested.
-    repository = evidence.parent / "certification-repository"
-    if not repository.exists():
-        cloned = subprocess.run(
-            (
-                "git",
-                "clone",
-                "--no-local",
-                "--single-branch",
-                "--depth",
-                "1",
-                str(REPOSITORY_ROOT),
-                str(repository),
-            ),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        assert cloned.returncode == 0, cloned.stderr
+    # Keep the real CLI subprocess on the registered checkout; tests must not
+    # materialize another repository to obtain an isolated source tree.
+    repository = REPOSITORY_ROOT
+    clone_path = evidence.parent / "certification-repository"
+    assert not clone_path.exists(), "refusing to use a repository copy in test evidence"
     if contract is None:
         command = [sys.executable, "-m", "baseline_adoption.cli"]
     else:
@@ -158,7 +142,7 @@ core.BASELINES = tuple(core.BaselineSpec(**item) for item in json.loads(sys.argv
 raise SystemExit(cli.main(sys.argv[2:]))
 """
         command = [sys.executable, "-c", bootstrap, json.dumps(contract)]
-    return subprocess.run(
+    result = subprocess.run(
         [
             *command,
             "recertify-sources",
@@ -173,6 +157,8 @@ raise SystemExit(cli.main(sys.argv[2:]))
         check=False,
         env=os.environ.copy(),
     )
+    assert not clone_path.exists(), "CLI test created an unauthorized repository copy"
+    return result
 
 
 def _receipt(result: subprocess.CompletedProcess[str]) -> tuple[Path, dict[str, Any]]:
@@ -187,15 +173,35 @@ def _receipt(result: subprocess.CompletedProcess[str]) -> tuple[Path, dict[str, 
 def _make_wal(path: Path, *, rows: int = 8) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = sqlite3.connect(path, isolation_level=None, timeout=30)
-    writer.execute("PRAGMA journal_mode=WAL")
-    writer.execute("PRAGMA wal_autocheckpoint=0")
-    writer.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
-    writer.executemany(
-        "INSERT INTO ledger(value) VALUES (?)", [(f"seed-{n}",) for n in range(rows)]
-    )
-    assert Path(str(path) + "-wal").is_file()
-    assert Path(str(path) + "-shm").is_file()
-    return writer
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        writer.execute("BEGIN")
+        writer.executemany(
+            "INSERT INTO ledger(value) VALUES (?)", [(f"seed-{n}",) for n in range(rows)]
+        )
+        writer.execute("COMMIT")
+        assert Path(str(path) + "-wal").is_file()
+        assert Path(str(path) + "-shm").is_file()
+        return writer
+    except BaseException:
+        writer.close()
+        raise
+
+
+def test_make_wal_seed_commits_rows_without_checkpointing(tmp_path: Path) -> None:
+    database = tmp_path / "source.sqlite3"
+    writer = _make_wal(database, rows=8)
+    try:
+        assert writer.in_transaction is False
+        assert writer.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert writer.execute("PRAGMA wal_autocheckpoint").fetchone() == (0,)
+        assert writer.execute("SELECT COUNT(*) FROM ledger").fetchone() == (8,)
+        assert Path(str(database) + "-wal").is_file()
+        assert Path(str(database) + "-shm").is_file()
+    finally:
+        writer.close()
 
 
 def _source_state(path: Path) -> dict[str, bytes | None]:
@@ -274,10 +280,7 @@ def test_two_live_sources_emit_path_free_content_addressed_utc_provenance(
         # remains scoped to that component tree, while the checkout containing it
         # is always the canonical Market Aligner repository.
         assert content["source_content_revision"] == _independent_source_revision(
-            (tmp_path / "evidence").parent
-            / "certification-repository"
-            / "internal"
-            / "jaa"
+            REPOSITORY_ROOT / "internal" / "jaa"
         )
         assert set(content["databases"]) == {"raw_jobs", "career_pipeline"}
         assert content["isolation"] == {
