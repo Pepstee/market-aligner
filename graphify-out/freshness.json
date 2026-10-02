@@ -1,11 +1,11 @@
 {
-  "community_count": 30085,
-  "edge_count": 73631,
-  "node_count": 56625,
+  "community_count": 30069,
+  "edge_count": 73682,
+  "node_count": 56633,
   "outputs": {
-    ".graphify_labels.json": "777889ce608768c57375fb8104242f1e08ae46951c421f0b53f5049b45bcaa7e",
-    "GRAPH_REPORT.md": "aa7e439d7a87bda33e87614e53f498cfbd568edb096d3c184cad084b26ed5359",
-    "graph.json": "afa412b8d5f417993d57888c186a0cf6ec90fc3c233cf0124b704ad7781d660d"
+    ".graphify_labels.json": "26d88501a1c9483cefef01e65229b79f6bb9077409f5c4e2e4a6fc54672c9e18",
+    "GRAPH_REPORT.md": "56aac3ec58f90bce892048bf8cf36e0b62fcf9bc94c2d11c10c78b0b5c1b1ee5",
+    "graph.json": "d182a2b9975d1665df3312bdb8160101900c1922e7135e4aeeef3d718db1b83c"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "eb69df2eed110a230282e44462adc76a79d5ff7d",
+  "source_base_commit": "371719ce56a38a775cc7cd92d72e890ce032d4bd",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -538,7 +538,7 @@
     "internal/jaa/test_jaa01_source_revision_binding.py": "6da4942adc2b0c12b590f7bcb536891f3617a514d8d5246c4125315716704447",
     "internal/jaa/test_jaa02_independent_acceptance.py": "0742d26c42d961c4e51266723015d45c4a33186e28a57aeefc22b31b4727a7ab",
     "internal/jaa/test_jaa02_receipt_command_tamper.py": "1e975ad85b5acebad0035705a66518bcb2656b84ed913bcc67fe0ecdecd6882a",
-    "internal/jaa/test_jaa02_runtime_certification.py": "9c3975a6d39aeafe17c5a298f5a849fc0a59be9b3f9d004041cda653353f4681",
+    "internal/jaa/test_jaa02_runtime_certification.py": "b8926c5e644ad02345faab63ef44e0b390fa7dae70945a9e72192bb74279e51c",
     "internal/jaa/test_jaa02_runtime_identity_tamper.py": "387b7211a4eadacb3570690088b2fa563b368474b6e2e1490805588ab5f2e187",
     "internal/jaa/test_jaa03_historical_receipt.py": "507917033b57e1e62c71076d5937fd3ee59c2e09bcb6f5de20a9f421db9919ed",
     "internal/jaa/test_jaa03_independent_acceptance.py": "aeec8903206888133f7e42c6032252649fbfcd85dd2ba715b2042f0ecc401bcc",
@@ -552,7 +552,7 @@
     "internal/jaa/test_jaa04_evidence_authority_contract.py": "68c543f722c291ab4e2b784324779fdd9b573a62b106f4be0da38b7a6e6aa1dc",
     "internal/jaa/test_jaa04_increment_a_authority_canaries.py": "fb5f61a959a33c70d8c937da99c8ba1b8b2b9a2c25879e4d7bf38fc6a0739177",
     "internal/jaa/test_jaa04_increment_a_certification_surface.py": "a5da49ec1a2adbf5f7513ca8327f3b24c9294d0a8a9098d6f76792e52359cc6a",
-    "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": "5aab9afaa753a73089238cf05b804563d4433a6dbaaabd452378f2a2542f0f91",
+    "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": "edfb30187ba65b430bd3b8a0d9890162cd0ff19ddfdc786c0540430b5e8d448b",
     "internal/jaa/test_jaa04_increment_a_independent_regressions.py": "fe87763735b6b3a6e162cd82f35411395f08b9f4d5f1affe6f3d46b9c6132ad5",
     "internal/jaa/test_jaa04_increment_a_temporal_authority_regression.py": "427ecb5d8174b805d021b0c01c71a5105aee2f8971178d43988488daca684d68",
     "internal/jaa/test_jaa04_increment_a_temporal_provenance_certification.py": "4309ed030270f0bc125ac1b1296d8ad6d5108b9d764e0bbf158aaab5b0a0fb55",

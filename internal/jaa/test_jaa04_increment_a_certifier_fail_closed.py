@@ -41,13 +41,48 @@ CERTIFICATION_SURFACE_MUTATIONS = {
     "internal/jaa/career_automation/dirty-certifier-control.txt",
 }
 JAA02_RECEIPT_MUTATION = "@jaa02-content-addressed-receipt"
+JAA02_TWO_RECEIPTS_MUTATION = "@jaa02-two-receipts"
 JAA02_INITIAL_RECEIPT_PATH = (
     "internal/jaa/runtime_evidence/jaa02/"
     "sha256-8d49a1543093644703e95a78d424c971f55465111baece7a45f6e3c0a71805d2.json"
 )
+JAA02_CONFLICT_RECEIPT_PATH = (
+    "internal/jaa/runtime_evidence/jaa02/sha256-"
+    + "0" * 64
+    + ".json"
+)
+JAA02_MULTIPLE_RECEIPT_PATHS = (
+    "internal/jaa/runtime_evidence/jaa02/sha256-"
+    + "1" * 64
+    + ".json",
+    "internal/jaa/runtime_evidence/jaa02/sha256-"
+    + "2" * 64
+    + ".json",
+)
+JAA02_COMMAND_FAILURE_PATH = "internal/jaa/scripts/accept_jaa_02.py"
+JAA02_WRONG_TOTALS_PATH = "internal/jaa/test_jaa02_independent_acceptance.py"
+JAA02_HISTORICAL_SOURCE_PATH = "internal/jaa/career_automation/candidate_graph.py"
 JAA02_CLEAN_COMMIT_SEQUENCE = (
     (JAA02_INITIAL_RECEIPT_PATH, "deleted"),
     (JAA02_RECEIPT_MUTATION, "added"),
+)
+JAA02_DELETE_RECEIPT_SEQUENCE = ((JAA02_INITIAL_RECEIPT_PATH, "deleted"),)
+JAA02_COMMAND_FAILURE_SEQUENCE = (
+    (JAA02_INITIAL_RECEIPT_PATH, "deleted"),
+    (JAA02_COMMAND_FAILURE_PATH, "modified"),
+)
+JAA02_WRONG_TOTALS_SEQUENCE = (
+    (JAA02_INITIAL_RECEIPT_PATH, "deleted"),
+    (JAA02_WRONG_TOTALS_PATH, "modified"),
+)
+JAA02_HISTORICAL_COMMIT_SEQUENCE = (
+    (JAA02_INITIAL_RECEIPT_PATH, "deleted"),
+    (JAA02_RECEIPT_MUTATION, "added"),
+    (JAA02_HISTORICAL_SOURCE_PATH, "modified"),
+)
+JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE = (
+    (JAA02_INITIAL_RECEIPT_PATH, "deleted"),
+    (JAA02_TWO_RECEIPTS_MUTATION, "added"),
 )
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/README.md",
@@ -56,7 +91,12 @@ PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/baseline_adoption/cli.py",
     "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml",
     JAA02_INITIAL_RECEIPT_PATH,
+    JAA02_CONFLICT_RECEIPT_PATH,
     JAA02_RECEIPT_MUTATION,
+    JAA02_TWO_RECEIPTS_MUTATION,
+    JAA02_COMMAND_FAILURE_PATH,
+    JAA02_WRONG_TOTALS_PATH,
+    JAA02_HISTORICAL_SOURCE_PATH,
 } | CERTIFICATION_SURFACE_MUTATIONS
 PUBLICATION_EVIDENCE_PATH = "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml"
 PUBLICATION_SOURCE_PATH = "internal/jaa/baseline_adoption/cli.py"
@@ -252,6 +292,20 @@ class _FixtureBranch:
     commit_records: list[_FixtureCommit] = field(default_factory=list)
 
 
+def _fixture_commit_groups(records: list[_FixtureCommit]) -> list[list[_FixtureCommit]]:
+    groups: list[list[_FixtureCommit]] = []
+    seen_heads: set[str] = set()
+    for record in records:
+        if groups and groups[-1][0].head == record.head:
+            groups[-1].append(record)
+            continue
+        if record.head in seen_heads:
+            raise RuntimeError("fixture commit records are not in parent order")
+        seen_heads.add(record.head)
+        groups.append([record])
+    return groups
+
+
 @pytest.fixture(autouse=True)
 def _admit_each_test() -> Iterator[None]:
     expected_head = os.environ.get("MA_JAA04_INPLACE_BASE_HEAD", "")
@@ -308,7 +362,15 @@ def _committed_inplace_branch(
         if not exact_mutations <= PERMITTED_MUTATION_PATHS:
             _abort_suite("fixture mutation scope is outside its reviewed exact paths")
         if commit_sequence is not None:
-            permitted_sequences = (PUBLICATION_COMMIT_SEQUENCE, JAA02_CLEAN_COMMIT_SEQUENCE)
+            permitted_sequences = (
+                PUBLICATION_COMMIT_SEQUENCE,
+                JAA02_CLEAN_COMMIT_SEQUENCE,
+                JAA02_DELETE_RECEIPT_SEQUENCE,
+                JAA02_COMMAND_FAILURE_SEQUENCE,
+                JAA02_WRONG_TOTALS_SEQUENCE,
+                JAA02_HISTORICAL_COMMIT_SEQUENCE,
+                JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE,
+            )
             if (
                 commit_sequence not in permitted_sequences
                 or exact_mutations != frozenset(path for path, _ in commit_sequence)
@@ -351,62 +413,66 @@ def _committed_inplace_branch(
                 if _git("rev-parse", base_branch) != base_head:
                     raise RuntimeError("original branch ref changed")
                 expected_records = state.commit_sequence
-                actual_sequence = tuple(
-                    (record.path, record.operation) for record in state.commit_records
-                )
+                commit_groups = _fixture_commit_groups(state.commit_records)
                 if expected_records is None:
-                    if len(state.commit_records) > 1:
+                    if len(commit_groups) > 1 or any(len(group) != 1 for group in commit_groups):
                         raise RuntimeError("single-commit fixture contains multiple commits")
-                    if state.commit_records and state.commit_records[0].parent_head != base_head:
+                    if commit_groups and commit_groups[0][0].parent_head != base_head:
                         raise RuntimeError("single fixture commit does not descend from its base")
-                    if state.commit_records and not _mutation_path_allowed(
-                        state.commit_records[0].path, state.allowed_mutations
+                    if commit_groups and not _mutation_path_allowed(
+                        commit_groups[0][0].path, state.allowed_mutations
                     ):
                         raise RuntimeError("single fixture commit changed an unapproved path")
                 elif (
-                    len(actual_sequence) != len(expected_records)
+                    len(commit_groups) != len(expected_records)
                     or any(
-                        operation != expected_operation
-                        or not _mutation_path_matches(expected_path, actual_path)
-                        for (actual_path, operation), (expected_path, expected_operation)
-                        in zip(actual_sequence, expected_records)
+                        not _fixture_commit_group_matches(group, expected_path, expected_operation)
+                        for group, (expected_path, expected_operation)
+                        in zip(commit_groups, expected_records)
                     )
                     or state.allowed_mutations
                     != frozenset(path for path, _ in expected_records)
                 ):
                     raise RuntimeError("fixture commit sequence differs from its exact admitted history")
                 previous_head = base_head
-                for record in state.commit_records:
-                    expected_status = {
-                        "modified": "M",
-                        "added": "A",
-                        "deleted": "D",
-                        "symlink": "T",
-                    }.get(record.operation)
+                for group in commit_groups:
+                    commit_head = group[0].head
                     if (
-                        expected_status is None
-                        or record.parent_head != previous_head
-                        or _git("rev-parse", f"{record.head}^") != record.parent_head
-                        or _git("diff", "--name-status", f"{record.parent_head}..{record.head}").splitlines()
-                        != [f"{expected_status}\t{record.path}"]
-                        or _git_path_blob_sha256(record.parent_head, record.path)
-                        != record.parent_blob_sha256
-                        or _git_path_blob_sha256(record.head, record.path)
-                        != record.result_blob_sha256
-                        or (record.operation == "added" and record.parent_blob_sha256 is not None)
-                        or (record.operation == "modified" and (
-                            record.parent_blob_sha256 is None or record.result_blob_sha256 is None
-                        ))
-                        or (record.operation == "deleted" and (
-                            record.parent_blob_sha256 is None or record.result_blob_sha256 is not None
-                        ))
-                        or (record.operation == "symlink" and (
-                            record.parent_blob_sha256 is None or record.result_blob_sha256 is None
-                        ))
+                        any(record.parent_head != previous_head or record.head != commit_head for record in group)
+                        or _git("rev-parse", f"{commit_head}^") != previous_head
                     ):
-                        raise RuntimeError("fixture commit record differs from its exact path or blob history")
-                    previous_head = record.head
-                expected_count = str(len(state.commit_records))
+                        raise RuntimeError("fixture commit parentage differs from its exact history")
+                    expected_statuses = []
+                    for record in group:
+                        expected_status = {
+                            "modified": "M",
+                            "added": "A",
+                            "deleted": "D",
+                            "symlink": "T",
+                        }.get(record.operation)
+                        if (
+                            expected_status is None
+                            or _git_path_blob_sha256(record.parent_head, record.path)
+                            != record.parent_blob_sha256
+                            or _git_path_blob_sha256(record.head, record.path)
+                            != record.result_blob_sha256
+                            or (record.operation == "added" and record.parent_blob_sha256 is not None)
+                            or (record.operation == "modified" and (
+                                record.parent_blob_sha256 is None or record.result_blob_sha256 is None
+                            ))
+                            or (record.operation == "deleted" and (
+                                record.parent_blob_sha256 is None or record.result_blob_sha256 is not None
+                            ))
+                            or (record.operation == "symlink" and (
+                                record.parent_blob_sha256 is None or record.result_blob_sha256 is None
+                            ))
+                        ):
+                            raise RuntimeError("fixture commit record differs from its exact path or blob history")
+                        expected_statuses.append(f"{expected_status}\t{record.path}")
+                    if _git("diff", "--name-status", f"{previous_head}..{commit_head}").splitlines() != sorted(expected_statuses):
+                        raise RuntimeError("fixture commit changed an unexpected path set")
+                    previous_head = commit_head
+                expected_count = str(len(commit_groups))
                 if (
                     state.head != previous_head
                     or _git("rev-list", "--count", f"{base_head}..{branch}") != expected_count
@@ -491,6 +557,24 @@ def _is_jaa02_receipt_path(path: str) -> bool:
 def _mutation_path_matches(expected: str, actual: str) -> bool:
     return actual == expected or (
         expected == JAA02_RECEIPT_MUTATION and _is_jaa02_receipt_path(actual)
+    ) or (
+        expected == JAA02_TWO_RECEIPTS_MUTATION and actual in JAA02_MULTIPLE_RECEIPT_PATHS
+    )
+
+
+def _fixture_commit_group_matches(
+    group: list[_FixtureCommit], expected_path: str, expected_operation: str
+) -> bool:
+    if expected_path == JAA02_TWO_RECEIPTS_MUTATION:
+        return (
+            expected_operation == "added"
+            and tuple(sorted(record.path for record in group)) == JAA02_MULTIPLE_RECEIPT_PATHS
+            and all(record.operation == "added" for record in group)
+        )
+    return (
+        len(group) == 1
+        and group[0].operation == expected_operation
+        and _mutation_path_matches(expected_path, group[0].path)
     )
 
 
@@ -689,6 +773,274 @@ def _commit_existing_added_file(
     )
 
 
+def _commit_added_receipts(
+    state: _FixtureBranch,
+    receipts: tuple[tuple[str, bytes], tuple[str, bytes]],
+    case: str,
+) -> None:
+    paths = tuple(path for path, _content in receipts)
+    if (
+        paths != JAA02_MULTIPLE_RECEIPT_PATHS
+        or state.commit_sequence != JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE
+        or state.allowed_mutations
+        != frozenset(path for path, _operation in JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE)
+    ):
+        _abort_suite("multiple-receipt fixture differs from its exact admitted history")
+    if len(state.commit_records) != 1 or state.commit_records[0].operation != "deleted":
+        _abort_suite("multiple-receipt fixture is not at its admitted commit boundary")
+    marker_path, marker_operation = state.commit_sequence[1]
+    if marker_path != JAA02_TWO_RECEIPTS_MUTATION or marker_operation != "added":
+        _abort_suite("multiple-receipt commit is outside its exact admitted sequence")
+    _assert_admission(state.branch, state.head, False)
+    targets = [(path, content, _safe_mutation_target(path)) for path, content in receipts]
+    for path, _content, target in targets:
+        if (
+            _git_path_blob_sha256(state.head, path) is not None
+            or target.exists()
+            or target.is_symlink()
+        ):
+            _abort_suite("multiple-receipt target already exists in the admitted source")
+    created: list[tuple[str, Path, bytes]] = []
+    try:
+        for path, content, target in targets:
+            expected_before = [f"?? {created_path}" for created_path, _created_target, _bytes in created]
+            if (
+                _git("status", "--porcelain", "--untracked-files=all").splitlines()
+                != expected_before
+                or any(
+                    not created_target.is_file()
+                    or created_target.is_symlink()
+                    or created_target.read_bytes() != created_content
+                    or stat.S_IMODE(created_target.stat().st_mode) != 0o644
+                    for _created_path, created_target, created_content in created
+                )
+            ):
+                _abort_suite("partial multiple-receipt fixture differs from its exact admitted paths")
+            _assert_admission(state.branch, state.head, bool(created))
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o644,
+            )
+            os.fchmod(descriptor, 0o644)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            created.append((path, target, content))
+    except OSError:
+        _abort_suite("multiple-receipt fixture creation failed; preserving current branch state")
+
+    expected_unstaged = [f"?? {path}" for path in paths]
+    if (
+        _git("status", "--porcelain", "--untracked-files=all").splitlines()
+        != expected_unstaged
+        or any(
+            not target.is_file()
+            or target.is_symlink()
+            or target.read_bytes() != content
+            or stat.S_IMODE(target.stat().st_mode) != 0o644
+            for _path, target, content in created
+        )
+    ):
+        _abort_suite("multiple-receipt fixture differs from its exact untracked paths or bytes")
+    _assert_admission(state.branch, state.head, True)
+    staged = _run(
+        REPOSITORY_ROOT,
+        "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+        "add", "--", *paths,
+    )
+    if staged.returncode != 0:
+        _abort_suite("fixture could not stage both exact receipt paths")
+    expected_staged = [f"A  {path}" for path in paths]
+    if (
+        _git("status", "--porcelain", "--untracked-files=all").splitlines()
+        != expected_staged
+        or _git("diff", "--cached", "--name-only").splitlines() != list(paths)
+        or _git("diff", "--name-only")
+        or any(
+            _git_blob_sha256(f":{path}") != hashlib.sha256(content).hexdigest()
+            for path, content in receipts
+        )
+    ):
+        _abort_suite("staged receipt diff is not exactly the two admitted paths")
+    _assert_admission(state.branch, state.head, True)
+    committed = _run(
+        REPOSITORY_ROOT,
+        "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+        "-c", "user.email=tester@example.invalid", "-c", "user.name=Independent tester",
+        "commit", "--only", "-m", f"adversarial certification control: {case}",
+        "--", *paths,
+    )
+    if committed.returncode != 0:
+        _abort_suite("multiple-receipt fixture commit failed; preserving staged work")
+    new_head = _git("rev-parse", "HEAD")
+    parent_head = state.head
+    for path, content in receipts:
+        state.commit_records.append(
+            _FixtureCommit(
+                parent_head,
+                new_head,
+                path,
+                "added",
+                None,
+                hashlib.sha256(content).hexdigest(),
+            )
+        )
+    state.head = new_head
+    expected_diff = [f"A\t{path}" for path in paths]
+    _assert_admission(state.branch, state.head, False)
+    if (
+        _git("rev-parse", f"{new_head}^") != parent_head
+        or _git("diff", "--name-status", f"{parent_head}..{new_head}").splitlines()
+        != expected_diff
+        or any(
+            _git_path_blob_sha256(parent_head, path) is not None
+            or _git_path_blob_sha256(new_head, path) != hashlib.sha256(content).hexdigest()
+            for path, content in receipts
+        )
+        or _git("status", "--porcelain", "--untracked-files=all")
+    ):
+        _abort_suite("multiple-receipt commit changed an unexpected path or blob")
+
+
+@contextmanager
+def _temporarily_dirty_tracked_path_on_branch(
+    state: _FixtureBranch, path: str, suffix: bytes
+) -> Iterator[Path]:
+    if not _mutation_path_allowed(path, state.allowed_mutations) or not suffix:
+        _abort_suite("temporary dirty path is outside the exact fixture scope")
+    _assert_admission(state.branch, state.head, False)
+    target = _safe_mutation_target(path)
+    base_blob_sha256 = _git_path_blob_sha256(state.head, path)
+    if base_blob_sha256 is None or not target.is_file() or target.is_symlink():
+        _abort_suite("temporary dirty path is not an exact tracked regular file")
+    original = target.read_bytes()
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    if hashlib.sha256(original).hexdigest() != base_blob_sha256:
+        _abort_suite("temporary dirty path differs from its admitted base blob")
+    if _git("status", "--porcelain", "--untracked-files=all"):
+        _abort_suite("temporary dirty path requires a clean branch")
+    changed_bytes = original + suffix
+    changed_sha256 = hashlib.sha256(changed_bytes).hexdigest()
+    write_started = False
+    try:
+        _assert_admission(state.branch, state.head, False)
+        descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+        write_started = True
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(changed_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if (
+            _git("status", "--porcelain", "--untracked-files=all").splitlines()
+            != [f" M {path}"]
+            or not target.is_file()
+            or target.is_symlink()
+            or hashlib.sha256(target.read_bytes()).hexdigest() != changed_sha256
+            or stat.S_IMODE(target.stat().st_mode) != original_mode
+        ):
+            _abort_suite("temporary dirty path is not the exact admitted append")
+        _assert_admission(state.branch, state.head, True)
+        yield target
+    except OSError:
+        _abort_suite("temporary dirty path write failed; preserving current bytes")
+    finally:
+        if write_started:
+            if (
+                not target.is_file()
+                or target.is_symlink()
+                or hashlib.sha256(target.read_bytes()).hexdigest() != changed_sha256
+                or stat.S_IMODE(target.stat().st_mode) != original_mode
+                or _git("status", "--porcelain", "--untracked-files=all").splitlines()
+                != [f" M {path}"]
+            ):
+                _abort_suite("temporary dirty path drifted; preserving unexpected work")
+            _assert_admission(state.branch, state.head, True)
+            try:
+                descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except OSError:
+                _abort_suite("cannot restore exact temporary dirty bytes; preserving work")
+            _assert_admission(state.branch, state.head, False)
+            if (
+                hashlib.sha256(target.read_bytes()).hexdigest() != base_blob_sha256
+                or stat.S_IMODE(target.stat().st_mode) != original_mode
+                or _git("status", "--porcelain", "--untracked-files=all")
+            ):
+                _abort_suite("temporary dirty path did not restore the exact clean blob")
+
+
+def _replace_untracked_jaa02_receipt(
+    state: _FixtureBranch,
+    old_path: str,
+    new_path: str,
+    content: bytes,
+) -> Path:
+    if (
+        not _mutation_path_allowed(old_path, state.allowed_mutations)
+        or not _mutation_path_allowed(new_path, state.allowed_mutations)
+        or old_path == new_path
+        or new_path.rsplit("/", 1)[-1] != f"sha256-{hashlib.sha256(content).hexdigest()}.json"
+    ):
+        _abort_suite("replacement receipt path is not content-addressed or admitted")
+    old_target = _safe_mutation_target(old_path)
+    new_target = _safe_mutation_target(new_path)
+    _assert_admission(state.branch, state.head, True)
+    old_bytes = old_target.read_bytes() if old_target.is_file() and not old_target.is_symlink() else b""
+    if (
+        _git("status", "--porcelain", "--untracked-files=all").splitlines()
+        != [f"?? {old_path}"]
+        or not old_bytes
+        or old_target.name != f"sha256-{hashlib.sha256(old_bytes).hexdigest()}.json"
+        or new_target.exists()
+        or new_target.is_symlink()
+    ):
+        _abort_suite("generated receipt changed before its admitted replacement")
+    _assert_admission(state.branch, state.head, True)
+    try:
+        old_target.unlink()
+    except OSError:
+        _abort_suite("cannot remove the exact generated receipt before replacement")
+    _assert_admission(state.branch, state.head, False)
+    if (
+        old_target.exists()
+        or old_target.is_symlink()
+        or new_target.exists()
+        or new_target.is_symlink()
+        or _git("status", "--porcelain", "--untracked-files=all")
+    ):
+        _abort_suite("receipt replacement deletion did not restore a clean branch")
+    _assert_admission(state.branch, state.head, False)
+    try:
+        descriptor = os.open(
+            new_target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o644,
+        )
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        _abort_suite("cannot create exact rehashed receipt; preserving current state")
+    _assert_admission(state.branch, state.head, True)
+    if (
+        _git("status", "--porcelain", "--untracked-files=all").splitlines()
+        != [f"?? {new_path}"]
+        or not new_target.is_file()
+        or new_target.is_symlink()
+        or new_target.read_bytes() != content
+        or stat.S_IMODE(new_target.stat().st_mode) != 0o644
+    ):
+        _abort_suite("rehashed receipt differs from its exact path, bytes or mode")
+    return new_target
+
+
 def _commit_deleted_file(state: _FixtureBranch, path: str, case: str) -> None:
     _commit_path_change(state, path, "deleted", None, case)
 
@@ -824,7 +1176,12 @@ def _uncommitted_control_file(
     path: str,
     content: bytes,
 ) -> Iterator[Path]:
-    if path not in state.allowed_mutations:
+    temporary_jaa02_conflict = (
+        path == JAA02_CONFLICT_RECEIPT_PATH
+        and state.commit_sequence == JAA02_DELETE_RECEIPT_SEQUENCE
+        and state.allowed_mutations == frozenset({JAA02_INITIAL_RECEIPT_PATH})
+    )
+    if path not in state.allowed_mutations and not temporary_jaa02_conflict:
         _abort_suite("uncommitted control path is not allowlisted")
     _assert_admission(state.branch, state.head, False)
     target = _safe_mutation_target(path)
