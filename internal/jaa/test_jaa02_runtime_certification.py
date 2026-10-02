@@ -10,16 +10,25 @@ from pathlib import Path
 
 import pytest
 
-from testing_repository import clone_jaa_repository
+import test_jaa04_increment_a_certifier_fail_closed as inplace_fixture
 
 
 ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parents[1]
 CERTIFIER = Path("scripts/certify_jaa02_runtime.py")
 VALIDATOR = Path("scripts/accept_jaa02_receipt.py")
 EXPECTED_TOTALS = {"passed": 12, "failed": 0, "errors": 0, "skipped": 0}
+INPLACE_TEST_NAME = "test_clean_certification_executes_real_commands_and_checked_validator_passes"
+_ACTIVE_INPLACE_STATE = None
 
 
 def _run(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+    if _ACTIVE_INPLACE_STATE is not None:
+        inplace_fixture._assert_admission(
+            _ACTIVE_INPLACE_STATE.branch,
+            _ACTIVE_INPLACE_STATE.head,
+            False,
+        )
     return subprocess.run(
         (sys.executable, *argv),
         cwd=root,
@@ -42,27 +51,41 @@ def _git(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.fixture()
-def repository(tmp_path: Path) -> Path:
-    clone = clone_jaa_repository(ROOT, tmp_path / "repository")
-    assert (
-        _git(clone, "config", "user.name", "JAA-02 certification test").returncode == 0
-    )
-    assert _git(clone, "config", "user.email", "jaa02@example.test").returncode == 0
-    tracked_receipts = [
-        line
-        for line in _git(
-            clone, "ls-files", "runtime_evidence/jaa02/sha256-*.json"
-        ).stdout.splitlines()
-        if line
-    ]
-    if tracked_receipts:
-        removed = _git(clone, "rm", "-f", "--", *tracked_receipts)
-        assert removed.returncode == 0, removed.stderr
-        committed = _git(
-            clone, "commit", "-m", "remove checked receipt for certifier test"
+def repository(request: pytest.FixtureRequest) -> Path:
+    global _ACTIVE_INPLACE_STATE
+    if request.node.name != INPLACE_TEST_NAME:
+        pytest.exit(
+            "this JAA-02 case has not been adapted to the admitted in-place fixture",
+            returncode=2,
         )
-        assert committed.returncode == 0, committed.stderr
-    return clone
+    allowed = frozenset(
+        {
+            inplace_fixture.JAA02_INITIAL_RECEIPT_PATH,
+            inplace_fixture.JAA02_RECEIPT_MUTATION,
+        }
+    )
+    with inplace_fixture._committed_inplace_branch(
+        "jaa02-clean",
+        allowed_mutations=allowed,
+        commit_sequence=inplace_fixture.JAA02_CLEAN_COMMIT_SEQUENCE,
+    ) as state:
+        initial_receipt = Path(
+            inplace_fixture.JAA02_INITIAL_RECEIPT_PATH
+        ).relative_to("internal/jaa").as_posix()
+        tracked_receipts = _git(
+            ROOT, "ls-files", "runtime_evidence/jaa02/sha256-*.json"
+        ).stdout.splitlines()
+        assert tracked_receipts == [initial_receipt]
+        inplace_fixture._commit_deleted_file(
+            state,
+            inplace_fixture.JAA02_INITIAL_RECEIPT_PATH,
+            "remove checked receipt for JAA-02 clean certification",
+        )
+        _ACTIVE_INPLACE_STATE = state
+        try:
+            yield ROOT
+        finally:
+            _ACTIVE_INPLACE_STATE = None
 
 
 def _commit(root: Path, *paths: str, message: str) -> None:
@@ -83,6 +106,15 @@ def _certify(root: Path) -> tuple[Path, dict[str, object]]:
 
 
 def _track_receipt(root: Path, receipt: Path) -> None:
+    if _ACTIVE_INPLACE_STATE is not None:
+        project_relative = receipt.relative_to(PROJECT_ROOT).as_posix()
+        inplace_fixture._commit_existing_added_file(
+            _ACTIVE_INPLACE_STATE,
+            project_relative,
+            receipt.read_bytes(),
+            "track JAA-02 runtime receipt",
+        )
+        return
     _commit(
         root,
         receipt.relative_to(root).as_posix(),

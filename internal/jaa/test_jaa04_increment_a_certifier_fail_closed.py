@@ -40,12 +40,23 @@ CERTIFICATION_SURFACE_MUTATIONS = {
     "internal/jaa/career_automation/fixtures/jaa04_authority_canaries/unexpected.json",
     "internal/jaa/career_automation/dirty-certifier-control.txt",
 }
+JAA02_RECEIPT_MUTATION = "@jaa02-content-addressed-receipt"
+JAA02_INITIAL_RECEIPT_PATH = (
+    "internal/jaa/runtime_evidence/jaa02/"
+    "sha256-8d49a1543093644703e95a78d424c971f55465111baece7a45f6e3c0a71805d2.json"
+)
+JAA02_CLEAN_COMMIT_SEQUENCE = (
+    (JAA02_INITIAL_RECEIPT_PATH, "deleted"),
+    (JAA02_RECEIPT_MUTATION, "added"),
+)
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/README.md",
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
     "internal/jaa/test_jaa04_sidecar_temporal_semantics.py",
     "internal/jaa/baseline_adoption/cli.py",
     "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml",
+    JAA02_INITIAL_RECEIPT_PATH,
+    JAA02_RECEIPT_MUTATION,
 } | CERTIFICATION_SURFACE_MUTATIONS
 PUBLICATION_EVIDENCE_PATH = "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml"
 PUBLICATION_SOURCE_PATH = "internal/jaa/baseline_adoption/cli.py"
@@ -296,11 +307,13 @@ def _committed_inplace_branch(
         )
         if not exact_mutations <= PERMITTED_MUTATION_PATHS:
             _abort_suite("fixture mutation scope is outside its reviewed exact paths")
-        if commit_sequence is not None and (
-            commit_sequence != PUBLICATION_COMMIT_SEQUENCE
-            or exact_mutations != frozenset(path for path, _ in PUBLICATION_COMMIT_SEQUENCE)
-        ):
-            _abort_suite("multi-commit fixture is outside its exact publication history")
+        if commit_sequence is not None:
+            permitted_sequences = (PUBLICATION_COMMIT_SEQUENCE, JAA02_CLEAN_COMMIT_SEQUENCE)
+            if (
+                commit_sequence not in permitted_sequences
+                or exact_mutations != frozenset(path for path, _ in commit_sequence)
+            ):
+                _abort_suite("multi-commit fixture is outside its exact admitted history")
         base_branch = BASE_BRANCH
         base_head = os.environ.get("MA_JAA04_INPLACE_BASE_HEAD", "")
         try:
@@ -346,10 +359,18 @@ def _committed_inplace_branch(
                         raise RuntimeError("single-commit fixture contains multiple commits")
                     if state.commit_records and state.commit_records[0].parent_head != base_head:
                         raise RuntimeError("single fixture commit does not descend from its base")
-                    if state.commit_records and state.commit_records[0].path not in state.allowed_mutations:
+                    if state.commit_records and not _mutation_path_allowed(
+                        state.commit_records[0].path, state.allowed_mutations
+                    ):
                         raise RuntimeError("single fixture commit changed an unapproved path")
                 elif (
-                    actual_sequence != expected_records
+                    len(actual_sequence) != len(expected_records)
+                    or any(
+                        operation != expected_operation
+                        or not _mutation_path_matches(expected_path, actual_path)
+                        for (actual_path, operation), (expected_path, expected_operation)
+                        in zip(actual_sequence, expected_records)
+                    )
                     or state.allowed_mutations
                     != frozenset(path for path, _ in expected_records)
                 ):
@@ -460,14 +481,33 @@ def _git_path_blob_sha256(revision: str, path: str) -> str | None:
     return _git_blob_sha256(f"{revision}:{path}")
 
 
+def _is_jaa02_receipt_path(path: str) -> bool:
+    return re.fullmatch(
+        r"internal/jaa/runtime_evidence/jaa02/sha256-[0-9a-f]{64}\.json",
+        path,
+    ) is not None
+
+
+def _mutation_path_matches(expected: str, actual: str) -> bool:
+    return actual == expected or (
+        expected == JAA02_RECEIPT_MUTATION and _is_jaa02_receipt_path(actual)
+    )
+
+
+def _mutation_path_allowed(path: str, allowed: frozenset[str]) -> bool:
+    return any(_mutation_path_matches(expected, path) for expected in allowed)
+
+
 def _commit_path_change(
     state: _FixtureBranch,
     path: str,
     operation: str,
     content: bytes | None,
     case: str,
+    *,
+    preexisting_added: bool = False,
 ) -> None:
-    if path not in state.allowed_mutations:
+    if not _mutation_path_allowed(path, state.allowed_mutations):
         _abort_suite("fixture mutation path is not allowlisted")
     commit_index = len(state.commit_records)
     if state.commit_sequence is None:
@@ -475,13 +515,19 @@ def _commit_path_change(
             _abort_suite("single-commit fixture cannot accept another commit")
     elif (
         commit_index >= len(state.commit_sequence)
-        or state.commit_sequence[commit_index] != (path, operation)
+        or state.commit_sequence[commit_index][1] != operation
+        or not _mutation_path_matches(state.commit_sequence[commit_index][0], path)
     ):
         _abort_suite("fixture commit does not match its exact admitted sequence")
-    _assert_admission(state.branch, state.head, False)
+    _assert_admission(state.branch, state.head, preexisting_added)
     target = _safe_mutation_target(path)
     parent_head = state.head
     parent_blob_sha256 = _git_path_blob_sha256(parent_head, path)
+    if preexisting_added and (
+        _git("status", "--porcelain", "--untracked-files=all").splitlines()
+        != [f"?? {path}"]
+    ):
+        _abort_suite("generated receipt is not the sole exact untracked path")
     if operation in {"modified", "deleted", "symlink"}:
         if (
             parent_blob_sha256 is None
@@ -491,7 +537,17 @@ def _commit_path_change(
         ):
             _abort_suite("fixture mutation source differs from its admitted base blob")
     elif operation == "added":
-        if parent_blob_sha256 is not None or target.exists() or target.is_symlink():
+        if parent_blob_sha256 is not None or target.is_symlink():
+            _abort_suite("fixture addition target already exists in the admitted source")
+        if preexisting_added:
+            if (
+                not _is_jaa02_receipt_path(path)
+                or not target.is_file()
+                or content is None
+                or target.read_bytes() != content
+            ):
+                _abort_suite("existing generated receipt differs from its exact fixture bytes")
+        elif target.exists():
             _abort_suite("fixture addition target already exists in the admitted source")
     else:
         _abort_suite("fixture mutation operation is not permitted")
@@ -501,6 +557,11 @@ def _commit_path_change(
         _abort_suite("fixture write is missing its exact content bytes")
 
     result_blob_sha256 = hashlib.sha256(content).hexdigest() if content is not None else None
+    if operation == "added" and _mutation_path_matches(JAA02_RECEIPT_MUTATION, path) and (
+        result_blob_sha256 is None
+        or Path(path).name != f"sha256-{result_blob_sha256}.json"
+    ):
+        _abort_suite("JAA-02 receipt path is not bound to its exact content hash")
     try:
         if operation == "modified":
             target.write_bytes(content or b"")
@@ -509,16 +570,17 @@ def _commit_path_change(
             _assert_admission(state.branch, state.head, True)
             target.symlink_to(os.fsdecode(content or b""))
         elif operation == "added":
-            descriptor = os.open(
-                target,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o644,
-            )
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(content or b"")
-                stream.flush()
-                os.fsync(stream.fileno())
-        else:
+            if not preexisting_added:
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o644,
+                )
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(content or b"")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        elif operation == "deleted":
             target.unlink()
     except OSError:
         _abort_suite("fixture path change failed; preserving current branch state")
@@ -617,6 +679,14 @@ def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) 
 
 def _commit_added_file(state: _FixtureBranch, path: str, content: bytes, case: str) -> None:
     _commit_path_change(state, path, "added", content, case)
+
+
+def _commit_existing_added_file(
+    state: _FixtureBranch, path: str, content: bytes, case: str
+) -> None:
+    _commit_path_change(
+        state, path, "added", content, case, preexisting_added=True
+    )
 
 
 def _commit_deleted_file(state: _FixtureBranch, path: str, case: str) -> None:
