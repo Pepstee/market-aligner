@@ -293,18 +293,34 @@ class _CombinedReviewBackend(Backend):
     def __init__(self, result: dict[str, object]) -> None:
         self.result = result
         self.calls = 0
+        self.last_system = ""
         self.last_user = ""
+        self.last_images: tuple[bytes, ...] = ()
 
     def available(self) -> bool:
         return True
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
         self.calls += 1
+        self.last_system = system
         self.last_user = user
         return LLMResponse(
             text=json.dumps(self.result),
             model="gpt-6-luna",
         )
+
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, object],
+        task: str = "generic",
+        image_bytes: tuple[bytes, ...] = (),
+    ) -> LLMResponse:
+        self.last_images = image_bytes
+        return self.complete(system, user, temperature)
 
 
 def _combined_pass_result() -> dict[str, object]:
@@ -620,6 +636,8 @@ def test_native_combined_review_is_one_call_and_rebinds_only_visible_fields(
     assert backend.calls == 1
     assert receipt.model_identity == "gpt-6-luna"
     assert receipt.review_coverage["review_stage"] == "pre_fill_semantic_intent"
+    assert "aim-level targets" in backend.last_system
+    assert "accept supported qualitative results" in backend.last_system
     assert "synthetic-hidden-provider-state" not in backend.last_user
     assert "provider_state" not in backend.last_user
 

@@ -451,7 +451,7 @@ class _OneCallBackend:
     def available(self) -> bool:
         return self.backend.available()
 
-    def complete(self, system: str, user: str, temperature: float):
+    def _dispatch(self, invoke):
         self.call_attempts += 1
         if self.dispatched >= 1:
             self.refused_before_dispatch += 1
@@ -462,7 +462,7 @@ class _OneCallBackend:
             )
         self.dispatched += 1
         try:
-            response = self.backend.complete(system, user, temperature)
+            response = invoke()
         except Exception:
             self.backend_errors += 1
             raise
@@ -479,6 +479,91 @@ class _OneCallBackend:
                 "capture_error_type": type(capture_error).__name__,
             }
         return response
+
+    def complete(self, system: str, user: str, temperature: float):
+        return self._dispatch(
+            lambda: self.backend.complete(system, user, temperature)
+        )
+
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, object],
+        task: str = "generic",
+        image_bytes: tuple[bytes, ...] = (),
+    ):
+        from llm.client import LLMError
+
+        structured = getattr(self.backend, "complete_structured", None)
+        if not callable(structured):
+            raise LLMError("wrapped backend does not support structured output")
+        return self._dispatch(
+            lambda: structured(
+                system,
+                user,
+                temperature,
+                schema=schema,
+                task=task,
+                **({"image_bytes": image_bytes} if image_bytes else {}),
+            )
+        )
+
+
+def test_one_call_backend_forwards_review_images_without_second_dispatch() -> None:
+    from llm.client import LLMError, LLMResponse
+
+    class StructuredBackend:
+        name = "codex_cli"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.image_bytes: tuple[bytes, ...] = ()
+
+        def available(self) -> bool:
+            return True
+
+        def complete_structured(
+            self,
+            system: str,
+            user: str,
+            temperature: float,
+            *,
+            schema: dict[str, object],
+            task: str = "generic",
+            image_bytes: tuple[bytes, ...] = (),
+        ) -> LLMResponse:
+            self.calls += 1
+            self.image_bytes = image_bytes
+            return LLMResponse(text='{"verdict":"pass"}', model="synthetic")
+
+    source = StructuredBackend()
+    guarded = _OneCallBackend(source)
+    images = (b"\x89PNG\r\n\x1a\nsynthetic-page",)
+    response = guarded.complete_structured(
+        "synthetic system",
+        "synthetic user",
+        0.0,
+        schema={"type": "object"},
+        image_bytes=images,
+    )
+
+    assert response.text == '{"verdict":"pass"}'
+    assert source.calls == 1
+    assert source.image_bytes == images
+    with pytest.raises(LLMError, match="second backend dispatch refused"):
+        guarded.complete_structured(
+            "synthetic system",
+            "synthetic user",
+            0.0,
+            schema={"type": "object"},
+            image_bytes=images,
+        )
+    assert source.calls == 1
+    assert guarded.dispatched == 1
+    assert guarded.refused_before_dispatch == 1
 
 
 @_capture_setup_failures
@@ -1092,6 +1177,77 @@ def test_native_response_capture_preserves_exact_bytes_and_one_call_limit(
     assert backend.responses == 1
     assert backend.refused_before_dispatch == 1
     assert response_path.read_bytes() == text.encode("utf-8")
+
+
+@pytest.mark.parametrize("first_method", ("plain", "structured"))
+def test_native_one_call_backend_shares_guard_across_transport_methods(
+    first_method: str,
+) -> None:
+    from llm.client import LLMError, LLMResponse
+
+    response = LLMResponse(text='{"result":"synthetic"}', model="synthetic-model")
+    schema = {"type": "object", "required": ["result"]}
+
+    class _FakeBackend:
+        plain_calls = 0
+        structured_calls = 0
+        observed_schema = None
+        observed_task = None
+
+        def available(self) -> bool:
+            return True
+
+        def complete(self, system: str, user: str, temperature: float):
+            self.plain_calls += 1
+            return response
+
+        def complete_structured(
+            self,
+            system: str,
+            user: str,
+            temperature: float,
+            *,
+            schema: dict[str, object],
+            task: str,
+        ):
+            self.structured_calls += 1
+            self.observed_schema = schema
+            self.observed_task = task
+            return response
+
+    fake = _FakeBackend()
+    backend = _OneCallBackend(fake)
+    if first_method == "structured":
+        first_response = backend.complete_structured(
+            "synthetic system",
+            "synthetic user",
+            0.0,
+            schema=schema,
+            task="synthetic-review",
+        )
+        second_call = lambda: backend.complete("synthetic system", "synthetic user", 0.0)
+    else:
+        first_response = backend.complete("synthetic system", "synthetic user", 0.0)
+        second_call = lambda: backend.complete_structured(
+            "synthetic system",
+            "synthetic user",
+            0.0,
+            schema=schema,
+            task="synthetic-review",
+        )
+
+    assert first_response is response
+    with pytest.raises(LLMError, match="second backend dispatch refused"):
+        second_call()
+    assert fake.plain_calls == (first_method == "plain")
+    assert fake.structured_calls == (first_method == "structured")
+    if first_method == "structured":
+        assert fake.observed_schema is schema
+        assert fake.observed_task == "synthetic-review"
+    assert backend.call_attempts == 2
+    assert backend.dispatched == 1
+    assert backend.responses == 1
+    assert backend.refused_before_dispatch == 1
 
 
 def test_native_response_capture_refuses_oversize_without_partial_file(

@@ -40,6 +40,8 @@ _A4_WIDTH = 595.0
 _A4_HEIGHT = 842.0
 _GEOMETRY_TOLERANCE = 1.0
 _MINIMUM_MARGIN = 36.0
+_MAX_REVIEW_RASTER_BYTES = 16 * 1024 * 1024
+_MAX_REVIEW_RASTER_SET_BYTES = 32 * 1024 * 1024
 
 
 QUALITY_POLICY_SHA256 = content_hash(
@@ -409,6 +411,71 @@ def _run(
     if completed.returncode != 0:
         raise DocumentQualityError(f"Poppler {tool} failed")
     return completed
+
+
+def rasterize_review_pdf_pages(
+    pdf_bytes: bytes,
+    document_kind: str,
+    *,
+    poppler_runtime: PopplerRuntime | None = None,
+) -> tuple[bytes, ...]:
+    if (
+        type(pdf_bytes) is not bytes
+        or not pdf_bytes.startswith(b"%PDF-")
+        or len(pdf_bytes) > 20 * 1024 * 1024
+        or document_kind not in {"cv", "cover_letter"}
+    ):
+        raise DocumentQualityError("visual review PDF is invalid")
+    runtime = poppler_runtime or resolve_poppler_runtime()
+    runtime.__post_init__()
+    with tempfile.TemporaryDirectory(prefix="jaa-review-pages-") as temporary:
+        directory = Path(temporary)
+        pdf_path = directory / "source.pdf"
+        descriptor = os.open(
+            pdf_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(pdf_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        page_info = _run(runtime, "pdfinfo", str(pdf_path)).stdout
+        page_match = re.search(r"(?m)^Pages:\s*(\d+)\s*$", page_info)
+        maximum_pages = 2 if document_kind == "cv" else 1
+        if page_match is None:
+            raise DocumentQualityError("visual review page count is unavailable")
+        page_count = int(page_match.group(1))
+        if page_count < 1 or page_count > maximum_pages:
+            raise DocumentQualityError("visual review page count is outside policy")
+        prefix = directory / "page"
+        _run(runtime, "pdftoppm", "-png", "-r", "144", str(pdf_path), str(prefix))
+        raster_paths = sorted(directory.glob("page-*.png"))
+        if len(raster_paths) != page_count:
+            raise DocumentQualityError("visual review raster count differs")
+        rasters: list[bytes] = []
+        total_bytes = 0
+        for path in raster_paths:
+            metadata = path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size <= 8
+                or metadata.st_size > _MAX_REVIEW_RASTER_BYTES
+            ):
+                raise DocumentQualityError("visual review raster size is invalid")
+            path.chmod(0o600)
+            image = path.read_bytes()
+            if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise DocumentQualityError("visual review raster format is invalid")
+            total_bytes += len(image)
+            if total_bytes > _MAX_REVIEW_RASTER_SET_BYTES:
+                raise DocumentQualityError("visual review raster set exceeds its bound")
+            rasters.append(image)
+        return tuple(rasters)
 
 
 def _normalized_lines(text: str) -> tuple[str, ...]:

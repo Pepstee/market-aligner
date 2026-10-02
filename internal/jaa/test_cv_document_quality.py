@@ -5,6 +5,7 @@ from career_automation.form_answers import form_answers_bytes
 import hashlib
 import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -326,3 +327,64 @@ def test_quality_receipt_cannot_claim_release_or_visual_review() -> None:
         replace(receipt, release_authority=True)
     with pytest.raises(DocumentQualityError, match="visual judgement"):
         replace(receipt, visual_judgement="pass")
+
+
+def test_visual_review_rasterizer_bounds_pages_and_private_temp_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = quality.PopplerRuntime(
+        version="pdftoppm version synthetic",
+        tool_paths=tuple((tool, f"/synthetic/{tool}") for tool in quality.POPPLER_TOOLS),
+        tool_sha256=tuple((tool, "a" * 64) for tool in quality.POPPLER_TOOLS),
+        runtime_sha256="b" * 64,
+    )
+    png = b"\x89PNG\r\n\x1a\nsynthetic-page"
+    observed: dict[str, object] = {}
+
+    def fake_run(_runtime, tool, *arguments):
+        if tool == "pdfinfo":
+            pdf_path = Path(arguments[0])
+            observed["directory_mode"] = os.stat(pdf_path.parent).st_mode & 0o777
+            observed["pdf_mode"] = os.stat(pdf_path).st_mode & 0o777
+            observed["pdf_bytes"] = pdf_path.read_bytes()
+            return SimpleNamespace(stdout="Pages:          1\n")
+        prefix = Path(arguments[-1])
+        page_path = prefix.with_name("page-1.png")
+        page_path.write_bytes(png)
+        observed["page_path"] = page_path
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(quality, "_run", fake_run)
+    result = quality.rasterize_review_pdf_pages(
+        b"%PDF-1.4\nsynthetic-pdf",
+        "cv",
+        poppler_runtime=runtime,
+    )
+
+    assert result == (png,)
+    assert observed["directory_mode"] == 0o700
+    assert observed["pdf_mode"] == 0o600
+    assert observed["pdf_bytes"] == b"%PDF-1.4\nsynthetic-pdf"
+    assert not Path(observed["page_path"]).exists()
+
+
+def test_visual_review_rasterizer_refuses_excess_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = quality.PopplerRuntime(
+        version="pdftoppm version synthetic",
+        tool_paths=tuple((tool, f"/synthetic/{tool}") for tool in quality.POPPLER_TOOLS),
+        tool_sha256=tuple((tool, "a" * 64) for tool in quality.POPPLER_TOOLS),
+        runtime_sha256="b" * 64,
+    )
+    monkeypatch.setattr(
+        quality,
+        "_run",
+        lambda *_args: SimpleNamespace(stdout="Pages:          3\n"),
+    )
+    with pytest.raises(DocumentQualityError, match="page count is outside policy"):
+        quality.rasterize_review_pdf_pages(
+            b"%PDF-1.4\nsynthetic-pdf",
+            "cv",
+            poppler_runtime=runtime,
+        )

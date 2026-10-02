@@ -313,6 +313,193 @@ def test_codex_cli_backend_uses_ephemeral_session(monkeypatch):
     assert commands[0][commands[0].index("-s") + 1] == "read-only"
 
 
+def test_codex_cli_structured_output_uses_private_schema_and_cleans_temps(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    schema = {
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}},
+        "required": ["verdict"],
+        "additionalProperties": False,
+    }
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        schema_path = Path(command[command.index("--output-schema") + 1])
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        captured["schema_path"] = schema_path
+        captured["output_path"] = output_path
+        captured["schema_mode"] = stat.S_IMODE(schema_path.stat().st_mode)
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        output_path.write_text('{"verdict":"pass"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    response = CodexCliBackend(model="gpt-6-luna").complete_structured(
+        "synthetic system",
+        "synthetic user",
+        0.0,
+        schema=schema,
+        task="synthetic-review",
+    )
+
+    schema_path = captured["schema_path"]
+    output_path = captured["output_path"]
+    assert response.text == '{"verdict":"pass"}'
+    assert captured["schema"] == schema
+    assert captured["schema_mode"] == 0o600
+    assert not schema_path.exists()
+    assert not output_path.exists()
+
+
+def test_codex_cli_structured_output_cleans_schema_when_launch_fails(monkeypatch):
+    import pytest
+
+    from llm import client as client_module
+
+    paths: list[Path] = []
+
+    def fake_run(command, **kwargs):
+        paths.extend(
+            [
+                Path(command[command.index("--output-schema") + 1]),
+                Path(command[command.index("--output-last-message") + 1]),
+                *(
+                    Path(command[index + 1])
+                    for index, value in enumerate(command)
+                    if value == "--image"
+                ),
+            ]
+        )
+        raise OSError("synthetic launch failure")
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    with pytest.raises(LLMError, match="failed to launch codex CLI"):
+        CodexCliBackend(model="synthetic-model").complete_structured(
+            "synthetic system",
+            "synthetic user",
+            0.0,
+            schema={"type": "object"},
+            image_bytes=(b"\x89PNG\r\n\x1a\nsynthetic-page",),
+        )
+
+    assert len(paths) == 3
+    assert all(not path.exists() for path in paths)
+
+
+def test_codex_cli_structured_review_images_are_private_and_cleaned(monkeypatch):
+    import json
+    import stat
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    captured: dict[str, object] = {}
+    images = (
+        b"\x89PNG\r\n\x1a\nsynthetic-cv-page",
+        b"\x89PNG\r\n\x1a\nsynthetic-letter-page",
+    )
+
+    def fake_run(command, **kwargs):
+        image_paths = [
+            Path(command[index + 1])
+            for index, value in enumerate(command)
+            if value == "--image"
+        ]
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        schema_path = Path(command[command.index("--output-schema") + 1])
+        captured["image_paths"] = image_paths
+        captured["image_modes"] = tuple(
+            stat.S_IMODE(path.stat().st_mode) for path in image_paths
+        )
+        captured["image_contents"] = tuple(path.read_bytes() for path in image_paths)
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        output_path.write_text('{"verdict":"pass"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+    response = CodexCliBackend(model="synthetic-model").complete_structured(
+        "synthetic system",
+        "synthetic user",
+        0.0,
+        schema={"type": "object"},
+        image_bytes=images,
+    )
+
+    assert response.text == '{"verdict":"pass"}'
+    assert captured["image_contents"] == images
+    assert captured["image_modes"] == (0o600, 0o600)
+    assert captured["schema"] == {"type": "object"}
+    assert all(not path.exists() for path in captured["image_paths"])
+
+
+def test_structured_codex_backend_preserves_process_failure_metadata(
+    monkeypatch, tmp_path
+):
+    import pytest
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    paths: list[Path] = []
+
+    def fake_run(command, **kwargs):
+        paths.extend(
+            (
+                Path(command[command.index("--output-schema") + 1]),
+                Path(command[command.index("--output-last-message") + 1]),
+            )
+        )
+        return SimpleNamespace(
+            returncode=73,
+            stdout="",
+            stderr="synthetic permission error",
+        )
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+    client = LLMClient(
+        backend=CodexCliBackend(model="synthetic-model"),
+        model="synthetic-model",
+        temperature=0,
+        max_retries=1,
+        cache_enabled=False,
+        cache_dir=tmp_path / "cache",
+        usage_log=tmp_path / "usage.jsonl",
+    )
+
+    with pytest.raises(LLMError) as captured:
+        client.complete_json_with_response(
+            "synthetic system",
+            "synthetic user",
+            schema={"type": "object"},
+            task="synthetic-review",
+            json_attempts=1,
+        )
+
+    assert captured.value.backend_failure is not None
+    assert captured.value.backend_failure["exit_code"] == 73
+    assert len(paths) == 2
+    assert all(not path.exists() for path in paths)
+
+
 def test_codex_cli_backend_redacts_structured_stdout_failure(monkeypatch):
     import hashlib
     from types import SimpleNamespace

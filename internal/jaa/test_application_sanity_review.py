@@ -50,6 +50,7 @@ class ScriptedBackend(Backend):
         self.model = model
         self.last_system = ""
         self.last_user = ""
+        self.last_images: tuple[bytes, ...] = ()
         self.calls = 0
 
     def available(self) -> bool:
@@ -62,12 +63,46 @@ class ScriptedBackend(Backend):
         text = self.result if isinstance(self.result, str) else json.dumps(self.result)
         return LLMResponse(text=text, model=self.model)
 
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, object],
+        task: str = "generic",
+        image_bytes: tuple[bytes, ...] = (),
+    ) -> LLMResponse:
+        self.last_images = image_bytes
+        return self.complete(system, user, temperature)
+
 
 class TimeoutBackend(ScriptedBackend):
     name = "timeout_test"
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
         raise TimeoutError("bounded timeout")
+
+
+class ImageAwareScriptedBackend(ScriptedBackend):
+    def __init__(self, result: dict[str, object] | str, *, model: str = "scripted-v1") -> None:
+        super().__init__(result, model=model)
+        self.review_images: tuple[bytes, ...] = ()
+        self.structured_calls = 0
+
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, object],
+        task: str = "generic",
+        image_bytes: tuple[bytes, ...] = (),
+    ) -> LLMResponse:
+        self.structured_calls += 1
+        self.review_images = image_bytes
+        return self.complete(system, user, temperature)
 
 
 PASS = {"schema_version": RESULT_SCHEMA_VERSION, "verdict": "pass", "findings": []}
@@ -197,6 +232,23 @@ def test_clean_relevant_canary_passes_and_legitimate_llm_claim_is_quoted(
     )
 
 
+def test_standalone_malformed_response_is_invalid_result_not_backend_failure(
+    tmp_path,
+) -> None:
+    marker = "synthetic-private-response-fragment"
+    backend = ScriptedBackend('{"verdict": ' + marker)
+
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package(package(), client=client(backend, tmp_path))
+
+    assert backend.calls == 1
+    assert captured.value.code == "review.invalid_result"
+    assert captured.value.result is None
+    assert captured.value.backend_failure is None
+    assert marker not in str(captured.value)
+    assert marker not in str(captured.value.document())
+
+
 def _combined_result(
     *,
     sanity: dict[str, object] | None = None,
@@ -261,8 +313,44 @@ def test_combined_review_issues_one_content_bound_receipt_for_all_criteria(
         [row["criterion_id"] for row in criteria]
     ) in backend.last_system
     assert "Return one JSON object containing one sanity_review" in backend.last_system
+    assert (
+        "intentional non-deliverability alone is not itself a defect"
+        not in backend.last_system
+    )
     restored = SanityReviewReceipt.from_document(receipt.document())
     assert restored.receipt_sha256 == receipt.receipt_sha256
+
+
+def test_combined_review_binds_exact_pdf_rasters_in_its_single_dispatch(
+    tmp_path,
+) -> None:
+    candidate = package()
+    backend = ImageAwareScriptedBackend(_combined_result(), model="gpt-6-luna")
+    criteria = (
+        {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+        {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+    )
+    receipt = review_application_package_with_criteria(
+        candidate,
+        client=client(backend, tmp_path),
+        criteria_prompt="Inspect the exact synthetic PDF pages and apply both criteria.",
+        criteria=criteria,
+    )
+    document, hashes, expected_images = review_module._package_document(candidate)
+    visual_pages = document["application"]["visual_review_pages"]
+
+    assert backend.calls == 1
+    assert backend.structured_calls == 1
+    assert backend.review_images == expected_images
+    assert len(expected_images) == 2
+    assert all(image.startswith(b"\x89PNG\r\n\x1a\n") for image in expected_images)
+    assert [row["image_sha256"] for row in visual_pages] == [
+        hashlib.sha256(image).hexdigest() for image in expected_images
+    ]
+    assert receipt.package_hashes == hashes
+    assert json.loads(backend.last_user)["application"]["visual_review_pages"] == visual_pages
+    assert "inspect every attached exact-PDF page image" in backend.last_system
+    verify_sanity_review_receipt(receipt, candidate)
 
 
 def test_local_diagnostic_receipt_is_context_bound_and_rejected_by_default(
@@ -310,6 +398,10 @@ def test_local_diagnostic_receipt_is_context_bound_and_rejected_by_default(
     assert receipt.review_coverage["diagnostic_context"] == context.document()
     assert receipt.review_coverage["diagnostic_context_sha256"] == context.context_sha256
     assert review_module.canonical_json(context.document()) in backend.last_system
+    assert (
+        "intentional non-deliverability alone is not itself a defect"
+        in backend.last_system
+    )
     with pytest.raises(
         ValueError,
         match="local diagnostic receipt is rejected by production verification",
@@ -427,6 +519,31 @@ def test_combined_review_blocks_if_any_component_finds_a_problem(
     assert backend.calls == 1
     assert captured.value.result is not None
     assert captured.value.document()["code"] == "review.combined_finding"
+
+
+def test_combined_malformed_response_is_invalid_result_not_backend_failure(
+    tmp_path,
+) -> None:
+    marker = "synthetic-private-response-fragment"
+    backend = ScriptedBackend('{"sanity_review": ' + marker, model="gpt-6-luna")
+
+    with pytest.raises(ApplicationSanityReviewError) as captured:
+        review_application_package_with_criteria(
+            package(),
+            client=client(backend, tmp_path),
+            criteria_prompt="Apply both synthetic read-only review criteria.",
+            criteria=(
+                {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+                {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+            ),
+        )
+
+    assert backend.calls == 1
+    assert captured.value.code == "review.invalid_result"
+    assert captured.value.result is None
+    assert captured.value.backend_failure is None
+    assert marker not in str(captured.value)
+    assert marker not in str(captured.value.document())
 
 
 def test_combined_criterion_finding_code_schema_accepts_only_bounded_dotted_codes() -> None:
@@ -727,14 +844,17 @@ def test_backend_failure_records_redacted_process_diagnostics(
         staticmethod(lambda: "/synthetic/codex"),
     )
     stdout = "synthetic-only stdout"
+    real_subprocess_run = llm_client_module.subprocess.run
+
+    def fake_subprocess_run(command, *args, **kwargs):
+        if Path(command[0]).name in {"pdfinfo", "pdffonts", "pdftotext", "pdftoppm"}:
+            return real_subprocess_run(command, *args, **kwargs)
+        return SimpleNamespace(returncode=73, stdout=stdout, stderr=stderr)
+
     monkeypatch.setattr(
         llm_client_module.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=73,
-            stdout=stdout,
-            stderr=stderr,
-        ),
+        fake_subprocess_run,
     )
 
     with pytest.raises(ApplicationSanityReviewError) as captured:

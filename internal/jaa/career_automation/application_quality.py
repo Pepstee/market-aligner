@@ -522,6 +522,9 @@ def review_application_package_with_pinned_skills(
             "Apply the complete pinned document below as a read-only review. Return pass only when no concrete skill-defined issue remains. Otherwise return detailed findings with exact evidence from the supplied package; do not invent candidate facts.\n\n"
             + skill_document.decode("utf-8", errors="strict")
         )
+    prompt_sections.append(
+        "When applying pinned criteria, preserve their mandatory, aim, and conditional distinctions: cite concrete defects with supporting excerpts, and do not invent numbers or convert aim-level targets (e.g., the 60% measurable-result guidance) into mandatory failures; accept supported qualitative results only where specific numbers are unavailable, without weakening truthfulness or quality requirements."
+    )
     if local_synthetic_context is None:
         return review_application_package_with_criteria(
             package,

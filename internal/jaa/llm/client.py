@@ -34,7 +34,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 # --------------------------------------------------------------------------- #
 # Paths — everything this module writes lives under llm/data/ (per protocol).
@@ -45,6 +45,26 @@ _CACHE_DIR = _DATA_DIR / "cache"
 _USAGE_LOG = _DATA_DIR / "usage.jsonl"
 _REPO_ROOT = _MODULE_DIR.parent
 _CONFIG_PATH = _REPO_ROOT / "skeleton" / "config.yaml"
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_MAX_STRUCTURED_IMAGES = 8
+_MAX_STRUCTURED_IMAGE_BYTES = 16 * 1024 * 1024
+_MAX_STRUCTURED_IMAGE_SET_BYTES = 32 * 1024 * 1024
+
+
+def _validate_structured_images(images: Sequence[bytes]) -> tuple[bytes, ...]:
+    if not isinstance(images, (tuple, list)) or len(images) > _MAX_STRUCTURED_IMAGES:
+        raise ValueError("structured review image count is invalid")
+    normalized = tuple(images)
+    total_bytes = 0
+    for image in normalized:
+        if type(image) is not bytes or not image.startswith(_PNG_SIGNATURE):
+            raise ValueError("structured review image is not a PNG")
+        if len(image) > _MAX_STRUCTURED_IMAGE_BYTES:
+            raise ValueError("structured review image exceeds its byte limit")
+        total_bytes += len(image)
+    if total_bytes > _MAX_STRUCTURED_IMAGE_SET_BYTES:
+        raise ValueError("structured review image set exceeds its byte limit")
+    return normalized
 
 
 class LLMError(RuntimeError):
@@ -60,6 +80,10 @@ class LLMError(RuntimeError):
             dict(backend_failure) if backend_failure is not None else None
         )
         super().__init__(message)
+
+
+class StructuredOutputError(LLMError):
+    """A provider response did not satisfy its requested JSON contract."""
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -836,7 +860,38 @@ class CodexCliBackend(Backend):
         return self.resolve_binary() is not None
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
+        return self._complete_with_cli(system, user, temperature)
+
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, Any],
+        task: str = "generic",
+        image_bytes: Sequence[bytes] = (),
+    ) -> LLMResponse:
+        return self._complete_with_cli(
+            system,
+            user,
+            temperature,
+            schema=schema,
+            image_bytes=image_bytes,
+        )
+
+    def _complete_with_cli(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, Any] | None = None,
+        image_bytes: Sequence[bytes] = (),
+    ) -> LLMResponse:
         import tempfile
+
+        normalized_images = _validate_structured_images(image_bytes)
 
         codex = self.resolve_binary()
         if codex is None:
@@ -848,11 +903,48 @@ class CodexCliBackend(Backend):
 
         prompt = f"{system}\n\n{user}" if system else user
 
-        with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as tf:
-            out_path = Path(tf.name)
+        out_path: Path | None = None
+        schema_path: Path | None = None
+        image_paths: list[Path] = []
         try:
+            with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as tf:
+                out_path = Path(tf.name)
+            if schema is not None:
+                schema_fd, schema_name = tempfile.mkstemp(
+                    prefix="jaa-codex-output-schema-",
+                    suffix=".json",
+                )
+                schema_path = Path(schema_name)
+                with os.fdopen(schema_fd, "w", encoding="utf-8") as schema_file:
+                    os.fchmod(schema_file.fileno(), 0o600)
+                    json.dump(
+                        schema,
+                        schema_file,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    schema_file.write("\n")
+                    schema_file.flush()
+                    os.fsync(schema_file.fileno())
+            for image in normalized_images:
+                image_fd, image_name = tempfile.mkstemp(
+                    prefix="jaa-codex-review-page-",
+                    suffix=".png",
+                )
+                image_path = Path(image_name)
+                image_paths.append(image_path)
+                with os.fdopen(image_fd, "wb") as image_file:
+                    os.fchmod(image_file.fileno(), 0o600)
+                    image_file.write(image)
+                    image_file.flush()
+                    os.fsync(image_file.fileno())
             cmd = [codex, "exec", "--json", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
                    "--output-last-message", str(out_path)]
+            if schema_path is not None:
+                cmd += ["--output-schema", str(schema_path)]
+            for image_path in image_paths:
+                cmd += ["--image", str(image_path)]
             if self.model:
                 cmd += ["-m", self.model]
             cmd += ["-"]   # read the prompt from stdin
@@ -920,10 +1012,12 @@ class CodexCliBackend(Backend):
                 model=self.model or "codex-default",
             )
         finally:
-            try:
-                out_path.unlink()
-            except FileNotFoundError:
-                pass
+            for temporary_path in (*image_paths, schema_path, out_path):
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink()
+                    except FileNotFoundError:
+                        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1271,6 +1365,7 @@ class LLMClient:
         *,
         schema: dict[str, Any],
         task: str,
+        image_bytes: tuple[bytes, ...] = (),
     ) -> LLMResponse:
         """Use a provider-native structured-output seam when one is present.
 
@@ -1282,10 +1377,16 @@ class LLMClient:
 
         structured = getattr(self.backend, "complete_structured", None)
         if not callable(structured):
+            if image_bytes:
+                raise LLMError("configured backend cannot accept review images")
             return self.complete(system, user, task=task)
+        cache_user = user
+        if image_bytes:
+            image_hashes = [hashlib.sha256(image).hexdigest() for image in image_bytes]
+            cache_user += "\n\nREVIEW IMAGE SHA256 LIST:" + json.dumps(image_hashes)
         key = self.cache_key(
             system,
-            user,
+            cache_user,
             self.temperature,
             self.model,
             backend=self.backend.name,
@@ -1296,14 +1397,32 @@ class LLMClient:
             return cached
 
         last: Optional[Exception] = None
+        if image_bytes:
+            try:
+                import inspect
+
+                parameters = inspect.signature(structured).parameters.values()
+            except (TypeError, ValueError):
+                parameters = ()
+            if not any(
+                parameter.name == "image_bytes"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            ):
+                raise LLMError("configured backend cannot accept review images")
         for attempt in range(1, self.max_retries + 1):
             try:
+                structured_kwargs: dict[str, Any] = {
+                    "schema": schema,
+                    "task": task,
+                }
+                if image_bytes:
+                    structured_kwargs["image_bytes"] = image_bytes
                 response = structured(
                     system,
                     user,
                     self.temperature,
-                    schema=schema,
-                    task=task,
+                    **structured_kwargs,
                 )
                 if not isinstance(response, LLMResponse):
                     raise LLMError(
@@ -1320,7 +1439,8 @@ class LLMClient:
                 if attempt < self.max_retries:
                     time.sleep(self._backoff_base * (2 ** (attempt - 1)))
         raise LLMError(
-            f"structured backend failed after {self.max_retries} attempts: {last}"
+            f"structured backend failed after {self.max_retries} attempts: {last}",
+            backend_failure=getattr(last, "backend_failure", None),
         )
 
     # -- structured output helper ------------------------------------------ #
@@ -1350,6 +1470,7 @@ class LLMClient:
         schema: Optional[dict[str, Any]] = None,
         task: str = "generic",
         json_attempts: int = 2,
+        image_bytes: Sequence[bytes] = (),
     ) -> tuple[dict[str, Any], LLMResponse]:
         """Complete, parse JSON (leniently), validate against `schema`.
 
@@ -1360,8 +1481,11 @@ class LLMClient:
         Lenient parse tolerates markdown fences and prose around the object
         (real models do this despite instructions). On a bad response the cache
         entry is EVICTED before retrying, so a poisoned answer can never satisfy
-        this or any future lookup. Raises LLMError with a response preview on
-        final failure."""
+        this or any future lookup. Raises StructuredOutputError after final
+        structured-output rejection."""
+        normalized_images = _validate_structured_images(image_bytes)
+        if normalized_images and schema is None:
+            raise ValueError("review images require structured output")
         schema_contract = ""
         if schema is not None:
             schema_contract = (
@@ -1372,7 +1496,6 @@ class LLMClient:
             )
 
         last_err = ""
-        preview = ""
         for attempt in range(1, json_attempts + 1):
             attempt_system = system + schema_contract
             if attempt > 1 and last_err:
@@ -1387,6 +1510,7 @@ class LLMClient:
                     user,
                     schema=schema,
                     task=task,
+                    image_bytes=normalized_images,
                 )
                 if schema is not None
                 else self.complete(attempt_system, user, task=task)
@@ -1400,16 +1524,28 @@ class LLMClient:
                 return data, resp
             except (json.JSONDecodeError, LLMError) as exc:
                 last_err = str(exc)
-                preview = repr((resp.text or "")[:200])
-                self._evict(attempt_system, user)  # never retain a poisoned answer
-        raise LLMError(
-            f"structured output failed for task '{task}' after {json_attempts} "
-            f"attempts: {last_err}; last response preview: {preview}"
+                self._evict(
+                    attempt_system,
+                    user,
+                    image_bytes=normalized_images,
+                )
+        raise StructuredOutputError(
+            f"structured output failed for task '{task}' after {json_attempts} attempts"
         )
 
-    def _evict(self, system: str, user: str) -> None:
+    def _evict(
+        self,
+        system: str,
+        user: str,
+        *,
+        image_bytes: tuple[bytes, ...] = (),
+    ) -> None:
         """Remove a cached response so the next call re-hits the backend."""
-        key = self.cache_key(system, user, self.temperature, self.model,
+        cache_user = user
+        if image_bytes:
+            image_hashes = [hashlib.sha256(image).hexdigest() for image in image_bytes]
+            cache_user += "\n\nREVIEW IMAGE SHA256 LIST:" + json.dumps(image_hashes)
+        key = self.cache_key(system, cache_user, self.temperature, self.model,
                              backend=self.backend.name)
         try:
             self._cache_path(key).unlink()
