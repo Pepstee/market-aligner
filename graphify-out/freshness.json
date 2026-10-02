@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "cd3c82f67e78e7d66394421ff3a08366192085f3",
+  "source_base_commit": "c7929c180a33a50205e9fb59cb04683985d1b188",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -553,7 +553,7 @@
     "internal/jaa/test_jaa04_increment_a_authority_canaries.py": "fb5f61a959a33c70d8c937da99c8ba1b8b2b9a2c25879e4d7bf38fc6a0739177",
     "internal/jaa/test_jaa04_increment_a_certification_surface.py": "c9b538158a8e39bd14763b924ea192211f23309f085b9c1d93b293e37c8d6da5",
     "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": "90be10fd3c7db74a0dbc0869795ded7f2c74a3984129352b1a208eb40b769d9c",
-    "internal/jaa/test_jaa04_increment_a_independent_regressions.py": "d6a1caf3af2349cabefd3c27ff65a1441f5b373922c6ebae0bc6fa8d39772bbd",
+    "internal/jaa/test_jaa04_increment_a_independent_regressions.py": "80cd617022918fc21a45123e4d3d56d5b4253b96ab87552eae6495d99281728a",
     "internal/jaa/test_jaa04_increment_a_temporal_authority_regression.py": "427ecb5d8174b805d021b0c01c71a5105aee2f8971178d43988488daca684d68",
     "internal/jaa/test_jaa04_increment_a_temporal_provenance_certification.py": "4309ed030270f0bc125ac1b1296d8ad6d5108b9d764e0bbf158aaab5b0a0fb55",
     "internal/jaa/test_jaa04_independent_acceptance.py": "2c331428c007f3529e517a96b132deea228db263684c76a72cb82de46c460297",

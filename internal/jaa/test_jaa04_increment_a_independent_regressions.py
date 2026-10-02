@@ -83,6 +83,8 @@ def pytest_collection_modifyitems(config, items):
 def pytest_runtest_setup(item):
     if _target(item) and MODE == "skipped":
         pytest.skip("independent skip control")
+    if _target(item) and MODE == "error":
+        raise RuntimeError("independent error control")
 
 def pytest_runtest_call(item):
     if not _target(item):
@@ -91,8 +93,6 @@ def pytest_runtest_call(item):
         pytest.xfail("independent xfail control")
     if MODE == "failed":
         pytest.fail("independent failure control")
-    if MODE == "error":
-        raise RuntimeError("independent error control")
 ''',
         encoding="utf-8",
     )
