@@ -7,10 +7,11 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
-from testing_repository import clone_jaa_repository
+import test_jaa04_increment_a_certifier_fail_closed as inplace_fixture
 
 
 ROOT = Path(__file__).resolve().parent
@@ -36,27 +37,35 @@ def _canonical(document: object) -> bytes:
 
 
 @pytest.fixture()
-def certified_repository(tmp_path: Path) -> Path:
-    clone = clone_jaa_repository(ROOT, tmp_path / "certified")
-    assert (
-        _git(
-            clone, "config", "user.name", "independent JAA-02 receipt tester"
-        ).returncode
-        == 0
-    )
-    assert (
-        _git(clone, "config", "user.email", "jaa02-tester@example.test").returncode == 0
-    )
-    return clone
+def certified_repository(
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[Path, inplace_fixture._FixtureBranch]]:
+    case = "jaa02-command-tamper"
+    with inplace_fixture._committed_inplace_branch(
+        case,
+        allowed_mutations={inplace_fixture.JAA02_REHASHED_RECEIPT_COMMIT},
+        commit_sequence=inplace_fixture.JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE,
+    ) as state:
+        expected_receipt = Path(
+            inplace_fixture.JAA02_INITIAL_RECEIPT_PATH
+        ).relative_to("internal/jaa").as_posix()
+        tracked_receipts = _git(
+            ROOT, "ls-files", "runtime_evidence/jaa02/sha256-*.json"
+        ).stdout.splitlines()
+        assert tracked_receipts == [expected_receipt]
+        yield ROOT, state
 
 
 @pytest.mark.parametrize("attack", ["omission", "reordering"])
 def test_jaa02_rehashed_command_omission_and_reordering_fail_closed(
-    certified_repository: Path,
+    certified_repository: tuple[Path, inplace_fixture._FixtureBranch],
     attack: str,
 ) -> None:
-    evidence = certified_repository / "runtime_evidence" / "jaa02"
+    repository_root, state = certified_repository
+    evidence = repository_root / "runtime_evidence" / "jaa02"
     receipt = next(evidence.glob("sha256-*.json"))
+    old_path = receipt.relative_to(inplace_fixture.REPOSITORY_ROOT).as_posix()
+    assert old_path == inplace_fixture.JAA02_INITIAL_RECEIPT_PATH
     document = json.loads(receipt.read_text(encoding="utf-8"))
     commands = document["command_semantics"]
     assert isinstance(commands, list) and len(commands) == 2
@@ -66,22 +75,17 @@ def test_jaa02_rehashed_command_omission_and_reordering_fail_closed(
         commands.reverse()
     payload = _canonical(document)
     replacement = evidence / f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
-    receipt.unlink()
-    replacement.write_bytes(payload)
-    assert (
-        _git(
-            certified_repository, "add", "-A", "--", "runtime_evidence/jaa02"
-        ).returncode
-        == 0
-    )
-    assert (
-        _git(certified_repository, "commit", "-m", "tamper JAA-02 receipt").returncode
-        == 0
+    replacement_path = replacement.relative_to(inplace_fixture.REPOSITORY_ROOT).as_posix()
+    inplace_fixture._commit_rehashed_receipt_replacement(
+        state,
+        replacement_path,
+        payload,
+        f"command-{attack}",
     )
 
     rejected = subprocess.run(
         (sys.executable, str(VALIDATOR)),
-        cwd=certified_repository,
+        cwd=repository_root,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

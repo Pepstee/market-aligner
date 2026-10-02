@@ -330,8 +330,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/candidate_graph.py": {
-    "mtime": 1788246507.263781,
-    "seen": 1790775868.5197024,
+    "mtime": 1790971328.8903563,
+    "seen": 1790972804.9708257,
     "ast_hash": "85353346f5de25f49a132697efa2a856",
     "semantic_hash": ""
   },
@@ -1842,8 +1842,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/accept_jaa_02.py": {
-    "mtime": 1788246507.3052046,
-    "seen": 1790775868.5200438,
+    "mtime": 1790971305.9623516,
+    "seen": 1790972804.971048,
     "ast_hash": "4294795af29a22e6aac59f80756bf137",
     "semantic_hash": ""
   },
@@ -1926,8 +1926,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/certify_jaa04_increment_a.py": {
-    "mtime": 1790964235.2984958,
-    "seen": 1790965460.4597201,
+    "mtime": 1790971367.3343806,
+    "seen": 1790972804.9710605,
     "ast_hash": "85be558982ba31f4c2af06beeab50d36",
     "semantic_hash": ""
   },
@@ -2412,15 +2412,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa02_independent_acceptance.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.5201554,
+    "mtime": 1790971311.662352,
+    "seen": 1790972804.971158,
     "ast_hash": "6d66673236b9651059859bbc66a6536d",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa02_receipt_command_tamper.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.5201566,
-    "ast_hash": "573933806ade865297577ec40e9c4fda",
+    "mtime": 1790972278.9579935,
+    "seen": 1790972804.9711587,
+    "ast_hash": "22702c6e1b12a8f30950285da67364cf",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa02_runtime_certification.py": {
@@ -2430,9 +2430,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa02_runtime_identity_tamper.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.5201583,
-    "ast_hash": "4d8ec627a30f1e5654d2de753df462a1",
+    "mtime": 1790972352.3579934,
+    "seen": 1790972804.9711607,
+    "ast_hash": "718ea4fb872580c4a507a71161fbff84",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa03_historical_receipt.py": {
@@ -2496,8 +2496,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_authority_canaries.py": {
-    "mtime": 1790964246.1184914,
-    "seen": 1790965460.4598439,
+    "mtime": 1790971381.194379,
+    "seen": 1790972804.9711702,
     "ast_hash": "4624a315882844dd3412eb01e2084990",
     "semantic_hash": ""
   },
@@ -2508,9 +2508,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": {
-    "mtime": 1790970230.1663678,
-    "seen": 1790970614.5809436,
-    "ast_hash": "345d0020c896291f46d2446a0c89eea7",
+    "mtime": 1790972616.1299896,
+    "seen": 1790972804.971172,
+    "ast_hash": "d254cd0a84921449f572c112a6731e6f",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_independent_regressions.py": {

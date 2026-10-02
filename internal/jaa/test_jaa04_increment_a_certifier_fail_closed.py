@@ -42,6 +42,7 @@ CERTIFICATION_SURFACE_MUTATIONS = {
 }
 JAA02_RECEIPT_MUTATION = "@jaa02-content-addressed-receipt"
 JAA02_TWO_RECEIPTS_MUTATION = "@jaa02-two-receipts"
+JAA02_REHASHED_RECEIPT_COMMIT = "@jaa02-rehashed-receipt-commit"
 JAA02_INITIAL_RECEIPT_PATH = (
     "internal/jaa/runtime_evidence/jaa02/"
     "sha256-8d49a1543093644703e95a78d424c971f55465111baece7a45f6e3c0a71805d2.json"
@@ -84,6 +85,9 @@ JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE = (
     (JAA02_INITIAL_RECEIPT_PATH, "deleted"),
     (JAA02_TWO_RECEIPTS_MUTATION, "added"),
 )
+JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE = (
+    (JAA02_REHASHED_RECEIPT_COMMIT, "replaced"),
+)
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/README.md",
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
@@ -94,6 +98,7 @@ PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     JAA02_CONFLICT_RECEIPT_PATH,
     JAA02_RECEIPT_MUTATION,
     JAA02_TWO_RECEIPTS_MUTATION,
+    JAA02_REHASHED_RECEIPT_COMMIT,
     JAA02_COMMAND_FAILURE_PATH,
     JAA02_WRONG_TOTALS_PATH,
     JAA02_HISTORICAL_SOURCE_PATH,
@@ -370,6 +375,7 @@ def _committed_inplace_branch(
                 JAA02_WRONG_TOTALS_SEQUENCE,
                 JAA02_HISTORICAL_COMMIT_SEQUENCE,
                 JAA02_MULTIPLE_RECEIPTS_COMMIT_SEQUENCE,
+                JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE,
             )
             if (
                 commit_sequence not in permitted_sequences
@@ -469,7 +475,13 @@ def _committed_inplace_branch(
                         ):
                             raise RuntimeError("fixture commit record differs from its exact path or blob history")
                         expected_statuses.append(f"{expected_status}\t{record.path}")
-                    if _git("diff", "--name-status", f"{previous_head}..{commit_head}").splitlines() != sorted(expected_statuses):
+                    actual_statuses = sorted(
+                        _git(
+                            "diff", "--no-renames", "--name-status",
+                            f"{previous_head}..{commit_head}",
+                        ).splitlines()
+                    )
+                    if actual_statuses != sorted(expected_statuses):
                         raise RuntimeError("fixture commit changed an unexpected path set")
                     previous_head = commit_head
                 expected_count = str(len(commit_groups))
@@ -559,6 +571,9 @@ def _mutation_path_matches(expected: str, actual: str) -> bool:
         expected == JAA02_RECEIPT_MUTATION and _is_jaa02_receipt_path(actual)
     ) or (
         expected == JAA02_TWO_RECEIPTS_MUTATION and actual in JAA02_MULTIPLE_RECEIPT_PATHS
+    ) or (
+        expected == JAA02_REHASHED_RECEIPT_COMMIT
+        and (actual == JAA02_INITIAL_RECEIPT_PATH or _is_jaa02_receipt_path(actual))
     )
 
 
@@ -570,6 +585,21 @@ def _fixture_commit_group_matches(
             expected_operation == "added"
             and tuple(sorted(record.path for record in group)) == JAA02_MULTIPLE_RECEIPT_PATHS
             and all(record.operation == "added" for record in group)
+        )
+    if expected_path == JAA02_REHASHED_RECEIPT_COMMIT:
+        deleted = [record for record in group if record.operation == "deleted"]
+        added = [record for record in group if record.operation == "added"]
+        return (
+            expected_operation == "replaced"
+            and len(group) == 2
+            and len(deleted) == 1
+            and deleted[0].path == JAA02_INITIAL_RECEIPT_PATH
+            and len(added) == 1
+            and _is_jaa02_receipt_path(added[0].path)
+            and added[0].path != JAA02_INITIAL_RECEIPT_PATH
+            and added[0].result_blob_sha256 is not None
+            and Path(added[0].path).name
+            == f"sha256-{added[0].result_blob_sha256}.json"
         )
     return (
         len(group) == 1
@@ -902,6 +932,186 @@ def _commit_added_receipts(
         or _git("status", "--porcelain", "--untracked-files=all")
     ):
         _abort_suite("multiple-receipt commit changed an unexpected path or blob")
+
+
+def _commit_rehashed_receipt_replacement(
+    state: _FixtureBranch,
+    new_path: str,
+    content: bytes,
+    case: str,
+) -> None:
+    if (
+        state.commit_sequence != JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE
+        or state.allowed_mutations != frozenset({JAA02_REHASHED_RECEIPT_COMMIT})
+        or len(state.commit_records) != 0
+        or state.head != state.base_head
+        or not _is_jaa02_receipt_path(new_path)
+        or new_path == JAA02_INITIAL_RECEIPT_PATH
+        or Path(new_path).name != f"sha256-{hashlib.sha256(content).hexdigest()}.json"
+    ):
+        _abort_suite("rehashed-receipt replacement differs from its exact admitted history")
+
+    old_target = _safe_mutation_target(JAA02_INITIAL_RECEIPT_PATH)
+    new_target = _safe_mutation_target(new_path)
+    _assert_admission(state.branch, state.head, False)
+    parent_head = state.head
+    parent_blob_sha256 = _git_path_blob_sha256(parent_head, JAA02_INITIAL_RECEIPT_PATH)
+    original = old_target.read_bytes() if old_target.is_file() and not old_target.is_symlink() else b""
+    if (
+        _git("status", "--porcelain", "--untracked-files=all")
+        or parent_blob_sha256 is None
+        or hashlib.sha256(original).hexdigest() != parent_blob_sha256
+        or old_target.name != f"sha256-{hashlib.sha256(original).hexdigest()}.json"
+        or new_target.exists()
+        or new_target.is_symlink()
+    ):
+        _abort_suite("historical receipt changed before its admitted replacement")
+
+    _assert_admission(state.branch, state.head, False)
+    try:
+        old_target.unlink()
+    except OSError:
+        _abort_suite("cannot remove the exact historical receipt; preserving branch state")
+    if (
+        old_target.exists()
+        or old_target.is_symlink()
+        or _git(
+            "status", "--no-renames", "--porcelain", "--untracked-files=all"
+        ).splitlines()
+        != [f" D {JAA02_INITIAL_RECEIPT_PATH}"]
+        or new_target.exists()
+        or new_target.is_symlink()
+    ):
+        _abort_suite("receipt deletion differs from its exact admitted path")
+
+    _assert_admission(state.branch, state.head, True)
+    descriptor = None
+    try:
+        descriptor = os.open(
+            new_target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o644,
+        )
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = None
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        _abort_suite("cannot create exact rehashed receipt; preserving branch state")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    expected_unstaged = sorted(
+        (f" D {JAA02_INITIAL_RECEIPT_PATH}", f"?? {new_path}")
+    )
+    if (
+        sorted(
+            _git(
+                "status", "--no-renames", "--porcelain", "--untracked-files=all"
+            ).splitlines()
+        )
+        != expected_unstaged
+        or old_target.exists()
+        or old_target.is_symlink()
+        or not new_target.is_file()
+        or new_target.is_symlink()
+        or new_target.read_bytes() != content
+        or stat.S_IMODE(new_target.stat().st_mode) != 0o644
+    ):
+        _abort_suite("replacement working tree differs from the exact receipt bytes and paths")
+
+    _assert_admission(state.branch, state.head, True)
+    staged = _run(
+        REPOSITORY_ROOT,
+        "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+        "add", "--", JAA02_INITIAL_RECEIPT_PATH, new_path,
+    )
+    expected_staged = sorted(
+        (f"A  {new_path}", f"D  {JAA02_INITIAL_RECEIPT_PATH}")
+    )
+    expected_cached = sorted(
+        (f"A\t{new_path}", f"D\t{JAA02_INITIAL_RECEIPT_PATH}")
+    )
+    if (
+        staged.returncode != 0
+        or sorted(
+            _git(
+                "status", "--no-renames", "--porcelain", "--untracked-files=all"
+            ).splitlines()
+        )
+        != expected_staged
+        or sorted(
+            _git("diff", "--no-renames", "--cached", "--name-status").splitlines()
+        )
+        != expected_cached
+        or sorted(
+            _git("diff", "--no-renames", "--cached", "--name-only").splitlines()
+        )
+        != sorted((JAA02_INITIAL_RECEIPT_PATH, new_path))
+        or _git("diff", "--name-only")
+        or _git_blob_sha256(f":{new_path}") != hashlib.sha256(content).hexdigest()
+        or _git("ls-files", "--stage", "--", JAA02_INITIAL_RECEIPT_PATH)
+    ):
+        _abort_suite("staged receipt replacement is not the exact delete/add pair")
+
+    _assert_admission(state.branch, state.head, True)
+    committed = _run(
+        REPOSITORY_ROOT,
+        "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+        "-c", "user.email=tester@example.invalid", "-c", "user.name=Independent tester",
+        "commit", "--only", "-m", f"adversarial certification control: {case}",
+        "--", JAA02_INITIAL_RECEIPT_PATH, new_path,
+    )
+    if committed.returncode != 0:
+        _abort_suite("receipt replacement commit failed; preserving staged work")
+
+    new_head = _git("rev-parse", "HEAD")
+    result_blob_sha256 = hashlib.sha256(content).hexdigest()
+    state.commit_records.extend(
+        (
+            _FixtureCommit(
+                parent_head,
+                new_head,
+                JAA02_INITIAL_RECEIPT_PATH,
+                "deleted",
+                parent_blob_sha256,
+                None,
+            ),
+            _FixtureCommit(
+                parent_head,
+                new_head,
+                new_path,
+                "added",
+                None,
+                result_blob_sha256,
+            ),
+        )
+    )
+    state.head = new_head
+    _assert_admission(state.branch, state.head, False)
+    expected_diff = sorted(
+        (f"A\t{new_path}", f"D\t{JAA02_INITIAL_RECEIPT_PATH}")
+    )
+    if (
+        _git("rev-parse", f"{new_head}^") != parent_head
+        or sorted(
+            _git(
+                "diff", "--no-renames", "--name-status",
+                f"{parent_head}..{new_head}",
+            ).splitlines()
+        )
+        != expected_diff
+        or _git_path_blob_sha256(parent_head, JAA02_INITIAL_RECEIPT_PATH)
+        != parent_blob_sha256
+        or _git_path_blob_sha256(parent_head, new_path) is not None
+        or _git_path_blob_sha256(new_head, JAA02_INITIAL_RECEIPT_PATH) is not None
+        or _git_path_blob_sha256(new_head, new_path) != result_blob_sha256
+        or _git("status", "--porcelain", "--untracked-files=all")
+    ):
+        _abort_suite("single receipt replacement commit changed unexpected history or blobs")
 
 
 @contextmanager
