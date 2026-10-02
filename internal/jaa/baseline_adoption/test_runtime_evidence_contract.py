@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tracked_source_revision import source_content_revision_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -207,25 +209,98 @@ def _public(
     )
 
 
-def _clean_repository(destination: Path) -> Path:
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def test_independent_review_rejects_ancestor_receipt_with_stale_source_binding(
+    tmp_path: Path,
+) -> None:
+    ancestor = "b7b9f4bf02b2bf5463aa40281f2b0bb34042f4b6"
+    child_env = {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": str(ROOT),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+    ancestry = subprocess.run(
+        ["/usr/bin/git", "merge-base", "--is-ancestor", ancestor, "HEAD"],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        env=child_env,
+    )
+    assert ancestry.returncode == 0, ancestry.stderr.decode(errors="replace")
+
+    content = {
+        "format": "jaa-00-online-snapshot-receipt/v2",
+        "repository": {
+            "label": "canonical-repository",
+            "identity": "canonical-repository",
+            "revision": ancestor,
+        },
+        "source_revision": {
+            "revision": "sha256:" + "0" * 64,
+            "contract": source_content_revision_contract(),
+        },
+        "inventory": {},
+        "runtime": {},
+        "secret_references": [],
+        "databases": {},
+    }
+    certification_inputs = {
+        key: content[key]
+        for key in (
+            "repository",
+            "source_revision",
+            "inventory",
+            "runtime",
+            "secret_references",
+            "databases",
+        )
+    }
+    content["certification"] = {
+        "contract": "jaa-00-source-revision-binding/v1",
+        "inputs_sha256": hashlib.sha256(
+            _canonical_json_bytes(certification_inputs)
+        ).hexdigest(),
+    }
+    content_hash = hashlib.sha256(_canonical_json_bytes(content)).hexdigest()
+    receipt = {"content": content, "content_sha256": content_hash}
+    receipt_path = tmp_path / f"migration-{content_hash}.json"
+    receipt_path.write_bytes(_canonical_json_bytes(receipt) + b"\n")
+    data_root = tmp_path / "synthetic-runtime"
+    command = [
+        sys.executable,
+        "-m",
+        "baseline_adoption.cli",
+        "independent-review",
+        "--receipt",
+        str(receipt_path),
+        "--data-root",
+        str(data_root),
+        "--repository",
+        str(ROOT),
+    ]
     result = subprocess.run(
-        [
-            "git",
-            "clone",
-            "-q",
-            "--no-local",
-            "--single-branch",
-            "--depth",
-            "1",
-            str(REPOSITORY_ROOT),
-            str(destination),
-        ],
+        command,
+        cwd=ROOT,
+        env=child_env,
         text=True,
         capture_output=True,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
-    return destination / "internal" / "jaa"
+
+    assert result.returncode == 2
+    assert "receipt canonical source revision is stale or mismatched" in result.stderr
+    assert not data_root.exists()
 
 
 def _runtime_files(root: Path) -> set[Path]:
@@ -252,7 +327,7 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
 ) -> None:
     runtime = _runtime_root()
     receipt = _receipt(runtime)
-    repository = _clean_repository(tmp_path / "certification-repository")
+    repository = ROOT
     evidence = _evidence_document(EVIDENCE)
     receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
     content = receipt_document["content"]
@@ -292,11 +367,10 @@ def test_historical_online_snapshot_reconciles_but_cannot_certify_current_source
         cwd=repository,
     )
     # The frozen databases and their content-addressed receipt remain valid
-    # historical evidence.  Their pre-integration repository revision is not in
-    # the canonical Market Aligner ancestry, however, so it must never be
-    # promoted to a current source certification.
+    # historical evidence. Their recorded repository revision is an ancestor,
+    # but their source-content binding is stale for the current tracked tree.
     assert review_result.returncode == 2
-    assert "receipt repository ancestry proof is unavailable" in review_result.stderr
+    assert "receipt canonical source revision is stale or mismatched" in review_result.stderr
 
     assert evidence["evidence"] == "JAA-00:first-adopted-frozen-baseline"
     assert evidence["receipt"] == {

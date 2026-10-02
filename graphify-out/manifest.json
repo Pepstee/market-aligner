@@ -102,8 +102,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/README.md": {
-    "mtime": 1790974511.4219646,
-    "seen": 1790975951.3637881,
+    "mtime": 1790977465.7979352,
+    "seen": 1790979033.5402114,
     "ast_hash": "45f42f20cdc97c40db4eb97d30baf983",
     "semantic_hash": ""
   },
@@ -180,9 +180,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/baseline_adoption/test_runtime_evidence_contract.py": {
-    "mtime": 1788246507.260215,
-    "seen": 1790775868.519665,
-    "ast_hash": "3061b7eab574d66624bd7d9af16fa3ab",
+    "mtime": 1790979073.6779065,
+    "seen": 1790979244.4562404,
+    "ast_hash": "f8d05b3524196dd392946a41020a27e2",
     "semantic_hash": ""
   },
   "internal/jaa/baseline_adoption/test_wal_source_preservation.py": {
@@ -1926,8 +1926,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/certify_jaa04_increment_a.py": {
-    "mtime": 1790974532.1899898,
-    "seen": 1790975951.3633673,
+    "mtime": 1790977472.6539352,
+    "seen": 1790979033.5398133,
     "ast_hash": "85be558982ba31f4c2af06beeab50d36",
     "semantic_hash": ""
   },
@@ -2496,8 +2496,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_authority_canaries.py": {
-    "mtime": 1790974543.2139904,
-    "seen": 1790975951.363478,
+    "mtime": 1790977486.6219351,
+    "seen": 1790979033.5399196,
     "ast_hash": "4624a315882844dd3412eb01e2084990",
     "semantic_hash": ""
   },

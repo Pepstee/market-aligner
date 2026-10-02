@@ -1,11 +1,11 @@
 {
-  "community_count": 30079,
-  "edge_count": 73729,
-  "node_count": 56638,
+  "community_count": 30052,
+  "edge_count": 73734,
+  "node_count": 56639,
   "outputs": {
-    ".graphify_labels.json": "092978f2b09092b4b96a6bb4292d91e889e5ccc423ec88df2277549b5886c194",
-    "GRAPH_REPORT.md": "93de0f0d9346920c0bb30bb3c392e481524c10eade089871ea614c64e8ff6620",
-    "graph.json": "a0f1dda17e6d284037ff73c2604f687e475bbe1f199a083b03d517578b285742"
+    ".graphify_labels.json": "f976713d7285ef2a05a074fdbf827663a54d0abb2b0be31599c6b27713c40f2c",
+    "GRAPH_REPORT.md": "4554310ed548164d24fad244397e4554a900ff8fbacfb9a5f0bb99fc9a5293f6",
+    "graph.json": "5ec711886f9a5209009bb76e4573ad2b8fd3a38efdd494de702da205e224ccce"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "75a783573c0590440cd973f3202de5b01d4f9ce5",
+  "source_base_commit": "4d77a6cf28191a42accd0f0917ce64eb2ea9beff",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -56,7 +56,7 @@
     "internal/jaa/baseline_adoption/test_live_recertification_semantics.py": "631e3eb15d477170cb6ac20665048eeecbb8e684856d6d62c1a87e6ba238d344",
     "internal/jaa/baseline_adoption/test_live_sqlite_online_snapshot.py": "386b8d9fff762a0ec67ad31407636a961d9e7752fc8ab5419a7380c140e4b6ba",
     "internal/jaa/baseline_adoption/test_publication_fail_closed.py": "68ad91602f053aef34cc8a63dea43c66435dc26b5724ed052575f3cf8d08c21e",
-    "internal/jaa/baseline_adoption/test_runtime_evidence_contract.py": "3d584cc389c621b2b3ea3a5a0c8c57be82ff2c58133faaf02d6c8307c09b3b68",
+    "internal/jaa/baseline_adoption/test_runtime_evidence_contract.py": "17471e41f6f2cd204f3196ff940ddaabf308eddb73bff48713e85a493e3174b9",
     "internal/jaa/baseline_adoption/test_wal_source_preservation.py": "1a2087c780291043fd217ddb3775aa8261cf2d34e6007f83e165aae1c05c68b2",
     "internal/jaa/canonical-repository.json": "9a63c518a339a8098c9018a256a251e492fb76ab2200c36485aed6a53f645427",
     "internal/jaa/career_automation/__init__.py": "dfeadb2f425be98b23a58dc0710f5554a09f36d1a31715e7567d1438434a96b9",
