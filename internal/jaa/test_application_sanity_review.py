@@ -582,6 +582,15 @@ def test_combined_criterion_finding_code_schema_accepts_only_bounded_dotted_code
             llm_client_module.validate_json(result_with_code(code), schema)
 
 
+def test_sanity_finding_severity_schema_declares_string_type() -> None:
+    severity_schema = (
+        review_module.RESULT_SCHEMA["properties"]["findings"]["items"]
+        ["properties"]["severity"]
+    )
+
+    assert severity_schema == {"type": "string", "const": "material"}
+
+
 def test_combined_criterion_schema_rejects_decorated_undeclared_ids() -> None:
     schema = review_module._combined_result_schema(
         ("resume-cover-letter", "humanizer")

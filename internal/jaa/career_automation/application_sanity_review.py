@@ -152,7 +152,7 @@ RESULT_SCHEMA: dict[str, object] = {
                 "required": ["code", "severity", "location", "explanation"],
                 "properties": {
                     "code": {"enum": list(FINDING_CODES)},
-                    "severity": {"const": "material"},
+                    "severity": {"type": "string", "const": "material"},
                     "location": {"type": "string", "minLength": 1, "maxLength": 160},
                     "explanation": {"type": "string", "minLength": 1, "maxLength": 500},
                     "suggestion": {"type": "string", "minLength": 1, "maxLength": 500},
